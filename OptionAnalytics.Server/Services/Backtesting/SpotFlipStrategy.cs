@@ -89,17 +89,23 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.SignalStartTimeParameter(),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         OptionTradeSimulator.MaxHoldingTimeParameter(),
+        new BacktestParameterSpec("trigger", "Entry trigger", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(1, "Fresh spot EMA crossover, with the OI behind it"),
+            new BacktestParameterOption(0, "The since-open CE - PE flip"),
+        }),
+        new BacktestParameterSpec("minLeadPct", "Crossover trigger: since-open CE - PE must lean with the trade by at least (% of the chain) - less is a sideways OI market", Default: 0.3m, Min: 0, Max: 20, Step: 0.1m),
         new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 60, Step: 1),
         new BacktestParameterSpec("emaTf", "EMA candle size (minutes)", Default: 3, Min: 1, Max: 15, Step: 1),
-        new BacktestParameterSpec("emaMode", "Spot EMA", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
-        new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 3, Min: 1, Max: 20, Step: 1),
+        new BacktestParameterSpec("emaMode", "Spot EMA (the crossover trigger always asks a fresh crossover)", Default: ModeCross, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
+        new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 2, Min: 1, Max: 20, Step: 1),
         new BacktestParameterSpec("vwapMode", "VWAP", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
         {
             new BacktestParameterOption(0, "Not asked"),
             new BacktestParameterOption(1, "Spot above VWAP for a long, below for a short"),
         }),
-        new BacktestParameterSpec("optEmaMode", "ATM option EMAs (CE / PE premium)", Default: ModeOff, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction", "Fresh crossover")),
-        new BacktestParameterSpec("optEmaLegs", "ATM option EMAs: legs", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
+        new BacktestParameterSpec("optEmaMode", "ATM option EMAs (CE / PE premium) - they may be aligned already", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction", "Fresh crossover")),
+        new BacktestParameterSpec("optEmaLegs", "ATM option EMAs: legs", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
         {
             new BacktestParameterOption(0, "The leg traded (CE for a long, PE for a short)"),
             new BacktestParameterOption(1, "Both: traded leg rising, the other falling"),
@@ -186,11 +192,13 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var flipTf = Math.Max(1, (int)p["flipTf"]);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
-        var emaMode = p.GetValueOrDefault("emaMode", ModeState);
-        var crossBars = Math.Max(1, (int)p.GetValueOrDefault("crossBars", 3));
+        var crossTrigger = p.GetValueOrDefault("trigger", 1m) >= 0.5m;
+        var minLead = p.GetValueOrDefault("minLeadPct", 0.3m) / 100m;
+        var emaMode = crossTrigger ? ModeCross : p.GetValueOrDefault("emaMode", ModeCross);
+        var crossBars = Math.Max(1, (int)p.GetValueOrDefault("crossBars", 2));
         var vwapOn = p.GetValueOrDefault("vwapMode", 0) >= 0.5m;
-        var optMode = p.GetValueOrDefault("optEmaMode", ModeOff);
-        var optBoth = p.GetValueOrDefault("optEmaLegs", 0) >= 0.5m;
+        var optMode = p.GetValueOrDefault("optEmaMode", ModeState);
+        var optBoth = p.GetValueOrDefault("optEmaLegs", 1) >= 0.5m;
         var optFast = Math.Max(2, (int)p.GetValueOrDefault("optEmaFast", 7));
         var optSlow = Math.Max(3, (int)p.GetValueOrDefault("optEmaSlow", 21));
         var emaFast = Math.Max(2, (int)p["emaFast"]);
@@ -279,7 +287,10 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             var clock = bar.Time + one;
             var minute = IstClock.MinutesOfDay(clock);
             if (minute < signalStart || minute > lastEntry) continue;
-            if (lead(clock) is not { } now || lead(clock - TimeSpan.FromMinutes(flipTf)) is not { } prev) continue;
+            if (lead(clock) is not { } now) continue;
+            var prevLead = crossTrigger ? null : lead(clock - TimeSpan.FromMinutes(flipTf));
+            if (!crossTrigger && prevLead is null) continue;
+            var prev = prevLead ?? 0m;
             var fast = Ema(dayCloses, emaFast); var slow = Ema(dayCloses, emaSlow);
             if (emaMode != ModeOff && (fast is null || slow is null)) continue;
             var vwap = vwapSum / vwapCount;
@@ -291,7 +302,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
 
             foreach (var dir in new[] { 1, -1 })
             {
-                var flipped = dir > 0 ? prev >= 0 && now < 0 : prev <= 0 && now > 0;
+                var flipped = crossTrigger ? dir * now < -minLead : dir > 0 ? prev >= 0 && now < 0 : prev <= 0 && now > 0;
                 if (!flipped) continue;
                 var name = dir > 0 ? "Bullish" : "Bearish";
                 var emaWith = EmaAgrees(dayCloses, emaFast, emaSlow, emaMode, crossBars, dir);

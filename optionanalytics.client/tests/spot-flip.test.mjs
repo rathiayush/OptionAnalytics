@@ -10,9 +10,14 @@ import { PARAM_BLOCKS, SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, applyT
 import { emaAgrees, evaluateSpotStrategies, scanSpotDay, spotBlocks } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, entryDefsFor, entryPartOf, filtersFromTuning, labOverrides, labParams, paramsFromFilters } from '../src/strategyTuning.js'
-import { MIN, T, flipLong, flipShort } from './spot-flip-world.mjs'
+import { CLIMB, MIN, T, crossLong, crossShort, flipLong, flipShort } from './spot-flip-world.mjs'
 
-const mine = (w, filters = {}) => scanSpotDay({ bars: w.bars, oi: w.oi, filters }).filter((s) => s.id === 'spotFlip')
+// The defaults are now the crossover trigger; most scenarios below are the flip trigger's, so they are read with the flip rule
+// as it was (EMA already in direction, no ATM option EMAs) under whatever a test sets.
+const FLIP_RULE = { trigger: 'flip', emaMode: 'state', optEmaMode: 'off', optEmaLegs: 'traded', crossBars: 3 }
+const mine = (w, filters = {}) => scanSpotDay({ bars: w.bars, oi: w.oi, filters: { ...filters, spotFlip: { ...FLIP_RULE, ...(filters.spotFlip ?? {}) } } }).filter((s) => s.id === 'spotFlip')
+// (A fresh cross stays fresh for `crossBars` candles, so the day scan finds it on each of those minutes: the scanner's list is the first of them - the 20-minute cooldown.)
+const byDefault = (w, filters = {}) => firstPerCooldown(scanSpotDay({ bars: w.bars, oi: w.oi, filters }).filter((s) => s.id === 'spotFlip'))
 
 test('#101 is the one spot strategy: the CE / PE flip', () => {
   assert.equal(SPOT_STRATEGIES.length, 1)
@@ -74,7 +79,7 @@ test('no look-ahead: what happens after the clock changes nothing, and the tunin
   const full = flipLong()
   const cut = flipLong({ minutes: 73 })
   const clock = T + 72 * MIN
-  const at = (w) => evaluateSpotStrategies({ nowMs: clock, bars: w.bars.filter((b) => b.t + MIN <= clock), oi: w.oi }).filter((s) => s.id === 'spotFlip')
+  const at = (w) => evaluateSpotStrategies({ nowMs: clock, bars: w.bars.filter((b) => b.t + MIN <= clock), oi: w.oi, filters: { spotFlip: FLIP_RULE } }).filter((s) => s.id === 'spotFlip')
   assert.equal(at(full).length, 1)
   assert.deepEqual(at(full), at(cut))
   assert.deepEqual(firstPerCooldown(mine(full)).map((s) => s.t), mine(full).map((s) => s.t))
@@ -83,7 +88,7 @@ test('no look-ahead: what happens after the clock changes nothing, and the tunin
 test('a trailing stop of its own: per index (NIFTY 10 / BANKNIFTY 20 / SENSEX 30 points), dynamic (x ATR) or none', () => {
   // (A setup trades with `trail` - the live scan puts its own trailOverride there (withOwnTrail), the tuning the same.)
   const withTrail = (x) => ({ ...x, trail: x.trailOverride })
-  const day = (filters, underlying = 'NIFTY', make = flipLong) => scanSpotDay({ bars: make().bars, oi: make().oi, filters: { spotFlip: filters }, underlying }).filter((x) => x.id === 'spotFlip')[0]
+  const day = (filters, underlying = 'NIFTY', make = flipLong) => scanSpotDay({ bars: make().bars, oi: make().oi, filters: { spotFlip: { ...FLIP_RULE, ...filters } }, underlying }).filter((x) => x.id === 'spotFlip')[0]
   const s = withTrail(day({}))
   assert.deepEqual(s.trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 })
   assert.match(s.checks.Trail, /NIFTY trailing stop after 10 pts, 10 pts behind/)
@@ -146,9 +151,9 @@ test('VWAP: the spot on the trade\'s side of the day\'s VWAP (long above, short 
   assert.equal(mine(flipShort(), { spotFlip: { vwapMode: 'with' } }).length, 1, 'a falling spot is under it')
 })
 
-test('the ATM CE / PE EMAs are configurable and off by default', () => {
+test('the ATM CE / PE EMAs are configurable (aligned already is fine by default)', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.optEmaFast, f.optEmaSlow, f.crossBars, f.emaMode], ['off', 'traded', 7, 21, 3, 'state'])
+  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.optEmaFast, f.optEmaSlow, f.crossBars, f.emaMode, f.trigger, f.minLeadPct], ['state', 'both', 7, 21, 2, 'cross', 'cross', 0.3])
   // Whatever the fixture's premiums say, asking for the ATM EMAs can only remove signals, never add them.
   for (const o of [{ optEmaMode: 'state' }, { optEmaMode: 'cross' }, { optEmaMode: 'state', optEmaLegs: 'both' }]) {
     assert.ok(mine(flipLong(), { spotFlip: o }).length <= mine(flipLong()).length, JSON.stringify(o))
@@ -186,7 +191,7 @@ test('trailing in R (x the stop distance), the stop and target in ATR, and the E
   const slow = { emaFast: 7, emaSlow: 80 }
   assert.equal(mine(flipLong(), { spotFlip: slow }).length, 0)
   const prevDay = { date: '2025-01-01', high: 22400, low: 22000, close: 22399, closes: Array.from({ length: 375 }, (_, i) => 22000 + i) }
-  const w = scanSpotDay({ ...flipLong(), filters: { spotFlip: { ...slow, emaWarm: true } }, prevDay }).filter((s) => s.id === 'spotFlip')
+  const w = scanSpotDay({ ...flipLong(), filters: { spotFlip: { ...FLIP_RULE, ...slow, emaWarm: true } }, prevDay }).filter((s) => s.id === 'spotFlip')
   assert.equal(w.length, 1, 'ready with the previous day in front')
 })
 
@@ -207,4 +212,43 @@ test('the server accepts every own rule and block setting in a lab job (Strategy
   const cs = readFileSync(new URL('../../OptionAnalytics.Server/Controllers/StrategyTuningController.cs', import.meta.url), 'utf8')
   const missing = entryDefsFor(SPOT_STRATEGIES.map((s) => s.id)).map((d) => d.key).filter((k) => !cs.includes(`"${k}"`))
   assert.deepEqual(missing, [], 'add these keys to LabParamKeys')
+})
+
+test('the crossover trigger (default): a FRESH spot EMA crossover with the OI behind it - once, at the cross', () => {
+  const f = strategyFilters('spotFlip', {})
+  assert.deepEqual([f.trigger, f.emaMode, f.optEmaMode, f.optEmaLegs, f.minLeadPct], ['cross', 'cross', 'state', 'both', 0.3], 'the defaults')
+  for (const [make, side] of [[crossLong, 'LONG'], [crossShort, 'SHORT']]) {
+    const found = byDefault(make())
+    assert.equal(found.length, 1, side)
+    const s = found[0]
+    assert.equal(s.side, side)
+    const minutes = (s.t - T) / MIN
+    assert.ok(minutes >= CLIMB && minutes <= CLIMB + 20, `at the cross - minute ${minutes}`)
+    assert.match(s.checks.OI, /since the open CE - PE .*% of the chain \((puts|calls) added lead\)/)
+    assert.match(s.checks.Trend, /EMA 7 .* (over|under) EMA 21 .*crossed within 2 candles/)
+    assert.match(s.checks['ATM option EMA'], /and the (PE|CE) under/)
+    assert.match(s.checks.Walls, /heavier/)
+  }
+})
+
+test('the crossover trigger: not without a fresh cross, the OI behind it (sideways), walls, or the ATM CE / PE lined up', () => {
+  assert.equal(byDefault(crossLong({ sideways: true })).length, 0, 'a sideways OI market - the since-open CE - PE has no lean')
+  assert.equal(byDefault(crossLong({ ceLead: true })).length, 0, 'the OI leans against a long')
+  assert.equal(byDefault(crossLong({ ceHeavy: true })).length, 0, 'resistance heavier round the ATM')
+  assert.equal(byDefault(crossLong({ optFlat: true })).length, 0, 'the ATM CE / PE EMAs do not line up')
+  assert.equal(byDefault(crossLong({ optFlat: true }), { spotFlip: { optEmaMode: 'off' } }).length, 1, 'with the ATM EMAs not asked it is the cross, OI and walls')
+  // A trend long under way is not fresh: the flip day's spot climbs from the open, the EMAs crossed long before the OI came.
+  assert.equal(byDefault(flipLong({ slow: true })).length, 0)
+  // Looser: the lean needed can be lowered to nothing; sideways OI then lets the cross through.
+  assert.equal(byDefault(crossLong({ sideways: true }), { spotFlip: { minLeadPct: 0 } }).length, 0, 'still needs the since-open lean to be on the trade\'s side and the last minutes\' change with it')
+})
+
+test('the ATM CE / PE may already be aligned (state) - a fresh crossover there is optional; the spot\'s must be fresh', () => {
+  assert.equal(byDefault(crossLong(), { spotFlip: { optEmaMode: 'state', optEmaLegs: 'traded' } }).length, 1)
+  assert.equal(byDefault(crossLong(), { spotFlip: { optEmaMode: 'cross' } }).length, 0, 'asked to cross afresh too, the options had lined up before the spot did - not fresh any more')
+  assert.equal(byDefault(crossLong(), { spotFlip: { optEmaMode: 'cross', crossBars: 20 } }).length >= 1, true, 'with a long enough window it counts')
+  // Asking "already in direction" for the spot with the crossover trigger still asks a fresh cross.
+  assert.equal(byDefault(crossLong(), { spotFlip: { emaMode: 'state' } }).length, 1)
+  const trend = byDefault(flipLong(), { spotFlip: { emaMode: 'state' } })
+  assert.equal(trend.length, 0, 'a climb that began at the open never crosses afresh later')
 })

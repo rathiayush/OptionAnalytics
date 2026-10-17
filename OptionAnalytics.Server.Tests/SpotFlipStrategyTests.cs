@@ -18,14 +18,14 @@ public sealed class SpotFlipStrategyTests
             return new Candle(T0.AddMinutes(i), c, c + 1, c - 1, c);
         }).ToList();
 
-    private static BacktestStrategyContext Context(List<Candle> spot, long putJump, long callJump)
+    private static BacktestStrategyContext Context(List<Candle> spot, long putJump, long callJump, int putRamp = 0)
     {
         var ce = new List<OiIvPoint>(); var pe = new List<OiIvPoint>();
         foreach (var strike in new[] { 22900m, 22950m, 23000m, 23050m, 23100m })
             for (var i = 0; i < Minutes; i++)
             {
                 ce.Add(new OiIvPoint(T0.AddMinutes(i), strike, 1_000_000 + (i >= FlipAt ? callJump : 0), 12m));
-                pe.Add(new OiIvPoint(T0.AddMinutes(i), strike, 1_000_000 + (i >= FlipAt ? putJump : 0), 12m));
+                pe.Add(new OiIvPoint(T0.AddMinutes(i), strike, 1_000_000 + (i >= FlipAt ? putJump + putRamp * (i - FlipAt) : 0), 12m));
             }
         return new BacktestStrategyContext
         {
@@ -47,6 +47,8 @@ public sealed class SpotFlipStrategyTests
     {
         var p = Parameters();
         p["emaTf"] = 1; p["emaFast"] = 3; p["emaSlow"] = 7; p["deltaMin"] = 3; p["signalStartMinutes"] = 0;
+        // The scenarios below are the flip trigger's: the flip rule as it was (EMA already in direction, no ATM option EMAs).
+        p["trigger"] = 0; p["emaMode"] = 1; p["optEmaMode"] = 0; p["optEmaLegs"] = 0; p["crossBars"] = 3;
         return p;
     }
 
@@ -154,5 +156,28 @@ public sealed class SpotFlipStrategyTests
         p["indexExit"] = 1; p["trailMode"] = 3; p["trailStartR"] = 0.5m; p["trailGapR"] = 0.5m;
         var (e4, _, x4) = new SpotFlipStrategy().Evaluate(Context(RiseThen(FlipAt + 12, -3), 60_000, 0), p);
         Assert.Equal("Index trailing stop", x4[e4[0].Time].Reason);
+    }
+
+    [Fact]
+    public void The_crossover_trigger_needs_a_fresh_cross_with_the_OI_behind_it_and_not_a_sideways_OI()
+    {
+        // The spot falls to minute 48 then climbs: the EMAs cross up afresh a few candles later; puts keep being added.
+        var turn = Enumerable.Range(0, Minutes).Select(i =>
+        {
+            var c = i <= 48 ? 23000m - i : 23000m - 48 + 3 * (i - 48);
+            return new Candle(T0.AddMinutes(i), c, c + 1, c - 1, c);
+        }).ToList();
+        var p = Small();
+        p["trigger"] = 1; p["minLeadPct"] = 0.3m; p["emaMode"] = 2; p["crossBars"] = 2; p["optEmaMode"] = 0;
+        var entry = Assert.Single(new SpotFlipStrategy().EntrySignals(Context(turn, 60_000, 0, putRamp: 2_000), p), s => s.Kind == "Entry");
+        Assert.Equal("Bullish", entry.Direction);
+        Assert.True(entry.TimeUtc > T0.AddMinutes(48));
+        // Sideways OI: nothing moves, so there is no lean to back the cross.
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(turn, 0, 0), p), s => s.Kind == "Entry");
+        // A climb under way from the start is not a fresh cross.
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 60_000, 0, putRamp: 2_000), p), s => s.Kind == "Entry");
+        // Asked about the ATM option EMAs (none in this fixture) it stands down.
+        p["optEmaMode"] = 1;
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(turn, 60_000, 0, putRamp: 2_000), p), s => s.Kind == "Entry");
     }
 }

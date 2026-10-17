@@ -13,10 +13,10 @@ const AXIS = 22500
 const c = (open, close, pad = 1.5) => ({ open, close, high: Math.max(open, close) + pad, low: Math.min(open, close) - pad })
 const near = (k) => k >= 22400 && k <= 22600
 
-function build(spotAt, ceAt, peAt, minutes) {
+function build(spotAt, ceAt, peAt, minutes, priceAt = () => 60) {
   const spot = Array.from({ length: minutes }, (_, m) => ({ time: iso(m), ...spotAt(m) }))
-  const points = (f) => spot.flatMap((_, m) => STRIKES.map((k) => ({ time: iso(m), strike: k, openInterest: Math.round(f(k, m)), price: 60 })))
-  const run = { success: true, date: '2026-10-09', step: 50, cePoints: points(ceAt), pePoints: points(peAt), futuresBars: [], spotCandlesOneMinute: spot }
+  const points = (f, side) => spot.flatMap((_, m) => STRIKES.map((k) => ({ time: iso(m), strike: k, openInterest: Math.round(f(k, m)), price: priceAt(side, k, m) })))
+  const run = { success: true, date: '2026-10-09', step: 50, cePoints: points(ceAt, 'CE'), pePoints: points(peAt, 'PE'), futuresBars: [], spotCandlesOneMinute: spot }
   return { oi: buildOiContext(run, null, { live: false }), bars: spotBarsOf(spot) }
 }
 
@@ -36,4 +36,30 @@ export const flipShort = (o = {}) => {
   const d = longDay(o)
   const mirror = (x) => ({ open: 2 * AXIS - x.open, close: 2 * AXIS - x.close, high: 2 * AXIS - x.low, low: 2 * AXIS - x.high })
   return build((m) => mirror(d.spotAt(m)), (k, m) => d.peAt(2 * AXIS - k, m), (k, m) => d.ceAt(2 * AXIS - k, m), o.minutes ?? 140)
+}
+
+// The CROSSOVER trigger's days. LONG: the spot drifts down 0.2 a minute until 11:00 (minute 105), then climbs 1.2 points a
+// minute - the 3-minute EMA 7 crosses over 21 on the first candles of the climb; puts were added faster than calls all
+// morning (the since-open CE - PE leans to puts), the OI round the ATM is held by puts, the last minutes' change is with
+// puts, and the ATM CE's premium climbs with the spot while the PE's falls (their EMAs line up with it). SHORT: mirrored.
+// Options: `sideways` - neither side's OI moves (the since-open CE - PE stays balanced: no OI behind the cross); `ceLead` -
+// calls added faster than puts (the OI leans against a long); `ceHeavy` - the calls round the ATM outweigh the puts;
+// `optFlat` - the option premiums do not move (the ATM CE / PE EMAs do not line up); `late` - the climb starts at minute 130.
+export const CLIMB = 105
+const crossDay = (o = {}) => {
+  const at = o.late ? 130 : CLIMB
+  const base = (m) => 22500 - 0.2 * Math.min(m, at) + 1.2 * Math.max(0, m - at)
+  const spotAt = (m) => c(base(m), base(m + 1))
+  const rate = (up) => (o.sideways ? 0 : up ? 0.0016 : 0)
+  const ceAt = (k, m) => (near(k) && o.ceHeavy ? 4e6 : 2e6) * (1 + (o.ceLead ? rate(true) : rate(false)) * m)
+  const peAt = (k, m) => (near(k) ? 3e6 : 2e6) * (1 + (o.ceLead ? rate(false) : rate(true)) * m)
+  const priceAt = (side, k, m) => (o.optFlat ? 60 : side === 'CE' ? 60 + 0.6 * Math.max(0, m - at) : Math.max(20, 60 - 0.6 * Math.max(0, m - at)))
+  return { spotAt, ceAt, peAt, priceAt }
+}
+export const crossLong = (o = {}) => { const d = crossDay(o); return build(d.spotAt, d.ceAt, d.peAt, o.minutes ?? 140, d.priceAt) }
+export const crossShort = (o = {}) => {
+  const d = crossDay(o)
+  const mirror = (x) => ({ open: 2 * AXIS - x.open, close: 2 * AXIS - x.close, high: 2 * AXIS - x.low, low: 2 * AXIS - x.high })
+  return build((m) => mirror(d.spotAt(m)), (k, m) => d.peAt(2 * AXIS - k, m), (k, m) => d.ceAt(2 * AXIS - k, m), o.minutes ?? 140,
+    (side, k, m) => d.priceAt(side === 'CE' ? 'PE' : 'CE', 2 * AXIS - k, m))
 }

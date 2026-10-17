@@ -310,16 +310,21 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
   const leadNow = leadAt(nowMs)
   const leadPrev = leadAt(nowMs - f.flipTf * MIN)
   // The predefined blocks this strategy lists (PARAM_BLOCKS): EMA, VWAP, ATM option EMAs, stop / target, trailing.
-  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, bars, oi, nowMs, minute, spotNow, atr, prevDay, underlying })
+  // The crossover trigger always asks a FRESH spot crossover; the ATM CE / PE EMAs may be aligned already (optEmaMode).
+  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f: f.trigger === 'cross' ? { ...f, emaMode: 'cross' } : f, bars, oi, nowMs, minute, spotNow, atr, prevDay, underlying })
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
   const near = rows.filter((r) => Math.abs(r.strike - B.atmK) <= f.nearStrikes * oi.step)
   const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
   const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
-  if (leadNow != null && leadPrev != null) {
+  if (leadNow != null && (f.trigger === 'cross' || leadPrev != null)) {
     for (const dir of [1, -1]) {
-      const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
-      if (!flipped) continue
+      // The entry's trigger: the since-open CE - PE flipping sign - or, by default, a fresh crossover (asked by the blocks below)
+      // with the since-open CE - PE leaning with the trade by at least minLeadPct (less is a sideways market: no OI behind it).
+      const triggered = f.trigger === 'cross'
+        ? dir * leadNow < -(f.minLeadPct / 100)
+        : dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
+      if (!triggered) continue
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
       const confirmed = B.confirm(dir)
@@ -327,7 +332,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
         // Its exits come from the blocks: the index stop / target and its own trailing stop (a tuned trailing stop - the
         // tradeTrail filter - overrides it).
         push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
-          OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
+          OI: `since the open CE - PE ${f.trigger === 'cross' ? `${pct(leadNow)} of the chain (${dir > 0 ? 'puts' : 'calls'} added lead)` : `flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'})`}; last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
           ...confirmed.checks,
           Trail: B.exits.trailText,

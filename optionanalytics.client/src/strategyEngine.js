@@ -51,7 +51,7 @@ export const SPOT_STRATEGIES = [
   // overtake calls (a long), or the reverse - and the 3-minute EMA 7 / 21 on the spot agrees, the CE / PE change over the last
   // few minutes (configurable) is with the trade, and the support / resistance OI round the ATM (+/- 2 strikes, configurable)
   // sits with it: BUY / SELL per the index's setting, index stop and target, until the flip comes back (the opposite signal).
-  { id: 'spotFlip', no: 101, name: 'Spot: CE / PE since-open flip + 3-min EMA 7 / 21 + CE / PE change and ATM walls with the trade', short: 'Spot CE/PE flip', spot: true, blocks: ['ema', 'vwap', 'optEma', 'exits', 'trail'] },
+  { id: 'spotFlip', no: 101, name: 'Spot: fresh EMA crossover with the CE / PE OI behind it (since-open lean, ATM CE / PE, walls, last-10-min change)', short: 'Spot EMA cross + OI', spot: true, blocks: ['ema', 'vwap', 'optEma', 'exits', 'trail'] },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -89,6 +89,8 @@ const STRATEGY_OWN_FILTERS = {
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'trigger', label: 'What triggers the entry: a fresh spot EMA crossover (OI, walls, delta and the ATM CE / PE EMAs all with it), or the since-open CE - PE flip', type: 'select', default: 'cross', options: [{ value: 'cross', label: 'Fresh EMA crossover, with the OI behind it' }, { value: 'flip', label: 'The since-open CE - PE flip' }] },
+    { key: 'minLeadPct', label: 'Crossover trigger: the since-open CE - PE must lean with the trade by at least (% of the chain) - below it the OI says sideways', type: 'number', default: 0.3, min: 0, max: 20, step: 0.1 },
     { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 60, step: 1 },
   ],
 }
@@ -107,8 +109,8 @@ const STRATEGY_OWN_FILTERS = {
 export const PARAM_BLOCKS = {
   ema: { label: 'Spot EMA', filters: [
     { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
-    { key: 'emaMode', label: 'Spot EMA: already in the direction, a fresh crossover, or not asked', type: 'select', default: 'state', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
-    { key: 'crossBars', label: 'A fresh crossover happened within the last (candles) - spot and ATM option EMAs', type: 'number', default: 3, min: 1, max: 20, step: 1 },
+    { key: 'emaMode', label: 'Spot EMA (the crossover trigger always asks a fresh crossover): already in the direction, a fresh crossover, or not asked', type: 'select', default: 'cross', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
+    { key: 'crossBars', label: 'A fresh crossover happened within the last (candles) - spot and ATM option EMAs', type: 'number', default: 2, min: 1, max: 20, step: 1 },
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
     { key: 'emaWarm', label: 'EMAs: start from the previous day\'s candles (ready at the open, not ~10:20)', type: 'switch', default: false },
@@ -117,8 +119,8 @@ export const PARAM_BLOCKS = {
     { key: 'vwapMode', label: 'VWAP: spot on the trade\'s side of the day\'s VWAP, or not asked', type: 'select', default: 'off', options: [{ value: 'off', label: 'Not asked' }, { value: 'with', label: 'Spot above VWAP for a long, below for a short' }] },
   ] },
   optEma: { label: 'ATM option EMAs (CE / PE)', filters: [
-    { key: 'optEmaMode', label: 'ATM option EMAs (CE / PE premium): already in direction, a fresh crossover, or not asked', type: 'select', default: 'off', options: [{ value: 'off', label: 'Not asked' }, { value: 'state', label: 'Already in direction' }, { value: 'cross', label: 'Fresh crossover' }] },
-    { key: 'optEmaLegs', label: 'ATM option EMAs: the leg traded only, or both legs (the other one falling)', type: 'select', default: 'traded', options: [{ value: 'traded', label: 'The leg traded (CE for a long, PE for a short)' }, { value: 'both', label: 'Both: traded leg rising, the other falling' }] },
+    { key: 'optEmaMode', label: 'ATM option EMAs (CE / PE premium): already in direction (they may be aligned already), a fresh crossover, or not asked', type: 'select', default: 'state', options: [{ value: 'off', label: 'Not asked' }, { value: 'state', label: 'Already in direction' }, { value: 'cross', label: 'Fresh crossover' }] },
+    { key: 'optEmaLegs', label: 'ATM option EMAs: the leg traded only, or both legs (the other one falling)', type: 'select', default: 'both', options: [{ value: 'traded', label: 'The leg traded (CE for a long, PE for a short)' }, { value: 'both', label: 'Both: traded leg rising, the other falling' }] },
     { key: 'optEmaFast', label: 'ATM option EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'optEmaSlow', label: 'ATM option EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
   ] },
