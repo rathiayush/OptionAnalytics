@@ -195,6 +195,68 @@ export function spotProfile(bars, step) {
 }
 
 /**
+ * The predefined parameter blocks (PARAM_BLOCKS in strategyEngine.js) evaluated for a spot strategy at `nowMs`: the strategy
+ * lists the `blocks` it has and hands over its filter values `f`; it gets back `confirm(dir)` - { ok, checks }, every
+ * listed confirmation (spot EMA, VWAP, ATM option EMAs) asked for that direction - and `exits` - the index stop / target
+ * (ATR) and its trailing stop (fixed points per index, x ATR or in R). A block not listed is not asked and not read.
+ */
+export function spotBlocks({ blocks = [], f, bars, oi, nowMs, minute, spotNow, atr, prevDay = null, underlying = null }) {
+  const has = (b) => blocks.includes(b)
+  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in): the EMAs of their closes.
+  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
+  const emaTf = f.emaTf ?? 3
+  const buckets = new Map()
+  for (const b of bars) {
+    if (b.t < sessionStart) continue
+    const k = Math.floor((b.t - sessionStart) / (emaTf * MIN))
+    buckets.set(k, [...(buckets.get(k) ?? []), b])
+  }
+  const candleOf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === emaTf).map(([, xs]) => xs)
+  // Warm-up (emaWarm): the previous session's candles in front, so the EMAs are ready at the open instead of ~10:20.
+  const warm = f.emaWarm && prevDay?.closes?.length ? prevDay.closes.filter((_, i) => (i + 1) % emaTf === 0) : []
+  const closesTf = [...warm, ...candleOf.map((xs) => xs.at(-1).close)]
+  const vwapNow = has('vwap') && f.vwapMode !== 'off' ? vwapSeries(bars.filter((b) => b.t >= sessionStart)).at(-1) : null
+  const atmK = Math.round(spotNow / oi.step) * oi.step
+  // The ATM option's own premium in the same candles (the strike now ATM, its whole day - a snapshot, like the live scan).
+  const premiumCloses = (side) => candleOf.map((xs) => closePremiumAt(oi, side, atmK, xs.at(-1).t + MIN)).filter((v) => v != null)
+
+  const confirm = (dir) => {
+    const checks = {}
+    let ok = true
+    if (has('ema') && f.emaMode !== 'off') {
+      const e = emaAgrees(closesTf, f.emaFast, f.emaSlow, f.emaMode, f.crossBars, dir)
+      if (!e.ok) ok = false
+      else checks.Trend = `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${f.emaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`
+    } else if (has('ema')) checks.Trend = 'EMA not asked'
+    if (ok && has('vwap') && f.vwapMode !== 'off') {
+      if (vwapNow == null || !(dir * (spotNow - vwapNow) > 0)) ok = false
+      else checks.VWAP = `spot ${spotNow.toFixed(1)} ${dir > 0 ? 'over' : 'under'} VWAP ${vwapNow.toFixed(1)}`
+    }
+    // The ATM options' own EMAs: the leg bought for the trade rises (CE for a long); `both` also has the other leg falling.
+    if (ok && has('optEma') && f.optEmaMode !== 'off') {
+      const traded = emaAgrees(premiumCloses(dir > 0 ? 'CE' : 'PE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, 1)
+      const other = f.optEmaLegs === 'both' ? emaAgrees(premiumCloses(dir > 0 ? 'PE' : 'CE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, -1) : { ok: true }
+      if (!traded.ok || !other.ok) ok = false
+      else checks['ATM option EMA'] = `ATM ${atmK} ${dir > 0 ? 'CE' : 'PE'} EMA ${f.optEmaFast} over ${f.optEmaSlow}${f.optEmaLegs === 'both' ? ` and the ${dir > 0 ? 'PE' : 'CE'} under` : ''}${f.optEmaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`
+    }
+    return { ok, checks }
+  }
+
+  // The index stop / target in ATR, and the trailing stop: fixed for this index (NIFTY when the index is not named), x ATR, or in R.
+  const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
+  const stopPts = (has('exits') ? f.stopAtr : 1.5) * atr
+  const targetPts = (has('exits') ? f.targetAtr : 3) * atr
+  const trail = !has('trail') || f.trailMode === 'off' ? null
+    : f.trailMode === 'r' ? { start: +(f.trailStartR * stopPts).toFixed(2), gap: +(f.trailGapR * stopPts).toFixed(2), r: true }
+      : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
+        : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
+  const trailText = trail
+    ? `${index} trailing stop after ${trail.start} pts${trail.atr ? ` (${f.trailStartAtr} ATR)` : trail.r ? ` (${f.trailStartR}R)` : ''}, ${trail.gap} pts behind${trail.atr ? ` (${f.trailGapAtr} ATR)` : trail.r ? ` (${f.trailGapR}R)` : ''}`
+    : 'no trailing stop'
+  return { confirm, atmK, exits: { stopPts, targetPts, trail, trailText } }
+}
+
+/**
  * Every spot setup whose rules pass at `nowMs` (a whole minute). `bars` - the FINISHED spot minutes up to it (spotBarsOf,
  * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }. #111 -
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
@@ -247,63 +309,29 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
   }
   const leadNow = leadAt(nowMs)
   const leadPrev = leadAt(nowMs - f.flipTf * MIN)
-  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in): the EMAs of their closes.
-  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
-  const buckets = new Map()
-  for (const b of bars) {
-    if (b.t < sessionStart) continue
-    const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
-    buckets.set(k, [...(buckets.get(k) ?? []), b])
-  }
-  const candleOf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
-  // Warm-up (emaWarm): the previous session's candles in front, so the EMAs are ready at the open instead of ~10:20.
-  const warm = f.emaWarm && prevDay?.closes?.length ? prevDay.closes.filter((_, i) => (i + 1) % f.emaTf === 0) : []
-  const closesTf = [...warm, ...candleOf.map((xs) => xs.at(-1).close)]
-  const vwapNow = f.vwapMode === 'off' ? null : vwapSeries(bars.filter((b) => b.t >= sessionStart)).at(-1)
+  // The predefined blocks this strategy lists (PARAM_BLOCKS): EMA, VWAP, ATM option EMAs, stop / target, trailing.
+  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, bars, oi, nowMs, minute, spotNow, atr, prevDay, underlying })
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
-  const atmK = Math.round(spotNow / oi.step) * oi.step
-  const near = rows.filter((r) => Math.abs(r.strike - atmK) <= f.nearStrikes * oi.step)
-  // The ATM option's own premium in the same candles (the strike now ATM, its whole day - a snapshot, like the live scan).
-  const premiumCloses = (side) => candleOf.map((xs) => closePremiumAt(oi, side, atmK, xs.at(-1).t + MIN)).filter((v) => v != null)
+  const near = rows.filter((r) => Math.abs(r.strike - B.atmK) <= f.nearStrikes * oi.step)
   const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
   const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
-  // The trailing stop's points: fixed for this index (NIFTY when the index is not named), or the ATR's multiples.
-  const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
-  const stopPts = f.stopAtr * atr
-  const trail = f.trailMode === 'off' ? null
-    : f.trailMode === 'r' ? { start: +(f.trailStartR * stopPts).toFixed(2), gap: +(f.trailGapR * stopPts).toFixed(2), r: true }
-    : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
-      : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
-  const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : t.r ? ` (${f.trailStartR}R)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : t.r ? ` (${f.trailGapR}R)` : ''}` : 'no trailing stop')
   if (leadNow != null && leadPrev != null) {
     for (const dir of [1, -1]) {
       const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
       if (!flipped) continue
-      const spotEma = emaAgrees(closesTf, f.emaFast, f.emaSlow, f.emaMode, f.crossBars, dir)
-      const emaWith = spotEma.ok
-      const vwapWith = f.vwapMode === 'off' || (vwapNow != null && dir * (spotNow - vwapNow) > 0)
-      // The ATM options' own EMAs: the leg bought for the trade rises (CE for a long); `both` also has the other leg falling.
-      const legWith = f.optEmaMode === 'off' || (() => {
-        const traded = emaAgrees(premiumCloses(dir > 0 ? 'CE' : 'PE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, 1)
-        if (!traded.ok) return false
-        if (f.optEmaLegs !== 'both') return true
-        return emaAgrees(premiumCloses(dir > 0 ? 'PE' : 'CE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, -1).ok
-      })()
-      const ema7 = spotEma.fast, ema21 = spotEma.slow
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
-      if (emaWith && vwapWith && legWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
-        // Its own trailing stop: this index's fixed points (after `start` in profit it stays `gap` behind the best price), or
-        // dynamic - the same in multiples of the ATR -, or none. A tuned trailing stop (the tradeTrail filter) overrides it.
-        push('spotFlip', dir, stopPts, f.targetAtr * atr, 330, {
+      const confirmed = B.confirm(dir)
+      if (confirmed.ok && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+        // Its exits come from the blocks: the index stop / target and its own trailing stop (a tuned trailing stop - the
+        // tradeTrail filter - overrides it).
+        push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
-          Trend: f.emaMode === 'off' ? 'EMA not asked' : `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}${f.emaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`,
-          ...(f.vwapMode !== 'off' ? { VWAP: `spot ${spotNow.toFixed(1)} ${dir > 0 ? 'over' : 'under'} VWAP ${vwapNow.toFixed(1)}` } : {}),
-          ...(f.optEmaMode !== 'off' ? { 'ATM option EMA': `ATM ${atmK} ${dir > 0 ? 'CE' : 'PE'} EMA ${f.optEmaFast} over ${f.optEmaSlow}${f.optEmaLegs === 'both' ? ` and the ${dir > 0 ? 'PE' : 'CE'} under` : ''}${f.optEmaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}` } : {}),
-          Trail: trailText(trail),
-        }, { trailOverride: trail ? { unit: 'pts', startPts: trail.start, gapPts: trail.gap } : null })
+          ...confirmed.checks,
+          Trail: B.exits.trailText,
+        }, { trailOverride: B.exits.trail ? { unit: 'pts', startPts: B.exits.trail.start, gapPts: B.exits.trail.gap } : null })
       }
     }
   }

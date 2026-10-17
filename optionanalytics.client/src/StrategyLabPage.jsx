@@ -3,11 +3,11 @@
 // confirmation, how it is taken in options) and see what that setting would have done on past days - beside the strategy
 // as written and as applied now. A server job (the tuning's own day scan and measure - tune.mjs "lab": past days come
 // from the cache, so a run normally costs no Dhan calls); nothing is written to the tuning history. Apply it from here.
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filterGroup } from './strategyEngine.js'
 import { OPTION_DEFAULT, entryDefsFor, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, sumPoints, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { ApplyTunedButton } from './ApplyTuned.jsx'
@@ -250,11 +250,14 @@ export default function StrategyLabPage() {
               {entryDefs.length > 0 && (
                 <Row gutter={[16, 8]} style={{ marginBottom: 12 }}>
                   <Col span={24}><Text strong style={{ fontSize: 12 }}>The strategy&apos;s own rules - a change scans the days again</Text></Col>
-                  {entryDefs.map((f) => {
+                  {entryDefs.map((f, i) => {
                     const v = params[f.key] ?? f.default
+                    const heading = i === 0 || filterGroup(entryDefs[i - 1]) !== filterGroup(f)
                     const changed = params[f.key] !== undefined && String(params[f.key]) !== String(f.default)
                     return (
-                      <Col xs={24} md={12} xl={8} key={f.key}>
+                      <Fragment key={f.key}>
+                      {heading && <Col span={24}><Text type="secondary" style={{ fontSize: 12 }}>{filterGroup(f)}</Text></Col>}
+                      <Col xs={24} md={12} xl={8}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                           <Text style={{ fontSize: 12, fontWeight: changed ? 600 : 400 }}>{f.label}</Text>
                           {f.type === 'select'
@@ -264,6 +267,7 @@ export default function StrategyLabPage() {
                               : <InputNumber size="small" min={f.min} max={f.max} step={f.step} value={v} onChange={(x) => set(f.key, x ?? f.default)} style={{ width: 100, flex: 'none' }} aria-label={f.key} />}
                         </div>
                       </Col>
+                      </Fragment>
                     )
                   })}
                 </Row>

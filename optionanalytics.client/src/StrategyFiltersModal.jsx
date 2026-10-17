@@ -3,7 +3,7 @@
 // written and tested, so an untouched strategy behaves exactly as before).
 import { useState } from 'react'
 import { Button, InputNumber, Modal, Segmented, Select, Space, Switch, Typography } from 'antd'
-import { STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters } from './strategyEngine.js'
+import { STRATEGY_BY_ID, STRATEGY_FILTERS, filterGroup, strategyFilters } from './strategyEngine.js'
 
 const { Text } = Typography
 
@@ -38,8 +38,9 @@ export function StrategyFiltersModal({ id, values, byIndex = {}, onClose, onSave
         <Text type="secondary" style={{ fontSize: 11 }}>
           {scope === 'all' ? 'Used on every index that has none of its own.' : own(scope) ? `${scope} has its own filters (●) - they win over the all-index ones.` : `Save to give ${scope} its own: the all-index filters are the start.`}
         </Text>
-        {defs.map((f) => (
-          <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        {defs.map((f, i) => (
+          <div key={f.key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, ...(i === 0 || filterGroup(defs[i - 1]) !== filterGroup(f) ? { borderTop: i ? '1px solid rgba(128,128,128,.25)' : 'none', paddingTop: i ? 8 : 0, flexWrap: 'wrap' } : {}) }}>
+            {(i === 0 || filterGroup(defs[i - 1]) !== filterGroup(f)) && <Text strong style={{ fontSize: 12, flexBasis: '100%' }}>{filterGroup(f)}</Text>}
             <Text style={{ fontSize: 12 }}>
               {f.label}
               {draft[f.key] !== f.default && <Text type="secondary" style={{ fontSize: 11 }}>{` (default ${f.type === 'switch' ? (f.default ? 'on' : 'off') : f.type === 'select' ? f.options.find((o) => o.value === f.default)?.label : f.default})`}</Text>}

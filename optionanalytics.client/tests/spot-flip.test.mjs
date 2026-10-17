@@ -6,8 +6,8 @@
 // too. Run: npm test (node --test) - see CLAUDE.md.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters, trailedStop, applyTradeFilter } from '../src/strategyEngine.js'
-import { emaAgrees, evaluateSpotStrategies, scanSpotDay } from '../src/spotEngine.js'
+import { PARAM_BLOCKS, SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, applyTradeFilter, blocksOf, filterGroup, strategyFilters, trailedStop } from '../src/strategyEngine.js'
+import { emaAgrees, evaluateSpotStrategies, scanSpotDay, spotBlocks } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
 import { DEFAULT_VARIANT, entryDefsFor, entryPartOf, filtersFromTuning, labOverrides, labParams, paramsFromFilters } from '../src/strategyTuning.js'
 import { MIN, T, flipLong, flipShort } from './spot-flip-world.mjs'
@@ -188,4 +188,16 @@ test('trailing in R (x the stop distance), the stop and target in ATR, and the E
   const prevDay = { date: '2025-01-01', high: 22400, low: 22000, close: 22399, closes: Array.from({ length: 375 }, (_, i) => 22000 + i) }
   const w = scanSpotDay({ ...flipLong(), filters: { spotFlip: { ...slow, emaWarm: true } }, prevDay }).filter((s) => s.id === 'spotFlip')
   assert.equal(w.length, 1, 'ready with the previous day in front')
+})
+
+test('predefined parameter blocks: a strategy lists the blocks it has; its filters are its own rules + those blocks + the trade filters', () => {
+  assert.deepEqual(blocksOf('spotFlip'), ['ema', 'vwap', 'optEma', 'exits', 'trail'])
+  const defs = STRATEGY_FILTERS.spotFlip
+  const groups = [...new Set(defs.map(filterGroup))]
+  assert.deepEqual(groups, ['Its own rules', 'Spot EMA', 'VWAP', 'ATM option EMAs (CE / PE)', 'Index stop-loss and target', 'Trailing stop', 'How the trade is taken (every strategy)'])
+  for (const [b, { filters }] of Object.entries(PARAM_BLOCKS)) for (const f of filters) assert.ok(defs.find((d) => d.key === f.key && d.block === b), `${b}: ${f.key}`)
+  // A block not listed is neither asked nor given settings: with none, the strategy only needs its own rule.
+  const pass = spotBlocks({ blocks: [], f: { emaMode: 'state', vwapMode: 'with', optEmaMode: 'state' }, bars: [], oi: { step: 50 }, nowMs: 0, minute: 570, spotNow: 100, atr: 2 })
+  assert.equal(pass.confirm(1).ok, true, 'no blocks = nothing asked')
+  assert.deepEqual([pass.exits.stopPts, pass.exits.targetPts, pass.exits.trail], [3, 6, null], 'and the default 1.5 / 3 ATR, no trailing stop')
 })

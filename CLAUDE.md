@@ -106,6 +106,13 @@ polls stay as the fallback.
 
 When adding or changing a strategy:
 
+- **Own rule + predefined blocks.** A strategy is its OWN rule (`STRATEGY_OWN_FILTERS[id]`, its code in spotEngine.js) plus the
+  predefined parameter blocks it lists (`blocks: [...]` on the strategy, `PARAM_BLOCKS` in strategyEngine.js: `ema`, `vwap`,
+  `optEma`, `exits`, `trail`), evaluated by one shared function (`spotBlocks` in spotEngine.js: `confirm(dir)` and `exits`) and
+  then the trade filters every strategy has. `STRATEGY_FILTERS[id]` is built from the three (each block filter carries
+  `block`; `filterGroup` names the group in the Filters dialog and the Strategy lab). A new block = its filters in
+  `PARAM_BLOCKS` + its question/exit in `spotBlocks`; a new strategy = its own filters + `blocks` + its rule, and the Strategies
+  page, the Lab (per-index, re-scanned days) and applying a setting work for it with no page code. `tests/spot-flip.test.mjs`.
 - add a scenario test in `optionanalytics.client/tests/` - it fires on its rules (LONG and SHORT where
   it trades both) and does NOT fire when each key condition is missing;
 - update the strategy count in the tests (`STRATEGIES.length`) and check what the default Top 15

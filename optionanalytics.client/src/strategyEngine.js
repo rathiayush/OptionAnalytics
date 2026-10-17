@@ -51,7 +51,7 @@ export const SPOT_STRATEGIES = [
   // overtake calls (a long), or the reverse - and the 3-minute EMA 7 / 21 on the spot agrees, the CE / PE change over the last
   // few minutes (configurable) is with the trade, and the support / resistance OI round the ATM (+/- 2 strikes, configurable)
   // sits with it: BUY / SELL per the index's setting, index stop and target, until the flip comes back (the opposite signal).
-  { id: 'spotFlip', no: 101, name: 'Spot: CE / PE since-open flip + 3-min EMA 7 / 21 + CE / PE change and ATM walls with the trade', short: 'Spot CE/PE flip', spot: true },
+  { id: 'spotFlip', no: 101, name: 'Spot: CE / PE since-open flip + 3-min EMA 7 / 21 + CE / PE change and ATM walls with the trade', short: 'Spot CE/PE flip', spot: true, blocks: ['ema', 'vwap', 'optEma', 'exits', 'trail'] },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -82,27 +82,51 @@ const PROFILE_REJECT_FILTERS = [
 ]
 
 // Per-strategy entry filters: none - every strategy was removed (the trade filters below stay available to any new one).
-export const STRATEGY_FILTERS = {
-  // #101's own, configurable rules: how many minutes of CE / PE change must back the trade, and how many strikes round the
-  // ATM the support / resistance OI is counted over. The defaults ARE the rule as written.
+// A strategy's OWN rules - what makes it that strategy. Everything else it can be given from PARAM_BLOCKS below.
+const STRATEGY_OWN_FILTERS = {
+  // #101's own, configurable rules: how many minutes of CE / PE change must back the trade, how many strikes round the
+  // ATM the support / resistance OI is counted over, and how far back the since-open CE - PE flip may be.
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
-    { key: 'stopAtr', label: 'Index stop-loss (x ATR) - the trade leaves at it', type: 'number', default: 1.5, min: 0.5, max: 5, step: 0.25 },
-    { key: 'targetAtr', label: 'Index target (x ATR)', type: 'number', default: 3, min: 0.5, max: 10, step: 0.25 },
-    { key: 'emaWarm', label: 'EMAs: start from the previous day\'s candles (ready at the open, not ~10:20)', type: 'switch', default: false },
     { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 60, step: 1 },
+  ],
+}
+
+/**
+ * The PREDEFINED parameter blocks any strategy can be given (its `blocks` list in STRATEGIES / SPOT_STRATEGIES): ready-made
+ * confirmations and exits, each with its settings, evaluated by one shared piece of code (spotBlocks in spotEngine.js) - so a
+ * new strategy writes only its own rule and lists the blocks it wants; every setting then shows on the Strategies page, in
+ * the Strategy lab and in the Expired Backtest the same way, per index. A strategy NOT listing a block does not get its
+ * settings and is not asked its question. Defaults are the rule as written.
+ *   ema - the spot's fast / slow EMA on N-minute candles: already in direction or a fresh crossover (optionally warmed up from
+ *         the previous day);  vwap - the spot on the trade's side of the day's VWAP;  optEma - the same EMA check on the ATM
+ *         CE / PE premium (the leg traded, or both legs);  exits - the index stop-loss and target in ATR;
+ *   trail - the trailing stop: fixed points per index, x ATR or in R.
+ */
+export const PARAM_BLOCKS = {
+  ema: { label: 'Spot EMA', filters: [
     { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
     { key: 'emaMode', label: 'Spot EMA: already in the direction, a fresh crossover, or not asked', type: 'select', default: 'state', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
     { key: 'crossBars', label: 'A fresh crossover happened within the last (candles) - spot and ATM option EMAs', type: 'number', default: 3, min: 1, max: 20, step: 1 },
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
+    { key: 'emaWarm', label: 'EMAs: start from the previous day\'s candles (ready at the open, not ~10:20)', type: 'switch', default: false },
+  ] },
+  vwap: { label: 'VWAP', filters: [
     { key: 'vwapMode', label: 'VWAP: spot on the trade\'s side of the day\'s VWAP, or not asked', type: 'select', default: 'off', options: [{ value: 'off', label: 'Not asked' }, { value: 'with', label: 'Spot above VWAP for a long, below for a short' }] },
+  ] },
+  optEma: { label: 'ATM option EMAs (CE / PE)', filters: [
     { key: 'optEmaMode', label: 'ATM option EMAs (CE / PE premium): already in direction, a fresh crossover, or not asked', type: 'select', default: 'off', options: [{ value: 'off', label: 'Not asked' }, { value: 'state', label: 'Already in direction' }, { value: 'cross', label: 'Fresh crossover' }] },
     { key: 'optEmaLegs', label: 'ATM option EMAs: the leg traded only, or both legs (the other one falling)', type: 'select', default: 'traded', options: [{ value: 'traded', label: 'The leg traded (CE for a long, PE for a short)' }, { value: 'both', label: 'Both: traded leg rising, the other falling' }] },
     { key: 'optEmaFast', label: 'ATM option EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'optEmaSlow', label: 'ATM option EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
-    // Its own trailing stop - per index, and either fixed points or dynamic (a multiple of the day's ATR, so it breathes with the market).
+  ] },
+  exits: { label: 'Index stop-loss and target', filters: [
+    { key: 'stopAtr', label: 'Index stop-loss (x ATR) - the trade leaves at it', type: 'number', default: 1.5, min: 0.5, max: 5, step: 0.25 },
+    { key: 'targetAtr', label: 'Index target (x ATR)', type: 'number', default: 3, min: 0.5, max: 10, step: 0.25 },
+  ] },
+  trail: { label: 'Trailing stop', filters: [
     { key: 'trailMode', label: 'Trailing stop: fixed index points, or dynamic (x ATR)', type: 'select', default: 'points', options: [{ value: 'points', label: 'Fixed points (per index, below)' }, { value: 'atr', label: 'Dynamic: x the current ATR' }, { value: 'r', label: 'In R: x the stop distance (0.5R, 1R ...)' }, { value: 'off', label: 'No trailing stop' }] },
     { key: 'trailStartNIFTY', label: 'NIFTY: trailing starts after (points in profit)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
     { key: 'trailGapNIFTY', label: 'NIFTY: stays this far behind the best price (points)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
@@ -114,8 +138,14 @@ export const STRATEGY_FILTERS = {
     { key: 'trailGapR', label: 'In R: stays this far behind the best price (x the stop distance)', type: 'number', default: 1, min: 0.25, max: 5, step: 0.25 },
     { key: 'trailStartAtr', label: 'Dynamic: trailing starts after (x ATR in profit)', type: 'number', default: 1, min: 0.2, max: 10, step: 0.1 },
     { key: 'trailGapAtr', label: 'Dynamic: stays this far behind the best price (x ATR)', type: 'number', default: 1, min: 0.2, max: 10, step: 0.1 },
-  ],
+  ] },
 }
+/** The blocks of a strategy, in the order they are listed. */
+export const blocksOf = (id) => (STRATEGY_BY_ID[id]?.blocks ?? []).filter((b) => PARAM_BLOCKS[b])
+export const STRATEGY_FILTERS = {}
+/** Where a filter of STRATEGY_FILTERS belongs, for the dialogs: its strategy's own rules, one of its predefined blocks, or the
+ *  trade filters every strategy has. */
+export const filterGroup = (f) => (f.block ? PARAM_BLOCKS[f.block].label : f.key.startsWith('trade') ? 'How the trade is taken (every strategy)' : 'Its own rules')
 // How any strategy's trades are taken (every strategy has these, after its own): long / short only, the
 // entry time window, the stop-loss and target as a multiple of the strategy's own, a time stop, a trailing
 // stop of its own. The defaults are the strategy exactly as written; the strategy tuning measures them.
@@ -390,7 +420,9 @@ export function optionExitText(plan) {
   if (plan.exit === 'option') return `option: its own SL / target only (${levels}), else 15:10`
   return `option out with the index trade${plan.slPts > 0 || plan.targetPts > 0 ? `, or ${levels} first` : ''}`
 }
-for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) STRATEGY_FILTERS[st.id] = [...(STRATEGY_FILTERS[st.id] ?? []), ...TRADE_FILTERS]
+for (const st of [...STRATEGIES, ...SPOT_STRATEGIES]) {
+  STRATEGY_FILTERS[st.id] = [...(STRATEGY_OWN_FILTERS[st.id] ?? []), ...blocksOf(st.id).flatMap((b) => PARAM_BLOCKS[b].filters.map((f) => ({ ...f, block: b }))), ...TRADE_FILTERS]
+}
 
 /** A strategy's filter values: its defaults with the trader's `overrides` on top - numbers clamped to
  *  their range, a choice not in the list, wrong types and unknown keys ignored. */
