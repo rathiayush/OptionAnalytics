@@ -854,11 +854,13 @@ public sealed class ExpiredOptionBacktestService
             // same as the spot fetch (GetSpotCandlesAsync) - rather than failing every strike of the band.
             var stored = useStoredData && _storedRollingOption.IsConfigured;
             IRollingOptionDataSource source = stored ? _storedRollingOption : _rollingOption;
+            // Every day of this segment already in the Dhan day cache: the read below makes no Dhan call, so no pacing.
+            var cachedOnDisk = !stored && _rollingOption.IsFullyCached(underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1);
             var (segmentBars, segmentError) = await source.GetRollingOptionCandlesAsync(
                 underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
-            if (!stored) anyLiveDhanCall = true;
+            if (!stored && !cachedOnDisk) anyLiveDhanCall = true;
         }
 
         return (bars, error, anyLiveDhanCall);
