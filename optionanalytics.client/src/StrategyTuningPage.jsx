@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, InputNumber, Popconfirm, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { NEAR_BEST, OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, settingSignature, variantText } from './strategyTuning.js'
+import { MIN_TUNE_DAYS, NEAR_BEST, OI_COMBO_CAP, OI_FACTORS, OPTION_DEFAULT, countOiCombinations, oiFactorsFor, optionText, settingSignature, variantText } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { AppliedSettingsCard, ApplyTunedButton } from './ApplyTuned.jsx'
 import ClearData from './ClearData.jsx'
@@ -230,6 +230,8 @@ function DaysTable({ days, skipped }) {
 const settingText = (params, unit) => (params ? `${variantText(params)}${unit === 'pts' ? ` · ${optionText(params)}` : ''}` : '-')
 
 /** [from, to] covering the last n calendar days up to yesterday (weekends are never fetched anyway). */
+// The order-flow inputs: real only on the few days the server recorded live (on estimated days they pass every trade).
+const FLOW_KEYS = new Set(OI_FACTORS.filter((f) => f.flow).map((f) => f.key))
 const lastDays = (n) => [dayjs().subtract(n, 'day').startOf('day'), dayjs().subtract(1, 'day').startOf('day')]
 
 const when = (iso) => (iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-')
@@ -362,13 +364,15 @@ export default function StrategyTuningPage() {
   const [underlying, setUnderlying] = useState('NIFTY')
   const [pick, setPick] = useState('top3')
   const [custom, setCustom] = useState([])
-  const [includeEstimated, setIncludeEstimated] = useState(false)
+  // Estimated days on by default: a setting is chosen on months of days, not on the few the server recorded live.
+  const [includeEstimated, setIncludeEstimated] = useState(true)
   const [minTrades, setMinTrades] = useState(8)
   const [minPerMonth, setMinPerMonth] = useState(4)
   const [walkForward, setWalkForward] = useState(3)
   const [what, setWhat] = useState('both')
   // Always a date range (from / to): the last 30 days to yesterday until another is picked.
-  const [range, setRange] = useState(() => lastDays(30))
+  // A year by default: a setting chosen on the last month is the one that fitted the last month (heldToMinDays).
+  const [range, setRange] = useState(() => lastDays(365))
   const [data, setData] = useState('futures')
   const spot = data === 'spot'
   const [oiFactors, setOiFactors] = useState(OI_FACTORS.map((f) => f.key))
@@ -411,7 +415,11 @@ export default function StrategyTuningPage() {
 
   const running = status?.state === 'running'
   const rangeOk = !!(range?.[0] && range?.[1])
-  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, minPerMonth, walkForward, what, oiFactors, search, data,
+  // With estimated days the order-flow inputs are left out: on those days they let every trade through, so tuning them
+  // would only fit the few recorded days.
+  const sentFactors = !spot && includeEstimated ? oiFactors.filter((k) => !FLOW_KEYS.has(k)) : oiFactors
+  const rangeDays = rangeOk ? range[1].diff(range[0], 'day') + 1 : 0
+  const jobBody = () => ({ underlying, strategies: pick === 'custom' ? custom : pick, days: 250, includeEstimated, minTrades, minPerMonth, walkForward, what, oiFactors: sentFactors, search, data,
     from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null })
   // The schedule: jobs run one after another on the server - for one index or several, now or at a set time, once or daily.
   const [queue, setQueue] = useState([])
@@ -562,7 +570,7 @@ export default function StrategyTuningPage() {
                 <Space size={6} wrap>
                   <Text>Days</Text>
                   <Tooltip title="Every past trading day in this range is used (up to 250; Saturdays and Sundays are never fetched); the older 70% choose, the newest 30% check"><DatePicker.RangePicker value={range} onChange={setRange} onCalendarChange={(v) => { if (v?.[0] && v?.[1]) setRange(v) }} format="DD MMM YYYY" allowClear={false}
-                    presets={[30, 60, 90, 120, 250].map((n) => ({ label: `Last ${n} days`, value: lastDays(n) }))}
+                    presets={[[90, 'Last 3 months'], [180, 'Last 6 months'], [365, 'Last year (best)'], [30, 'Last 30 days (fits that month only)']].map(([n, label]) => ({ label, value: lastDays(n) }))}
                     disabledDate={(d) => d && (!d.isBefore(dayjs().startOf('day')) || d.day() === 0 || d.day() === 6)} aria-label="Tuning date range" /></Tooltip>
                 </Space>
               </Col>
@@ -616,6 +624,12 @@ export default function StrategyTuningPage() {
               </div>
             )}
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can run a tuning job or apply a result." />}
+            {rangeOk && rangeDays < 90 && (
+              <Alert type="warning" showIcon message={`${rangeDays} calendar days is one short stretch - whatever is picked on it fits that stretch, so it is shown but never recommended (${MIN_TUNE_DAYS}+ trading days are needed). Use the last year for a setting that holds on other days.`} />
+            )}
+            {!spot && includeEstimated && oiFactors.some((k) => FLOW_KEYS.has(k)) && (what === 'oi' || what === 'both' || what === 'all') && (
+              <Text type="secondary" style={{ fontSize: 12 }}>The order-flow inputs (tape, big orders, book, delta, volume) are left out of this run: on estimated days they let every trade through.</Text>
+            )}
             {!spot && !includeEstimated && (
               <Alert type="warning" showIcon message="Only the recorded days will be used - the server keeps just the last few (in memory)."
                 description="For a long run (30, 120, 250 days) switch on Include estimated days: the other days are rebuilt from 1-minute futures candles (no tape or market depth - the order-flow checks are estimated, and each is marked 'est.'). Or use Spot + options only, which needs no futures order flow." />

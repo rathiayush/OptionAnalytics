@@ -77,3 +77,20 @@ test('of the settings about as good as the top one, the one closest to as writte
   // Nothing positive: the top, as before.
   assert.equal(pickSimplest([row(-0.1, { tradeSide: 'long' }, 1), row(-0.2, {}, 2)], asWritten).chosen.at, 1)
 })
+
+test('a setting chosen on one short stretch is shown, never recommended - however well it did there', async () => {
+  const { heldToMinDays, MIN_TUNE_DAYS } = await import('../src/strategyTuning.js')
+  assert.equal(MIN_TUNE_DAYS, 60)
+  const good = { recommend: true, reason: 'better on the train days and on the 6 unseen test day(s)', best: { params: { tradeSide: 'long' } } }
+  const short = heldToMinDays(good, 21)
+  assert.equal(short.recommend, false)
+  assert.deepEqual(short.tooFewDays, { days: 21, min: 60 })
+  assert.match(short.reason, /only 21 trading day\(s\).*60\+ trading days.*\(better on the train days/)
+  assert.equal(short.best, good.best, 'the setting itself is still shown')
+  // Enough days: untouched. Not recommended anyway: untouched.
+  assert.equal(heldToMinDays(good, 60), good)
+  const no = { recommend: false, reason: 'it fitted the past' }
+  assert.equal(heldToMinDays(no, 10), no)
+  // The job's own threshold can be set (the tests run on a few days).
+  assert.equal(heldToMinDays(good, 6, 5), good)
+})

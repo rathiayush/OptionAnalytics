@@ -47,7 +47,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultIndexTrade, defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText, withWalkForward } from '../src/strategyTuning.js'
+import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText, withWalkForward, heldToMinDays, MIN_TUNE_DAYS } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 import { CHECK_COLUMNS, DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
@@ -68,6 +68,8 @@ const RANGED = !!(FROM || TO)
 const inRange = (date) => (!FROM || date >= FROM) && (!TO || date <= TO)
 // Saturdays and Sundays have no trading: never fetched, whatever lists them.
 const isWeekend = (date) => [0, 6].includes(new Date(`${date}T00:00:00Z`).getUTCDay())
+// TUNE_MIN_DAYS: the fewest days a setting may be recommended on (MIN_TUNE_DAYS; the tests lower it).
+const MIN_DAYS_TO_TRUST = process.env.TUNE_MIN_DAYS != null ? Math.max(0, Number(process.env.TUNE_MIN_DAYS) || 0) : MIN_TUNE_DAYS
 const MAX_DAYS = RANGED ? 250 : Math.max(1, Math.min(250, Number(job.days) || 30))
 const MIN_TRADES = Math.max(2, Math.min(100, Number(job.minTrades) || 8))
 // The fewest trades a month a setting must take on the train days to be chosen (0: no such rule) - 4 when not sent.
@@ -785,7 +787,8 @@ async function main() {
           progress({ stage: 'tune', strategy: ids[i], done: i, total: ids.length, ...p })
         },
       }
-      results.push(withWalkForward(tuneStrategy(days, ids[i], tuneOpts), days, ids[i], tuneOpts, WALK_FORWARD))
+      // Chosen on too short a stretch, it is shown but never recommended (heldToMinDays) - however well it did there.
+      results.push(heldToMinDays(withWalkForward(tuneStrategy(days, ids[i], tuneOpts), days, ids[i], tuneOpts, WALK_FORWARD), days.length, MIN_DAYS_TO_TRUST))
     } catch (err) {
       if (!err.overBudget) throw err
       tuneStop = `the job's own time budget of ${budgetText} ran out while fine-tuning ${STRATEGY_BY_ID[ids[i]]?.name ?? ids[i]} (${i} of ${ids.length} strategy(s) finished) - that one and the rest were left`

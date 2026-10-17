@@ -221,6 +221,16 @@ export const oiGridOf = (keys) => {
 }
 export const DEFAULT_VARIANT = Object.fromEntries(TRADE_FILTERS.map((f) => [f.key, f.default]))
 
+/** The fewest trading days a setting may be chosen on and still be recommended (about three months). A setting picked on
+ *  one short stretch - the last month, say - is the one that fitted THAT stretch: it is shown, never recommended. */
+export const MIN_TUNE_DAYS = 60
+/** A tuning result held to MIN_TUNE_DAYS: chosen on fewer days it is not recommended, and says why. */
+export function heldToMinDays(result, days, min = MIN_TUNE_DAYS) {
+  if (!result?.recommend || days >= min) return result
+  return { ...result, recommend: false, tooFewDays: { days, min },
+    reason: `chosen on only ${days} trading day(s) - a setting picked on one short stretch fits that stretch, not the market; tune on ${min}+ trading days (about three months or more) before trusting it (${result.reason})` }
+}
+
 /** Every combination of `grid` (key -> values; 'window' -> [from, to] pairs), each on top of `base` (the
  *  trade filters not in the grid). */
 export function* variants(grid = TUNING_GRID, base = DEFAULT_VARIANT) {
