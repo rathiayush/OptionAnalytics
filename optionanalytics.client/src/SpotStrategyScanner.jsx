@@ -460,18 +460,18 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
         let memory = { fired: firedRef.current }
         const found = []
         if (isReplay) {
-          const r = spotScanMinutes({ from, to: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current }, memory)
+          const r = spotScanMinutes({ from, to: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current, underlying }, memory)
           memory = { fired: r.fired }
           found.push(...r.fresh)
         } else {
           // Minutes this page has not judged (opened part-way through the day): read the way a replay is - each minute once
           // it is over -, recorded, not alerted. Then this minute, on the live OI.
           if (from < clockMinute - MIN) {
-            const r = spotScanMinutes({ from, to: clockMinute - MIN, bars: dayBars, oi: asReplayContext(oi), filters, trail, prevDay: prevDayRef.current }, memory)
+            const r = spotScanMinutes({ from, to: clockMinute - MIN, bars: dayBars, oi: asReplayContext(oi), filters, trail, prevDay: prevDayRef.current, underlying }, memory)
             memory = { fired: r.fired }
             found.push(...r.fresh)
           }
-          const tick = caughtUp ? spotScanTick({ minute: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current }, memory) : null
+          const tick = caughtUp ? spotScanTick({ minute: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current, underlying }, memory) : null
           if (tick) { memory = { fired: tick.fired }; found.push(...tick.fresh) }
         }
         lastMinuteRef.current = clockMinute

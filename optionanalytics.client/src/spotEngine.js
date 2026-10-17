@@ -182,7 +182,7 @@ export function spotProfile(bars, step) {
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlying = null }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -246,6 +246,12 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
   const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
+  // The trailing stop's points: fixed for this index (NIFTY when the index is not named), or the ATR's multiples.
+  const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
+  const trail = f.trailMode === 'off' ? null
+    : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
+      : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
+  const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : ''}` : 'no trailing stop')
   if (leadNow != null && leadPrev != null && ema7 != null && ema21 != null) {
     for (const dir of [1, -1]) {
       const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
@@ -253,14 +259,14 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
       if (flipped && emaWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
-        // Its own trailing stop, in index points: after `trailStartPts` in profit it stays `trailGapPts` behind the best price
-        // (0 start = no trailing stop). A tuned trailing stop (the tradeTrail filter) overrides it.
+        // Its own trailing stop: this index's fixed points (after `start` in profit it stays `gap` behind the best price), or
+        // dynamic - the same in multiples of the ATR -, or none. A tuned trailing stop (the tradeTrail filter) overrides it.
         push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
           Trend: `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}`,
-          Trail: f.trailStartPts > 0 ? `trailing stop after ${f.trailStartPts} pts, ${f.trailGapPts} pts behind` : 'no trailing stop',
-        }, { trailOverride: f.trailStartPts > 0 ? { unit: 'pts', startPts: f.trailStartPts, gapPts: f.trailGapPts } : null })
+          Trail: trailText(trail),
+        }, { trailOverride: trail ? { unit: 'pts', startPts: trail.start, gapPts: trail.gap } : null })
       }
     }
   }
@@ -273,7 +279,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
  * Every spot setup of every minute of a day (from 15 minutes after the first candle): `bars` - spotBarsOf the day's
  * 1-minute candles, `oi` - the replay context (live: false). The tuning dedupes after its own filters, like the futures'.
  */
-export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = null }) {
+export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = null, underlying = null }) {
   if (!bars?.length || !oi) return []
   const found = []
   const first = bars[0].t + 15 * MIN
@@ -281,7 +287,7 @@ export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = nu
   let done = 0 // bars finished by the clock
   for (let clock = first; clock <= end; clock += MIN) {
     while (done < bars.length && bars[done].t + MIN <= clock) done++
-    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, prevDay }))
+    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, prevDay, underlying }))
   }
   return found
 }

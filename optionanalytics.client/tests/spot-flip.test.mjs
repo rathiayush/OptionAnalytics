@@ -79,22 +79,31 @@ test('no look-ahead: what happens after the clock changes nothing, and the tunin
   assert.deepEqual(firstPerCooldown(mine(full)).map((s) => s.t), mine(full).map((s) => s.t))
 })
 
-test('a trailing stop of its own: after 10 index points in profit it stays 10 behind - configurable, 0 = none', () => {
+test('a trailing stop of its own: per index (NIFTY 10 / BANKNIFTY 20 / SENSEX 30 points), dynamic (x ATR) or none', () => {
   // (A setup trades with `trail` - the live scan puts its own trailOverride there (withOwnTrail), the tuning the same.)
   const withTrail = (x) => ({ ...x, trail: x.trailOverride })
-  const [s0] = mine(flipLong())
-  const s = withTrail(s0)
+  const day = (filters, underlying = 'NIFTY', make = flipLong) => scanSpotDay({ bars: make().bars, oi: make().oi, filters: { spotFlip: filters }, underlying }).filter((x) => x.id === 'spotFlip')[0]
+  const s = withTrail(day({}))
   assert.deepEqual(s.trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 })
-  assert.match(s.checks.Trail, /trailing stop after 10 pts, 10 pts behind/)
+  assert.match(s.checks.Trail, /NIFTY trailing stop after 10 pts, 10 pts behind/)
   // The stop stays where it was until the trade is 10 points up, then follows 10 behind the best price - never loosened.
   assert.equal(trailedStop(s, s.entry + 9), s.stop)
   assert.ok(Math.abs(trailedStop(s, s.entry + 10) - s.entry) < 1e-9, 'at +10 the stop reaches the entry')
   assert.ok(Math.abs(trailedStop(s, s.entry + 25) - (s.entry + 15)) < 1e-9)
-  const short = withTrail(mine(flipShort())[0])
+  const short = withTrail(day({}, 'NIFTY', flipShort))
   assert.ok(Math.abs(trailedStop(short, short.entry - 25) - (short.entry - 15)) < 1e-9, 'the short trails the other way')
-  const wide = mine(flipLong(), { spotFlip: { trailStartPts: 6, trailGapPts: 4 } })[0]
-  assert.deepEqual(wide.trailOverride, { unit: 'pts', startPts: 6, gapPts: 4 })
-  assert.equal(mine(flipLong(), { spotFlip: { trailStartPts: 0 } })[0].trailOverride, null, '0 = no trailing stop')
+  // Each index has its own, each configurable.
+  assert.deepEqual(day({}, 'BANKNIFTY').trailOverride, { unit: 'pts', startPts: 20, gapPts: 20 })
+  assert.deepEqual(day({}, 'SENSEX').trailOverride, { unit: 'pts', startPts: 30, gapPts: 30 })
+  assert.deepEqual(day({ trailStartBANKNIFTY: 40, trailGapBANKNIFTY: 15 }, 'BANKNIFTY').trailOverride, { unit: 'pts', startPts: 40, gapPts: 15 })
+  assert.deepEqual(day({ trailStartBANKNIFTY: 40 }, 'NIFTY').trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 }, 'another index\'s setting does not touch this one')
+  assert.deepEqual(day({}, null).trailOverride, { unit: 'pts', startPts: 10, gapPts: 10 }, 'no index named: NIFTY\'s')
+  // Dynamic: a multiple of the ATR at the signal.
+  const dyn = day({ trailMode: 'atr', trailStartAtr: 2, trailGapAtr: 1 })
+  const atr = (dyn.entry - dyn.stop) / 1.5
+  assert.ok(Math.abs(dyn.trailOverride.startPts - 2 * atr) < 0.01 && Math.abs(dyn.trailOverride.gapPts - atr) < 0.01)
+  assert.match(dyn.checks.Trail, /\(2 ATR\).*\(1 ATR\)/)
+  assert.equal(day({ trailMode: 'off' }).trailOverride, null, 'none')
   // A tuned trailing stop (the tradeTrail filter) overrides it, as for every strategy.
   assert.equal(applyTradeFilter(s, { tradeTrail: 'off' }).trailOverride, null)
 })
