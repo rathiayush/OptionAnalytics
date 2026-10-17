@@ -15,7 +15,7 @@
 
 import { pocIndexOf, valueAreaOf } from './orderFlowMath.js'
 import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, closePremiumAt, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
+  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
 } from './strategyEngine.js'
 
@@ -195,65 +195,13 @@ export function spotProfile(bars, step) {
 }
 
 /**
- * The predefined parameter blocks (PARAM_BLOCKS in strategyEngine.js) evaluated for a spot strategy at `nowMs`: the strategy
- * lists the `blocks` it has and hands over its filter values `f`; it gets back `confirm(dir)` - { ok, checks }, every
- * listed confirmation (spot EMA, VWAP, ATM option EMAs) asked for that direction - and `exits` - the index stop / target
- * (ATR) and its trailing stop (fixed points per index, x ATR or in R). A block not listed is not asked and not read.
+ * The predefined parameter blocks (PARAM_BLOCKS in strategyEngine.js) evaluated for a spot strategy: the strategy lists the
+ * `blocks` it has and hands over its filter values `f`; `exits` - the index stop / target in ATR (a block not listed keeps the
+ * defaults, 1.5 / 3 ATR).
  */
-export function spotBlocks({ blocks = [], f, bars, oi, nowMs, minute, spotNow, atr, prevDay = null, underlying = null }) {
+export function spotBlocks({ blocks = [], f, atr }) {
   const has = (b) => blocks.includes(b)
-  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in): the EMAs of their closes.
-  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
-  const emaTf = f.emaTf ?? 3
-  const buckets = new Map()
-  for (const b of bars) {
-    if (b.t < sessionStart) continue
-    const k = Math.floor((b.t - sessionStart) / (emaTf * MIN))
-    buckets.set(k, [...(buckets.get(k) ?? []), b])
-  }
-  const candleOf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === emaTf).map(([, xs]) => xs)
-  // Warm-up (emaWarm): the previous session's candles in front, so the EMAs are ready at the open instead of ~10:20.
-  const warm = f.emaWarm && prevDay?.closes?.length ? prevDay.closes.filter((_, i) => (i + 1) % emaTf === 0) : []
-  const closesTf = [...warm, ...candleOf.map((xs) => xs.at(-1).close)]
-  const vwapNow = has('vwap') && f.vwapMode !== 'off' ? vwapSeries(bars.filter((b) => b.t >= sessionStart)).at(-1) : null
-  const atmK = Math.round(spotNow / oi.step) * oi.step
-  // The ATM option's own premium in the same candles (the strike now ATM, its whole day - a snapshot, like the live scan).
-  const premiumCloses = (side) => candleOf.map((xs) => closePremiumAt(oi, side, atmK, xs.at(-1).t + MIN)).filter((v) => v != null)
-
-  const confirm = (dir) => {
-    const checks = {}
-    let ok = true
-    if (has('ema') && f.emaMode !== 'off') {
-      const e = emaAgrees(closesTf, f.emaFast, f.emaSlow, f.emaMode, f.crossBars, dir)
-      if (!e.ok) ok = false
-      else checks.Trend = `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${f.emaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`
-    } else if (has('ema')) checks.Trend = 'EMA not asked'
-    if (ok && has('vwap') && f.vwapMode !== 'off') {
-      if (vwapNow == null || !(dir * (spotNow - vwapNow) > 0)) ok = false
-      else checks.VWAP = `spot ${spotNow.toFixed(1)} ${dir > 0 ? 'over' : 'under'} VWAP ${vwapNow.toFixed(1)}`
-    }
-    // The ATM options' own EMAs: the leg bought for the trade rises (CE for a long); `both` also has the other leg falling.
-    if (ok && has('optEma') && f.optEmaMode !== 'off') {
-      const traded = emaAgrees(premiumCloses(dir > 0 ? 'CE' : 'PE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, 1)
-      const other = f.optEmaLegs === 'both' ? emaAgrees(premiumCloses(dir > 0 ? 'PE' : 'CE'), f.optEmaFast, f.optEmaSlow, f.optEmaMode, f.crossBars, -1) : { ok: true }
-      if (!traded.ok || !other.ok) ok = false
-      else checks['ATM option EMA'] = `ATM ${atmK} ${dir > 0 ? 'CE' : 'PE'} EMA ${f.optEmaFast} over ${f.optEmaSlow}${f.optEmaLegs === 'both' ? ` and the ${dir > 0 ? 'PE' : 'CE'} under` : ''}${f.optEmaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`
-    }
-    return { ok, checks }
-  }
-
-  // The index stop / target in ATR, and the trailing stop: fixed for this index (NIFTY when the index is not named), x ATR, or in R.
-  const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
-  const stopPts = (has('exits') ? f.stopAtr : 1.5) * atr
-  const targetPts = (has('exits') ? f.targetAtr : 3) * atr
-  const trail = !has('trail') || f.trailMode === 'off' ? null
-    : f.trailMode === 'r' ? { start: +(f.trailStartR * stopPts).toFixed(2), gap: +(f.trailGapR * stopPts).toFixed(2), r: true }
-      : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
-        : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
-  const trailText = trail
-    ? `${index} trailing stop after ${trail.start} pts${trail.atr ? ` (${f.trailStartAtr} ATR)` : trail.r ? ` (${f.trailStartR}R)` : ''}, ${trail.gap} pts behind${trail.atr ? ` (${f.trailGapAtr} ATR)` : trail.r ? ` (${f.trailGapR}R)` : ''}`
-    : 'no trailing stop'
-  return { confirm, atmK, exits: { stopPts, targetPts, trail, trailText } }
+  return { exits: { stopPts: (has('exits') ? f.stopAtr : 1.5) * atr, targetPts: (has('exits') ? f.targetAtr : 3) * atr } }
 }
 
 /**
@@ -262,7 +210,7 @@ export function spotBlocks({ blocks = [], f, bars, oi, nowMs, minute, spotNow, a
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlying = null, prevDay = null }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -299,64 +247,81 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
   }
   const pct = (v) => (v == null ? 'no read' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)
 
-  // 101. THE CE / PE FLIP ---------------------------------------------------------------------------------------------
+  // 101. THE CE / PE CROSSOVER, THEN THE SPOT'S EMA ---------------------------------------------------------------------
+  // (1) The ALERT: the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the open, as a share
+  // of the chain: > 0 calls written more (bearish), < 0 puts - and (2) within `armMin` minutes the spot's `emaTf`-minute EMA fast / slow
+  // cross the trade's way: the entry is taken when THAT candle closes. Along with it (3) the cumulative CE / PE change with the trade,
+  // (4) the S / R OI near the ATM going the trade's way over the last `wallMin` minutes (puts added and calls leaving for a long) with a
+  // big net difference between the sides, and (5) the strikes right round the ATM doing the same.
   const f = strategyFilters('spotFlip', filters?.spotFlip)
-  // The whole chain's CE - PE added since the open, as a share of the chain: > 0 calls written more (bearish), < 0 puts.
+  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, atr })
   const leadAt = (ms) => {
     const spot = valueAt(oi.spot, ms)?.close
     const r = spot > 0 ? optionOiRead(oi, spot, ms, 15) : null
     return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
   }
-  const leadNow = leadAt(nowMs)
-  const leadPrev = leadAt(nowMs - f.flipTf * MIN)
-  // The predefined blocks this strategy lists (PARAM_BLOCKS): EMA, VWAP, ATM option EMAs, stop / target, trailing.
-  // The crossover trigger always asks a FRESH spot crossover; the ATM CE / PE EMAs may be aligned already (optEmaMode).
-  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f: f.trigger === 'cross' ? { ...f, emaMode: 'cross' } : f, bars, oi, nowMs, minute, spotNow, atr, prevDay, underlying })
-  // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
-  const near = rows.filter((r) => Math.abs(r.strike - B.atmK) <= f.nearStrikes * oi.step)
-  const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
-  const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
-  const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
-  if (leadNow != null && (f.trigger === 'cross' || leadPrev != null)) {
+  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in).
+  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
+  const buckets = new Map()
+  for (const b of bars) {
+    if (b.t < sessionStart) continue
+    const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
+    buckets.set(k, [...(buckets.get(k) ?? []), b])
+  }
+  const candles = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
+  const closes = candles.map((xs) => xs.at(-1).close)
+  // Entries are taken only at the close of a candle: this minute is the one that just finished it.
+  const candleJustClosed = candles.length > 0 && candles.at(-1).at(-1).t + MIN === nowMs
+  if (candleJustClosed) {
+    const read = optionOiRead(oi, spotNow, nowMs, 15)
+    const cum = sideOiChanges(read, true)
+    const atmK = Math.round(spotNow / oi.step) * oi.step
+    const sums = (ms, n) => {
+      const rs = oiRows(oi, ms).filter((r) => Math.abs(r.strike - atmK) <= n * oi.step)
+      return { pe: rs.reduce((s, r) => s + (r.peOi ?? 0), 0), ce: rs.reduce((s, r) => s + (r.ceOi ?? 0), 0) }
+    }
+    const thenMs = nowMs - f.wallMin * MIN
+    const goes = (n, dir) => {
+      const now = sums(nowMs, n)
+      const then = sums(thenMs, n)
+      const peChg = then.pe > 0 ? (now.pe - then.pe) / then.pe : null
+      const ceChg = then.ce > 0 ? (now.ce - then.ce) / then.ce : null
+      // The writers of the side that holds the trade add (puts for a long), the writers against it leave (calls for a long).
+      return { now, peChg, ceChg, ok: peChg != null && ceChg != null && (dir > 0 ? peChg > 0 && ceChg < 0 : ceChg > 0 && peChg < 0) }
+    }
     for (const dir of [1, -1]) {
-      // The entry's trigger: the since-open CE - PE flipping sign - or, by default, a fresh crossover (asked by the blocks below)
-      // with the since-open CE - PE leaning with the trade by at least minLeadPct (less is a sideways market: no OI behind it).
-      const triggered = f.trigger === 'cross'
-        ? dir * leadNow < -(f.minLeadPct / 100)
-        : dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
-      if (!triggered) continue
-      const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
-      const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
-      const confirmed = B.confirm(dir)
-      // The S / R OI walls near the ATM, from the last `wallMin` minutes: the OI of the side that holds the trade (puts for a
-      // long, calls for a short) is not leaving, the two sides near the ATM move with the trade, the wall strike itself is not
-      // leaving, and the net difference between the sides is big enough.
-      const net = peNear + ceNear > 0 ? (peNear - ceNear) / (peNear + ceNear) : 0
-      const netOk = !(f.netMinPct > 0) || dir * net >= f.netMinPct / 100
-      let wallsGo = true
-      if (f.wallTrend === 'with') {
-        const then = oiRows(oi, nowMs - f.wallMin * MIN).filter((r) => Math.abs(r.strike - B.atmK) <= f.nearStrikes * oi.step)
-        const peThen = then.reduce((s, r) => s + (r.peOi ?? 0), 0)
-        const ceThen = then.reduce((s, r) => s + (r.ceOi ?? 0), 0)
-        const peChg = peThen > 0 ? (peNear - peThen) / peThen : null
-        const ceChg = ceThen > 0 ? (ceNear - ceThen) / ceThen : null
-        const w = wallsAt(oi, rows, spotNow)
-        const wc = wallOiChanges(oi, { resistanceAhead: w.resistance, supportAhead: w.support }, nowMs, f.wallMin)
-        const holder = dir > 0 ? peChg : ceChg
-        const wallChg = dir > 0 ? wc.supChg : wc.resChg
-        const score = sideScore(dir, ceChg, peChg, 0.0005)
-        wallsGo = holder != null && holder >= 0 && score != null && score >= 1 && wallChg != null && wallChg >= 0
+      // (2) the spot's EMA crossing the trade's way on the candle that just closed (or - emaMode state - already that way)
+      const e = emaAgrees(closes, f.emaFast, f.emaSlow, f.emaMode === 'state' ? 'state' : 'cross', 1, dir)
+      if (!e.ok) continue
+      // (1) the since-open CE - PE lines crossed to this side on the 1-minute clock within the last armMin minutes, and still are
+      const leadNow = leadAt(nowMs)
+      if (leadNow == null || !(dir * leadNow < 0)) continue
+      let crossedAt = null
+      let after = leadNow
+      for (let k = 1; k <= f.armMin; k++) {
+        const before = leadAt(nowMs - k * MIN)
+        if (before == null) break
+        if (dir * before >= 0) { crossedAt = nowMs - (k - 1) * MIN; break }
+        after = before
       }
-      if (confirmed.ok && deltaWith != null && deltaWith >= 1 && wallsWith && netOk && wallsGo && ceNear > 0 && peNear > 0) {
-        // Its exits come from the blocks: the index stop / target and its own trailing stop (a tuned trailing stop - the
-        // tradeTrail filter - overrides it).
-        push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
-          OI: `since the open CE - PE ${f.trigger === 'cross' ? `${pct(leadNow)} of the chain (${dir > 0 ? 'puts' : 'calls'} added lead)` : `flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'})`}; last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
-          Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier by ${(Math.abs(net) * 100).toFixed(0)}%${f.wallTrend === 'with' ? `, going the trade's way over ${f.wallMin} min and not leaving` : ''}`,
-          ...confirmed.checks,
-          Trail: B.exits.trailText,
-        }, { trailOverride: B.exits.trail ? { unit: 'pts', startPts: B.exits.trail.start, gapPts: B.exits.trail.gap } : null })
-      }
+      if (crossedAt == null) continue
+      // (3) the cumulative CE / PE change since the open with the trade (puts rising and / or calls falling for a long)
+      const cumWith = sideScore(dir, cum.ceC, cum.peC)
+      if (cumWith == null || cumWith < 1) continue
+      // (4) the S / R OI near the ATM +/- nearStrikes going the trade's way, with a big net difference between the sides
+      const wide = goes(f.nearStrikes, dir)
+      const net = wide.now.pe + wide.now.ce > 0 ? (wide.now.pe - wide.now.ce) / (wide.now.pe + wide.now.ce) : 0
+      if (!wide.ok || !(dir * net > 0) || dir * net < f.netMinPct / 100) continue
+      // (5) the strikes right round the ATM too
+      const tight = f.atmStrikes > 0 ? goes(f.atmStrikes, dir) : null
+      if (tight && !tight.ok) continue
+      push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
+        Alert: `since the open the CE - PE lines crossed at ${new Date(crossedAt - MIN + 330 * MIN).toISOString().slice(11, 16)} (${pct(after)} -> ${pct(leadNow)} of the chain: ${dir > 0 ? 'puts' : 'calls'} added lead)`,
+        Trend: `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${f.emaMode === 'state' ? '' : ' - crossed on the candle that just closed'}`,
+        Cumulative: `since the open CE ${pct(cum.ceC)} / PE ${pct(cum.peC)}`,
+        Walls: `ATM +/- ${f.nearStrikes}: over ${f.wallMin} min PE ${pct(wide.peChg)} / CE ${pct(wide.ceChg)}; PE ${(wide.now.pe / 1e5).toFixed(1)}L vs CE ${(wide.now.ce / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier by ${(Math.abs(net) * 100).toFixed(0)}%`,
+        ...(tight ? { 'Round the ATM': `ATM +/- ${f.atmStrikes}: PE ${pct(tight.peChg)} / CE ${pct(tight.ceChg)} over ${f.wallMin} min` } : {}),
+      })
     }
   }
 

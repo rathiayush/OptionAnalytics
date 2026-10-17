@@ -3,35 +3,80 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
-/// Spot #101 "CE / PE flip" for the Expired Backtest - the same rule as the scanner's <c>spotFlip</c> (spotEngine.js),
-/// walked on the 1-minute clock:
-///  - the chain's since-open CE - PE OI change (as a share of the chain's OI) changes sign within <c>flipTf</c> minutes
-///    (CE - PE going negative = puts added now lead = Bullish; going positive = Bearish);
-///  - the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles (a candle counts once all its minutes are in) agree;
-///  - the CE / PE OI change over the last <c>deltaMin</c> minutes is with the trade;
-///  - the PE vs CE OI within ATM +/- <c>nearStrikes</c> strikes sits with it (support heavier for Bullish, resistance for Bearish).
-/// The chain is the expired-option strike band the run fetched (ATM +/- 10 strikes), each ABSOLUTE strike read from its
-/// first bar of the day, so the lead is an approximation of the scanner's whole-chain read, not the same number. OI is read
-/// from the minute before the clock (finished minutes only). A 20-minute cooldown per side, like the scanner.
-/// The option leaves by the simulator's premium stop / target / square-off, and (exitOnFlipBack) when the lead flips back.
-/// The index (spot) stop-loss, target and trailing stop (points per index, x ATR or in R) leave it too - the earliest wins.
+/// Spot #101 for the Expired Backtest - the same rule as the scanner's <c>spotFlip</c> (spotEngine.js), on the 1-minute clock:
+///  1. the ALERT: the chain's since-open CE - PE OI lines cross (CE - PE going negative = puts added lead = Bullish; positive = Bearish);
+///  2. within <c>armMin</c> minutes the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles cross the trade's way - the
+///     entry is taken when THAT candle closes (emaMode: crossed on the candle that just closed, or already in direction too);
+///  3. the cumulative CE / PE change since the open is with the trade;
+///  4. the S / R OI near the ATM +/- <c>nearStrikes</c> goes the trade's way over the last <c>wallMin</c> minutes (puts added and calls
+///     leaving for a Bullish one) with a net difference of at least <c>netMinPct</c> between the sides;
+///  5. the strikes right round the ATM (+/- <c>atmStrikes</c>) do the same.
+/// The chain is the expired-option strike band the run fetched (ATM +/- 10 strikes), each ABSOLUTE strike read from its first bar of the
+/// day, so the lines are an approximation of the scanner's whole-chain read. OI is read from the minute before the clock (finished
+/// minutes only). A 20-minute cooldown per side. The option leaves by the simulator's premium rules and the index stop-loss / target
+/// (spot, in ATR) - the earliest wins. No trailing stop.
 /// </summary>
 public sealed class SpotFlipStrategy : IBacktestStrategy
 {
     public string Key => "spot-flip";
-    public string Name => "Spot #101: CE / PE since-open flip + EMA + CE/PE change + ATM walls";
-    public string Description => "Enters when the chain's since-open CE - PE OI change flips sign, the spot's fast/slow EMA agree, the last few minutes' CE/PE OI change and the OI walls round the ATM are with the trade; leaves on the stop / target or when the flip comes back.";
+    public string Name => "Spot #101: CE / PE since-open crossover -> spot EMA crossover, with the CE/PE change and S/R walls";
+    public string Description => "Alert: the since-open CE - PE lines cross. Then the spot's 3-minute EMA crossover (entry when that candle closes), with the cumulative CE/PE change, the S/R OI near the ATM (writers adding on one side, leaving on the other, a big net difference) and the strikes round the ATM all in the trade's direction; leaves on the index stop / target.";
 
     private const int CooldownMinutes = 20;
-    private const decimal ModeOff = 0, ModeState = 1, ModeCross = 2;
-    private const decimal TrailOff = 0, TrailPoints = 1, TrailAtr = 2, TrailR = 3;
+    private const decimal EmaCross = 0, EmaState = 1;
+    private const decimal ModeOff = 0, ModeState = 1, ModeCross = 2; // EmaAgrees modes
 
-    private static BacktestParameterOption[] ModeOptions(string state, string cross) => new[]
+    public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
     {
-        new BacktestParameterOption(ModeOff, "Not asked"),
-        new BacktestParameterOption(ModeState, state),
-        new BacktestParameterOption(ModeCross, cross),
+        OptionTradeSimulator.SideParameter(),
+        OptionTradeSimulator.StrikeOffsetParameter(),
+        OptionTradeSimulator.StopLossParameter(),
+        OptionTradeSimulator.TakeProfitParameter(),
+        OptionTradeSimulator.SquareOffTimeParameter(),
+        // As the scanner: no entry before 09:30 (570), and its time stop of 330 minutes (in bars of the page's timeframe, see DefaultsForTimeframe).
+        OptionTradeSimulator.SignalStartTimeParameter() with { Default = 570 },
+        OptionTradeSimulator.ExcludeLastDaysParameter(),
+        OptionTradeSimulator.MaxHoldingTimeParameter() with { Default = 330 },
+        new BacktestParameterSpec("armMin", "After the CE - PE crossover (the alert) wait for the spot EMA crossover for at most (minutes)", Default: 30, Min: 1, Max: 120, Step: 1),
+        new BacktestParameterSpec("emaTf", "Spot EMA candle (minutes) - the entry is taken when the crossover candle closes", Default: 3, Min: 1, Max: 15, Step: 1),
+        new BacktestParameterSpec("emaFast", "EMA fast (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
+        new BacktestParameterSpec("emaSlow", "EMA slow (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
+        new BacktestParameterSpec("emaMode", "Spot EMA", Default: EmaCross, Min: EmaCross, Max: EmaState, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(EmaCross, "Crossed on the candle that just closed"),
+            new BacktestParameterOption(EmaState, "Already in direction counts too"),
+        }),
+        new BacktestParameterSpec("wallMin", "S / R OI near the ATM: over the last (minutes) the writers go the trade's way (puts added and calls leaving for a long)", Default: 10, Min: 3, Max: 30, Step: 1),
+        new BacktestParameterSpec("nearStrikes", "S / R OI counted over ATM +/- (strikes)", Default: 2, Min: 1, Max: 5, Step: 1),
+        new BacktestParameterSpec("atmStrikes", "The strikes right round the ATM (+/-) also go the trade's way", Default: 1, Min: 0, Max: 3, Step: 1),
+        new BacktestParameterSpec("netMinPct", "S / R OI net difference (PE - CE as a % of both) at least, in the trade's direction - a big gap, not a small one", Default: 25, Min: 0, Max: 90, Step: 1),
+        new BacktestParameterSpec("lastEntryMinutes", "No entries after (IST time)", Default: 885, Min: 0, Max: 1439, Step: 1),
+        new BacktestParameterSpec("indexExit", "Leave on the index stop / target (spot) too (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
+        new BacktestParameterSpec("stopAtr", "Index stop-loss (x ATR)", Default: 1.5m, Min: 0.5m, Max: 5, Step: 0.25m),
+        new BacktestParameterSpec("targetAtr", "Index target (x ATR)", Default: 3, Min: 0.5m, Max: 10, Step: 0.25m),
     };
+
+    /// <summary>The scanner's 330-minute time stop is bars of the page's timeframe here (330 on 1-minute bars, 110 on 3-minute ...), and the
+    /// premium stop / target scale with the timeframe like every strategy's.</summary>
+    public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
+    {
+        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
+        return new Dictionary<string, decimal>
+        {
+            ["slPoints"] = 10m * scale,
+            ["tpPoints"] = 20m * scale,
+            ["maxHoldingBars"] = Math.Round(330m / Math.Max(1, timeframeMinutes)),
+        };
+    }
+
+    public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
+    {
+        var (entries, _, exits) = Evaluate(context, parameters);
+        return OptionTradeSimulator.Run(context, entries, parameters, signalExits: exits.Count > 0 ? exits : null);
+    }
+
+    public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
+        Evaluate(context, parameters).Signals;
 
     /// <summary>Whether a fast / slow EMA pair of <paramref name="closes"/> is with a trade (sign +1: should rise with it, -1: fall):
     /// state = the fast is on the trade's side of the slow; cross = it got there within the last crossBars candles; off = not asked.</summary>
@@ -59,15 +104,6 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         return n == 0 ? 0 : sum / n;
     }
 
-    private static (decimal? Start, decimal? Gap) TrailPointsOf(string underlying, decimal mode, IReadOnlyDictionary<string, decimal> p, decimal atr, decimal stopPts)
-    {
-        if (mode == TrailOff) return (null, null);
-        if (mode == TrailAtr) return (p.GetValueOrDefault("trailStartAtr", 1m) * atr, p.GetValueOrDefault("trailGapAtr", 1m) * atr);
-        if (mode == TrailR) return (p.GetValueOrDefault("trailStartR", 1m) * stopPts, p.GetValueOrDefault("trailGapR", 1m) * stopPts);
-        var own = underlying.ToUpperInvariant() switch { "BANKNIFTY" => 20m, "SENSEX" => 30m, _ => 10m };
-        var start = p.GetValueOrDefault("trailStartPts", 0m); var gap = p.GetValueOrDefault("trailGapPts", 0m);
-        return (start > 0 ? start : own, gap > 0 ? gap : own);
-    }
 
     private static decimal?[] EmaAll(IReadOnlyList<decimal> v, int period)
     {
@@ -78,94 +114,6 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         for (var i = period; i < v.Count; i++) { e = v[i] * k + e * (1 - k); o[i] = e; }
         return o;
     }
-
-    public IReadOnlyList<BacktestParameterSpec> Parameters { get; } = new[]
-    {
-        OptionTradeSimulator.SideParameter(),
-        OptionTradeSimulator.StrikeOffsetParameter(),
-        OptionTradeSimulator.StopLossParameter(),
-        OptionTradeSimulator.TakeProfitParameter(),
-        OptionTradeSimulator.SquareOffTimeParameter(),
-        // As the scanner: no entry before 09:30 (570), and its time stop of 330 minutes (in bars of the page's timeframe, see DefaultsForTimeframe).
-        OptionTradeSimulator.SignalStartTimeParameter() with { Default = 570 },
-        OptionTradeSimulator.ExcludeLastDaysParameter(),
-        OptionTradeSimulator.MaxHoldingTimeParameter() with { Default = 330 },
-        new BacktestParameterSpec("trigger", "Entry trigger", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(0, "The since-open CE - PE flip (entry on the 1-minute clock)"),
-            new BacktestParameterOption(1, "Fresh spot EMA crossover, with the OI behind it"),
-        }),
-        new BacktestParameterSpec("wallMin", "S / R OI walls: over the last (minutes) the support / resistance OI near the ATM goes the trade's way and is not leaving", Default: 10, Min: 3, Max: 30, Step: 1),
-        new BacktestParameterSpec("wallTrend", "S / R OI walls going the trade's way, not leaving", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(1, "With the trade, not leaving"),
-            new BacktestParameterOption(0, "Not asked"),
-        }),
-        new BacktestParameterSpec("netMinPct", "S / R OI net difference near the ATM (PE - CE as a % of both) at least, in the trade's direction (0 = off)", Default: 10, Min: 0, Max: 80, Step: 1),
-        new BacktestParameterSpec("minLeadPct", "Crossover trigger: since-open CE - PE must lean with the trade by at least (% of the chain) - less is a sideways OI market", Default: 0.3m, Min: 0, Max: 20, Step: 0.1m),
-        new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 60, Step: 1),
-        new BacktestParameterSpec("emaTf", "EMA candle size (minutes)", Default: 3, Min: 1, Max: 15, Step: 1),
-        new BacktestParameterSpec("emaMode", "Spot EMA (crossed, or already in that direction - it counts as crossed; the crossover trigger always asks a fresh one)", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
-        new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 2, Min: 1, Max: 20, Step: 1),
-        new BacktestParameterSpec("vwapMode", "VWAP", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(0, "Not asked"),
-            new BacktestParameterOption(1, "Spot above VWAP for a long, below for a short"),
-        }),
-        new BacktestParameterSpec("optEmaMode", "ATM option EMAs (CE / PE premium) - they may be aligned already", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction", "Fresh crossover")),
-        new BacktestParameterSpec("optEmaLegs", "ATM option EMAs: legs", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(0, "The leg traded (CE for a long, PE for a short)"),
-            new BacktestParameterOption(1, "Both: traded leg rising, the other falling"),
-        }),
-        new BacktestParameterSpec("optEmaFast", "ATM option EMA fast (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
-        new BacktestParameterSpec("optEmaSlow", "ATM option EMA slow (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
-        new BacktestParameterSpec("emaFast", "Fast EMA (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
-        new BacktestParameterSpec("emaSlow", "Slow EMA (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
-        new BacktestParameterSpec("deltaMin", "CE/PE OI change over the last (minutes)", Default: 10, Min: 3, Max: 15, Step: 1),
-        new BacktestParameterSpec("nearStrikes", "OI walls: ATM +/- strikes", Default: 2, Min: 1, Max: 5, Step: 1),
-        new BacktestParameterSpec("lastEntryMinutes", "No entries after (IST time)", Default: 885, Min: 0, Max: 1439, Step: 1),
-        new BacktestParameterSpec("indexExit", "Leave on the index stop / target / trailing stop (spot) too (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
-        new BacktestParameterSpec("stopAtr", "Index stop-loss (x ATR)", Default: 1.5m, Min: 0.5m, Max: 5, Step: 0.25m),
-        new BacktestParameterSpec("targetAtr", "Index target (x ATR)", Default: 3, Min: 0.5m, Max: 10, Step: 0.25m),
-        new BacktestParameterSpec("trailMode", "Trailing stop on the index", Default: TrailR, Min: TrailOff, Max: TrailR, Step: 1, Options: new[]
-        {
-            new BacktestParameterOption(TrailOff, "No trailing stop"),
-            new BacktestParameterOption(TrailPoints, "Fixed points (this index: NIFTY 10 / BANKNIFTY 20 / SENSEX 30, or the points below)"),
-            new BacktestParameterOption(TrailAtr, "Dynamic: x the ATR"),
-            new BacktestParameterOption(TrailR, "In R: x the stop distance (0.5R, 1R ...)"),
-        }),
-        new BacktestParameterSpec("trailStartPts", "Points: trailing starts after (0 = this index's own)", Default: 0, Min: 0, Max: 1500, Step: 1),
-        new BacktestParameterSpec("trailGapPts", "Points: stays this far behind (0 = this index's own)", Default: 0, Min: 0, Max: 1500, Step: 1),
-        new BacktestParameterSpec("trailStartAtr", "ATR: trailing starts after (x ATR)", Default: 1, Min: 0.2m, Max: 10, Step: 0.1m),
-        new BacktestParameterSpec("trailGapAtr", "ATR: stays this far behind (x ATR)", Default: 1, Min: 0.2m, Max: 10, Step: 0.1m),
-        new BacktestParameterSpec("trailStartR", "R: trailing starts after (x the stop distance)", Default: 1, Min: 0.25m, Max: 5, Step: 0.25m),
-        new BacktestParameterSpec("trailGapR", "R: stays this far behind (x the stop distance)", Default: 1, Min: 0.25m, Max: 5, Step: 0.25m),
-        new BacktestParameterSpec("emaWarm", "EMAs: carry the previous day's candles over (1 = yes)", Default: 0, Min: 0, Max: 1, Step: 1),
-        new BacktestParameterSpec("exitOnFlipBack", "Leave when the CE-PE flip comes back (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
-    };
-
-    /// <summary>The scanner's 330-minute time stop is bars of the page's timeframe here (330 on 1-minute bars, 110 on 3-minute ...), and the
-    /// premium stop / target scale with the timeframe like every strategy's.</summary>
-    public IReadOnlyDictionary<string, decimal> DefaultsForTimeframe(int timeframeMinutes)
-    {
-        var scale = OptionTradeSimulator.TimeframeScale(timeframeMinutes);
-        return new Dictionary<string, decimal>
-        {
-            ["slPoints"] = 10m * scale,
-            ["tpPoints"] = 20m * scale,
-            ["maxHoldingBars"] = Math.Round(330m / Math.Max(1, timeframeMinutes)),
-        };
-    }
-
-    public IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters)
-    {
-        var (entries, _, exits) = Evaluate(context, parameters);
-        return OptionTradeSimulator.Run(context, entries, parameters, signalExits: exits.Count > 0 ? exits : null);
-    }
-
-    public IReadOnlyList<BacktestSignal> EntrySignals(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters) =>
-        Evaluate(context, parameters).Signals;
 
     private sealed class StrikeSeries
     {
@@ -205,38 +153,27 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         return e;
     }
 
+
     internal (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals, Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> Exits) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> p)
     {
         var entries = new List<(DateTimeOffset Time, string Direction)>();
         var signals = new List<BacktestSignal>();
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
-        var flipTf = Math.Max(1, (int)p["flipTf"]);
+        var armMin = Math.Max(1, (int)p["armMin"]);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
-        var crossTrigger = p.GetValueOrDefault("trigger", 0m) >= 0.5m;
-        var minLead = p.GetValueOrDefault("minLeadPct", 0.3m) / 100m;
-        var emaMode = crossTrigger ? ModeCross : p.GetValueOrDefault("emaMode", ModeState);
-        var crossBars = Math.Max(1, (int)p.GetValueOrDefault("crossBars", 2));
-        var vwapOn = p.GetValueOrDefault("vwapMode", 0) >= 0.5m;
-        var optMode = p.GetValueOrDefault("optEmaMode", ModeState);
-        var optBoth = p.GetValueOrDefault("optEmaLegs", 1) >= 0.5m;
-        var optFast = Math.Max(2, (int)p.GetValueOrDefault("optEmaFast", 7));
-        var optSlow = Math.Max(3, (int)p.GetValueOrDefault("optEmaSlow", 21));
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
-        var deltaMin = Math.Max(1, (int)p["deltaMin"]);
+        var emaMode = p.GetValueOrDefault("emaMode", EmaCross) >= 0.5m ? 1m : 2m; // EmaAgrees: 1 = state, 2 = cross
+        var wallMin = Math.Max(1, (int)p["wallMin"]);
         var nearStrikes = Math.Max(1, (int)p["nearStrikes"]);
-        var signalStart = (int)p.GetValueOrDefault("signalStartMinutes", 555);
+        var atmStrikes = Math.Max(0, (int)p.GetValueOrDefault("atmStrikes", 1));
+        var netMin = p.GetValueOrDefault("netMinPct", 25m) / 100m;
+        var signalStart = (int)p.GetValueOrDefault("signalStartMinutes", 570);
         var lastEntry = (int)p.GetValueOrDefault("lastEntryMinutes", 885);
         var indexExit = p.GetValueOrDefault("indexExit", 1m) >= 0.5m;
         var stopAtr = p.GetValueOrDefault("stopAtr", 1.5m);
         var targetAtr = p.GetValueOrDefault("targetAtr", 3m);
-        var trailMode = p.GetValueOrDefault("trailMode", TrailR);
-        var emaWarm = p.GetValueOrDefault("emaWarm", 0m) >= 0.5m;
-        var exitOnFlipBack = p.GetValueOrDefault("exitOnFlipBack", 1m) >= 0.5m;
-        var wallMin = Math.Max(1, (int)p.GetValueOrDefault("wallMin", 10));
-        var wallsOn = p.GetValueOrDefault("wallTrend", 1m) >= 0.5m;
-        var netMin = p.GetValueOrDefault("netMinPct", 10m) / 100m;
         var step = Math.Max(1, context.Step);
 
         var ce = SeriesOf(context.CeOiIvBand, step);
@@ -252,7 +189,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             return v;
         }
 
-        // The chain's since-open CE - PE share at the finished minute before `clock`.
+        // The chain's since-open CE - PE share at the finished minute before `clock`: > 0 calls added more (bearish), < 0 puts (bullish).
         decimal? LeadAt(DateTimeOffset clock)
         {
             var t = clock - one; var day = IstClock.IstDate(t);
@@ -261,156 +198,107 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
             foreach (var (k, s) in pe) { if (s.At(t) is { } n && OpenAt(day, false, k, s) is { } o) { chgPe += n - o; now += n; } }
             return now > 0 ? (chgCe - chgPe) / now : null;
         }
-        // CE / PE OI change over `minutes`, as a share of each side's OI now.
-        (decimal? Ce, decimal? Pe) DeltaAt(DateTimeOffset clock, int minutes)
+        // Each side's cumulative change since the open, as a share of its OI now.
+        (decimal? Ce, decimal? Pe) CumulativeAt(DateTimeOffset clock)
         {
-            var t = clock - one; var before = t - TimeSpan.FromMinutes(minutes);
-            decimal Side(Dictionary<decimal, StrikeSeries> m)
+            var t = clock - one; var day = IstClock.IstDate(t);
+            decimal? Side(Dictionary<decimal, StrikeSeries> m, bool call)
             {
                 decimal chg = 0, now = 0;
-                foreach (var (_, s) in m) if (s.At(t) is { } n && s.At(before) is { } b) { chg += n - b; now += n; }
-                return now > 0 ? chg / now : decimal.MinValue;
+                foreach (var (k, s) in m) if (s.At(t) is { } n && OpenAt(day, call, k, s) is { } o) { chg += n - o; now += n; }
+                return now > 0 ? chg / now : null;
             }
-            var c = Side(ce); var q = Side(pe);
-            return (c == decimal.MinValue ? null : c, q == decimal.MinValue ? null : q);
+            return (Side(ce, true), Side(pe, false));
         }
-        int St(decimal x) => x >= 0.0005m ? 1 : x <= -0.0005m ? -1 : 0;
+        int St(decimal x, decimal bar) => x >= bar ? 1 : x <= -bar ? -1 : 0;
+        // The CE / PE OI summed over ATM +/- n strikes at the finished minute before `at`.
+        (decimal Pe, decimal Ce) Sums(DateTimeOffset at, decimal atm, int n)
+        {
+            decimal c = 0, q = 0;
+            foreach (var (k, s) in ce) if (Math.Abs(k - atm) <= n * step && s.At(at - one) is { } v) c += v;
+            foreach (var (k, s) in pe) if (Math.Abs(k - atm) <= n * step && s.At(at - one) is { } v) q += v;
+            return (q, c);
+        }
+        // The writers go the trade's way over wallMin: the side that holds it adds (puts for a long), the other leaves (calls for a long).
+        (bool Ok, decimal? PeChg, decimal? CeChg, decimal Pe, decimal Ce) Goes(DateTimeOffset clock, decimal atm, int n, int dir)
+        {
+            var now = Sums(clock, atm, n); var then = Sums(clock - TimeSpan.FromMinutes(wallMin), atm, n);
+            decimal? peChg = then.Pe > 0 ? (now.Pe - then.Pe) / then.Pe : null;
+            decimal? ceChg = then.Ce > 0 ? (now.Ce - then.Ce) / then.Ce : null;
+            var ok = peChg is { } a && ceChg is { } b && (dir > 0 ? a > 0 && b < 0 : b > 0 && a < 0);
+            return (ok, peChg, ceChg, now.Pe, now.Ce);
+        }
 
         var lastFire = new Dictionary<int, DateTimeOffset>();
         var dayCloses = new List<decimal>();
-        var candleEnds = new List<DateTimeOffset>();
         var inBucket = 0;
-        decimal vwapSum = 0; var vwapCount = 0;
-        var optBars = new Dictionary<(decimal, bool), IReadOnlyList<Candle>>();
-        IReadOnlyList<Candle> OptBars(decimal strike, bool call)
-        {
-            if (!optBars.TryGetValue((strike, call), out var b)) optBars[(strike, call)] = b = context.GetOptionBarsOneMinute(strike, call);
-            return b;
-        }
-        // The ATM option's closes at the end of each finished spot candle (the strike ATM now - a snapshot, like the scanner's).
-        List<decimal> OptCloses(decimal strike, bool call, DateTimeOffset clock)
-        {
-            var bs = OptBars(strike, call); var o = new List<decimal>();
-            foreach (var end in candleEnds)
-            {
-                if (end > clock) break;
-                Candle? last = null;
-                foreach (var c in bs) { if (c.Time + one > end) break; last = c; }
-                if (last is { } l && l.Close > 0) o.Add(l.Close);
-            }
-            return o;
-        }
         DateOnly curDay = default;
         foreach (var bar in bars)
         {
             var day = IstClock.IstDate(bar.Time);
-            if (day != curDay) { curDay = day; if (!emaWarm) dayCloses.Clear(); candleEnds.Clear(); inBucket = 0; vwapSum = 0; vwapCount = 0; }
-            vwapSum += (bar.High + bar.Low + bar.Close) / 3; vwapCount++;
-            // A candle counts once all its minutes are in.
-            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); candleEnds.Add(bar.Time + one); inBucket = 0; }
+            if (day != curDay) { curDay = day; dayCloses.Clear(); inBucket = 0; }
+            // A candle counts once all its minutes are in; the entry is taken at the close of one.
+            var candleClosed = false;
+            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); inBucket = 0; candleClosed = true; }
+            if (!candleClosed) continue;
             var clock = bar.Time + one;
             var minute = IstClock.MinutesOfDay(clock);
             if (minute < signalStart || minute > lastEntry) continue;
-            if (lead(clock) is not { } now) continue;
-            var prevLead = crossTrigger ? null : lead(clock - TimeSpan.FromMinutes(flipTf));
-            if (!crossTrigger && prevLead is null) continue;
-            var prev = prevLead ?? 0m;
-            var fast = Ema(dayCloses, emaFast); var slow = Ema(dayCloses, emaSlow);
-            if (emaMode != ModeOff && (fast is null || slow is null)) continue;
-            var vwap = vwapSum / vwapCount;
+            if (LeadAt(clock) is not { } now) continue;
             var atm = Math.Round(bar.Close / step) * step;
-            decimal ceNear = 0, peNear = 0;
-            foreach (var (k, s) in ce) if (Math.Abs(k - atm) <= nearStrikes * step && s.At(clock - one) is { } n) ceNear += n;
-            foreach (var (k, s) in pe) if (Math.Abs(k - atm) <= nearStrikes * step && s.At(clock - one) is { } n) peNear += n;
-            var (ceD, peD) = DeltaAt(clock, deltaMin);
 
             foreach (var dir in new[] { 1, -1 })
             {
-                var flipped = crossTrigger ? dir * now < -minLead : dir > 0 ? prev >= 0 && now < 0 : prev <= 0 && now > 0;
-                if (!flipped) continue;
                 var name = dir > 0 ? "Bullish" : "Bearish";
-                var emaWith = EmaAgrees(dayCloses, emaFast, emaSlow, emaMode, crossBars, dir);
-                var vwapWith = !vwapOn || dir * (bar.Close - vwap) > 0;
-                var legWith = optMode == ModeOff || (
-                    EmaAgrees(OptCloses(atm, dir > 0, clock), optFast, optSlow, optMode, crossBars, 1)
-                    && (!optBoth || EmaAgrees(OptCloses(atm, dir < 0, clock), optFast, optSlow, optMode, crossBars, -1)));
-                var deltaWith = ceD is { } a && peD is { } b ? dir * (St(b) - St(a)) : (int?)null;
-                var wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear;
-                // S / R OI walls near the ATM over the last wallMin minutes: the holding side (puts for a long) is not leaving, the two
-                // sides move with the trade, the wall strike itself is not leaving, and the net difference is big enough.
-                var net = peNear + ceNear > 0 ? (peNear - ceNear) / (peNear + ceNear) : 0m;
-                var netOk = netMin <= 0 || dir * net >= netMin;
-                var wallsGo = true;
-                if (wallsOn)
+                // (2) the spot's EMA crossing the trade's way on the candle that just closed (or already that way)
+                if (!EmaAgrees(dayCloses, emaFast, emaSlow, emaMode, 1, dir)) continue;
+                // (1) the since-open CE - PE lines crossed to this side within the last armMin minutes, and are still there
+                if (!(dir * now < 0)) continue;
+                DateTimeOffset? crossedAt = null;
+                for (var k = 1; k <= armMin; k++)
                 {
-                    decimal peThen = 0, ceThen = 0;
-                    foreach (var (k, s2) in ce) if (Math.Abs(k - atm) <= nearStrikes * step && s2.At(clock - one - TimeSpan.FromMinutes(wallMin)) is { } n) ceThen += n;
-                    foreach (var (k, s2) in pe) if (Math.Abs(k - atm) <= nearStrikes * step && s2.At(clock - one - TimeSpan.FromMinutes(wallMin)) is { } n) peThen += n;
-                    decimal? peChg = peThen > 0 ? (peNear - peThen) / peThen : null;
-                    decimal? ceChg = ceThen > 0 ? (ceNear - ceThen) / ceThen : null;
-                    // The strongest wall strike (support: most PE OI at or under the spot, resistance: most CE OI at or over it, within 8 strikes).
-                    decimal? WallChange(Dictionary<decimal, StrikeSeries> m, bool below)
-                    {
-                        decimal? best = null; long bestOi = 0;
-                        foreach (var (k, s2) in m)
-                        {
-                            if (Math.Abs(k - bar.Close) > 8 * step) continue;
-                            if (below ? k > bar.Close + step * 0.5m : k < bar.Close - step * 0.5m) continue;
-                            if (s2.At(clock - one) is { } n && n > bestOi) { bestOi = n; best = k; }
-                        }
-                        if (best is not { } wk) return null;
-                        var nowOi = m[wk].At(clock - one); var then = m[wk].At(clock - one - TimeSpan.FromMinutes(wallMin));
-                        return nowOi is { } a && then is { } b && b > 0 ? (decimal)(a - b) / b : null;
-                    }
-                    var wallChg = dir > 0 ? WallChange(pe, below: true) : WallChange(ce, below: false);
-                    var holder = dir > 0 ? peChg : ceChg;
-                    var score = ceChg is { } cc && peChg is { } pp ? dir * (St(pp) - St(cc)) : (int?)null;
-                    wallsGo = holder is >= 0 && score is >= 1 && wallChg is >= 0;
+                    if (LeadAt(clock - TimeSpan.FromMinutes(k)) is not { } before) break;
+                    if (dir * before >= 0) { crossedAt = clock - TimeSpan.FromMinutes(k - 1); break; }
                 }
-                string detail = $"CE-PE since open {prev:P2} -> {now:P2}; EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; VWAP {vwap:0.0}; last {deltaMin} min CE {ceD:P2} / PE {peD:P2}; ATM+-{nearStrikes}: PE {peNear / 1e5m:0.0}L vs CE {ceNear / 1e5m:0.0}L";
-                if (!emaWith || !vwapWith || !legWith || deltaWith is null || deltaWith < 1 || !wallsWith || !netOk || !wallsGo || ceNear <= 0 || peNear <= 0)
+                if (crossedAt is null) continue;
+                var fast = Ema(dayCloses, emaFast)!.Value; var slow = Ema(dayCloses, emaSlow)!.Value;
+                var (ceC, peC) = CumulativeAt(clock);
+                var wide = Goes(clock, atm, nearStrikes, dir);
+                var net = wide.Pe + wide.Ce > 0 ? (wide.Pe - wide.Ce) / (wide.Pe + wide.Ce) : 0m;
+                var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; since open CE {ceC:P2} / PE {peC:P2}; ATM+-{nearStrikes} over {wallMin} min PE {wide.PeChg:P2} / CE {wide.CeChg:P2}, net {net:P0}";
+                // (3) the cumulative CE / PE change since the open with the trade
+                var cumWith = ceC is { } cc && peC is { } pp ? dir * (St(pp, 0.003m) - St(cc, 0.003m)) : (int?)null;
+                string? why = cumWith is null or < 1 ? "cumulative CE/PE change not with the trade"
+                    : !wide.Ok || !(dir * net > 0) || dir * net < netMin ? "S/R OI near the ATM not going the trade's way, or the net difference too small"
+                    : atmStrikes > 0 && !Goes(clock, atm, atmStrikes, dir).Ok ? "the strikes round the ATM not going the trade's way"
+                    : null;
+                if (why is not null)
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name,
-                        $"Flip, but {(!emaWith ? "EMA not with the trade" : !vwapWith ? "VWAP against" : !legWith ? "ATM option EMAs not with the trade" : deltaWith is null or < 1 ? "CE/PE change not with the trade" : "OI walls not with the trade")} - {detail}"));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Crossover candle closed, but {why} - {detail}"));
                     continue;
                 }
                 if (lastFire.TryGetValue(dir, out var last) && clock - last < TimeSpan.FromMinutes(CooldownMinutes))
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Flip, but in the {CooldownMinutes}-minute cooldown - {detail}"));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Crossover candle closed, but in the {CooldownMinutes}-minute cooldown - {detail}"));
                     continue;
                 }
                 lastFire[dir] = clock;
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", name, detail));
                 entries.Add((bar.Time, name));
-                // The trade's exit in the index (spot): its stop, target and trailing stop, and the flip coming back - the first.
-                (DateTimeOffset Time, string Reason)? exit = null;
+                if (!indexExit) continue;
+                // The trade's exit in the index (spot): its stop-loss and target, the first.
                 var atr = Math.Max(AvgRange(bars, bar.Time), bar.Close * 0.0004m);
-                var stopPts = stopAtr * atr;
-                var targetPts = targetAtr * atr;
-                var (trailStart, trailGap) = TrailPointsOf(context.Underlying, trailMode, p, atr, stopPts);
-                var entryPrice = bar.Close;
-                var level = entryPrice - dir * stopPts;
-                var best = entryPrice;
+                var stop = bar.Close - dir * stopAtr * atr;
+                var target = bar.Close + dir * targetAtr * atr;
                 foreach (var later in bars.Where(x => x.Time > bar.Time && IstClock.IstDate(x.Time) == day))
                 {
-                    if (indexExit)
-                    {
-                        var stopHit = dir > 0 ? later.Low <= level : later.High >= level;
-                        if (stopHit) { exit = (later.Time, level == entryPrice - dir * stopPts ? "Index stop-loss" : "Index trailing stop"); break; }
-                        if (dir > 0 ? later.High >= entryPrice + targetPts : later.Low <= entryPrice - targetPts) { exit = (later.Time, "Index target"); break; }
-                        // The trailing stop moves after each completed bar and only tightens.
-                        best = dir > 0 ? Math.Max(best, later.High) : Math.Min(best, later.Low);
-                        if (trailStart is { } ts && trailGap is { } tg && dir * (best - entryPrice) >= ts)
-                            level = dir > 0 ? Math.Max(level, best - tg) : Math.Min(level, best + tg);
-                    }
-                    if (exitOnFlipBack && lead(later.Time + one) is { } l && (dir > 0 ? l >= 0 : l <= 0)) { exit = (later.Time, "CE-PE flipped back"); break; }
+                    if (dir > 0 ? later.Low <= stop : later.High >= stop) { exits[bar.Time] = (later.Time, "Index stop-loss"); break; }
+                    if (dir > 0 ? later.High >= target : later.Low <= target) { exits[bar.Time] = (later.Time, "Index target"); break; }
                 }
-                if (exit is { } e) exits[bar.Time] = e;
             }
         }
 
-        return (entries, signals.OrderByDescending(s => s.TimeUtc).ToList(), exits);
-
-        decimal? lead(DateTimeOffset clock) => LeadAt(clock);
+        return (entries, signals.OrderByDescending(x => x.TimeUtc).ToList(), exits);
     }
+
 }
