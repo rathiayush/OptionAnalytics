@@ -9,7 +9,9 @@ the scanner plumbing (the runner, the OI reads and walls, the outcome simulation
 settings, the Strategies / Tuning / Lab / Trades pages - which list nothing until a strategy is added) and the Dhan cache.
 One strategy is back: spot #101 `spotFlip` (spotEngine.js) - the whole chain's since-open CE - PE flips sign on the 1-minute clock,
 the spot's 3-minute EMA 7 / 21 agrees, the CE / PE change over the last `deltaMin` (10, 3 - 15) minutes is with the trade and the
-support / resistance OI round the ATM +/- `nearStrikes` (2, 1 - 5) sits with it; index stop 1.5 ATR / target 3 ATR; `tests/spot-flip.test.mjs`.
+support / resistance OI round the ATM +/- `nearStrikes` (2, 1 - 5) sits with it; index stop 1.5 ATR / target 3 ATR, its own trailing stop (after `trailStartPts` 10 index points, `trailGapPts` 10 behind; a
+`trailOverride`); also configurable per index on the Strategies page: `emaTf` (3 min candles), `emaFast` / `emaSlow` (7 / 21), `flipTf` (1 min);
+`tests/spot-flip.test.mjs`.
 The history before it is in git (`main`, and `git stash list` holds the #115 work in progress). The rules below describe
 how a strategy WOULD be added back; read them as the contract for any new one.
 

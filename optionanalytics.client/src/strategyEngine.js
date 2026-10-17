@@ -88,6 +88,12 @@ export const STRATEGY_FILTERS = {
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+    { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 15, step: 1 },
+    { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
+    { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
+    { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
+    { key: 'trailStartPts', label: 'Trailing stop starts after (index points in profit; 0 = no trailing stop)', type: 'number', default: 10, min: 0, max: 300, step: 1 },
+    { key: 'trailGapPts', label: 'Trailing stop stays this far behind the best price (index points)', type: 'number', default: 10, min: 1, max: 300, step: 1 },
   ],
 }
 // How any strategy's trades are taken (every strategy has these, after its own): long / short only, the

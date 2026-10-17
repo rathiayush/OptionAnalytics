@@ -207,9 +207,10 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     })),
     support, resistance, spot: spotNow, ...ahead,
   })
-  const push = (id, dir, stopPts, targetPts, timeStopMin, checks) => {
+  const push = (id, dir, stopPts, targetPts, timeStopMin, checks, extra = null) => {
     if (!(stopPts > 0) || !(targetPts > 0)) return
     out.push({
+      ...extra,
       id, name: BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: spotNow,
       stop: spotNow - dir * stopPts, target: spotNow + dir * targetPts,
       timeStopMs: Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN),
@@ -227,18 +228,18 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
   }
   const leadNow = leadAt(nowMs)
-  const leadPrev = leadAt(nowMs - MIN)
-  // The spot in 3-minute candles from 09:15 (a candle counts once its three minutes are in): EMA 7 / 21 of their closes.
+  const leadPrev = leadAt(nowMs - f.flipTf * MIN)
+  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in): the EMAs of their closes.
   const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
   const buckets = new Map()
   for (const b of bars) {
     if (b.t < sessionStart) continue
-    const k = Math.floor((b.t - sessionStart) / (3 * MIN))
+    const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
     buckets.set(k, [...(buckets.get(k) ?? []), b])
   }
-  const closes3 = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === 3).map(([, xs]) => xs.at(-1).close)
-  const ema7 = emaSeries(closes3, 7).at(-1)
-  const ema21 = emaSeries(closes3, 21).at(-1)
+  const closesTf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs.at(-1).close)
+  const ema7 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaFast).at(-1) : null
+  const ema21 = f.emaSlow > f.emaFast ? emaSeries(closesTf, f.emaSlow).at(-1) : null
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
   const atmK = Math.round(spotNow / oi.step) * oi.step
   const near = rows.filter((r) => Math.abs(r.strike - atmK) <= f.nearStrikes * oi.step)
@@ -252,11 +253,14 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
       if (flipped && emaWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+        // Its own trailing stop, in index points: after `trailStartPts` in profit it stays `trailGapPts` behind the best price
+        // (0 start = no trailing stop). A tuned trailing stop (the tradeTrail filter) overrides it.
         push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
-          Trend: `3-min EMA 7 ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA 21 ${ema21.toFixed(1)}`,
-        })
+          Trend: `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}`,
+          Trail: f.trailStartPts > 0 ? `trailing stop after ${f.trailStartPts} pts, ${f.trailGapPts} pts behind` : 'no trailing stop',
+        }, { trailOverride: f.trailStartPts > 0 ? { unit: 'pts', startPts: f.trailStartPts, gapPts: f.trailGapPts } : null })
       }
     }
   }
