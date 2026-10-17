@@ -72,29 +72,3 @@ test('the record a day posts carries each signal\'s market', () => {
   const body = scannerLogBody({ underlying: 'NIFTY', date: '2026-10-05', source: 'server', dayResults: [{ id: 'pocReject', t: at(50), side: 'LONG', entry: 1, stop: 0, target: 2, market, outcome: { status: 'open' } }], rows: [] })
   assert.deepEqual(body.signals[0].market, market)
 })
-
-test('the order-flow trade filters: each one on the market at the signal; off (the default) changes nothing', async () => {
-  const { applyTradeFilter, strategyFilters, FLOW_FILTER_KEYS } = await import('../src/strategyEngine.js')
-  const t = at(90)
-  const setup = (side, market) => ({ id: 'trap', side, t, entry: 22700, stop: side === 'LONG' ? 22680 : 22720, target: side === 'LONG' ? 22740 : 22660, checks: {}, market })
-  const f = (o) => ({ ...strategyFilters('trap', undefined), ...o })
-  const withLong = { tape60: 62, bigNet: 15, bookImb: 0.2, cvd15: 300, volX: 1.5 }
-  // Defaults: every one off - the setup goes through untouched.
-  assert.ok(FLOW_FILTER_KEYS.every((k) => strategyFilters('trap', undefined)[k] === 'any'))
-  assert.deepEqual(applyTradeFilter(setup('LONG', withLong), strategyFilters('trap', undefined)), setup('LONG', withLong))
-  // Each filter: with the trade passes, against it blocks - for a LONG and the mirror SHORT.
-  const against = { tape60: 38, bigNet: -15, bookImb: -0.2, cvd15: -300, volX: 0.7 }
-  const mirror = (m) => ({ tape60: 100 - m.tape60, bigNet: -m.bigNet, bookImb: -m.bookImb, cvd15: -m.cvd15, volX: m.volX })
-  for (const [key, mode] of [['tradeTape', 'with'], ['tradeTape', 'strong'], ['tradeBig', 'with'], ['tradeBook', 'with'], ['tradeCvd', 'with'], ['tradeVolume', 'above']]) {
-    assert.ok(applyTradeFilter(setup('LONG', withLong), f({ [key]: mode })), `${key} ${mode}: LONG with it`)
-    assert.equal(applyTradeFilter(setup('LONG', against), f({ [key]: mode })), null, `${key} ${mode}: LONG against it`)
-    assert.ok(applyTradeFilter(setup('SHORT', mirror(withLong)), f({ [key]: mode })), `${key} ${mode}: SHORT with it`)
-    assert.equal(applyTradeFilter(setup('SHORT', mirror(against)), f({ [key]: mode })), null, `${key} ${mode}: SHORT against it`)
-  }
-  // "Not against" lets a neutral reading through; "quiet" volume wants under the average.
-  assert.ok(applyTradeFilter(setup('LONG', { tape60: 47, bigNet: 0, bookImb: -0.05 }), f({ tradeTape: 'notAgainst', tradeBig: 'notAgainst', tradeBook: 'notAgainst' })))
-  assert.equal(applyTradeFilter(setup('LONG', { volX: 1.5 }), f({ tradeVolume: 'below' })), null)
-  // Not there (an estimated day: no tape, no book) - the filter cannot judge, so the trade goes through.
-  assert.ok(applyTradeFilter(setup('LONG', { tape60: null, bigNet: null, bookImb: null, cvd15: 100, volX: 1.3 }), f({ tradeTape: 'strong', tradeBig: 'with', tradeBook: 'with' })))
-  assert.ok(applyTradeFilter(setup('LONG', undefined), f({ tradeTape: 'strong' })), 'no market at all: through')
-})

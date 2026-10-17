@@ -28,7 +28,7 @@ export default function StrategyLabPage() {
   const isAdmin = auth?.user?.role === 'Admin'
   const location = useLocation()
   const query = useMemo(() => Object.fromEntries(new URLSearchParams(location.search)), [location.search])
-  const initialId = STRATEGY_BY_ID[query.strategy] && !STRATEGY_BY_ID[query.strategy].retired ? query.strategy : 'wallBreak'
+  const initialId = STRATEGY_BY_ID[query.strategy] && !STRATEGY_BY_ID[query.strategy].retired ? query.strategy : null
   const [data, setData] = useState(STRATEGY_BY_ID[initialId]?.spot ? 'spot' : 'futures')
   // One index and one strategy, or several of each: one job per index, every strategy measured in it.
   const [indices, setIndices] = useState([UNDERLYINGS.includes(query.index) ? query.index : 'NIFTY'])

@@ -80,32 +80,3 @@ const ctx = (over) => ({ flow: 0, cum: 0, futOiPct: null, futPricePct: null, spo
 const long = (c) => ({ id: 'wallBreak', side: 'LONG', t: T, entry: 22500, stop: 22490, target: 22520, checks: {}, oiCtx: ctx(c) })
 const short = (c) => ({ id: 'wallBreak', side: 'SHORT', t: T, entry: 22500, stop: 22510, target: 22480, checks: {}, oiCtx: ctx(c) })
 const f = (o) => strategyFilters('wallBreak', o)
-
-test('wall room looks at the wall AHEAD of the price: a wall just broken is no obstacle, a closer one ahead is', () => {
-  // The call wall at 22500 was just broken (spot 22504): behind a LONG.
-  assert.ok(applyTradeFilter(long({ spot: 22504, resistance: 22500, resistanceAhead: 22550 }), f({ tradeWallRoom: 'oneR' })))
-  assert.equal(applyTradeFilter(long({ spot: 22504, resistance: 22500, resistanceAhead: 22508 }), f({ tradeWallRoom: 'oneR' })), null, 'the next wall is 4 away: under 1R')
-  assert.ok(applyTradeFilter(long({ spot: 22504, resistance: 22500, resistanceAhead: null }), f({ tradeWallRoom: 'target' })), 'no wall ahead at all')
-  // SHORT mirror: the put wall at 22500 just broken (spot 22496).
-  assert.ok(applyTradeFilter(short({ spot: 22496, support: 22500, supportAhead: 22450 }), f({ tradeWallRoom: 'oneR' })))
-  assert.equal(applyTradeFilter(short({ spot: 22496, support: 22500, supportAhead: 22492 }), f({ tradeWallRoom: 'oneR' })), null)
-  // A wall exactly at the price still blocks.
-  assert.equal(oiGatePasses(long({ resistanceAhead: 22500 }), f({ tradeWallRoom: 'oneR' })), false)
-  // An older setup without the field falls back to the wall the strategy saw; the default passes everything.
-  assert.equal(applyTradeFilter(long({ resistance: 22505 }), f({ tradeWallRoom: 'oneR' })), null)
-  assert.ok(applyTradeFilter(long({ resistanceAhead: 22501 }), f({})))
-})
-
-test('every setup records the wall strictly ahead of the price', async () => {
-  const syn = day()
-  const heatmap = syn.path.map((p, m) => ({ t: syn.at(m) + 30_000, bids: [[p - 1, 500]], asks: [[p + 1, 500]] }))
-  const replayDay = { meta: { lotSize: 75, lastPrice: syn.path.at(-1) }, minuteBars: syn.minuteBars, trades: [], icebergs: [], heatmap, sweeps: [], source: 'live' }
-  const all = await scanDaySetups({ day: replayDay, prints: syn.prints, oi: syn.oi, profile: null, rowSize: 1, lotSize: 75, largeLots: 10, estimated: false, filters: {}, keepAll: true })
-  assert.ok(all.length > 0)
-  for (const s of all) {
-    const c = s.oiCtx
-    assert.ok(c.resistanceAhead == null || c.resistanceAhead > c.spot, 'a call wall strictly above')
-    assert.ok(c.supportAhead == null || c.supportAhead < c.spot, 'a put wall strictly below')
-  }
-  assert.ok(all.some((s) => s.oiCtx.resistanceAhead != null && s.oiCtx.supportAhead != null))
-})

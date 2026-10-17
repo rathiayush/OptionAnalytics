@@ -185,16 +185,7 @@ export function combineRegime(price, oi, cvd) {
  *   fade  - reversal / mean reversion (it needs the market to come back);
  *   any   - works either way.
  */
-export const STRATEGY_STYLE = {
-  wallDefence: 'fade', wallBreak: 'trend', migration: 'trend', squeeze: 'trend', flush: 'trend', buildUp: 'trend',
-  range: 'fade', openingBias: 'trend', iceberg: 'fade', maxPain: 'any',
-  vaRejection: 'fade', tpo80: 'fade', pocReaction: 'fade', lvnRun: 'trend', ibBreakout: 'trend',
-  pocReject: 'fade', vaEdgeReject: 'fade', hvnReject: 'fade', lvnReject: 'fade',
-  weakWall: 'trend', trap: 'fade', cvdDivergence: 'fade', blockTrade: 'trend', imbalanceRetest: 'trend', atmFlip: 'trend',
-  vwapFade: 'fade', ibFade: 'fade', oiSqueeze: 'trend', suddenWall: 'any', heatmapOi: 'any', vwapPullback: 'trend',
-  oiStructure: 'any', vwapOi: 'trend', ibFailed: 'fade',
-  straddleFade: 'fade', wallShift: 'trend', cumFlip: 'trend',
-}
+export const STRATEGY_STYLE = {}
 
 /**
  * Would an adaptive scanner take `setup` on a day of type `regime.type`? (Tracking only.)

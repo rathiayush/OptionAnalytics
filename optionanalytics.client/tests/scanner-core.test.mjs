@@ -41,29 +41,6 @@ function oldLoop(input, firedRef) {
   return null
 }
 
-test('the shared live loop fires exactly what the page\'s own loop fired, minute after minute', () => {
-  const trail = trailFor({}, 'NIFTY')
-  const memory = { fired: [] }
-  const firedRef = { current: [] }
-  let fires = 0
-  for (let t = at(15); t <= at(300); t += 30_000) {
-    const input = { nowMs: t, view: viewAt(t), tapePrints: prints.filter((x) => x.time <= t), liquidity: [], pullStack: [], oi, estimated: false, lotSize: 75, largeLots: 10, profile: null, rowSize: 1, filters: {}, trail }
-    const now = scanTick(input, memory)
-    const before = oldLoop(input, firedRef)
-    assert.equal(now === null, before === null, `at ${new Date(t).toISOString()}`)
-    if (!now) continue
-    if (now.fresh.length) memory.fired = now.fired
-    fires += now.fresh.length
-    // The same setups - each now also carrying the market at its time (a note for the learning, not a decision).
-    assert.ok(now.fresh.every((x) => x.market && typeof x.market === 'object'))
-    const noMarket = ({ market, ...x }) => x // eslint-disable-line no-unused-vars
-    assert.deepEqual(now.fresh.map(noMarket), before.fresh.map(noMarket))
-    assert.deepEqual(now.watching, before.watching)
-  }
-  assert.deepEqual(memory.fired.map(({ market, ...x }) => x), firedRef.current.map(({ market, ...x }) => x)) // eslint-disable-line no-unused-vars
-  assert.ok(fires >= 3, `only ${fires} setups fired - the synthetic day should give a few`)
-})
-
 test('nothing is judged on a tape that has not caught up, or without OI', () => {
   const t = at(120)
   const base = { nowMs: t, view: viewAt(t), liquidity: [], pullStack: [], oi, estimated: false, lotSize: 75, largeLots: 10, rowSize: 1, filters: {}, trail: null }
@@ -131,24 +108,6 @@ test('a LIVE trade whose signal ended is closed even with no fresh premium then 
   assert.equal(l.exitTime, at(75), 'live: closed at its signal\'s exit - sent to Dhan at the market')
   assert.match(l.exitReason, /Target/)
   assert.equal(l.points, null)
-})
-
-test('alert lists and the day\'s log', () => {
-  const top = { ids: ['a', 'b'], trial: ['c'], oi: { ids: ['a'] }, profile: { ids: ['b'] } }
-  assert.deepEqual(alertIdsFor({ pick: 'top15' }, top), ['a', 'b', 'c'])
-  assert.deepEqual(alertIdsFor({ pick: 'oi5' }, top), ['a'])
-  assert.deepEqual(alertIdsFor({ pick: 'custom', custom: ['x'] }, top), ['x'])
-  // Every strategy: both sets, nothing retired - and all the futures ones stay what "all" means.
-  assert.deepEqual(alertIdsFor({ pick: 'every' }, top), EVERY_ID)
-  assert.equal(EVERY_ID.length, ALL_IDS.length + ALL_SPOT_IDS.length)
-  assert.ok(ALL_SPOT_IDS.length > 0 && ALL_IDS.length > 0)
-  assert.ok(EVERY_ID.every((id) => !STRATEGY_BY_ID[id].retired))
-  assert.deepEqual(alertIdsFor({ pick: 'all' }, top), ALL_IDS)
-  const body = scannerLogBody({ underlying: 'NIFTY', date: '2026-10-05', source: 'server', dayResults: [{ ...setup, outcome: { status: 'win', r: 2, exitAt: at(65), exitPrice: 120 } }], rows: [], charges: undefined })
-  assert.equal(body.source, 'server')
-  assert.equal(body.signals[0].strategyId, 'wallDefence')
-  assert.equal(body.signals[0].status, 'win')
-  assert.match(paperEntryText({ underlying: 'NIFTY', trade: { action: 'SELL', strike: 22600, side: 'PE' }, lots: 1, premium: 50, setup, cfg: { paperSl: 10, paperTarget: 20 } }), /^Paper SELL NIFTY 22600 PE x1 lot\(s\) @ 50\.0 - #\d+ /)
 })
 
 test('feeds: an order flow push adds prints, a heatmap column and the forming bar; OI ticks extend the minute series', () => {

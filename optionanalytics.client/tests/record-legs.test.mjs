@@ -50,29 +50,6 @@ test('rebuilt from the day\'s OI: no settings - the ATM pair at the signal\'s sp
   assert.equal(legs.buyOption.split(' ')[2], 'CE', 'a long buys the call')
 })
 
-test('with the index\'s settings: each leg out at the strategy\'s own option exit - its SL / target, held to the max rules', () => {
-  const ctx = buildOiContext(run, null, { live: false })
-  const [plain] = legsFromContext([row(40)], ctx)
-  // wallBreak applied on NIFTY with a 1% SL / 1% target of its own (first of that or the index exit); no max rules.
-  const config = { filtersByIndex: { NIFTY: { wallBreak: { tradeOptExit: 'first', tradeOptSlPct: 1, tradeOptTargetPct: 1 } } }, levels: { NIFTY: { maxSl: 0, maxTarget: 0 } } }
-  const cfg = runnerSettingsOf(config, 'NIFTY')
-  assert.equal(cfg.filters.wallBreak.tradeOptExit, 'first')
-  const [own] = legsFromContext([row(40)], ctx, cfg)
-  for (const which of ['buy', 'sell']) {
-    const entry = own[`${which}Entry`]
-    assert.equal(entry, plain[`${which}Entry`], 'the same option, at the same premium')
-    assert.match(own[`${which}ExitReason`], /^(Max SL|Target) /, `${which}: ${own[`${which}ExitReason`]}`)
-    assert.ok(own[`${which}ExitTime`] <= at(61), 'never after the index trade\'s exit')
-    assert.ok(Math.abs(Math.abs(own[`${which}Points`]) - entry / 100) < 1e-9, `out at 1% of ${entry}: ${own[`${which}Points`]}`)
-  }
-  // The index's max rules alone (no exit of its own): each leg leaves at the Max SL / Max target it reaches first.
-  const [capped] = legsFromContext([row(40)], ctx, runnerSettingsOf({ levels: { NIFTY: { maxSl: 0.25, maxTarget: 0.25 } } }, 'NIFTY'))
-  for (const which of ['buy', 'sell']) {
-    assert.match(capped[`${which}ExitReason`], /^(Max SL|Target) 0.25 pts hit$/)
-    assert.ok(Math.abs(Math.abs(capped[`${which}Points`]) - 0.25) < 1e-9)
-  }
-})
-
 test('every index and day fetched once; a day without data is reported, not guessed', async () => {
   const fetched = []
   const asked = []

@@ -36,8 +36,6 @@ check('the running minute is not read', JSON.stringify(dayRegime(twoSided, at(12
 check('the session open is 09:15 IST of the clock\'s day', sessionOpenMs(at(200) + 25_000) === T915 && sessionOpenMs(T915) === T915)
 check('every strategy has a style (trend / fade / any)', STRATEGIES.every((s) => ['trend', 'fade', 'any'].includes(STRATEGY_STYLE[s.id])), STRATEGIES.filter((s) => !STRATEGY_STYLE[s.id]).map((s) => s.id).join())
 const take = (id, side, type) => adaptiveDecision({ id, side }, { type }).take
-check('trend day: takes what goes WITH the trend, skips what goes against it', take('ibBreakout', 'LONG', 'trend-up') && take('trap', 'LONG', 'trend-up') && !take('trap', 'SHORT', 'trend-up') && !take('ibBreakout', 'LONG', 'trend-down'))
-check('range / two-sided day: takes fades, skips trend / breakout setups', take('range', 'SHORT', 'range') && take('ibFailed', 'LONG', 'two-sided') && !take('ibBreakout', 'LONG', 'range') && !take('vwapOi', 'SHORT', 'two-sided') && take('maxPain', 'LONG', 'range'))
 check('unclear / early: takes everything', take('ibBreakout', 'LONG', 'unclear') && take('range', 'SHORT', 'early'))
 
 const st = adaptiveStats([
