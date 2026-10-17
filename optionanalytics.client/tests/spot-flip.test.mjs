@@ -14,10 +14,13 @@ import { CLIMB, MIN, T, crossLong, crossShort, flipLong, flipShort } from './spo
 
 // The defaults are now the crossover trigger; most scenarios below are the flip trigger's, so they are read with the flip rule
 // as it was (EMA already in direction, no ATM option EMAs) under whatever a test sets.
-const FLIP_RULE = { trigger: 'flip', emaMode: 'state', optEmaMode: 'off', optEmaLegs: 'traded', crossBars: 3 }
+const FLIP_RULE = { trigger: 'flip', emaMode: 'state', optEmaMode: 'off', optEmaLegs: 'traded', crossBars: 3, wallTrend: 'off', netMinPct: 0, trailMode: 'points' }
+const CROSS_RULE = { trigger: 'cross', emaMode: 'cross', optEmaMode: 'state', optEmaLegs: 'both', crossBars: 2, wallTrend: 'off', netMinPct: 0, trailMode: 'points' }
 const mine = (w, filters = {}) => scanSpotDay({ bars: w.bars, oi: w.oi, filters: { ...filters, spotFlip: { ...FLIP_RULE, ...(filters.spotFlip ?? {}) } } }).filter((s) => s.id === 'spotFlip')
 // (A fresh cross stays fresh for `crossBars` candles, so the day scan finds it on each of those minutes: the scanner's list is the first of them - the 20-minute cooldown.)
-const byDefault = (w, filters = {}) => firstPerCooldown(scanSpotDay({ bars: w.bars, oi: w.oi, filters }).filter((s) => s.id === 'spotFlip'))
+const byDefault = (w, filters = {}) => firstPerCooldown(scanSpotDay({ bars: w.bars, oi: w.oi, filters: { ...filters, spotFlip: { ...CROSS_RULE, ...(filters.spotFlip ?? {}) } } }).filter((s) => s.id === 'spotFlip'))
+// The defaults as they are now (flip trigger, walls going the trade's way, net difference, trailing in R).
+const atDefaults = (w, filters = {}) => firstPerCooldown(scanSpotDay({ bars: w.bars, oi: w.oi, filters }).filter((s) => s.id === 'spotFlip'))
 
 test('#101 is the one spot strategy: the CE / PE flip', () => {
   assert.equal(SPOT_STRATEGIES.length, 1)
@@ -153,7 +156,7 @@ test('VWAP: the spot on the trade\'s side of the day\'s VWAP (long above, short 
 
 test('the ATM CE / PE EMAs are configurable (aligned already is fine by default)', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.optEmaFast, f.optEmaSlow, f.crossBars, f.emaMode, f.trigger, f.minLeadPct], ['state', 'both', 7, 21, 2, 'cross', 'cross', 0.3])
+  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.optEmaFast, f.optEmaSlow, f.crossBars, f.emaMode, f.trigger, f.minLeadPct], ['state', 'both', 7, 21, 2, 'state', 'flip', 0.3])
   // Whatever the fixture's premiums say, asking for the ATM EMAs can only remove signals, never add them.
   for (const o of [{ optEmaMode: 'state' }, { optEmaMode: 'cross' }, { optEmaMode: 'state', optEmaLegs: 'both' }]) {
     assert.ok(mine(flipLong(), { spotFlip: o }).length <= mine(flipLong()).length, JSON.stringify(o))
@@ -216,7 +219,7 @@ test('the server accepts every own rule and block setting in a lab job (Strategy
 
 test('the crossover trigger (default): a FRESH spot EMA crossover with the OI behind it - once, at the cross', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.trigger, f.emaMode, f.optEmaMode, f.optEmaLegs, f.minLeadPct], ['cross', 'cross', 'state', 'both', 0.3], 'the defaults')
+  assert.deepEqual([f.optEmaMode, f.optEmaLegs, f.minLeadPct], ['state', 'both', 0.3], 'the ATM option EMA defaults')
   for (const [make, side] of [[crossLong, 'LONG'], [crossShort, 'SHORT']]) {
     const found = byDefault(make())
     assert.equal(found.length, 1, side)
@@ -283,4 +286,31 @@ test('every parameter is consistent: keys unique, defaults inside their range / 
   assert.match(cs, /SignalStartTimeParameter\(\) with \{ Default = 570 \}/)
   assert.match(cs, /Default: 885/)
   assert.match(cs, /MaxHoldingTimeParameter\(\) with \{ Default = 330 \}/)
+})
+
+test('the defaults: the CE / PE flip on the 1-minute clock, the EMAs (crossed or already in direction), the ATM CE / PE, walls going the trade\'s way and a big net difference, trailing in R', () => {
+  const f = strategyFilters('spotFlip', {})
+  assert.deepEqual([f.trigger, f.flipTf, f.emaMode, f.optEmaMode, f.optEmaLegs, f.wallTrend, f.wallMin, f.netMinPct, f.nearStrikes, f.deltaMin, f.trailMode], ['flip', 1, 'state', 'state', 'both', 'with', 10, 10, 2, 10, 'r'])
+  for (const [make, side] of [[flipLong, 'LONG'], [flipShort, 'SHORT']]) {
+    const found = atDefaults(make())
+    assert.equal(found.length, 1, side)
+    const s = found[0]
+    assert.equal(s.side, side)
+    assert.match(s.checks.OI, /flipped/)
+    assert.match(s.checks.Trend, /EMA 7 .* (over|under) EMA 21/, 'spot EMAs in direction (crossed up / down or already)')
+    assert.match(s.checks['ATM option EMA'], /and the (PE|CE) under/, 'the CE breaks up and the PE down for a long (and the reverse)')
+    assert.match(s.checks.Walls, /heavier by \d+%, going the trade's way over 10 min and not leaving/)
+    assert.match(s.checks.Trail, /trailing stop after .* \(1R\), .* behind \(1R\)/, 'trailing in R of the index stop')
+    assert.ok(Math.abs(s.trailOverride.startPts - Math.abs(s.entry - s.stop)) < 0.01 && Math.abs(s.trailOverride.gapPts - Math.abs(s.entry - s.stop)) < 0.01, '1R after, 1R behind')
+  }
+})
+
+test('the walls and the net difference: not without them going the trade\'s way, not leaving, and a big enough net', () => {
+  assert.equal(atDefaults(flipLong({ bothShed: true })).length, 0, 'the OI near the ATM is leaving (both sides shed)')
+  assert.equal(atDefaults(flipLong({ ceHeavy: true })).length, 0, 'resistance heavier')
+  assert.equal(atDefaults(flipLong(), { spotFlip: { netMinPct: 30 } }).length, 0, 'a net difference of 20% is not enough for 30%')
+  assert.equal(atDefaults(flipLong(), { spotFlip: { netMinPct: 15 } }).length, 1, 'enough for 15%')
+  assert.equal(atDefaults(flipLong(), { spotFlip: { netMinPct: 0, wallTrend: 'off' } }).length, 1, 'both not asked: the base rule')
+  // The ATM CE / PE not lined up (premiums flat) stops it; not asked lets it through.
+  assert.equal(atDefaults(flipLong(), { spotFlip: { optEmaMode: 'off' } }).length, 1)
 })

@@ -328,12 +328,31 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
       const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
       const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
       const confirmed = B.confirm(dir)
-      if (confirmed.ok && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+      // The S / R OI walls near the ATM, from the last `wallMin` minutes: the OI of the side that holds the trade (puts for a
+      // long, calls for a short) is not leaving, the two sides near the ATM move with the trade, the wall strike itself is not
+      // leaving, and the net difference between the sides is big enough.
+      const net = peNear + ceNear > 0 ? (peNear - ceNear) / (peNear + ceNear) : 0
+      const netOk = !(f.netMinPct > 0) || dir * net >= f.netMinPct / 100
+      let wallsGo = true
+      if (f.wallTrend === 'with') {
+        const then = oiRows(oi, nowMs - f.wallMin * MIN).filter((r) => Math.abs(r.strike - B.atmK) <= f.nearStrikes * oi.step)
+        const peThen = then.reduce((s, r) => s + (r.peOi ?? 0), 0)
+        const ceThen = then.reduce((s, r) => s + (r.ceOi ?? 0), 0)
+        const peChg = peThen > 0 ? (peNear - peThen) / peThen : null
+        const ceChg = ceThen > 0 ? (ceNear - ceThen) / ceThen : null
+        const w = wallsAt(oi, rows, spotNow)
+        const wc = wallOiChanges(oi, { resistanceAhead: w.resistance, supportAhead: w.support }, nowMs, f.wallMin)
+        const holder = dir > 0 ? peChg : ceChg
+        const wallChg = dir > 0 ? wc.supChg : wc.resChg
+        const score = sideScore(dir, ceChg, peChg, 0.0005)
+        wallsGo = holder != null && holder >= 0 && score != null && score >= 1 && wallChg != null && wallChg >= 0
+      }
+      if (confirmed.ok && deltaWith != null && deltaWith >= 1 && wallsWith && netOk && wallsGo && ceNear > 0 && peNear > 0) {
         // Its exits come from the blocks: the index stop / target and its own trailing stop (a tuned trailing stop - the
         // tradeTrail filter - overrides it).
         push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
           OI: `since the open CE - PE ${f.trigger === 'cross' ? `${pct(leadNow)} of the chain (${dir > 0 ? 'puts' : 'calls'} added lead)` : `flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'})`}; last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
-          Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
+          Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier by ${(Math.abs(net) * 100).toFixed(0)}%${f.wallTrend === 'with' ? `, going the trade's way over ${f.wallMin} min and not leaving` : ''}`,
           ...confirmed.checks,
           Trail: B.exits.trailText,
         }, { trailOverride: B.exits.trail ? { unit: 'pts', startPts: B.exits.trail.start, gapPts: B.exits.trail.gap } : null })

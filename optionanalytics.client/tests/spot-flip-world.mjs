@@ -31,11 +31,13 @@ const longDay = (o = {}) => {
   const peAt = (k, m) => (near(k) ? 3e6 : 2e6) * (1 + 0.0002 * Math.min(m, 60) + (o.bothShed ? -0.0003 * Math.max(0, m - 60) : o.peStall ? 0 : peRate * Math.max(0, m - 60)))
   return { spotAt, ceAt, peAt }
 }
-export const flipLong = (o = {}) => { const d = longDay(o); return build(d.spotAt, d.ceAt, d.peAt, o.minutes ?? 140) }
+// The ATM options' own premiums move with the day: the CE climbs, the PE falls (their EMAs line up with a long).
+const flipPrice = (side, k, m) => (side === 'CE' ? 60 + 0.4 * m : Math.max(20, 60 - 0.4 * m))
+export const flipLong = (o = {}) => { const d = longDay(o); return build(d.spotAt, d.ceAt, d.peAt, o.minutes ?? 140, flipPrice) }
 export const flipShort = (o = {}) => {
   const d = longDay(o)
   const mirror = (x) => ({ open: 2 * AXIS - x.open, close: 2 * AXIS - x.close, high: 2 * AXIS - x.low, low: 2 * AXIS - x.high })
-  return build((m) => mirror(d.spotAt(m)), (k, m) => d.peAt(2 * AXIS - k, m), (k, m) => d.ceAt(2 * AXIS - k, m), o.minutes ?? 140)
+  return build((m) => mirror(d.spotAt(m)), (k, m) => d.peAt(2 * AXIS - k, m), (k, m) => d.ceAt(2 * AXIS - k, m), o.minutes ?? 140, (side, k, m) => flipPrice(side === 'CE' ? 'PE' : 'CE', k, m))
 }
 
 // The CROSSOVER trigger's days. LONG: the spot drifts down 0.2 a minute until 11:00 (minute 105), then climbs 1.2 points a

@@ -48,7 +48,7 @@ public sealed class SpotFlipStrategyTests
         var p = Parameters();
         p["emaTf"] = 1; p["emaFast"] = 3; p["emaSlow"] = 7; p["deltaMin"] = 3; p["signalStartMinutes"] = 0;
         // The scenarios below are the flip trigger's: the flip rule as it was (EMA already in direction, no ATM option EMAs).
-        p["trigger"] = 0; p["emaMode"] = 1; p["optEmaMode"] = 0; p["optEmaLegs"] = 0; p["crossBars"] = 3;
+        p["trigger"] = 0; p["emaMode"] = 1; p["optEmaMode"] = 0; p["optEmaLegs"] = 0; p["crossBars"] = 3; p["wallTrend"] = 0; p["netMinPct"] = 0; p["trailMode"] = 1;
         return p;
     }
 
@@ -195,10 +195,29 @@ public sealed class SpotFlipStrategyTests
         Assert.Equal(885, d["lastEntryMinutes"].Default);     // none after 14:45
         Assert.Equal(330, d["maxHoldingBars"].Default);       // its 330-minute time stop
         Assert.Equal(110, strategy.DefaultsForTimeframe(3)["maxHoldingBars"]);
-        Assert.Equal(1, d["trigger"].Default);                // the crossover trigger
-        Assert.Equal(2, d["emaMode"].Default);                // a fresh crossover
+        Assert.Equal(0, d["trigger"].Default);                // the CE / PE flip on the 1-minute clock
+        Assert.Equal(1, d["emaMode"].Default);                // crossed, or already in that direction
+        Assert.Equal(3, d["trailMode"].Default);              // trailing in R
+        Assert.Equal(1, d["wallTrend"].Default);
+        Assert.Equal(10, d["netMinPct"].Default);
         Assert.Equal(1.5m, d["stopAtr"].Default);
         Assert.Equal(3m, d["targetAtr"].Default);
         Assert.Equal(strategy.Parameters.Count, strategy.Parameters.Select(x => x.Key).Distinct().Count());
+    }
+
+    [Fact]
+    public void The_walls_going_the_trades_way_and_the_net_difference_gate_the_flip()
+    {
+        var p = Small(); p["wallTrend"] = 1; p["netMinPct"] = 2; p["wallMin"] = 10;
+        // Puts jumped 6% at the flip: the holding side is rising, the CE flat, the net difference ~3%.
+        Assert.Single(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 60_000, 0), p), s => s.Kind == "Entry");
+        p["netMinPct"] = 5; // a 3% net difference is not enough for 5%
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 60_000, 0), p), s => s.Kind == "Entry");
+        // Calls jumped too: the CE side moves with the puts, so the sides are not both going the long's way.
+        p["netMinPct"] = 0;
+        Assert.DoesNotContain(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 90_000, 60_000), p), s => s.Kind == "Entry");
+        // Not asked: the base rule.
+        p["wallTrend"] = 0;
+        Assert.Single(new SpotFlipStrategy().EntrySignals(Context(Spot(true), 60_000, 0), p), s => s.Kind == "Entry");
     }
 }

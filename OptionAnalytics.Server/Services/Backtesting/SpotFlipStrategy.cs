@@ -90,15 +90,22 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.SignalStartTimeParameter() with { Default = 570 },
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         OptionTradeSimulator.MaxHoldingTimeParameter() with { Default = 330 },
-        new BacktestParameterSpec("trigger", "Entry trigger", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
+        new BacktestParameterSpec("trigger", "Entry trigger", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
         {
+            new BacktestParameterOption(0, "The since-open CE - PE flip (entry on the 1-minute clock)"),
             new BacktestParameterOption(1, "Fresh spot EMA crossover, with the OI behind it"),
-            new BacktestParameterOption(0, "The since-open CE - PE flip"),
         }),
+        new BacktestParameterSpec("wallMin", "S / R OI walls: over the last (minutes) the support / resistance OI near the ATM goes the trade's way and is not leaving", Default: 10, Min: 3, Max: 30, Step: 1),
+        new BacktestParameterSpec("wallTrend", "S / R OI walls going the trade's way, not leaving", Default: 1, Min: 0, Max: 1, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(1, "With the trade, not leaving"),
+            new BacktestParameterOption(0, "Not asked"),
+        }),
+        new BacktestParameterSpec("netMinPct", "S / R OI net difference near the ATM (PE - CE as a % of both) at least, in the trade's direction (0 = off)", Default: 10, Min: 0, Max: 80, Step: 1),
         new BacktestParameterSpec("minLeadPct", "Crossover trigger: since-open CE - PE must lean with the trade by at least (% of the chain) - less is a sideways OI market", Default: 0.3m, Min: 0, Max: 20, Step: 0.1m),
         new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 60, Step: 1),
         new BacktestParameterSpec("emaTf", "EMA candle size (minutes)", Default: 3, Min: 1, Max: 15, Step: 1),
-        new BacktestParameterSpec("emaMode", "Spot EMA (the crossover trigger always asks a fresh crossover)", Default: ModeCross, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
+        new BacktestParameterSpec("emaMode", "Spot EMA (crossed, or already in that direction - it counts as crossed; the crossover trigger always asks a fresh one)", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
         new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 2, Min: 1, Max: 20, Step: 1),
         new BacktestParameterSpec("vwapMode", "VWAP", Default: 0, Min: 0, Max: 1, Step: 1, Options: new[]
         {
@@ -121,7 +128,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         new BacktestParameterSpec("indexExit", "Leave on the index stop / target / trailing stop (spot) too (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
         new BacktestParameterSpec("stopAtr", "Index stop-loss (x ATR)", Default: 1.5m, Min: 0.5m, Max: 5, Step: 0.25m),
         new BacktestParameterSpec("targetAtr", "Index target (x ATR)", Default: 3, Min: 0.5m, Max: 10, Step: 0.25m),
-        new BacktestParameterSpec("trailMode", "Trailing stop on the index", Default: TrailPoints, Min: TrailOff, Max: TrailR, Step: 1, Options: new[]
+        new BacktestParameterSpec("trailMode", "Trailing stop on the index", Default: TrailR, Min: TrailOff, Max: TrailR, Step: 1, Options: new[]
         {
             new BacktestParameterOption(TrailOff, "No trailing stop"),
             new BacktestParameterOption(TrailPoints, "Fixed points (this index: NIFTY 10 / BANKNIFTY 20 / SENSEX 30, or the points below)"),
@@ -206,9 +213,9 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var flipTf = Math.Max(1, (int)p["flipTf"]);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
-        var crossTrigger = p.GetValueOrDefault("trigger", 1m) >= 0.5m;
+        var crossTrigger = p.GetValueOrDefault("trigger", 0m) >= 0.5m;
         var minLead = p.GetValueOrDefault("minLeadPct", 0.3m) / 100m;
-        var emaMode = crossTrigger ? ModeCross : p.GetValueOrDefault("emaMode", ModeCross);
+        var emaMode = crossTrigger ? ModeCross : p.GetValueOrDefault("emaMode", ModeState);
         var crossBars = Math.Max(1, (int)p.GetValueOrDefault("crossBars", 2));
         var vwapOn = p.GetValueOrDefault("vwapMode", 0) >= 0.5m;
         var optMode = p.GetValueOrDefault("optEmaMode", ModeState);
@@ -224,9 +231,12 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var indexExit = p.GetValueOrDefault("indexExit", 1m) >= 0.5m;
         var stopAtr = p.GetValueOrDefault("stopAtr", 1.5m);
         var targetAtr = p.GetValueOrDefault("targetAtr", 3m);
-        var trailMode = p.GetValueOrDefault("trailMode", TrailPoints);
+        var trailMode = p.GetValueOrDefault("trailMode", TrailR);
         var emaWarm = p.GetValueOrDefault("emaWarm", 0m) >= 0.5m;
         var exitOnFlipBack = p.GetValueOrDefault("exitOnFlipBack", 1m) >= 0.5m;
+        var wallMin = Math.Max(1, (int)p.GetValueOrDefault("wallMin", 10));
+        var wallsOn = p.GetValueOrDefault("wallTrend", 1m) >= 0.5m;
+        var netMin = p.GetValueOrDefault("netMinPct", 10m) / 100m;
         var step = Math.Max(1, context.Step);
 
         var ce = SeriesOf(context.CeOiIvBand, step);
@@ -326,8 +336,39 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                     && (!optBoth || EmaAgrees(OptCloses(atm, dir < 0, clock), optFast, optSlow, optMode, crossBars, -1)));
                 var deltaWith = ceD is { } a && peD is { } b ? dir * (St(b) - St(a)) : (int?)null;
                 var wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear;
+                // S / R OI walls near the ATM over the last wallMin minutes: the holding side (puts for a long) is not leaving, the two
+                // sides move with the trade, the wall strike itself is not leaving, and the net difference is big enough.
+                var net = peNear + ceNear > 0 ? (peNear - ceNear) / (peNear + ceNear) : 0m;
+                var netOk = netMin <= 0 || dir * net >= netMin;
+                var wallsGo = true;
+                if (wallsOn)
+                {
+                    decimal peThen = 0, ceThen = 0;
+                    foreach (var (k, s2) in ce) if (Math.Abs(k - atm) <= nearStrikes * step && s2.At(clock - one - TimeSpan.FromMinutes(wallMin)) is { } n) ceThen += n;
+                    foreach (var (k, s2) in pe) if (Math.Abs(k - atm) <= nearStrikes * step && s2.At(clock - one - TimeSpan.FromMinutes(wallMin)) is { } n) peThen += n;
+                    decimal? peChg = peThen > 0 ? (peNear - peThen) / peThen : null;
+                    decimal? ceChg = ceThen > 0 ? (ceNear - ceThen) / ceThen : null;
+                    // The strongest wall strike (support: most PE OI at or under the spot, resistance: most CE OI at or over it, within 8 strikes).
+                    decimal? WallChange(Dictionary<decimal, StrikeSeries> m, bool below)
+                    {
+                        decimal? best = null; long bestOi = 0;
+                        foreach (var (k, s2) in m)
+                        {
+                            if (Math.Abs(k - bar.Close) > 8 * step) continue;
+                            if (below ? k > bar.Close + step * 0.5m : k < bar.Close - step * 0.5m) continue;
+                            if (s2.At(clock - one) is { } n && n > bestOi) { bestOi = n; best = k; }
+                        }
+                        if (best is not { } wk) return null;
+                        var nowOi = m[wk].At(clock - one); var then = m[wk].At(clock - one - TimeSpan.FromMinutes(wallMin));
+                        return nowOi is { } a && then is { } b && b > 0 ? (decimal)(a - b) / b : null;
+                    }
+                    var wallChg = dir > 0 ? WallChange(pe, below: true) : WallChange(ce, below: false);
+                    var holder = dir > 0 ? peChg : ceChg;
+                    var score = ceChg is { } cc && peChg is { } pp ? dir * (St(pp) - St(cc)) : (int?)null;
+                    wallsGo = holder is >= 0 && score is >= 1 && wallChg is >= 0;
+                }
                 string detail = $"CE-PE since open {prev:P2} -> {now:P2}; EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; VWAP {vwap:0.0}; last {deltaMin} min CE {ceD:P2} / PE {peD:P2}; ATM+-{nearStrikes}: PE {peNear / 1e5m:0.0}L vs CE {ceNear / 1e5m:0.0}L";
-                if (!emaWith || !vwapWith || !legWith || deltaWith is null || deltaWith < 1 || !wallsWith || ceNear <= 0 || peNear <= 0)
+                if (!emaWith || !vwapWith || !legWith || deltaWith is null || deltaWith < 1 || !wallsWith || !netOk || !wallsGo || ceNear <= 0 || peNear <= 0)
                 {
                     signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name,
                         $"Flip, but {(!emaWith ? "EMA not with the trade" : !vwapWith ? "VWAP against" : !legWith ? "ATM option EMAs not with the trade" : deltaWith is null or < 1 ? "CE/PE change not with the trade" : "OI walls not with the trade")} - {detail}"));

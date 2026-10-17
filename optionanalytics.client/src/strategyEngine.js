@@ -89,8 +89,11 @@ const STRATEGY_OWN_FILTERS = {
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
-    { key: 'trigger', label: 'What triggers the entry: a fresh spot EMA crossover (OI, walls, delta and the ATM CE / PE EMAs all with it), or the since-open CE - PE flip', type: 'select', default: 'cross', options: [{ value: 'cross', label: 'Fresh EMA crossover, with the OI behind it' }, { value: 'flip', label: 'The since-open CE - PE flip' }] },
+    { key: 'trigger', label: 'What triggers the entry: the since-open CE - PE flip on the 1-minute clock (then the EMAs, walls, delta must be with it), or a fresh spot EMA crossover with the OI behind it', type: 'select', default: 'flip', options: [{ value: 'flip', label: 'The since-open CE - PE flip (entry on the 1-minute clock)' }, { value: 'cross', label: 'Fresh EMA crossover, with the OI behind it' }] },
     { key: 'minLeadPct', label: 'Crossover trigger: the since-open CE - PE must lean with the trade by at least (% of the chain) - below it the OI says sideways', type: 'number', default: 0.3, min: 0, max: 20, step: 0.1 },
+    { key: 'wallMin', label: 'S / R OI walls: over the last (minutes) the support / resistance OI near the ATM goes the trade\'s way and is not leaving', type: 'number', default: 10, min: 3, max: 30, step: 1 },
+    { key: 'wallTrend', label: 'S / R OI walls going the trade\'s way (support OI not falling and, near the ATM, the sides moving with the trade)', type: 'select', default: 'with', options: [{ value: 'with', label: 'With the trade, not leaving' }, { value: 'off', label: 'Not asked' }] },
+    { key: 'netMinPct', label: 'S / R OI net difference near the ATM (PE - CE as a % of both) at least, in the trade\'s direction (0 = off)', type: 'number', default: 10, min: 0, max: 80, step: 1 },
     { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 60, step: 1 },
   ],
 }
@@ -109,7 +112,7 @@ const STRATEGY_OWN_FILTERS = {
 export const PARAM_BLOCKS = {
   ema: { label: 'Spot EMA', filters: [
     { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
-    { key: 'emaMode', label: 'Spot EMA (the crossover trigger always asks a fresh crossover): already in the direction, a fresh crossover, or not asked', type: 'select', default: 'cross', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
+    { key: 'emaMode', label: 'Spot EMA (crossed up / down, or already in that direction - it counts as crossed): already in direction, a fresh crossover, or not asked. The crossover trigger always asks a fresh one', type: 'select', default: 'state', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
     { key: 'crossBars', label: 'A fresh crossover happened within the last (candles) - spot and ATM option EMAs', type: 'number', default: 2, min: 1, max: 20, step: 1 },
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
@@ -129,7 +132,7 @@ export const PARAM_BLOCKS = {
     { key: 'targetAtr', label: 'Index target (x ATR)', type: 'number', default: 3, min: 0.5, max: 10, step: 0.25 },
   ] },
   trail: { label: 'Trailing stop', filters: [
-    { key: 'trailMode', label: 'Trailing stop: fixed index points, or dynamic (x ATR)', type: 'select', default: 'points', options: [{ value: 'points', label: 'Fixed points (per index, below)' }, { value: 'atr', label: 'Dynamic: x the current ATR' }, { value: 'r', label: 'In R: x the stop distance (0.5R, 1R ...)' }, { value: 'off', label: 'No trailing stop' }] },
+    { key: 'trailMode', label: 'Trailing stop: in R (x the stop distance), fixed index points, or dynamic (x ATR)', type: 'select', default: 'r', options: [{ value: 'points', label: 'Fixed points (per index, below)' }, { value: 'atr', label: 'Dynamic: x the current ATR' }, { value: 'r', label: 'In R: x the stop distance (0.5R, 1R ...)' }, { value: 'off', label: 'No trailing stop' }] },
     { key: 'trailStartNIFTY', label: 'NIFTY: trailing starts after (points in profit)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
     { key: 'trailGapNIFTY', label: 'NIFTY: stays this far behind the best price (points)', type: 'number', default: 10, min: 1, max: 500, step: 1 },
     { key: 'trailStartBANKNIFTY', label: 'BANKNIFTY: trailing starts after (points in profit)', type: 'number', default: 20, min: 1, max: 1000, step: 1 },
