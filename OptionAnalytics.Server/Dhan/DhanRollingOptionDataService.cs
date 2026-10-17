@@ -125,6 +125,29 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         _cache = cache;
     }
 
+    /// <summary>True when every day of [fromDay,toDay] of this contract is already kept on disk (DhanDataCache), so
+    /// <see cref="GetRollingOptionCandlesAsync"/> would make no Dhan call - the caller then need not pace itself.</summary>
+    public bool IsFullyCached(string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
+        DateOnly fromDay, DateOnly toDay, int intervalMinutes)
+    {
+        if (_cache is null || toDay < fromDay) return false;
+        var key = new
+        {
+            exchangeSegment = ResolveFnoSegment(underlying),
+            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+            securityId = underlyingSecurityId,
+            instrument = OptionInstrument,
+            expiryFlag,
+            expiryCode,
+            strike,
+            drvOptionType,
+            requiredData = RequiredData,
+        };
+        for (var d = fromDay; d <= toDay; d = d.AddDays(1))
+            if (!_cache.HasDay(RollingPath, key, d)) return false;
+        return true;
+    }
+
     /// <summary>Every bar for [fromDay,toDay] inclusive, one relative contract
     /// (expiryFlag/expiryCode/strike/drvOptionType), chunked transparently across Dhan's 30-day
     /// per-call cap. Stops and returns whatever already succeeded plus Dhan's own error the moment
