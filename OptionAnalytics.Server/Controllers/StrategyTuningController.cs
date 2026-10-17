@@ -38,7 +38,7 @@ public sealed class StrategyTuningController : ControllerBase
     /// the strategy as written, the default - "applied": its setting applied on the index) beside it as written and as
     /// applied; no tuning, nothing written to the tuning history.</summary>
     public sealed record RunRequest(string Underlying, JsonNode? Strategies, int Days = 30, bool IncludeEstimated = false, int MinTrades = 8, string? What = null, string[]? OiFactors = null, string? Search = null, string? Data = null, string? From = null, string? To = null,
-        JsonObject? Params = null, string? LabBase = null, int MinPerMonth = 4, int WalkForward = 0);
+        JsonObject? Params = null, string? LabBase = null, int MinPerMonth = 4, int WalkForward = 0, JsonObject? ParamsById = null);
     /// <summary>The OI inputs a tuning job may be asked to tune - strategyTuning.js OI_FACTORS, key for key. The two
     /// lists must stay the same: the page offers what OI_FACTORS holds, so anything missing here is refused and the run
     /// never starts (tests/oi-factor-keys.test.mjs is the guard). The last five are the order-flow ones, which the page
@@ -93,6 +93,7 @@ public sealed class StrategyTuningController : ControllerBase
         var what = string.IsNullOrWhiteSpace(request.What) ? "trade" : request.What.Trim().ToLowerInvariant();
         if (!TuneWhat.Contains(what)) return (null, "What must be trade, oi, both, option, all, check or lab.");
         JsonObject? labParams = null;
+        JsonObject? labParamsById = null;
         string? labBase = null;
         if (what == "lab")
         {
@@ -103,6 +104,21 @@ public sealed class StrategyTuningController : ControllerBase
             var unknownKeys = labParams.Select(kv => kv.Key).Where(k => !LabParamKeys.Contains(k)).ToList();
             if (unknownKeys.Count > 0) return (null, $"Params may only set the tuned settings - not {string.Join(", ", unknownKeys)}.");
             if (labParams.Any(kv => kv.Value is not JsonValue)) return (null, "Each of Params must be a single value.");
+            // Each strategy its OWN setting (the lab testing a tuning run's settings on other days): strategy id -> its
+            // params, the same keys as Params; only for strategies the job lists.
+            if (request.ParamsById is { } byId)
+            {
+                var listed = ((JsonArray)strategies).Select(x => x!.GetValue<string>()).ToHashSet();
+                foreach (var (id, node) in byId)
+                {
+                    if (!listed.Contains(id)) return (null, $"ParamsById: '{id}' is not one of the strategies listed.");
+                    if (node is not JsonObject one) return (null, $"ParamsById: '{id}' must be a setting (an object).");
+                    var bad = one.Select(kv => kv.Key).Where(k => !LabParamKeys.Contains(k)).ToList();
+                    if (bad.Count > 0) return (null, $"ParamsById: '{id}' may only set the tuned settings - not {string.Join(", ", bad)}.");
+                    if (one.Any(kv => kv.Value is not JsonValue)) return (null, $"ParamsById: each of '{id}' must be a single value.");
+                }
+                labParamsById = (JsonObject)byId.DeepClone();
+            }
         }
         var search = string.IsNullOrWhiteSpace(request.Search) ? "step" : request.Search.Trim().ToLowerInvariant();
         if (search is not ("step" or "full")) return (null, "Search must be step or full.");
@@ -117,7 +133,7 @@ public sealed class StrategyTuningController : ControllerBase
         if (factors.FirstOrDefault(f => !OiFactorKeys.Contains(f)) is { } unknown)
             return (null, $"OiFactors: '{unknown}' is not one of {string.Join(", ", OiFactorKeys)}.");
         return (new TuningJob(u, strategies.DeepClone(), Math.Clamp(request.Days, 1, 250), request.IncludeEstimated, Math.Clamp(request.MinTrades, 2, 100), what, factors, search, data, string.IsNullOrWhiteSpace(request.From) ? null : request.From.Trim(), string.IsNullOrWhiteSpace(request.To) ? null : request.To.Trim())
-        { Params = (JsonObject?)labParams?.DeepClone(), LabBase = labBase, MinPerMonth = Math.Clamp(request.MinPerMonth, 0, 30), WalkForward = Math.Clamp(request.WalkForward, 0, 5) }, null);
+        { Params = (JsonObject?)labParams?.DeepClone(), ParamsById = labParamsById, LabBase = labBase, MinPerMonth = Math.Clamp(request.MinPerMonth, 0, 30), WalkForward = Math.Clamp(request.WalkForward, 0, 5) }, null);
     }
 
     /// <summary>A job to schedule: the Run request, for one index or several (Underlyings), not before RunAtUtc (null:

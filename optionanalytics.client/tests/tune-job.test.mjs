@@ -402,6 +402,15 @@ test('the Strategy lab job: several strategies measured at once - each as writte
     assert.equal(pw.yours.trades.length, pw.yours.r.n, 'its trades are listed')
     assert.deepEqual(pw.applied.trades, [], 'the summary copy carries no second list')
     assert.deepEqual(ps.yours.r, ps.asWritten.r, 'nothing applied: as written')
+    // EACH STRATEGY ITS OWN SETTING (a tuning run's settings tested on other days): paramsById, as written underneath.
+    const byId = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'squeeze'], days: 30, minTrades: 2, what: 'lab', labBase: 'written',
+      paramsById: { weakWall: { tradeSide: 'short' }, squeeze: { tradeTargetX: 3, optLeg: 'buy', optExit: 'index' } } }, env)
+    assert.equal(byId.code, 0, JSON.stringify(byId.result))
+    const [bw, bs] = byId.result.results
+    assert.deepEqual(bw.yours.params, { tradeSide: 'short' }, 'weakWall measured with its own setting - not the applied one')
+    assert.equal(bs.yours.params.tradeTargetX, 3)
+    assert.equal(bs.yours.params.optLeg, 'buy')
+    assert.ok(bw.yours.trades.every((t) => t.side === 'SHORT'))
     // A strategy of the other kind, an unknown one or a RETIRED one no longer takes the whole run down with it: it is
     // left out and said, so asking for every strategy still measures the ones that work.
     const wrong = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall', 'nope', 'lvnRun', 'spotWallBreak'], days: 30, minTrades: 2, what: 'lab' }, env)

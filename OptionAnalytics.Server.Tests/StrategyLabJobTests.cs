@@ -34,6 +34,23 @@ public sealed class StrategyLabJobTests
     }
 
     [Fact]
+    public void ALabJob_CanGiveEachStrategyItsOwnSetting_ForTheListedOnes_AndOnlyTheTunedSettings()
+    {
+        StrategyTuningController.RunRequest ById(JsonObject byId) => new("NIFTY", new JsonArray("weakWall", "squeeze"), What: "lab", ParamsById: byId);
+        var (job, error) = StrategyTuningController.BuildJob(ById(new JsonObject { ["weakWall"] = new JsonObject { ["tradeSide"] = "long" }, ["squeeze"] = new JsonObject { ["optLeg"] = "buy", ["optSlPct"] = 30 } }), "NIFTY");
+        Assert.Null(error);
+        Assert.Equal("long", job!.ParamsById!["weakWall"]!["tradeSide"]!.GetValue<string>());
+        Assert.Equal(30, job.ParamsById["squeeze"]!["optSlPct"]!.GetValue<int>());
+        // The runner reads it as paramsById.
+        Assert.Contains("\"paramsById\":{\"weakWall\"", System.Text.Json.JsonSerializer.Serialize(job, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+        Assert.Contains("not one of the strategies listed", StrategyTuningController.BuildJob(ById(new JsonObject { ["cumFlip"] = new JsonObject() }), "NIFTY").Error);
+        Assert.Contains("only set the tuned settings", StrategyTuningController.BuildJob(ById(new JsonObject { ["weakWall"] = new JsonObject { ["lots"] = 3 } }), "NIFTY").Error);
+        Assert.Contains("must be a setting", StrategyTuningController.BuildJob(ById(new JsonObject { ["weakWall"] = 3 }), "NIFTY").Error);
+        // Not sent: none.
+        Assert.Null(StrategyTuningController.BuildJob(Lab(new JsonArray("weakWall")), "NIFTY").Job!.ParamsById);
+    }
+
+    [Fact]
     public void A_tuning_job_carries_the_fewest_trades_a_month_held_to_0_30_4_when_not_sent()
     {
         StrategyTuningController.RunRequest Tune(int? perMonth) => perMonth is int n

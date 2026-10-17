@@ -213,7 +213,7 @@ export default function StrategyLabPage() {
           <NavBar />
         </Space>
         <Segmented value={mode} onChange={setMode} aria-label="Lab mode"
-          options={[{ value: 'applied', label: 'What is applied, on older days' }, { value: 'try', label: 'Try a different setting' }]} />
+          options={[{ value: 'applied', label: 'Test on older days' }, { value: 'try', label: 'Try a different setting' }]} />
         {mode === 'applied' && <AppliedLab cfg={cfg} isAdmin={isAdmin} onTry={() => setMode('try')} />}
         {mode === 'try' && (<>
         <Card size="small" title="Strategy lab · change strategies' tuned settings and see what they would have done">

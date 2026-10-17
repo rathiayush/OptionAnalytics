@@ -8,8 +8,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { STRATEGY_BY_ID } from './strategyEngine.js'
-import { UNDERLYINGS, appliedPlan } from './appliedPlan.js'
-import { sumPoints } from './strategyTuning.js'
+import { UNDERLYINGS, appliedPlan, tunedPlan } from './appliedPlan.js'
+import { labParams, sumPoints } from './strategyTuning.js'
 
 const { Text } = Typography
 const col = (v) => (v == null ? undefined : v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
@@ -27,7 +27,19 @@ const entriesOf = (r) => (r?.ok && r?.lab ? (r.results ?? (r.strategy ? [{ strat
 export default function AppliedLab({ cfg, isAdmin, onTry }) {
   const [days, setDays] = useState(30)
   const [range, setRange] = useState(null)
-  const { pairs: allPairs, leftOut } = useMemo(() => appliedPlan(cfg), [cfg])
+  // What is tested: what is APPLIED now, or the LAST TUNING RUN's settings (each index's newest run, futures and spot) -
+  // these on the days before that run, which it never chose or checked on: the honest test of a setting not applied yet.
+  const [source, setSource] = useState('applied')
+  const tuned = source === 'tuned'
+  const [lastRuns, setLastRuns] = useState(null)
+  useEffect(() => {
+    if (!tuned || lastRuns) return
+    const keys = UNDERLYINGS.flatMap((u) => ['futures', 'spot'].map((k) => [u, k]))
+    Promise.all(keys.map(([u, k]) => fetch(`/api/strategy-tuning/result/${u}?data=${k}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+      .then((list) => setLastRuns(Object.fromEntries(keys.map(([u, k], i) => [`${u}|${k}`, list[i]]))))
+  }, [tuned, lastRuns])
+  const plan = useMemo(() => (tuned ? tunedPlan(lastRuns ?? {}, (params, kind) => labParams(params, kind)) : appliedPlan(cfg)), [tuned, lastRuns, cfg])
+  const { pairs: allPairs, leftOut } = plan
   // What to run: every applied strategy by default; or only futures / only spot + options, only some indices, only the
   // strategies picked (empty = all of them).
   const [kind, setKind] = useState('both')
@@ -52,14 +64,16 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
   const [status, setStatus] = useState(null)
   const [busy, setBusy] = useState(null)
 
-  const jobFor = (p) => ({
-    underlying: p.u, data: p.kind, strategies: p.ids, what: 'lab', labBase: 'applied', params: {}, minTrades: 2,
-    ...(range?.[0] || range?.[1] ? { from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null, days: 250 } : { days }),
-  })
-  /** Whether a stored result is of THIS question: what is applied now, over the days set now. */
+  const picked = range?.[0] || range?.[1] ? { from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null, days: 250 } : null
+  const jobFor = (p) => (tuned
+    // Each strategy its own tuned setting, as written underneath - on the days before the run unless dates are picked.
+    ? { underlying: p.u, data: p.kind, strategies: p.ids, what: 'lab', labBase: 'written', params: {}, paramsById: Object.fromEntries(p.ids.map((id) => [id, p.paramsById[id]])), minTrades: 2, ...(picked ?? { from: p.testFrom, to: p.testTo, days: 250 }) }
+    : { underlying: p.u, data: p.kind, strategies: p.ids, what: 'lab', labBase: 'applied', params: {}, minTrades: 2, ...(picked ?? { days }) })
+  /** Whether a stored result is of THIS question: what is applied now (or the last run's settings), over the days set now. */
   const sameRun = (file, p) => {
     const j = file?.job
-    if (!j || j.labBase !== 'applied' || Object.keys(j.params ?? {}).length) return false
+    if (!j || Object.keys(j.params ?? {}).length) return false
+    if (tuned ? j.labBase !== 'written' || !p.ids.every((id) => JSON.stringify(j.paramsById?.[id] ?? null) === JSON.stringify(p.paramsById[id])) : j.labBase !== 'applied' || j.paramsById) return false
     const mine = jobFor(p)
     const days = j.from || j.to ? `${j.from ?? ''}~${j.to ?? ''}` : `last ${Number(j.days) || 30}`
     const want = mine.from || mine.to ? `${mine.from ?? ''}~${mine.to ?? ''}` : `last ${mine.days}`
@@ -141,8 +155,10 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
   const cell = (m) => (m?.r?.n ? <span style={{ fontSize: 12 }}>{m.r.n} · win {pct(m.r.winRate)} · <b style={{ color: col(m.r.avg) }}>{fmtR(m.r.avg)}</b> avg · <span style={{ color: col(m.r.total) }}>{fmtR(m.r.total)}</span></span> : <Text type="secondary" style={{ fontSize: 12 }}>no trades</Text>)
   const legCell = (l) => (l?.n ? <span style={{ fontSize: 12 }}><b style={{ color: col(l.total) }}>{pts(l.total)}</b> <Text type="secondary" style={{ fontSize: 11 }}>({l.n} · {l.wins}/{l.losses})</Text></span> : <Text type="secondary" style={{ fontSize: 12 }}>-</Text>)
   // What the scanner trades on that index: the applied setting (as written when it carries none of its own).
-  const appliedOf = (e) => e.applied ?? e.asWritten
-  const ownSetting = (e) => Object.keys(e.applied?.filters ?? {}).some((k) => !k.startsWith('_'))
+  // (The last tuning run: the setting it found - what the job measured as "yours".)
+  const appliedOf = (e) => (tuned ? e.yours : e.applied ?? e.asWritten)
+  const ownSetting = (e) => (tuned ? Object.keys(e.yours?.params ?? {}).length > 0 : Object.keys(e.applied?.filters ?? {}).some((k) => !k.startsWith('_')))
+  const word = tuned ? 'Tuned setting' : 'As applied'
   const rTotal = (list, pick) => {
     const ms = list.map((r) => pick(r.entry)).filter((m) => m?.r?.n)
     return { n: ms.reduce((a, m) => a + m.r.n, 0), total: ms.reduce((a, m) => a + (m.r.total ?? 0), 0) }
@@ -172,10 +188,10 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
     const name = `${p.u} ${p.kind === 'spot' ? 'spot + options' : 'futures'} (${p.ids.length})`
     return (
       <span key={p.key} style={{ fontSize: 12 }}>
-        <b>{name}</b>{' '}
+        <b>{name}</b>{tuned && !picked ? <Text type="secondary" style={{ fontSize: 11 }}> tuned {p.run.first} - {p.run.last} · tested {p.testFrom} - {p.testTo}</Text> : null}{' '}
         {st === 'updating' ? <Tag color="processing">{here ? 'running now' : 'queued'}{file?.ok ? ` - showing the previous run${when ? ` (${when})` : ''} until it is done` : ' - no result yet'}</Tag>
           : st === 'failed' ? <Tooltip title={file.error}><Tag color="error">last run failed{when ? ` ${when}` : ''}: {String(file.error).slice(0, 90)}</Tag></Tooltip>
-            : st === 'done' ? <Tag color={sameRun(file, p) ? 'success' : 'warning'}>run {when}{sameRun(file, p) ? '' : ' - what was applied / the days were different then'}</Tag>
+            : st === 'done' ? <Tag color={sameRun(file, p) ? 'success' : 'warning'}>run {when}{sameRun(file, p) ? '' : tuned ? ' - of other settings / days' : ' - what was applied / the days were different then'}</Tag>
               : <Tag>no run yet</Tag>}
       </span>
     )
@@ -200,31 +216,41 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
 
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
-      <Card size="small" title="What is applied, on older days"
+      <Card size="small" title={tuned ? 'The last tuning run, on the days before it' : 'What is applied, on older days'}
         extra={<Button size="small" type="link" onClick={onTry}>Try a different setting instead →</Button>}>
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Segmented value={source} onChange={(v) => { setSource(v); setPickIds([]); setRange(null) }} aria-label="What to test"
+            options={[{ value: 'applied', label: 'What is applied' }, { value: 'tuned', label: 'The last tuning run' }]} />
+          {tuned && (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Each index&apos;s newest tuning run (futures and spot + options): every strategy it found a setting for, measured with THAT setting beside as written - on the
+              days just before the run, which it never chose or checked on, as many as it covered. A setting that also wins there is one to apply; one that only won on
+              the run&apos;s own days fitted them. Nothing is applied from here.
+            </Text>
+          )}
+          {tuned && lastRuns && allPairs.length === 0 && <Alert type="info" showIcon message="No tuning run with a setting found yet - run a tuning first (Strategy tuning page)." />}
+          {!tuned && <Text type="secondary" style={{ fontSize: 12 }}>
             Every strategy applied on an index is run over past days - as <b>applied</b> (its fine-tuned setting, or as written where it was applied without one) beside <b>as written</b> - with the
             tuning&apos;s own rules, the same day scan as the scanner. Nothing to pick: what is applied is what is measured. One run per index (futures and spot + options are separate scans); the
             first starts now and the others queue right behind it. Past days come from the cache, so it normally costs no Dhan calls. Days before a strategy was applied include the
             ones its setting was tuned on - the days it was never tuned on are the ones to trust.
-          </Text>
+          </Text>}
           {!isAdmin && <Alert type="warning" showIcon message="Only an Admin can run the lab - sign in with the admin login." />}
           {cfg === null && <Alert type="warning" showIcon message="The applied settings could not be read (sign in with the admin login)." />}
-          {cfg && allPairs.length === 0 && <Alert type="info" showIcon message="Nothing is applied on any index yet - choose strategies on the Strategies page (or apply a tuned setting) and they appear here." />}
+          {!tuned && cfg && allPairs.length === 0 && <Alert type="info" showIcon message="Nothing is applied on any index yet - choose strategies on the Strategies page (or apply a tuned setting) and they appear here." />}
           {allPairs.length > 0 && pairs.length === 0 && <Alert type="info" showIcon message="Nothing applied matches that choice - clear the kind / index / strategy picks." />}
-          {leftOut.length > 0 && <Alert type="warning" showIcon message={`Applied but not run: ${leftOut.map((x) => `#${STRATEGY_BY_ID[x.id]?.no ?? '?'} ${STRATEGY_BY_ID[x.id]?.name ?? x.id} on ${x.u} (${x.reason})`).join(' · ')}`} />}
+          {leftOut.length > 0 && <Alert type="warning" showIcon message={`${tuned ? 'Found by the run but not tested' : 'Applied but not run'}: ${leftOut.map((x) => `#${STRATEGY_BY_ID[x.id]?.no ?? '?'} ${STRATEGY_BY_ID[x.id]?.name ?? x.id} on ${x.u} (${x.reason})`).join(' · ')}`} />}
           <Space wrap size={10} align="center">
             <Segmented value={kind} onChange={(v) => { setKind(v); setPickIds([]) }} aria-label="Kind"
               options={[{ value: 'both', label: 'Both' }, { value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} />
             <Select mode="multiple" allowClear value={pickIdx} onChange={setPickIdx} placeholder="All indices" options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ minWidth: 190 }} maxTagCount="responsive" aria-label="Index" />
-            <Select mode="multiple" allowClear showSearch optionFilterProp="label" value={pickIds} onChange={setPickIds} placeholder="All applied strategies" options={idOptions} style={{ minWidth: 300, maxWidth: 520 }} maxTagCount="responsive" aria-label="Strategy" />
+            <Select mode="multiple" allowClear showSearch optionFilterProp="label" value={pickIds} onChange={setPickIds} placeholder={tuned ? 'All strategies the run tuned' : 'All applied strategies'} options={idOptions} style={{ minWidth: 300, maxWidth: 520 }} maxTagCount="responsive" aria-label="Strategy" />
           </Space>
           <Space wrap size={12} align="center">
-            <Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space>
+            {tuned ? <Text style={{ fontSize: 12 }}>{picked ? 'on the dates picked' : 'on the days before each run, or pick dates:'}</Text> : <Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space>}
             <DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" />
             <Button type="primary" onClick={run} disabled={!isAdmin || running || pairs.length === 0}>
-              Run what is applied{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strateg{pairs.reduce((a, p) => a + p.ids.length, 0) === 1 ? 'y' : 'ies'})
+              {tuned ? 'Test the last tuning run' : 'Run what is applied'}{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strateg{pairs.reduce((a, p) => a + p.ids.length, 0) === 1 ? 'y' : 'ies'})
             </Button>
             {(busy || (running && !labRunning)) && isAdmin && <Button onClick={queueAll}>Queue it after the running job</Button>}
           </Space>
@@ -249,7 +275,7 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
           <Table size="small" pagination={false} rowKey="key" dataSource={capture} scroll={{ x: 1100 }} aria-label="Capture"
             columns={[
               { title: 'Index', key: 'l', width: 190, render: (_, g) => <Text strong={!!g.top} type={g.sub ? 'secondary' : undefined} style={{ fontSize: 12, paddingLeft: g.sub ? 14 : 0 }}>{g.label}{g.top ? <Text type="secondary" style={{ fontSize: 11 }}> · {g.n} strateg{g.n === 1 ? 'y' : 'ies'}</Text> : null}</Text> },
-              { title: 'Trades · total R (applied)', key: 'r', width: 180, render: (_, g) => <span style={{ fontSize: 12 }}>{g.ar.n} · <b style={{ color: col(g.ar.total) }}>{fmtR(g.ar.total)}</b></span> },
+              { title: `Trades · total R (${tuned ? 'tuned' : 'applied'})`, key: 'r', width: 180, render: (_, g) => <span style={{ fontSize: 12 }}>{g.ar.n} · <b style={{ color: col(g.ar.total) }}>{fmtR(g.ar.total)}</b></span> },
               { title: <Tooltip title="What the applied settings captured in the index (futures / spot) points: net (trades · wins/losses)">Index points</Tooltip>, key: 'i', width: 170, render: (_, g) => legCell(g.ap) },
               { title: <Tooltip title="What the applied settings captured in the option BOUGHT (premium points)">Option bought</Tooltip>, key: 'b', width: 170, render: (_, g) => legCell(g.ap.buy) },
               { title: <Tooltip title="What the applied settings captured in the option SOLD (premium points)">Option sold</Tooltip>, key: 's', width: 170, render: (_, g) => legCell(g.ap.sell) },
@@ -261,7 +287,7 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
         </Card>
       )}
       {shown.length > 0 && (
-        <Card size="small" title={`Applied vs as written - ${shown.length} strategy / index pair(s)`}>
+        <Card size="small" title={`${word} vs as written - ${shown.length} strategy / index pair(s)`}>
           <Space direction="vertical" size={8} style={{ width: '100%' }}>
             {left > 0 && <Text type="warning" style={{ fontSize: 12 }}>{left} greyed row(s) are not counted: still running, or from a run of what was applied / the days before.</Text>}
             <Table size="small" pagination={false} rowKey="key" dataSource={shown} scroll={{ x: 1300 }} aria-label="Applied runs"
@@ -279,16 +305,18 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
                     const f = r.entry.applied?.filters
                     return (
                       <span>#{r.entry.strategy.no} {r.entry.strategy.name}{' '}
-                        <Tag style={{ marginLeft: 4 }} color={ownSetting(r.entry) ? 'blue' : undefined}>{ownSetting(r.entry) ? 'fine-tuned' : 'as written'}</Tag>
-                        {f?._appliedAt ? <Text type="secondary" style={{ fontSize: 11 }}>applied {dayMonth(f._appliedAt)}</Text> : null}
+                        {tuned
+                          ? <Tooltip title={r.entry.yours?.text}><Tag style={{ marginLeft: 4 }} color={r.pair.recommend?.[r.id] ? 'success' : undefined}>{r.pair.recommend?.[r.id] ? 'the run recommended it' : 'not recommended by the run'}</Tag></Tooltip>
+                          : <Tag style={{ marginLeft: 4 }} color={ownSetting(r.entry) ? 'blue' : undefined}>{ownSetting(r.entry) ? 'fine-tuned' : 'as written'}</Tag>}
+                        {!tuned && f?._appliedAt ? <Text type="secondary" style={{ fontSize: 11 }}>applied {dayMonth(f._appliedAt)}</Text> : null}
                         {r.updating ? <Tag color="processing" style={{ marginLeft: 6 }}>previous run - updating</Tag> : r.stale ? <Tag color="warning" style={{ marginLeft: 6 }}>older run</Tag> : null}
                       </span>
                     )
                   },
                 },
-                { title: 'As applied', key: 'a', width: 250, render: (_, r) => cell(appliedOf(r.entry)) },
+                { title: word, key: 'a', width: 250, render: (_, r) => cell(appliedOf(r.entry)) },
                 { title: 'As written', key: 'w', width: 250, render: (_, r) => cell(r.entry.asWritten) },
-                { title: 'Applied − written', key: 'd', width: 120, render: (_, r) => { const d = (appliedOf(r.entry)?.r?.total ?? 0) - (r.entry.asWritten?.r?.total ?? 0); return <b style={{ color: col(d) }}>{ownSetting(r.entry) ? fmtR(d) : '-'}</b> } },
+                { title: `${tuned ? 'Tuned' : 'Applied'} − written`, key: 'd', width: 120, render: (_, r) => { const d = (appliedOf(r.entry)?.r?.total ?? 0) - (r.entry.asWritten?.r?.total ?? 0); return <b style={{ color: col(d) }}>{ownSetting(r.entry) ? fmtR(d) : '-'}</b> } },
                 { title: <Tooltip title="What the applied setting captured in the index (futures / spot) points: net (trades · wins/losses)">Index pts</Tooltip>, key: 'idx', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points) },
                 { title: <Tooltip title="What the applied setting captured in the option BOUGHT (premium points)">Option bought</Tooltip>, key: 'buy', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points?.buy) },
                 { title: <Tooltip title="What the applied setting captured in the option SOLD (premium points)">Option sold</Tooltip>, key: 'sell', width: 150, render: (_, r) => legCell(appliedOf(r.entry)?.points?.sell) },

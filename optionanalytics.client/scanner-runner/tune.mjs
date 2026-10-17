@@ -747,7 +747,9 @@ async function main() {
       // As applied: with the trailing stop it was applied with (pinnedTrailOf), when one was stored.
       const appliedOpts = applied && pinnedTrailOf(applied) !== undefined ? { ...opts, trail: pinnedTrailOf(applied) } : opts
       const fromApplied = job.labBase === 'applied' && !!applied
-      let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...(job.params ?? {}) }
+      // Its own setting when the job gives one per strategy (a tuning run's settings tested on other days), else the one sent for all.
+      const own = job.paramsById?.[id] ?? job.params ?? {}
+      let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...own }
       if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
       // SEVERAL strategies: as written and as applied are read only as their summary (the comparison table), yet every
       // trade of them was carried in the result and shown nowhere - with all 22 picked that is two thirds of a file the
@@ -757,7 +759,7 @@ async function main() {
       // Nothing changed on top of the applied setting (the lab's "what is applied" run): the setting tried IS the applied
       // one, so it is measured once - the applied numbers are not worked out a second time under another name.
       const appliedM = applied ? evaluateSetting(days, id, paramsFromFilters(applied), appliedOpts) : null
-      const sameAsApplied = fromApplied && !!appliedM && Object.keys(job.params ?? {}).length === 0
+      const sameAsApplied = fromApplied && !!appliedM && Object.keys(own).length === 0
       results.push({
         strategy: { id, no: meta.no, name: meta.name },
         base: fromApplied ? 'applied' : 'written',

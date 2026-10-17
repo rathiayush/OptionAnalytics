@@ -507,6 +507,9 @@ public sealed record TuningJob(string Underlying, JsonNode? Strategies, int Days
 {
     /// <summary>A lab run (What = "lab"): the setting measured - the tuned-setting keys only (strategyTuning.js TUNED_SETTING_KEYS).</summary>
     public JsonObject? Params { get; init; }
+    /// <summary>A lab run: each strategy its own setting (strategy id -> params), on top of LabBase - a tuning run's
+    /// settings tested on other days. A strategy not in it takes Params.</summary>
+    public JsonObject? ParamsById { get; init; }
     /// <summary>A lab run: what Params go on top of - "written" (the strategy as written) or "applied" (its setting applied on the index).</summary>
     public string? LabBase { get; init; }
     /// <summary>The fewest trades a month a setting must take on the train days to be chosen (0: no such rule).</summary>

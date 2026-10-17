@@ -17,7 +17,10 @@ of each (the changes - `labOverrides` - on top of each one's start, `labBase` wr
 first run now and the rest queued, every strategy measured on one day scan); it writes no tuning history. It opens on "What is applied, on older days" (`AppliedLab.jsx`,
 `appliedPlan.js`): one click runs every strategy applied on each index over past days as applied vs as written (`labBase: 'applied'`,
 no changes on top, one job per index and kind - futures / spot - the first now, the rest queued); an applied strategy that has since
-been retired is listed and left out, never a reason to fail the run (the job leaves out any unrunnable id: `strategiesLeftOut`). Each index keeps its
+been retired is listed and left out, never a reason to fail the run (the job leaves out any unrunnable id: `strategiesLeftOut`). Its other choice,
+"The last tuning run" (`tunedPlan`), tests each index's newest tuning run on the days BEFORE it (as many calendar days as it
+covered, ending the day before its first): every strategy it found a setting for, each with its OWN setting (`paramsById` on
+the lab job, as written underneath) beside as written - the out-of-sample check of a setting before it is applied. Each index keeps its
 last lab result; a lab run that fails, crashes or is stopped REPLACES it with why (`WriteLabFailure`) - an older run's numbers
 never pass for a new run's. The page counts only results of the setting and days set now: an index it started that has not
 written its new result yet ("running / queued - showing its previous run") or an older setting / other days is greyed and
