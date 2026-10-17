@@ -115,7 +115,7 @@ export function openingOf(bars) {
 export function prevDayOf(result) {
   const bars = (result?.bars ?? []).filter((b) => b.high > 0 && b.low > 0 && b.close > 0)
   if (!bars.length) return null
-  return { date: result.profileDate ?? null, high: Math.max(...bars.map((b) => b.high)), low: Math.min(...bars.map((b) => b.low)), close: bars.at(-1).close }
+  return { date: result.profileDate ?? null, high: Math.max(...bars.map((b) => b.high)), low: Math.min(...bars.map((b) => b.low)), close: bars.at(-1).close, closes: bars.map((b) => b.close) }
 }
 
 // Our OWN spot profile (#111 - #113 read it): built here from the day's spot candles - no server profile, no futures. Spot
@@ -200,7 +200,7 @@ export function spotProfile(bars, step) {
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlying = null }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlying = null, prevDay = null }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -256,7 +256,9 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
     buckets.set(k, [...(buckets.get(k) ?? []), b])
   }
   const candleOf = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
-  const closesTf = candleOf.map((xs) => xs.at(-1).close)
+  // Warm-up (emaWarm): the previous session's candles in front, so the EMAs are ready at the open instead of ~10:20.
+  const warm = f.emaWarm && prevDay?.closes?.length ? prevDay.closes.filter((_, i) => (i + 1) % f.emaTf === 0) : []
+  const closesTf = [...warm, ...candleOf.map((xs) => xs.at(-1).close)]
   const vwapNow = f.vwapMode === 'off' ? null : vwapSeries(bars.filter((b) => b.t >= sessionStart)).at(-1)
   // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
   const atmK = Math.round(spotNow / oi.step) * oi.step
@@ -268,10 +270,12 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
   const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
   // The trailing stop's points: fixed for this index (NIFTY when the index is not named), or the ATR's multiples.
   const index = ['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(underlying) ? underlying : 'NIFTY'
+  const stopPts = f.stopAtr * atr
   const trail = f.trailMode === 'off' ? null
+    : f.trailMode === 'r' ? { start: +(f.trailStartR * stopPts).toFixed(2), gap: +(f.trailGapR * stopPts).toFixed(2), r: true }
     : f.trailMode === 'atr' ? { start: +(f.trailStartAtr * atr).toFixed(2), gap: +(f.trailGapAtr * atr).toFixed(2), atr: true }
       : { start: f[`trailStart${index}`], gap: f[`trailGap${index}`] }
-  const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : ''}` : 'no trailing stop')
+  const trailText = (t) => (t ? `${index} trailing stop after ${t.start} pts${t.atr ? ` (${f.trailStartAtr} ATR)` : t.r ? ` (${f.trailStartR}R)` : ''}, ${t.gap} pts behind${t.atr ? ` (${f.trailGapAtr} ATR)` : t.r ? ` (${f.trailGapR}R)` : ''}` : 'no trailing stop')
   if (leadNow != null && leadPrev != null) {
     for (const dir of [1, -1]) {
       const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
@@ -292,7 +296,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, underlyi
       if (emaWith && vwapWith && legWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
         // Its own trailing stop: this index's fixed points (after `start` in profit it stays `gap` behind the best price), or
         // dynamic - the same in multiples of the ATR -, or none. A tuned trailing stop (the tradeTrail filter) overrides it.
-        push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
+        push('spotFlip', dir, stopPts, f.targetAtr * atr, 330, {
           OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
           Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
           Trend: f.emaMode === 'off' ? 'EMA not asked' : `${f.emaTf}-min EMA ${f.emaFast} ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${ema21.toFixed(1)}${f.emaMode === 'cross' ? ` (crossed within ${f.crossBars} candles)` : ''}`,

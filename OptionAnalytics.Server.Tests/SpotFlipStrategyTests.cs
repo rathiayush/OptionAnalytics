@@ -126,4 +126,33 @@ public sealed class SpotFlipStrategyTests
         foreach (var k in new[] { "flipTf", "emaTf", "emaMode", "crossBars", "emaFast", "emaSlow", "vwapMode", "optEmaMode", "optEmaLegs", "optEmaFast", "optEmaSlow", "deltaMin", "nearStrikes", "lastEntryMinutes", "exitOnFlipBack", "slPoints", "tpPoints" })
             Assert.Contains(k, keys);
     }
+
+    private static List<Candle> RiseThen(int turn, decimal slope) =>
+        Enumerable.Range(0, Minutes).Select(i =>
+        {
+            var c = i <= turn ? 23000m + i : 23000m + turn + slope * (i - turn);
+            return new Candle(T0.AddMinutes(i), c, c + 1, c - 1, c);
+        }).ToList();
+
+    [Fact]
+    public void The_index_stop_takes_the_trade_out_and_a_trailing_stop_follows_a_run()
+    {
+        var p = Small(); p["exitOnFlipBack"] = 0;
+        // A fall right after the entry: out at the index stop-loss.
+        var (e1, _, x1) = new SpotFlipStrategy().Evaluate(Context(RiseThen(FlipAt, -3), 60_000, 0), p);
+        Assert.Single(e1);
+        Assert.Equal("Index stop-loss", x1[e1[0].Time].Reason);
+        // A run well past the trailing start, then a fall: out by the trailing stop, not the first stop.
+        p["target" + "Atr"] = 10;
+        var (e2, _, x2) = new SpotFlipStrategy().Evaluate(Context(RiseThen(FlipAt + 12, -3), 60_000, 0), p);
+        Assert.Equal("Index trailing stop", x2[e2[0].Time].Reason);
+        // Index exits off: none.
+        p["indexExit"] = 0;
+        var (e3, _, x3) = new SpotFlipStrategy().Evaluate(Context(RiseThen(FlipAt, -3), 60_000, 0), p);
+        Assert.Empty(x3);
+        // The trailing stop in R and in ATR is configurable too.
+        p["indexExit"] = 1; p["trailMode"] = 3; p["trailStartR"] = 0.5m; p["trailGapR"] = 0.5m;
+        var (e4, _, x4) = new SpotFlipStrategy().Evaluate(Context(RiseThen(FlipAt + 12, -3), 60_000, 0), p);
+        Assert.Equal("Index trailing stop", x4[e4[0].Time].Reason);
+    }
 }

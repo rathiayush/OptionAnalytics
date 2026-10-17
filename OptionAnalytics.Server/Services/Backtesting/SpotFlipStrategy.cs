@@ -14,7 +14,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// first bar of the day, so the lead is an approximation of the scanner's whole-chain read, not the same number. OI is read
 /// from the minute before the clock (finished minutes only). A 20-minute cooldown per side, like the scanner.
 /// The option leaves by the simulator's premium stop / target / square-off, and (exitOnFlipBack) when the lead flips back.
-/// No trailing stop here - the simulator has none.
+/// The index (spot) stop-loss, target and trailing stop (points per index, x ATR or in R) leave it too - the earliest wins.
 /// </summary>
 public sealed class SpotFlipStrategy : IBacktestStrategy
 {
@@ -24,6 +24,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
 
     private const int CooldownMinutes = 20;
     private const decimal ModeOff = 0, ModeState = 1, ModeCross = 2;
+    private const decimal TrailOff = 0, TrailPoints = 1, TrailAtr = 2, TrailR = 3;
 
     private static BacktestParameterOption[] ModeOptions(string state, string cross) => new[]
     {
@@ -45,6 +46,27 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         for (var i = Math.Max(0, n - 1 - crossBars); i < n - 1; i++)
             if (f[i] is { } a && sl[i] is { } b && sign * (a - b) <= 0) return true;
         return false;
+    }
+
+    private static decimal AvgRange(IReadOnlyList<Candle> bars, DateTimeOffset upTo)
+    {
+        decimal sum = 0; var n = 0;
+        for (var i = bars.Count - 1; i >= 0 && n < 14; i--)
+        {
+            if (bars[i].Time > upTo) continue;
+            sum += bars[i].High - bars[i].Low; n++;
+        }
+        return n == 0 ? 0 : sum / n;
+    }
+
+    private static (decimal? Start, decimal? Gap) TrailPointsOf(string underlying, decimal mode, IReadOnlyDictionary<string, decimal> p, decimal atr, decimal stopPts)
+    {
+        if (mode == TrailOff) return (null, null);
+        if (mode == TrailAtr) return (p.GetValueOrDefault("trailStartAtr", 1m) * atr, p.GetValueOrDefault("trailGapAtr", 1m) * atr);
+        if (mode == TrailR) return (p.GetValueOrDefault("trailStartR", 1m) * stopPts, p.GetValueOrDefault("trailGapR", 1m) * stopPts);
+        var own = underlying.ToUpperInvariant() switch { "BANKNIFTY" => 20m, "SENSEX" => 30m, _ => 10m };
+        var start = p.GetValueOrDefault("trailStartPts", 0m); var gap = p.GetValueOrDefault("trailGapPts", 0m);
+        return (start > 0 ? start : own, gap > 0 ? gap : own);
     }
 
     private static decimal?[] EmaAll(IReadOnlyList<decimal> v, int period)
@@ -89,6 +111,23 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         new BacktestParameterSpec("deltaMin", "CE/PE OI change over the last (minutes)", Default: 10, Min: 3, Max: 15, Step: 1),
         new BacktestParameterSpec("nearStrikes", "OI walls: ATM +/- strikes", Default: 2, Min: 1, Max: 5, Step: 1),
         new BacktestParameterSpec("lastEntryMinutes", "No entries after (IST time)", Default: 885, Min: 0, Max: 1439, Step: 1),
+        new BacktestParameterSpec("indexExit", "Leave on the index stop / target / trailing stop (spot) too (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
+        new BacktestParameterSpec("stopAtr", "Index stop-loss (x ATR)", Default: 1.5m, Min: 0.5m, Max: 5, Step: 0.25m),
+        new BacktestParameterSpec("targetAtr", "Index target (x ATR)", Default: 3, Min: 0.5m, Max: 10, Step: 0.25m),
+        new BacktestParameterSpec("trailMode", "Trailing stop on the index", Default: TrailPoints, Min: TrailOff, Max: TrailR, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(TrailOff, "No trailing stop"),
+            new BacktestParameterOption(TrailPoints, "Fixed points (this index: NIFTY 10 / BANKNIFTY 20 / SENSEX 30, or the points below)"),
+            new BacktestParameterOption(TrailAtr, "Dynamic: x the ATR"),
+            new BacktestParameterOption(TrailR, "In R: x the stop distance (0.5R, 1R ...)"),
+        }),
+        new BacktestParameterSpec("trailStartPts", "Points: trailing starts after (0 = this index's own)", Default: 0, Min: 0, Max: 1500, Step: 1),
+        new BacktestParameterSpec("trailGapPts", "Points: stays this far behind (0 = this index's own)", Default: 0, Min: 0, Max: 1500, Step: 1),
+        new BacktestParameterSpec("trailStartAtr", "ATR: trailing starts after (x ATR)", Default: 1, Min: 0.2m, Max: 10, Step: 0.1m),
+        new BacktestParameterSpec("trailGapAtr", "ATR: stays this far behind (x ATR)", Default: 1, Min: 0.2m, Max: 10, Step: 0.1m),
+        new BacktestParameterSpec("trailStartR", "R: trailing starts after (x the stop distance)", Default: 1, Min: 0.25m, Max: 5, Step: 0.25m),
+        new BacktestParameterSpec("trailGapR", "R: stays this far behind (x the stop distance)", Default: 1, Min: 0.25m, Max: 5, Step: 0.25m),
+        new BacktestParameterSpec("emaWarm", "EMAs: carry the previous day's candles over (1 = yes)", Default: 0, Min: 0, Max: 1, Step: 1),
         new BacktestParameterSpec("exitOnFlipBack", "Leave when the CE-PE flip comes back (1 = yes)", Default: 1, Min: 0, Max: 1, Step: 1),
     };
 
@@ -139,7 +178,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         return e;
     }
 
-    private (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals, Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> Exits) Evaluate(
+    internal (List<(DateTimeOffset Time, string Direction)> Entries, List<BacktestSignal> Signals, Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)> Exits) Evaluate(
         BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> p)
     {
         var entries = new List<(DateTimeOffset Time, string Direction)>();
@@ -160,6 +199,11 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var nearStrikes = Math.Max(1, (int)p["nearStrikes"]);
         var signalStart = (int)p.GetValueOrDefault("signalStartMinutes", 555);
         var lastEntry = (int)p.GetValueOrDefault("lastEntryMinutes", 885);
+        var indexExit = p.GetValueOrDefault("indexExit", 1m) >= 0.5m;
+        var stopAtr = p.GetValueOrDefault("stopAtr", 1.5m);
+        var targetAtr = p.GetValueOrDefault("targetAtr", 3m);
+        var trailMode = p.GetValueOrDefault("trailMode", TrailPoints);
+        var emaWarm = p.GetValueOrDefault("emaWarm", 0m) >= 0.5m;
         var exitOnFlipBack = p.GetValueOrDefault("exitOnFlipBack", 1m) >= 0.5m;
         var step = Math.Max(1, context.Step);
 
@@ -228,7 +272,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         foreach (var bar in bars)
         {
             var day = IstClock.IstDate(bar.Time);
-            if (day != curDay) { curDay = day; dayCloses.Clear(); candleEnds.Clear(); inBucket = 0; vwapSum = 0; vwapCount = 0; }
+            if (day != curDay) { curDay = day; if (!emaWarm) dayCloses.Clear(); candleEnds.Clear(); inBucket = 0; vwapSum = 0; vwapCount = 0; }
             vwapSum += (bar.High + bar.Low + bar.Close) / 3; vwapCount++;
             // A candle counts once all its minutes are in.
             if (++inBucket == emaTf) { dayCloses.Add(bar.Close); candleEnds.Add(bar.Time + one); inBucket = 0; }
@@ -272,17 +316,30 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                 lastFire[dir] = clock;
                 signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Entry", name, detail));
                 entries.Add((bar.Time, name));
-                if (exitOnFlipBack)
+                // The trade's exit in the index (spot): its stop, target and trailing stop, and the flip coming back - the first.
+                (DateTimeOffset Time, string Reason)? exit = null;
+                var atr = Math.Max(AvgRange(bars, bar.Time), bar.Close * 0.0004m);
+                var stopPts = stopAtr * atr;
+                var targetPts = targetAtr * atr;
+                var (trailStart, trailGap) = TrailPointsOf(context.Underlying, trailMode, p, atr, stopPts);
+                var entryPrice = bar.Close;
+                var level = entryPrice - dir * stopPts;
+                var best = entryPrice;
+                foreach (var later in bars.Where(x => x.Time > bar.Time && IstClock.IstDate(x.Time) == day))
                 {
-                    foreach (var later in bars.Where(x => x.Time > bar.Time && IstClock.IstDate(x.Time) == day))
+                    if (indexExit)
                     {
-                        if (lead(later.Time + one) is { } l && (dir > 0 ? l >= 0 : l <= 0))
-                        {
-                            exits[bar.Time] = (later.Time, "CE-PE flipped back");
-                            break;
-                        }
+                        var stopHit = dir > 0 ? later.Low <= level : later.High >= level;
+                        if (stopHit) { exit = (later.Time, level == entryPrice - dir * stopPts ? "Index stop-loss" : "Index trailing stop"); break; }
+                        if (dir > 0 ? later.High >= entryPrice + targetPts : later.Low <= entryPrice - targetPts) { exit = (later.Time, "Index target"); break; }
+                        // The trailing stop moves after each completed bar and only tightens.
+                        best = dir > 0 ? Math.Max(best, later.High) : Math.Min(best, later.Low);
+                        if (trailStart is { } ts && trailGap is { } tg && dir * (best - entryPrice) >= ts)
+                            level = dir > 0 ? Math.Max(level, best - tg) : Math.Min(level, best + tg);
                     }
+                    if (exitOnFlipBack && lead(later.Time + one) is { } l && (dir > 0 ? l >= 0 : l <= 0)) { exit = (later.Time, "CE-PE flipped back"); break; }
                 }
+                if (exit is { } e) exits[bar.Time] = e;
             }
         }
 

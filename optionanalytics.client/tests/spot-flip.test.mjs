@@ -171,3 +171,21 @@ test('the Strategy lab can change #101\'s own rules (timeframes, EMAs, VWAP, ATM
   assert.equal(next.nearStrikes, 3, 'a rule the lab setting does not mention stays')
   assert.deepEqual(entryPartOf('spotFlip', { emaTf: 5, tradeSide: 'long' }), { emaTf: 5 })
 })
+
+test('trailing in R (x the stop distance), the stop and target in ATR, and the EMAs warmed up from the previous day', () => {
+  const f = strategyFilters('spotFlip', {})
+  assert.deepEqual([f.stopAtr, f.targetAtr, f.trailStartR, f.trailGapR, f.emaWarm], [1.5, 3, 1, 1, false], 'the defaults are the rule as written')
+  const base = mine(flipLong())[0]
+  const r = mine(flipLong(), { spotFlip: { trailMode: 'r', trailStartR: 0.5, trailGapR: 1 } })[0]
+  const stop = base.entry - base.stop
+  assert.ok(Math.abs(r.trailOverride.startPts - 0.5 * stop) < 0.01 && Math.abs(r.trailOverride.gapPts - stop) < 0.01, 'trailing 0.5R after, 1R behind')
+  assert.match(r.checks.Trail, /\(0\.5R\).*\(1R\)/)
+  const wide = mine(flipLong(), { spotFlip: { stopAtr: 2.5, targetAtr: 5 } })[0]
+  assert.ok(Math.abs((wide.entry - wide.stop) - stop * 2.5 / 1.5) < 0.01 && Math.abs((wide.target - wide.entry) - 2 * (base.target - base.entry) * 5 / 6) < 0.01)
+  // EMA 80 on 3-minute candles is never ready in one session; the previous day's candles in front make it ready at the open.
+  const slow = { emaFast: 7, emaSlow: 80 }
+  assert.equal(mine(flipLong(), { spotFlip: slow }).length, 0)
+  const prevDay = { date: '2025-01-01', high: 22400, low: 22000, close: 22399, closes: Array.from({ length: 375 }, (_, i) => 22000 + i) }
+  const w = scanSpotDay({ ...flipLong(), filters: { spotFlip: { ...slow, emaWarm: true } }, prevDay }).filter((s) => s.id === 'spotFlip')
+  assert.equal(w.length, 1, 'ready with the previous day in front')
+})
