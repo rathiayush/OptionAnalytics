@@ -17,7 +17,7 @@
 // drive a whole day through it.
 
 import { buildOiContext, optionTradeAt, premiumAt, strategyStats, topFifteen, STRATEGY_BY_ID, optionPlanFor, optionExitText, squareOffMs, lotsFor } from '../src/strategyEngine.js'
-import { spotBarsOf } from '../src/spotEngine.js'
+import { prevDayOf, spotBarsOf } from '../src/spotEngine.js'
 import { liquiditySignals, pullStackSignals, autoBigLots } from '../src/orderFlowMath.js'
 import {
   MIN, msOf, scanTick, spotScanTick, followAllSetups, trailFor, alertIdsFor, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
@@ -508,7 +508,9 @@ export class IndexScanner {
       return []
     }
     this.spotMinute = minute
-    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying) }, this.memory)?.fresh ?? []
+    // The previous trading day's high / low / close (#115's sweep) - from the previous day's spot bars loaded with the day.
+    const prevDay = this.data.prevDay !== undefined ? this.data.prevDay : (this.data.prevDay = prevDayOf(this.data.spotVp))
+    return spotScanTick({ minute, bars, oi: this.data.oi, filters: cfg.filters, trail: trailFor(cfg, this.underlying), prevDay }, this.memory)?.fresh ?? []
   }
 
   // Today's finished spot minutes by `minute`: the server's own 1-minute spot candles (its live feed, every tick), over
@@ -536,12 +538,13 @@ export class IndexScanner {
     // The moment it alerts, the option is paper-traded (the sell side by default) - as on the page.
     // Buy or sell, which strike (this strategy's own if it was tuned and applied, else the scanner's), and how the option
     // leaves the trade - always the strategy's own exit, held to the index's Max SL / Max target (optionPlanFor).
-    const plan = optionPlanFor(s.id, cfg.filters, cfg)
+    // (A signal that decides its own leg - #115 - is taken that way under "per strategy", unless a tuned leg is applied.)
+    const plan = optionPlanFor(s.id, cfg.filters, cfg, null, s)
     const side = plan.leg
     const trade = side ? optionTradeAt(this.data.oi, s, side, plan.moneyness) : null
     if (trade) {
       const premium = premiumAt(this.data.oi, trade.side, trade.strike, s.t) ?? trade.premium
-      const levels = optionPlanFor(s.id, cfg.filters, cfg, premium) // a % SL / target needs the premium
+      const levels = optionPlanFor(s.id, cfg.filters, cfg, premium, s) // a % SL / target needs the premium
       // This strategy's own lot size on this index when one was applied with it, else the index's lots (Trade settings).
       const lots = lotsFor(s.id, cfg.filters, cfg.paperLots)
       if (!this.positions.some((p) => sameSignal(p, s, trade))) {

@@ -53,6 +53,64 @@ const avgRange = (bars, n = 14) => {
   return last.length ? last.reduce((s, b) => s + (b.high - b.low), 0) / last.length : 0
 }
 
+// ---- #115's three indicators: EMA, RSI and VWAP (and nothing else) ----
+/** EMA of `values`, aligned with them: null until `period` values, then seeded with their simple average. */
+export function emaSeries(values, period) {
+  const out = new Array(values.length).fill(null)
+  if (values.length < period) return out
+  let e = values.slice(0, period).reduce((a, v) => a + v, 0) / period
+  out[period - 1] = e
+  const k = 2 / (period + 1)
+  for (let i = period; i < values.length; i++) { e = values[i] * k + e * (1 - k); out[i] = e }
+  return out
+}
+/** Wilder's RSI of `closes`, aligned with them: null until `period` changes are in. */
+export function rsiSeries(closes, period = 14) {
+  const out = new Array(closes.length).fill(null)
+  if (closes.length <= period) return out
+  let gain = 0
+  let loss = 0
+  for (let i = 1; i <= period; i++) { const d = closes[i] - closes[i - 1]; if (d > 0) gain += d; else loss -= d }
+  gain /= period
+  loss /= period
+  const rsi = () => (loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss))
+  out[period] = rsi()
+  for (let i = period + 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1]
+    gain = (gain * (period - 1) + Math.max(d, 0)) / period
+    loss = (loss * (period - 1) + Math.max(-d, 0)) / period
+    out[i] = rsi()
+  }
+  return out
+}
+/** The session's VWAP at each finished minute. The index has no traded volume (neither has its spot feed), so each
+ *  minute weighs the same: the running average of the typical price (high + low + close) / 3 - time-weighted. */
+export function vwapSeries(bars) {
+  let sum = 0
+  return bars.map((b, i) => { sum += (b.high + b.low + b.close) / 3; return sum / (i + 1) })
+}
+/** The opening: the 09:15 - 09:29 minutes as three 5-minute candles and their range - null until all 15 are in. drive:
+ *  +1 when 2+ of the three closed up and the third closed above the first's open (a drive up), -1 the mirror, else 0. */
+export function openingOf(bars) {
+  const first = bars.filter((b) => { const m = istMinute(b.t); return m >= 555 && m < 570 })
+  if (first.length < 15) return null
+  const candle = (xs) => ({ open: xs[0].open, close: xs.at(-1).close, high: Math.max(...xs.map((b) => b.high)), low: Math.min(...xs.map((b) => b.low)) })
+  const candles = [0, 5, 10].map((i) => candle(first.slice(i, i + 5)))
+  const ups = candles.filter((c) => c.close > c.open).length
+  const downs = candles.filter((c) => c.close < c.open).length
+  const drive = ups >= 2 && candles[2].close > candles[0].open ? 1 : downs >= 2 && candles[2].close < candles[0].open ? -1 : 0
+  return { candles, high: Math.max(...candles.map((c) => c.high)), low: Math.min(...candles.map((c) => c.low)), ups, downs, drive }
+}
+/** The previous trading day's high, low and close from its 1-minute spot bars (GET /api/oi-replay/{index}/previous-day-
+ *  volume-profile - its `bars`; only their high / low / close are read, never a volume profile). Null without bars. */
+export function prevDayOf(result) {
+  const bars = (result?.bars ?? []).filter((b) => b.high > 0 && b.low > 0 && b.close > 0)
+  if (!bars.length) return null
+  return { date: result.profileDate ?? null, high: Math.max(...bars.map((b) => b.high)), low: Math.min(...bars.map((b) => b.low)), close: bars.at(-1).close }
+}
+const ADAPTIVE_LEAN = 0.15 // #115: the whole chain's OI added since the open leans this much to call it one-sided
+const ADAPTIVE_BALANCE = [0.8, 1.25] // ... support OI (PE, 3 strikes under) / resistance OI (CE, 3 over) in this band = balanced
+
 // Our OWN spot profile (#111 - #113 read it): built here from the day's spot candles - no server profile, no futures. Spot
 // has no traded volume, so each finished minute counts once - time at price, a TPO profile - spread evenly over the rows
 // (a tenth of the strike step) its high - low covers. Only minutes that finished PROFILE_LAG or more before the clock are
@@ -135,7 +193,7 @@ export function spotProfile(bars, step) {
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {}, prevDay = null }) {
   if (!oi || bars.length < 15) return []
   const minute = istMinute(nowMs)
   if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
@@ -164,9 +222,10 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     })),
     support, resistance, spot: spotNow, ...ahead,
   })
-  const push = (id, dir, stopPts, targetPts, timeStopMin, checks) => {
+  const push = (id, dir, stopPts, targetPts, timeStopMin, checks, extra = null) => {
     if (!(stopPts > 0) || !(targetPts > 0)) return
     out.push({
+      ...extra,
       id, name: BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: spotNow,
       stop: spotNow - dir * stopPts, target: spotNow + dir * targetPts,
       timeStopMs: Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN),
@@ -529,6 +588,136 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
     }
   }
 
+  // 15. ADAPTIVE - read the day, then play it. Everything from finished minutes and OI points only.
+  //   The day: the opening (09:15 - 09:29 as three 5-minute candles: their range and whether they drove one way), the
+  //   price against that range, the session VWAP and EMA 9 / 21; the option chain - the total CE vs PE added since the
+  //   open (the whole chain's lean), CE / PE at ATM +/- 2 strikes on 15 minutes, the support (PE) vs resistance (CE) OI on
+  //   the 3 strikes each side (balanced = a range), the walls' writers growing or leaving; RSI for stretch and momentum;
+  //   the previous day's high / low for a liquidity sweep.
+  //   - TREND (BUY the option): the opening range broken with the price beyond VWAP and EMA 9 over 21 (under, short), the
+  //     opening candles not against it, writers on the trade's side since the open, RSI with it but not exhausted; 2+ of:
+  //     ATM +/- 2 CE / PE with it, the wall ahead's writers leaving, the S/R OI in its favour, the option to buy above its
+  //     own EMA 9 (its buyers already in). Entered on the range break or on a pullback to EMA 9 that resumes.
+  //   - RANGE (SELL the option): the OI not one-sided since the open, support and resistance OI balanced, neither wall's
+  //     writers leaving, the price crossing VWAP back and forth; it fades the wall it touched - RSI stretched and turning,
+  //     a candle back off the wall, room back to VWAP (the target).
+  //   - SWEEP (BUY the turn): the previous day's high (low) taken out for the first time today in the last 10 minutes and
+  //     the price back under (over) it, RSI rolling over from a high (up from a low), back across EMA 9, the OI defending
+  //     the level or ATM +/- 2 turning with the trade.
+  //   At most 5 signals a day (maxPerDay - the cooldown layer counts them, the same live and in the tuning).
+  if (bars.length >= 22) {
+    const minuteNow = istMinute(nowMs)
+    const closes = bars.map((b) => b.close)
+    const ema9s = emaSeries(closes, 9)
+    const ema21s = emaSeries(closes, 21)
+    const rsis = rsiSeries(closes, 14)
+    const vwaps = vwapSeries(bars)
+    const ema9 = ema9s.at(-1)
+    const ema21 = ema21s.at(-1)
+    const rsi = rsis.at(-1)
+    const rsiPrev = rsis.at(-2)
+    const vwap = vwaps.at(-1)
+    const opening = openingOf(bars)
+    const nearRead = optionOiRead(oi, spotNow, nowMs, 15, 2)
+    const nearSides = sideOiChanges(nearRead, false)
+    const atWalls = wallOiChanges(oi, { resistanceAhead: resistance, supportAhead: support }, nowMs, 15) // the walls the price sits between
+    const aheadWalls = wallOiChanges(oi, ahead, nowMs, 15)
+    const ladder = ladderAt(nowMs)
+    const leanOpen = Number.isFinite(read.leanOpen) ? read.leanOpen : null
+    const balanced = ladder != null && ladder >= ADAPTIVE_BALANCE[0] && ladder <= ADAPTIVE_BALANCE[1]
+    // How often the price crossed VWAP in the last hour (each minute's close against that minute's VWAP).
+    let crosses = 0
+    for (let i = Math.max(1, bars.length - 60); i < bars.length; i++) if (Math.sign(closes[i] - vwaps[i]) * Math.sign(closes[i - 1] - vwaps[i - 1]) < 0) crosses++
+    const f1 = (v) => (v == null ? '-' : Number(v).toFixed(1))
+    const dayLine = (type) => `${type}; opening ${opening ? `${f1(opening.low)}-${f1(opening.high)}, 5-min candles ${opening.ups} up / ${opening.downs} down${opening.drive ? ` (a drive ${opening.drive > 0 ? 'up' : 'down'})` : ''}` : 'not complete'}; VWAP ${f1(vwap)} (crossed ${crosses}x in the last hour)${prevDay ? `; yesterday ${f1(prevDay.low)}-${f1(prevDay.high)}, close ${f1(prevDay.close)}` : ''}`
+    const oiLine = () => `since the open CE ${pct(read.ceNow > 0 ? read.ceOpen / read.ceNow : null)} / PE ${pct(read.peNow > 0 ? read.peOpen / read.peNow : null)} (lean ${leanOpen == null ? '-' : leanOpen.toFixed(2)}); ATM +/- 2 on 15m CE ${pct(nearSides.ceD)} / PE ${pct(nearSides.peD)}; S/R OI ${ladder == null ? '-' : `${ladder.toFixed(2)}x`}${balanced ? ' (balanced)' : ''}; put wall ${support ?? '-'} ${pct(atWalls.supChg)} / call wall ${resistance ?? '-'} ${pct(atWalls.resChg)} on 15m`
+    const indLine = () => `EMA 9 ${f1(ema9)} / 21 ${f1(ema21)}; RSI ${rsi == null ? '-' : rsi.toFixed(1)}; VWAP ${f1(vwap)}`
+    const lastIsWith = (dir) => (dir > 0 ? last.close > last.open : last.close < last.open)
+    // The option a trend trade buys (the call for a long), at the ATM strike: its last 20 minutes' premiums, read like the
+    // OI (each at its minute's end), against their own EMA 9.
+    const premiumWith = (dir) => {
+      const side = dir > 0 ? 'CE' : 'PE'
+      const xs = bars.slice(-20).map((b) => premiumAt(oi, side, atmK, b.t + MIN)).filter((v) => v != null)
+      const e = emaSeries(xs, 9).at(-1)
+      return xs.length >= 12 && e != null ? { now: xs.at(-1), ema: e, above: xs.at(-1) > e } : null
+    }
+
+    if (ema9 != null && ema21 != null && rsi != null && rsiPrev != null && opening) {
+      for (const dir of [1, -1]) {
+        // ---- TREND: buy the option ----
+        const orEdge = dir > 0 ? opening.high : opening.low
+        const beyondOr = dir * (spotNow - orEdge) > 0.1 * atr
+        const trendDay = beyondOr && dir * (spotNow - vwap) > 0 && dir * (ema9 - ema21) > 0
+        const writersWith = leanOpen != null && dir * leanOpen >= ADAPTIVE_LEAN
+        const rsiMomentum = dir > 0 ? rsi >= 52 && rsi <= 75 : rsi >= 25 && rsi <= 48
+        const brokeNow = prev && dir * (prev.close - orEdge) <= 0.1 * atr && beyondOr
+        const touchedEma = bars.slice(-6, -1).some((b, i) => { const e = ema9s[bars.length - 6 + i]; return e != null && (dir > 0 ? b.low <= e : b.high >= e) })
+        const resumed = prev && lastIsWith(dir) && dir * (spotNow - (dir > 0 ? prev.high : prev.low)) > 0
+        const trigger = brokeNow ? 'broke the opening range' : touchedEma && resumed ? 'pulled back to EMA 9 and resumed' : null
+        if (minuteNow <= 13 * 60 + 30 && trendDay && opening.drive !== -dir && writersWith && rsiMomentum && trigger) {
+          const prem = premiumWith(dir)
+          const confirm = [
+            sideScore(dir, nearSides.ceD, nearSides.peD) >= 1 ? 'ATM +/- 2 CE / PE with it' : null,
+            (dir > 0 ? aheadWalls.resChg : aheadWalls.supChg) != null && (dir > 0 ? aheadWalls.resChg : aheadWalls.supChg) <= -WALL_BAR ? `the ${dir > 0 ? 'call' : 'put'} wall ahead's writers leaving` : null,
+            ladder != null && (dir > 0 ? ladder >= 1.15 : ladder <= 1 / 1.15) ? `${dir > 0 ? 'support' : 'resistance'} OI outweighs the other side` : null,
+            prem?.above ? `the ATM ${dir > 0 ? 'call' : 'put'} above its EMA 9 (${f1(prem.now)} vs ${f1(prem.ema)})` : null,
+          ].filter(Boolean)
+          if (confirm.length >= 2) {
+            const swing = dir > 0 ? Math.min(...bars.slice(-6).map((b) => b.low)) : Math.max(...bars.slice(-6).map((b) => b.high))
+            const stopPts = Math.min(3 * atr, Math.max(1.0 * atr, dir * (spotNow - swing) + 0.3 * atr))
+            push('spotAdaptive', dir, stopPts, 2 * stopPts, 60, {
+              Day: dayLine(dir > 0 ? 'TREND up' : 'TREND down'), OI: oiLine(), Indicators: indLine(),
+              Plan: `BUY the ${dir > 0 ? 'call' : 'put'} - ${trigger}; ${confirm.join(', ')}`,
+            }, { optLeg: 'buy', mode: 'trend' })
+          }
+        }
+
+        // ---- RANGE: sell the option at the wall it fades ----
+        const wall = dir > 0 ? support : resistance // the wall a long bounces off - the put wall under the price
+        const rangeDay = leanOpen != null && Math.abs(leanOpen) < ADAPTIVE_LEAN && balanced
+          && atWalls.supChg != null && atWalls.resChg != null && atWalls.supChg > -WALL_BAR && atWalls.resChg > -WALL_BAR && crosses >= 2
+        if (minuteNow >= 10 * 60 && minuteNow <= 14 * 60 + 15 && rangeDay && wall != null) {
+          const touched = bars.slice(-3).some((b) => (dir > 0 ? b.low <= wall + 0.35 * atr : b.high >= wall - 0.35 * atr)) && dir * (spotNow - wall) > 0
+          const stretched = (dir > 0 ? Math.min(...rsis.slice(-4)) <= 35 : Math.max(...rsis.slice(-4)) >= 65) && dir * (rsi - rsiPrev) > 0
+          const room = dir * (vwap - spotNow)
+          const stopPts = Math.max(1.0 * atr, dir * (spotNow - wall) + 0.5 * atr)
+          if (touched && stretched && lastIsWith(dir) && room >= 0.6 * atr && room >= 0.8 * stopPts && sideScore(dir, nearSides.ceD, nearSides.peD) >= 0) {
+            push('spotAdaptive', dir, stopPts, room, 45, {
+              Day: dayLine('RANGE'), OI: oiLine(), Indicators: indLine(),
+              Plan: `SELL the ${dir > 0 ? 'put' : 'call'} - faded the ${dir > 0 ? 'put' : 'call'} wall ${wall} with RSI ${dir > 0 ? 'up from' : 'down from'} ${dir > 0 ? 'oversold' : 'overbought'}; target VWAP ${f1(vwap)}`,
+            }, { optLeg: 'sell', mode: 'range' })
+          }
+        }
+
+        // ---- SWEEP of the previous day's high / low: buy the turn ----
+        // dir is the trade: a SHORT after yesterday's high was swept, a LONG after its low was.
+        const level = prevDay ? (dir < 0 ? prevDay.high : prevDay.low) : null
+        if (level != null && minuteNow <= 14 * 60) {
+          const lastTen = bars.slice(-10)
+          const before = bars.slice(0, -10)
+          const swept = lastTen.some((b) => (dir < 0 ? b.high >= level + 0.05 * atr : b.low <= level - 0.05 * atr))
+          const firstTime = before.length > 0 && before.every((b) => (dir < 0 ? b.high < level : b.low > level))
+          const back = dir * (spotNow - level) >= 0.1 * atr && lastIsWith(dir)
+          const rsiTen = rsis.slice(-10).filter((v) => v != null)
+          const rsiTurned = rsiTen.length > 0 && (dir < 0 ? Math.max(...rsiTen) >= 62 && rsi <= Math.max(...rsiTen) - 8 : Math.min(...rsiTen) <= 38 && rsi >= Math.min(...rsiTen) + 8)
+          const pastEma = dir * (spotNow - ema9) > 0
+          const defended = (dir < 0 ? atWalls.resChg : atWalls.supChg) != null && (dir < 0 ? atWalls.resChg : atWalls.supChg) >= WALL_BAR
+          const nearWith = sideScore(dir, nearSides.ceD, nearSides.peD) >= 1
+          const notAgainst = leanOpen == null || dir * leanOpen > -0.2
+          if (swept && firstTime && back && rsiTurned && pastEma && (defended || nearWith) && notAgainst) {
+            const extreme = dir < 0 ? Math.max(...lastTen.map((b) => b.high)) : Math.min(...lastTen.map((b) => b.low))
+            const stopPts = Math.max(1.0 * atr, Math.abs(extreme - spotNow) + 0.3 * atr)
+            const toVwap = dir * (vwap - spotNow)
+            push('spotAdaptive', dir, stopPts, Math.min(3 * stopPts, Math.max(2 * stopPts, toVwap)), 60, {
+              Day: dayLine(`SWEEP of yesterday's ${dir < 0 ? 'high' : 'low'} ${f1(level)}`), OI: oiLine(), Indicators: indLine(),
+              Plan: `BUY the ${dir > 0 ? 'call' : 'put'} - took yesterday's ${dir < 0 ? 'high' : 'low'} out to ${f1(extreme)} and came back; ${defended ? `the ${dir < 0 ? 'call' : 'put'} wall's writers adding` : 'ATM +/- 2 CE / PE turning with it'}; RSI ${dir < 0 ? 'rolled over' : 'turned up'}, back ${dir < 0 ? 'under' : 'over'} EMA 9`,
+            }, { optLeg: 'buy', mode: 'sweep' })
+          }
+        }
+      }
+    }
+  }
+
   // The trade filters (sides, entry window, stop / target size, time stop, trailing, OI filters) - defaults change nothing.
   return out.map((s) => applyTradeFilter(s, strategyFilters(s.id, filters?.[s.id]))).filter(Boolean)
 }
@@ -537,7 +726,7 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
  * Every spot setup of every minute of a day (from 15 minutes after the first candle): `bars` - spotBarsOf the day's
  * 1-minute candles, `oi` - the replay context (live: false). The tuning dedupes after its own filters, like the futures'.
  */
-export function scanSpotDay({ bars, oi, filters = {}, until = null }) {
+export function scanSpotDay({ bars, oi, filters = {}, until = null, prevDay = null }) {
   if (!bars?.length || !oi) return []
   const found = []
   const first = bars[0].t + 15 * MIN
@@ -545,7 +734,7 @@ export function scanSpotDay({ bars, oi, filters = {}, until = null }) {
   let done = 0 // bars finished by the clock
   for (let clock = first; clock <= end; clock += MIN) {
     while (done < bars.length && bars[done].t + MIN <= clock) done++
-    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters }))
+    found.push(...evaluateSpotStrategies({ nowMs: clock, bars: bars.slice(0, done), oi, filters, prevDay }))
   }
   return found
 }

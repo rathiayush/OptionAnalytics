@@ -18,10 +18,9 @@ const find = (w, side, minute = 90) => at(w, minute).find((s) => s.id === 'spotO
 const fires = (w, side, minute = 90) => !!find(w, side, minute)
 
 test('#114 is the fourteenth spot strategy: the OI confluence', () => {
-  assert.equal(SPOT_STRATEGIES.length, 14)
   const s = STRATEGY_BY_ID.spotOiConfluence
   assert.ok(s?.spot && s.no === 114 && !s.retired)
-  assert.equal(SPOT_STRATEGIES.at(-1).id, 'spotOiConfluence')
+  assert.equal(SPOT_STRATEGIES[13].id, 'spotOiConfluence')
 })
 
 test('#114 LONG: puts written since the open, CE / PE with it, room to the call wall - a dip bought as the candle resumes up', () => {

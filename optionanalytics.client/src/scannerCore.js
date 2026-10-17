@@ -23,6 +23,26 @@ export const ALL_IDS = ACTIVE_STRATEGIES.map((s) => s.id)
 export const ALL_SPOT_IDS = SPOT_STRATEGIES.filter((s) => !s.retired).map((s) => s.id)
 export const EVERY_ID = [...ALL_IDS, ...ALL_SPOT_IDS]
 export const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
+const istDayOf = (ms) => Math.floor((ms + 330 * MIN) / 86_400_000)
+
+/** Whether setup `s` may fire after `fired` (the signals already taken, in time order): not the same strategy and side
+ *  within COOLDOWN_MS, and - for a strategy with a daily cap (maxPerDay, #115's 5) - fewer than that many of it already
+ *  that IST day. Every scan uses this - the live scanner, the page, the day scan and the tuning (firstPerCooldown) - so
+ *  they always take the same signals. A setup it refuses is not taken: it neither counts nor restarts the cooldown. */
+export function canFire(fired, s, cooldownMs = COOLDOWN_MS) {
+  if (fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < cooldownMs)) return false
+  const cap = STRATEGY_BY_ID[s.id]?.maxPerDay
+  if (!(cap > 0)) return true
+  const day = istDayOf(s.t)
+  return fired.filter((f) => f.id === s.id && istDayOf(f.t) === day).length < cap
+}
+/** The setups of one look (a minute) that may fire after `fired`, one at a time - so two in the same minute cannot both
+ *  take the last slot of a daily cap. */
+export function firable(fired, setups, cooldownMs = COOLDOWN_MS) {
+  const taken = []
+  for (const s of setups) if (canFire(fired.length ? [...fired, ...taken] : taken, s, cooldownMs)) taken.push(s)
+  return taken
+}
 
 // 1-minute analyzed bars that had COMPLETED by `nowMs`.
 export function completedBars(minuteBars, nowMs, rowSize, lotSize, estimated) {
@@ -129,8 +149,7 @@ export function scanTick(input, memory) {
     filters,
   })
   const watching = watchNow.filter((w) => w.missing.length)
-  const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh0 = setups.filter((s) => !recentlyFired(s))
+  const fresh0 = firable(memory.fired, setups)
   // What the market looked like at the signal (evaluateStrategies puts it on every setup) - kept with it in the scanner
   // record, so which conditions win can be learned from the live signals (only what was known at the clock).
   const market = fresh0.length && fresh0.some((s) => !s.market) ? marketAt({ nowMs, price, bars, tapePrints: estimated ? null : tapePrints, oi, heatmap: view.heatmap, lotSize, largeLots }) : null
@@ -169,12 +188,11 @@ export function followSetups(fired, trailLog, minuteBars, nowMs, dayOver = false
  * side at most once per COOLDOWN_MS (the tuning's firstPerCooldown). The server scanner and the OI Replay page both
  * judge them with this. Null when the minute's candle is not in yet (look again).
  */
-export function spotScanTick({ minute, bars, oi, filters, trail }, memory) {
+export function spotScanTick({ minute, bars, oi, filters, trail, prevDay = null }, memory) {
   if (!oi || !bars?.length || bars.at(-1).t !== minute - MIN) return null
   const done = bars.at(-1).t + MIN <= minute ? bars : bars.filter((b) => b.t + MIN <= minute)
-  const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters })
-  const recentlyFired = (s) => memory.fired.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)
-  const fresh = setups.filter((s) => !recentlyFired(s)).map((s) => ({ ...withOwnTrail(s, filters?.[s.id], trail), market: null }))
+  const setups = evaluateSpotStrategies({ nowMs: minute, bars: done, oi, filters, prevDay })
+  const fresh = firable(memory.fired, setups).map((s) => ({ ...withOwnTrail(s, filters?.[s.id], trail), market: null }))
   return { fresh, fired: fresh.length ? [...memory.fired, ...fresh] : memory.fired }
 }
 
@@ -183,13 +201,13 @@ export function spotScanTick({ minute, bars, oi, filters, trail }, memory) {
  * day's, oldest first) and `oi` (a context, or (minute) => context). What a replay that moved several minutes, or a
  * page opened part-way through today, has not judged yet. Returns { fresh, fired } like spotScanTick.
  */
-export function spotScanMinutes({ from, to, bars, oi, filters, trail }, memory) {
+export function spotScanMinutes({ from, to, bars, oi, filters, trail, prevDay = null }, memory) {
   let fired = memory.fired
   const fresh = []
   let done = 0
   for (let minute = Math.floor(from / MIN) * MIN + MIN; minute <= to; minute += MIN) {
     while (done < bars.length && bars[done].t + MIN <= minute) done++
-    const tick = spotScanTick({ minute, bars: bars.slice(0, done), oi: typeof oi === 'function' ? oi(minute) : oi, filters, trail }, { fired })
+    const tick = spotScanTick({ minute, bars: bars.slice(0, done), oi: typeof oi === 'function' ? oi(minute) : oi, filters, trail, prevDay }, { fired })
     if (!tick?.fresh.length) continue
     fired = tick.fired
     fresh.push(...tick.fresh)

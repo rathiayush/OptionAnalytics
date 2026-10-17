@@ -47,7 +47,15 @@ over the minutes finished `PROFILE_LAG` (15)+ minutes before the clock; its node
 never the server's previous-day profile or the futures' - so every caller gets the same one with nothing to pass. Spot #114
 (OI confluence) has the Strategy lab's OI filters as its own rules - the whole chain's net CE - PE since the open with the
 trade, CE / PE with it (15 min) and not against it (since the open), the wall in the way not growing and at least the target
-away, the day not trending against it - and buys the dip / sells the pop (`tests/spot-strategies-5.test.mjs`). On the page they live on
+away, the day not trending against it - and buys the dip / sells the pop (`tests/spot-strategies-5.test.mjs`). Spot #115 (adaptive) reads the day first - the opening
+09:15 - 09:29 as three 5-minute candles, the previous day's high / low / close (`prevDay` - `prevDayOf` the server's previous-day
+spot bars, high / low / close only; passed to `evaluateSpotStrategies` / `scanSpotDay` / `spotScanTick` by the tuning, the runner
+and the page alike), the OI since the open and at ATM +/- 2, the S/R OI balance and the walls' writers, and only EMA 9 / 21,
+RSI 14 and VWAP (time-weighted: the index has no volume) - then plays a TREND day by BUYING the option, a RANGE day by SELLING
+it at the wall, a failed SWEEP of yesterday's high / low by buying the turn. Each signal carries its own leg (`setup.optLeg`,
+`ownLeg` on the strategy): `optionPlanFor` takes it under "per strategy" after the index's own side and a tuned leg, the tuning
+measures it as `optLeg: 'signal'` (`legFor`); at most `maxPerDay` (5) signals a day, counted by `canFire` / `firable` in every
+scan (live, page, day scan, `firstPerCooldown`) so live == tuning (`tests/spot-strategies-6.test.mjs`). On the page they live on
 the OI Replay page (`SpotStrategyScanner.jsx`, its data), judged by the same `spotScanTick` / `spotScanMinutes`
 (`scannerCore.js`) and traded in options like the Order Flow scanner: paper on each alert, Live (Dhan) + confirmed
 "Auto-place on alert" for real super orders, exits on the signal's spot SL / target / trail / time stop. The runner is

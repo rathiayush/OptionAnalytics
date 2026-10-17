@@ -41,7 +41,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildOiContext, ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS, filtersForIndex, pinnedTrailOf } from '../src/strategyEngine.js'
-import { scanSpotDay, spotBarsOf } from '../src/spotEngine.js'
+import { scanSpotDay, spotBarsOf, prevDayOf } from '../src/spotEngine.js'
 import { autoBigLots } from '../src/orderFlowMath.js'
 import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultIndexTrade, defaultTradeLevels } from '../src/tradeDefaults.js'
@@ -333,7 +333,11 @@ async function main() {
       const oiMinutes = minutesOf(run.cePoints)
       if (oiMinutes < MIN_SESSION_MINUTES) throw new Error(`option OI for only ${oiMinutes} of 375 minutes - a partial day`)
       const oi = buildOiContext(run, expiryDate, { live: false })
-      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', ...(optionErrors ? { optionErrors } : {}) } }
+      // The previous trading day's high / low / close (#115's liquidity sweep) - one small call, kept like every past
+      // day; the server walks back over holidays. Without it the day is still scanned, the sweep simply cannot fire.
+      const prevDay = await fetcher.dayApi('prevday', p.date, `/api/oi-replay/${U}/previous-day-volume-profile?date=${p.date}`, (b) => !!b?.success && b?.bars?.length > 0, { source: 'previous-day' })
+        .then(prevDayOf).catch(() => null)
+      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, prevDay }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', previousDay: prevDay?.date ?? null, ...(optionErrors ? { optionErrors } : {}) } }
     }
     const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
     const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES, { source: 'futures-day' })
@@ -750,7 +754,7 @@ async function main() {
       // Its own setting when the job gives one per strategy (a tuning run's settings tested on other days), else the one sent for all.
       const own = job.paramsById?.[id] ?? job.params ?? {}
       let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...own }
-      if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
+      if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell' && tried.optLeg !== 'signal') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
       // SEVERAL strategies: as written and as applied are read only as their summary (the comparison table), yet every
       // trade of them was carried in the result and shown nowhere - with all 22 picked that is two thirds of a file the
       // page then re-reads on every look. They keep only their summary. ONE strategy is the deep dive, so it keeps

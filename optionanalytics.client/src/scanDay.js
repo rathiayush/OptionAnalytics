@@ -4,7 +4,7 @@
 
 import { evaluateStrategies, simulateOutcome } from './strategyEngine.js'
 import { liquiditySignals, pullStackSignals, replayRange, replayView } from './orderFlowMath.js'
-import { MIN, COOLDOWN_MS, completedBars, priceAt, upTo, trailOf } from './scannerCore.js'
+import { MIN, COOLDOWN_MS, canFire, completedBars, priceAt, upTo, trailOf } from './scannerCore.js'
 import { toColumn } from './liveFeeds.js'
 
 /** The replay day the Order Flow page builds from GET /api/order-flow/{u}/day/{date}. */
@@ -46,7 +46,7 @@ export async function scanDaySetups({ day, prints, oi, profile, rowSize, lotSize
       })
       for (const s of setups) {
         if (keepAll) { found.push(s); continue }
-        if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < COOLDOWN_MS)) found.push({ ...s, trail: trailOf(s, trail) })
+        if (canFire(found, s)) found.push({ ...s, trail: trailOf(s, trail) })
       }
     }
     if (onProgress && i % 10 === 0) await onProgress(i, steps)
@@ -55,10 +55,11 @@ export async function scanDaySetups({ day, prints, oi, profile, rowSize, lotSize
 }
 
 /** The scanner's list from every setup of every minute: the first of each strategy and side, then again
- *  only after COOLDOWN_MS - what scanDaySetups (without keepAll) gives, in time order. */
+ *  only after COOLDOWN_MS (and no more than a strategy's daily cap - canFire) - what scanDaySetups (without keepAll) and
+ *  the live scan give, in time order. */
 export function firstPerCooldown(setups, cooldownMs = COOLDOWN_MS) {
   const found = []
-  for (const s of setups) if (!found.some((f) => f.id === s.id && f.side === s.side && s.t - f.t < cooldownMs)) found.push(s)
+  for (const s of setups) if (canFire(found, s, cooldownMs)) found.push(s)
   return found
 }
 

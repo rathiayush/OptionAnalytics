@@ -144,6 +144,11 @@ export const SPOT_STRATEGIES = [
   { id: 'spotPocReject', no: 113, name: 'Spot: POC rejection after a fast run into it (own spot profile + OI)', short: 'Spot POC rejection', spot: true, group: 'profile' },
   // 114: the option chain's OI reads - the ones the Strategy lab tunes as filters - all on the trade's side, as its rules.
   { id: 'spotOiConfluence', no: 114, name: 'Spot: OI confluence - writers on the trade\'s side since the open, CE / PE with it, room to the wall - buy the dip', short: 'Spot OI confluence', spot: true },
+  // 115: ADAPTIVE - reads the day first (the opening 5-minute candles, the previous day's high / low, the OI since the
+  // open and at ATM +/- 2, the walls and their writers, EMA / RSI / VWAP) and then plays it: a trend day BUYS the option
+  // with the move, a range day SELLS the option at the wall it fades, a sweep of the previous day's high / low that fails
+  // BUYS the reversal. Each signal carries its own leg (ownLeg - setup.optLeg); at most maxPerDay signals a day.
+  { id: 'spotAdaptive', no: 115, name: 'Spot: adaptive day - trend: buy the option, range: sell it at the wall, failed sweep of yesterday: buy the turn', short: 'Spot adaptive', spot: true, ownLeg: true, maxPerDay: 5 },
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -465,7 +470,7 @@ export function filtersForIndex(settings, underlying) {
  * the scanner is set to" - so nothing changes for it. `cfg` is the scanner's own settings (autoPaper, moneyness,
  * paperSl, paperTarget), `filters` the trader's per-strategy values (scannerSettings / the server config).
  */
-export function optionPlanFor(id, filters, cfg = {}, premium = null) {
+export function optionPlanFor(id, filters, cfg = {}, premium = null, setup = null) {
   const f = strategyFilters(id, filters?.[id])
   const exit = ownOptionExit(f)
   // WHO DECIDES. A buy / sell chosen where the trading happens WINS - on the Order Flow page the trader is sitting
@@ -475,7 +480,10 @@ export function optionPlanFor(id, filters, cfg = {}, premium = null) {
   const chosen = cfg.autoPaper === 'buy' || cfg.autoPaper === 'sell' ? cfg.autoPaper : null
   const perStrategy = cfg.autoPaper === 'strategy'
   const tunedLeg = f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell' ? f.tradeOptLeg : null
-  const leg = perStrategy ? tunedLeg ?? 'sell' : chosen
+  // A signal that decides its own leg (a strategy with ownLeg - #115 buys on a trend day and sells on a range day): used
+  // under "per strategy" when no tuned leg is applied. A side chosen for the index, or a tuned leg, still wins.
+  const signalLeg = setup?.optLeg === 'buy' || setup?.optLeg === 'sell' ? setup.optLeg : null
+  const leg = perStrategy ? tunedLeg ?? signalLeg ?? 'sell' : chosen
   const overrode = !!(chosen && tunedLeg && tunedLeg !== chosen)
   const tunedMoneyness = f.tradeOptMoneyness === 'default' || f.tradeOptMoneyness == null ? null : f.tradeOptMoneyness
   const moneyness = perStrategy ? tunedMoneyness ?? (cfg.moneyness ?? 0) : (cfg.moneyness ?? tunedMoneyness ?? 0)

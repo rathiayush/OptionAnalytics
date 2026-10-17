@@ -91,7 +91,7 @@ export function crossCheck(days, candidates, trail = null, { stop = () => false 
     const unseen = days.filter((d) => !chosenOn(c, d.date))
     if (!unseen.length) continue
     const bk = `${c.id}|${c.unit}`
-    if (!asWritten.has(bk)) asWritten.set(bk, perDay(days, c.id, asWrittenVariant(c.unit), c.unit, trail))
+    if (!asWritten.has(bk)) asWritten.set(bk, perDay(days, c.id, asWrittenVariant(c.unit, c.id), c.unit, trail))
     for (const r of checkSetting(unseen, c.id, c.params, c.unit, trail, asWritten.get(bk))) {
       rows.push({ id: c.id, no: c.no, name: c.name, unit: c.unit, settingText: c.settingText, raw: c.raw, ...r })
     }

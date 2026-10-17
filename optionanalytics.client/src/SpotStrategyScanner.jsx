@@ -20,7 +20,7 @@ import {
   SPOT_STRATEGIES, STRATEGY_BY_ID, DEFAULT_TRAIL, LAST_ENTRY, SQUARE_OFF, fmtHm, exitLabel, premiumAt, optionTradeText, squareOffMs,
   asReplayContext, optionTradeAt, optionPlanFor, optionExitText, capPoints, filtersForIndex, lotsFor, trailPoints,
 } from './strategyEngine.js'
-import { spotBarsOf, spotProfile, PROFILE_LAG, PROFILE_MIN_BARS } from './spotEngine.js'
+import { prevDayOf, spotBarsOf, spotProfile, PROFILE_LAG, PROFILE_MIN_BARS } from './spotEngine.js'
 import { SCANNER_SETTINGS_KEY, BY_INDEX_KEY, readFiltersByIndex } from './scannerSettings.js'
 import {
   MIN, sameSignal, trailFor, followSetups, setupEvents, newPosition, positionRows, withCapChange, liveLegsFor, PAPER_TRADE_LOT_SIZE,
@@ -144,6 +144,16 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   useEffect(() => { alertIdsRef.current = alertIds })
 
   const dayKey = `${underlying}:${date}`
+  // The previous trading day's high / low / close (#115's liquidity sweep) - the same source the server scanner and the
+  // tuning read (its spot bars; only high / low / close).
+  const prevDayRef = useRef(null)
+  useEffect(() => {
+    prevDayRef.current = null
+    if (!underlying || !date) return undefined
+    let stop = false
+    fetch(`/api/oi-replay/${underlying}/previous-day-volume-profile?date=${date}`).then((r) => (r.ok ? r.json() : null)).then((b) => { if (!stop) prevDayRef.current = prevDayOf(b) }).catch(() => {})
+    return () => { stop = true }
+  }, [underlying, date])
   const [fired, setFired] = useState([])
   const firedRef = useRef([])
   const lastMinuteRef = useRef(0)
@@ -209,7 +219,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   // The option a setup is traded with, and how it leaves the trade: the strategy's own when it was tuned and applied (its
   // exit exactly - none of the index's points or trailing stop on top), else this card's choice and the index's levels
   // (optionPlanFor - the server scanner's rule too).
-  const planOf = (setup, premium = null) => optionPlanFor(setup.id, filtersOf(cfgRef.current), cfgRef.current, premium)
+  const planOf = (setup, premium = null) => optionPlanFor(setup.id, filtersOf(cfgRef.current), cfgRef.current, premium, setup)
   const tradeOf = (setup, which) => optionTradeAt(oiRef.current, setup, which, planOf(setup).moneyness)
   const markPosition = (key, patch) => setPaperBook((prev) => {
     const day = prev[dayKey]
@@ -365,7 +375,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
     if (!c.alerts || !alertIdsRef.current.includes(s.id)) return
     const meta = STRATEGY_BY_ID[s.id]
     const live = liveModeRef.current
-    const side = optionPlanFor(s.id, filtersOf(c), c).leg
+    const side = optionPlanFor(s.id, filtersOf(c), c, null, s).leg
     // TODAY THIS CARD TRADES NOTHING BY ITSELF: the SERVER scanner runs every strategy, spot ones included, and punches
     // the paper trade (and the live order where the index is Live today). This card would otherwise punch a second one
     // for the same signal, and send a second Telegram. It still shows the signal the moment it fires - chime, voice and
@@ -399,7 +409,7 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
   const paperTradeQuietly = (s) => {
     const c = cfgRef.current
     if (!isReplay || liveModeRef.current.mode === 'live' || !c.alerts || !alertIdsRef.current.includes(s.id)) return
-    const side = optionPlanFor(s.id, filtersOf(c), c).leg
+    const side = optionPlanFor(s.id, filtersOf(c), c, null, s).leg
     if (side && tradeOf(s, side)) punchRef.current?.(s, side, s.t, { auto: true, quiet: true })
   }
   // Today's finished spot minutes by `minute`: the server's own candles (every tick - what the server scanner judges),
@@ -450,18 +460,18 @@ export function SpotStrategyScanner({ underlying, date, isReplay, bars, clockMs,
         let memory = { fired: firedRef.current }
         const found = []
         if (isReplay) {
-          const r = spotScanMinutes({ from, to: clockMinute, bars: dayBars, oi, filters, trail }, memory)
+          const r = spotScanMinutes({ from, to: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current }, memory)
           memory = { fired: r.fired }
           found.push(...r.fresh)
         } else {
           // Minutes this page has not judged (opened part-way through the day): read the way a replay is - each minute once
           // it is over -, recorded, not alerted. Then this minute, on the live OI.
           if (from < clockMinute - MIN) {
-            const r = spotScanMinutes({ from, to: clockMinute - MIN, bars: dayBars, oi: asReplayContext(oi), filters, trail }, memory)
+            const r = spotScanMinutes({ from, to: clockMinute - MIN, bars: dayBars, oi: asReplayContext(oi), filters, trail, prevDay: prevDayRef.current }, memory)
             memory = { fired: r.fired }
             found.push(...r.fresh)
           }
-          const tick = caughtUp ? spotScanTick({ minute: clockMinute, bars: dayBars, oi, filters, trail }, memory) : null
+          const tick = caughtUp ? spotScanTick({ minute: clockMinute, bars: dayBars, oi, filters, trail, prevDay: prevDayRef.current }, memory) : null
           if (tick) { memory = { fired: tick.fired }; found.push(...tick.fresh) }
         }
         lastMinuteRef.current = clockMinute

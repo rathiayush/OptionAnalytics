@@ -105,6 +105,13 @@ export const OPTION_GRID = {
   optTargetPct: [30, 20, 50, 75, 100],
 }
 export const OPTION_DEFAULT = { optLeg: 'sell', optMoneyness: 0, optExit: 'index', optSlPct: 20, optTargetPct: 30 }
+/** A strategy whose every signal says whether to BUY or SELL its option (ownLeg - #115): its option is measured with the
+ *  signal's own leg ('signal') as written, and the tuning may also try buy / sell for all of them. */
+export const ownLegOf = (id) => !!STRATEGY_BY_ID[id]?.ownLeg
+const optionDefaultFor = (id) => (ownLegOf(id) ? { ...OPTION_DEFAULT, optLeg: 'signal' } : OPTION_DEFAULT)
+const optionGridFor = (id) => (ownLegOf(id) ? { ...OPTION_GRID, optLeg: ['signal', 'sell', 'buy'] } : OPTION_GRID)
+/** The leg a setting takes a setup's option on: its own buy / sell, else the setup's (#115's own), else sell. */
+export const legFor = (v, s) => (v?.optLeg === 'buy' || v?.optLeg === 'sell' ? v.optLeg : s?.optLeg === 'buy' || s?.optLeg === 'sell' ? s.optLeg : 'sell')
 /** Out with the index trade: the option's SL / target are not used - tried once; with the Max SL only, no target. */
 export const optionVariantRedundant = (v) => {
   const exit = v.optExit ?? 'index'
@@ -134,7 +141,7 @@ export function optionLevelsOf(v, premium, caps = null) {
  *  (`day.optionCaps`), as the scanner holds it. */
 export function optionOutcome(day, s, outcome, v) {
   if (!day.oi) return null
-  const trade = optionTradeAt(day.oi, s, v.optLeg ?? 'sell', v.optMoneyness ?? 0, s.t)
+  const trade = optionTradeAt(day.oi, s, legFor(v, s), v.optMoneyness ?? 0, s.t)
   if (!trade?.premium) return null
   const indexExit = (outcome.exitAt ?? (day.endMs - MIN)) + MIN // the index trade's exit bar has finished
   const squareOff = Math.min(day.endMs, Math.floor(s.t / MIN) * MIN + (SQUARE_OFF_MIN - istMinuteOf(s.t)) * MIN)
@@ -197,7 +204,7 @@ export function optionText(v) {
   const exit = (v.optExit ?? 'index') === 'index' ? 'out with the index trade'
     : v.optExit === 'indexSl' ? `out with the index trade, Max SL ${v.optSlPct}% of the premium`
     : `SL ${v.optSlPct}% / target ${v.optTargetPct}% of the premium${v.optExit === 'first' ? ', or the index trade\'s exit first' : ''}`
-  return `${(v.optLeg ?? 'sell').toUpperCase()} ${where} · ${exit}`
+  return `${v.optLeg === 'signal' ? 'BUY / SELL as each signal says' : (v.optLeg ?? 'sell').toUpperCase()} ${where} · ${exit}`
 }
 
 /** The most OI combinations one "every combination" search will try (each is a pass over the train days). */
@@ -547,8 +554,8 @@ export function perDay(days, id, variant, unit = 'R', trail = null) {
 
 /** A tuned setting's params as tried (the trade filters' defaults - and for the option trade the option defaults -
  *  under what was tuned), and the strategy as written in the same measure. */
-export const checkVariant = (params, unit = 'R') => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...params } : { ...DEFAULT_VARIANT, ...params })
-export const asWrittenVariant = (unit = 'R') => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT)
+export const checkVariant = (params, unit = 'R', id = null) => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...optionDefaultFor(id), ...params } : { ...DEFAULT_VARIANT, ...params })
+export const asWrittenVariant = (unit = 'R', id = null) => (unit === 'pts' ? { ...DEFAULT_VARIANT, ...optionDefaultFor(id) } : DEFAULT_VARIANT)
 
 /**
  * THE CROSS-CHECK. Tuning one month and then another gives two different "best" settings, each judged only on its
@@ -559,8 +566,8 @@ export const asWrittenVariant = (unit = 'R') => (unit === 'pts' ? { ...DEFAULT_V
  * Rows only for days where either traded.
  */
 export function checkSetting(days, id, params, unit = 'R', trail = null, asWritten = null) {
-  const mine = perDay(days, id, checkVariant(params, unit), unit, trail)
-  const base = asWritten ?? perDay(days, id, asWrittenVariant(unit), unit, trail)
+  const mine = perDay(days, id, checkVariant(params, unit, id), unit, trail)
+  const base = asWritten ?? perDay(days, id, asWrittenVariant(unit, id), unit, trail)
   return days.map((d) => {
     const m = mine.get(d.date) ?? { n: 0, total: 0, wins: 0 }
     const b = base.get(d.date) ?? { n: 0, total: 0, wins: 0 }
@@ -597,11 +604,11 @@ export function tuneStrategy(days, id, { trail = null, minTrades = 8, minPerMont
   }
   const explicitGrid = grid != null
   const isOpt = what === 'option'
-  grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : isOpt ? OPTION_GRID : TUNING_GRID)
-  if (isOpt) base = { ...OPTION_DEFAULT, ...base }
+  grid = grid ?? (what === 'oi' ? oiGridOf(oiKeys) : isOpt ? optionGridFor(id) : TUNING_GRID)
+  if (isOpt) base = { ...optionDefaultFor(id), ...base }
   // Scored in R on the index trade, or - the option trade - in premium points.
   const score = (ds, v) => (isOpt ? optionRun(ds, id, v, trail) : run(ds, id, v, trail))
-  const asWritten = isOpt ? { ...DEFAULT_VARIANT, ...OPTION_DEFAULT } : DEFAULT_VARIANT
+  const asWritten = isOpt ? { ...DEFAULT_VARIANT, ...optionDefaultFor(id) } : DEFAULT_VARIANT
   const { train, test } = splitDays(days, trainFraction)
   // Chosen month by month (robustScore): each setting is scored on every stretch of the train days, not on them added up.
   const periods = periodsOf(train)
@@ -873,7 +880,7 @@ export function settingParams(source, from = 'params') {
     : { leg: p.optLeg, m: p.optMoneyness, exit: p.optExit, sl: p.optExit && p.optExit !== 'index' ? p.optSlPct : null, tg: ownTarget(p.optExit) ? p.optTargetPct : null }
   if (opt.leg === 'buy' || opt.leg === 'sell') {
     const m = Number(opt.m) || 0
-    out.push({ key: 'optLeg', label: 'Option: buy or sell', value: opt.leg.toUpperCase(), changed: true })
+    out.push({ key: 'optLeg', label: 'Option: buy or sell', value: opt.leg === 'signal' ? 'AS EACH SIGNAL SAYS' : opt.leg.toUpperCase(), changed: true })
     out.push({ key: 'optMoneyness', label: 'Option: strike', value: m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}`, changed: m !== 0 })
   }
   if (opt.exit) out.push({ key: 'optExit', label: 'Option: exit', value: { index: 'with the index trade', indexSl: 'with the index trade, capped at a Max SL', first: 'own SL / target or the index exit, first', option: 'own SL / target only' }[opt.exit] ?? opt.exit, changed: opt.exit !== 'index' })
@@ -940,7 +947,7 @@ export function evaluateSetting(days0, id, params = {}, { trail = null, underlyi
   const variant = { ...DEFAULT_VARIANT }
   for (const f of TRADE_FILTERS) if (params[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '') variant[f.key] = params[f.key]
   const trades = tradeDetails(days, id, variant, trail, underlying, { optionLevels })
-  const leg = params.optLeg === 'buy' || params.optLeg === 'sell' ? params.optLeg : null
+  const leg = params.optLeg === 'buy' || params.optLeg === 'sell' || params.optLeg === 'signal' ? params.optLeg : null
   const opt = leg
     ? { ...OPTION_DEFAULT, ...variant, optLeg: leg, optMoneyness: Number(params.optMoneyness) || 0, optExit: params.optExit ?? 'index', optSlPct: Number(params.optSlPct) || OPTION_DEFAULT.optSlPct, optTargetPct: Number(params.optTargetPct) || OPTION_DEFAULT.optTargetPct }
     : null
@@ -975,7 +982,7 @@ export function labEditableKeys(data) {
 export function labOverrides(params, data) {
   const out = {}
   for (const k of labEditableKeys(data)) if (params?.[k] !== undefined && params[k] !== null && params[k] !== '') out[k] = params[k]
-  if (params?.optLeg === 'buy' || params?.optLeg === 'sell') {
+  if (params?.optLeg === 'buy' || params?.optLeg === 'sell' || params?.optLeg === 'signal') {
     const full = labParams(params, data)
     for (const k of ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']) if (full[k] !== undefined) out[k] = full[k]
   } else if (params?.optLeg === 'none') out.optLeg = 'none'
@@ -990,7 +997,7 @@ export function labParams(params, data) {
     const f = TRADE_FILTERS.find((x) => x.key === k)
     if (params?.[k] !== undefined && params[k] !== null && params[k] !== '' && params[k] !== f?.default) out[k] = params[k]
   }
-  if (params?.optLeg === 'buy' || params?.optLeg === 'sell') {
+  if (params?.optLeg === 'buy' || params?.optLeg === 'sell' || params?.optLeg === 'signal') {
     const n = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v))
     out.optLeg = params.optLeg
     out.optMoneyness = n(params.optMoneyness) ?? 0
