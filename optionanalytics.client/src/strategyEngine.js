@@ -46,7 +46,13 @@ export const STRATEGIES = []
 /** The SPOT + OPTIONS strategies (spotEngine.js): they trade the index price itself - spot candles and the option
  *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
  *  scanner does not run them, so they are not in STRATEGIES / ACTIVE_STRATEGIES. */
-export const SPOT_STRATEGIES = []
+export const SPOT_STRATEGIES = [
+  // 101: the CE / PE flip. When the whole chain's CE - PE change SINCE THE OPEN flips sign on the 1-minute clock - puts added
+  // overtake calls (a long), or the reverse - and the 3-minute EMA 7 / 21 on the spot agrees, the CE / PE change over the last
+  // few minutes (configurable) is with the trade, and the support / resistance OI round the ATM (+/- 2 strikes, configurable)
+  // sits with it: BUY / SELL per the index's setting, index stop and target, until the flip comes back (the opposite signal).
+  { id: 'spotFlip', no: 101, name: 'Spot: CE / PE since-open flip + 3-min EMA 7 / 21 + CE / PE change and ATM walls with the trade', short: 'Spot CE/PE flip', spot: true },
+]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
 export const ACTIVE_STRATEGIES = STRATEGIES.filter((s) => !s.retired)
@@ -76,7 +82,14 @@ const PROFILE_REJECT_FILTERS = [
 ]
 
 // Per-strategy entry filters: none - every strategy was removed (the trade filters below stay available to any new one).
-export const STRATEGY_FILTERS = {}
+export const STRATEGY_FILTERS = {
+  // #101's own, configurable rules: how many minutes of CE / PE change must back the trade, and how many strikes round the
+  // ATM the support / resistance OI is counted over. The defaults ARE the rule as written.
+  spotFlip: [
+    { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
+    { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
+  ],
+}
 // How any strategy's trades are taken (every strategy has these, after its own): long / short only, the
 // entry time window, the stop-loss and target as a multiple of the strategy's own, a time stop, a trailing
 // stop of its own. The defaults are the strategy exactly as written; the strategy tuning measures them.
