@@ -7,7 +7,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
-import { STRATEGY_BY_ID } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID } from './strategyEngine.js'
 import { UNDERLYINGS, appliedPlan, tunedPlan } from './appliedPlan.js'
 import { labParams, sumPoints } from './strategyTuning.js'
 
@@ -45,18 +45,34 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
   const [kind, setKind] = useState('both')
   const [pickIdx, setPickIdx] = useState([])
   const [pickIds, setPickIds] = useState([])
-  const pairs = useMemo(() => allPairs
-    .filter((p) => (kind === 'both' || p.kind === kind) && (!pickIdx.length || pickIdx.includes(p.u)))
-    .map((p) => ({ ...p, ids: pickIds.length ? p.ids.filter((id) => pickIds.includes(id)) : p.ids }))
-    .filter((p) => p.ids.length), [allPairs, kind, pickIdx, pickIds])
-  const idOptions = useMemo(() => {
-    const seen = new Map()
-    for (const p of allPairs) {
-      if (kind !== 'both' && p.kind !== kind) continue
-      for (const id of p.ids) if (!seen.has(id)) seen.set(id, { value: id, label: `#${STRATEGY_BY_ID[id].no} ${STRATEGY_BY_ID[id].name}`, no: STRATEGY_BY_ID[id].no })
+  // "What is applied" can ALSO test any strategy that is not applied anywhere yet (a new one - #115, say): picked, it is
+  // measured as written (the lab job's applied start falls back to as written) on the indices picked, or all three.
+  const pairs = useMemo(() => {
+    const inScope = (u, k) => (kind === 'both' || k === kind) && (!pickIdx.length || pickIdx.includes(u))
+    const out = allPairs.filter((p) => inScope(p.u, p.kind)).map((p) => ({ ...p, ids: pickIds.length ? p.ids.filter((id) => pickIds.includes(id)) : p.ids }))
+    if (!tuned) {
+      for (const id of pickIds) {
+        const k = STRATEGY_BY_ID[id]?.spot ? 'spot' : 'futures'
+        for (const u of UNDERLYINGS) {
+          if (!inScope(u, k)) continue
+          let p = out.find((x) => x.key === `${u}|${k}`)
+          if (!p) { p = { u, kind: k, key: `${u}|${k}`, ids: [] }; out.push(p) }
+          if (!p.ids.includes(id)) p.ids = [...p.ids, id].sort((a, b) => STRATEGY_BY_ID[a].no - STRATEGY_BY_ID[b].no)
+        }
+      }
+      out.sort((a, b) => UNDERLYINGS.indexOf(a.u) - UNDERLYINGS.indexOf(b.u) || (a.kind === b.kind ? 0 : a.kind === 'futures' ? -1 : 1))
     }
-    return [...seen.values()].sort((a, b) => a.no - b.no)
-  }, [allPairs, kind])
+    return out.filter((p) => p.ids.length)
+  }, [allPairs, kind, pickIdx, pickIds, tuned])
+  const idOptions = useMemo(() => {
+    const appliedOn = new Map()
+    for (const p of allPairs) for (const id of p.ids) appliedOn.set(id, [...(appliedOn.get(id) ?? []), p.u])
+    const pool = tuned ? [...appliedOn.keys()].map((id) => STRATEGY_BY_ID[id]) : [...ACTIVE_STRATEGIES, ...SPOT_STRATEGIES.filter((x) => !x.retired)]
+    return pool.filter((x) => x && (kind === 'both' || (kind === 'spot') === !!x.spot)).sort((a, b) => a.no - b.no).map((x) => ({
+      value: x.id, no: x.no,
+      label: `#${x.no} ${x.name}${tuned ? '' : appliedOn.has(x.id) ? ` (applied on ${appliedOn.get(x.id).join(', ')})` : ' (not applied - as written)'}`,
+    }))
+  }, [allPairs, kind, tuned])
   const [results, setResults] = useState({})
   // The pairs this page has started (or queued): { [key]: the finishedUtc of the result it started from } - until the result
   // is a newer one, what is shown for it is the PREVIOUS run's: greyed, out of the totals.
@@ -80,9 +96,11 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
     return days === want && p.ids.every((id) => (j.strategies ?? []).includes(id))
   }
 
-  const pairKeys = allPairs.map((p) => p.key).join()
-  const loadResults = () => Promise.all(allPairs.map((p) => fetch(`/api/strategy-tuning/lab/${p.u}?data=${p.kind}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
-    .then((list) => setResults(Object.fromEntries(allPairs.map((p, i) => [p.key, list[i]]))))
+  // Every index and kind's last lab result is read - a strategy picked that is not applied can land on any of them.
+  const pairKeys = 'all'
+  const ALL_KEYS = UNDERLYINGS.flatMap((u) => ['futures', 'spot'].map((k) => ({ u, kind: k, key: `${u}|${k}` })))
+  const loadResults = () => Promise.all(ALL_KEYS.map((p) => fetch(`/api/strategy-tuning/lab/${p.u}?data=${p.kind}`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : null)).catch(() => null)))
+    .then((list) => setResults(Object.fromEntries(ALL_KEYS.map((p, i) => [p.key, list[i]]))))
   useEffect(() => { loadResults() }, [pairKeys]) // eslint-disable-line react-hooks/exhaustive-deps
   // Any change of the job as last seen - a lab run done, failed or stopped, the next one starting - reads the results again.
   const lastJob = useRef(null)
@@ -237,20 +255,20 @@ export default function AppliedLab({ cfg, isAdmin, onTry }) {
           </Text>}
           {!isAdmin && <Alert type="warning" showIcon message="Only an Admin can run the lab - sign in with the admin login." />}
           {cfg === null && <Alert type="warning" showIcon message="The applied settings could not be read (sign in with the admin login)." />}
-          {!tuned && cfg && allPairs.length === 0 && <Alert type="info" showIcon message="Nothing is applied on any index yet - choose strategies on the Strategies page (or apply a tuned setting) and they appear here." />}
-          {allPairs.length > 0 && pairs.length === 0 && <Alert type="info" showIcon message="Nothing applied matches that choice - clear the kind / index / strategy picks." />}
+          {!tuned && cfg && allPairs.length === 0 && !pickIds.length && <Alert type="info" showIcon message="Nothing is applied on any index yet - pick any strategy in the strategy box to test it as written, or choose strategies on the Strategies page." />}
+          {(allPairs.length > 0 || pickIds.length > 0) && pairs.length === 0 && <Alert type="info" showIcon message="Nothing matches that choice - clear the kind / index / strategy picks." />}
           {leftOut.length > 0 && <Alert type="warning" showIcon message={`${tuned ? 'Found by the run but not tested' : 'Applied but not run'}: ${leftOut.map((x) => `#${STRATEGY_BY_ID[x.id]?.no ?? '?'} ${STRATEGY_BY_ID[x.id]?.name ?? x.id} on ${x.u} (${x.reason})`).join(' · ')}`} />}
           <Space wrap size={10} align="center">
             <Segmented value={kind} onChange={(v) => { setKind(v); setPickIds([]) }} aria-label="Kind"
               options={[{ value: 'both', label: 'Both' }, { value: 'futures', label: 'Futures + OI' }, { value: 'spot', label: 'Spot + options' }]} />
             <Select mode="multiple" allowClear value={pickIdx} onChange={setPickIdx} placeholder="All indices" options={UNDERLYINGS.map((u) => ({ value: u, label: u }))} style={{ minWidth: 190 }} maxTagCount="responsive" aria-label="Index" />
-            <Select mode="multiple" allowClear showSearch optionFilterProp="label" value={pickIds} onChange={setPickIds} placeholder={tuned ? 'All strategies the run tuned' : 'All applied strategies'} options={idOptions} style={{ minWidth: 300, maxWidth: 520 }} maxTagCount="responsive" aria-label="Strategy" />
+            <Select mode="multiple" allowClear showSearch optionFilterProp="label" value={pickIds} onChange={setPickIds} placeholder={tuned ? 'All strategies the run tuned' : 'All applied strategies - or pick any strategy'} options={idOptions} style={{ minWidth: 300, maxWidth: 520 }} maxTagCount="responsive" aria-label="Strategy" />
           </Space>
           <Space wrap size={12} align="center">
             {tuned ? <Text style={{ fontSize: 12 }}>{picked ? 'on the dates picked' : 'on the days before each run, or pick dates:'}</Text> : <Space size={4}><Text style={{ fontSize: 12 }}>last</Text><InputNumber min={1} max={250} value={days} onChange={(v) => setDays(v ?? 30)} disabled={!!(range?.[0] || range?.[1])} style={{ width: 80 }} aria-label="Days" /><Text style={{ fontSize: 12 }}>days, or</Text></Space>}
             <DatePicker.RangePicker value={range} onChange={setRange} format="DD MMM YYYY" allowEmpty={[true, true]} aria-label="Dates" />
             <Button type="primary" onClick={run} disabled={!isAdmin || running || pairs.length === 0}>
-              {tuned ? 'Test the last tuning run' : 'Run what is applied'}{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strateg{pairs.reduce((a, p) => a + p.ids.length, 0) === 1 ? 'y' : 'ies'})
+              {tuned ? 'Test the last tuning run' : 'Run on older days'}{pairs.length ? ` on ${[...new Set(pairs.map((p) => p.u))].join(', ')}` : ''} ({pairs.reduce((a, p) => a + p.ids.length, 0)} strateg{pairs.reduce((a, p) => a + p.ids.length, 0) === 1 ? 'y' : 'ies'})
             </Button>
             {(busy || (running && !labRunning)) && isAdmin && <Button onClick={queueAll}>Queue it after the running job</Button>}
           </Space>
