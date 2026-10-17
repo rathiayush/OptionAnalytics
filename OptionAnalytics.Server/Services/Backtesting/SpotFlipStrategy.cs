@@ -7,7 +7,7 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 ///  1. the ALERT: the chain's since-open CE - PE OI lines cross (CE - PE going negative = puts added lead = Bullish; positive = Bearish);
 ///  2. within <c>armMin</c> minutes the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles cross the trade's way - the
 ///     entry is taken when THAT candle closes (emaMode: crossed on the candle that just closed, or already in direction too);
-///  3. the cumulative CE / PE change since the open is with the trade;
+///  3. the cumulative CE / PE change since the open (the OI heatmap) is not against the trade (or with it, or not asked);
 ///  4. the S / R OI near the ATM +/- <c>nearStrikes</c> goes the trade's way over the last <c>wallMin</c> minutes (puts added and calls
 ///     leaving for a Bullish one) with a net difference of at least <c>netMinPct</c> between the sides;
 ///  5. the strikes right round the ATM (+/- <c>atmStrikes</c>) do the same.
@@ -45,6 +45,12 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         {
             new BacktestParameterOption(EmaCross, "Crossed on the candle that just closed"),
             new BacktestParameterOption(EmaState, "Already in direction counts too"),
+        }),
+        new BacktestParameterSpec("cumDelta", "Cumulative CE / PE change since the open (the OI heatmap)", Default: 0, Min: 0, Max: 2, Step: 1, Options: new[]
+        {
+            new BacktestParameterOption(0, "Not against the trade"),
+            new BacktestParameterOption(1, "With the trade"),
+            new BacktestParameterOption(2, "Not asked"),
         }),
         new BacktestParameterSpec("wallMin", "S / R OI near the ATM: over the last (minutes) the writers go the trade's way (puts added and calls leaving for a long)", Default: 10, Min: 3, Max: 30, Step: 1),
         new BacktestParameterSpec("nearStrikes", "S / R OI counted over ATM +/- (strikes)", Default: 2, Min: 1, Max: 5, Step: 1),
@@ -161,6 +167,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var signals = new List<BacktestSignal>();
         var exits = new Dictionary<DateTimeOffset, (DateTimeOffset Time, string Reason)>();
         var armMin = Math.Max(1, (int)p["armMin"]);
+        var cumMode = (int)p.GetValueOrDefault("cumDelta", 0);
         var emaTf = Math.Max(1, (int)p["emaTf"]);
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
@@ -268,7 +275,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
                 var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}; since open CE {ceC:P2} / PE {peC:P2}; ATM+-{nearStrikes} over {wallMin} min PE {wide.PeChg:P2} / CE {wide.CeChg:P2}, net {net:P0}";
                 // (3) the cumulative CE / PE change since the open with the trade
                 var cumWith = ceC is { } cc && peC is { } pp ? dir * (St(pp, 0.003m) - St(cc, 0.003m)) : (int?)null;
-                string? why = cumWith is null or < 1 ? "cumulative CE/PE change not with the trade"
+                string? why = cumMode != 2 && (cumWith is null || cumWith < (cumMode == 1 ? 1 : 0)) ? (cumMode == 1 ? "cumulative CE/PE change not with the trade" : "cumulative CE/PE change against the trade")
                     : !wide.Ok || !(dir * net > 0) || dir * net < netMin ? "S/R OI near the ATM not going the trade's way, or the net difference too small"
                     : atmStrikes > 0 && !Goes(clock, atm, atmStrikes, dir).Ok ? "the strikes round the ATM not going the trade's way"
                     : null;

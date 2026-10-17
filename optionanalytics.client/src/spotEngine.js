@@ -305,9 +305,10 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
         after = before
       }
       if (crossedAt == null) continue
-      // (3) the cumulative CE / PE change since the open with the trade (puts rising and / or calls falling for a long)
+      // (3) the cumulative CE / PE change since the open (the OI heatmap) not against the trade (puts rising and / or calls falling are with it)
       const cumWith = sideScore(dir, cum.ceC, cum.peC)
-      if (cumWith == null || cumWith < 1) continue
+      // Not against it (the default): the sides are not both moving the other way - or, asked so, with it; or not asked.
+      if (f.cumDelta !== 'off' && (cumWith == null || cumWith < (f.cumDelta === 'with' ? 1 : 0))) continue
       // (4) the S / R OI near the ATM +/- nearStrikes going the trade's way, with a big net difference between the sides
       const wide = goes(f.nearStrikes, dir)
       const net = wide.now.pe + wide.now.ce > 0 ? (wide.now.pe - wide.now.ce) / (wide.now.pe + wide.now.ce) : 0

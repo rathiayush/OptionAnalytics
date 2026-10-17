@@ -15,7 +15,7 @@ public sealed class SpotFlipStrategyTests
     private const decimal Axis = 23000;
     private static readonly decimal[] Strikes = { 22800, 22850, 22900, 22950, 23000, 23050, 23100, 23150, 23200 };
 
-    private sealed record Day(bool NoCross = false, bool CallsStay = false, bool CeHeavy = false, bool SmallNet = false, bool AtmCalls = false, bool NoFlip = false, bool LateTurn = false);
+    private sealed record Day(bool BothUp = false, bool NoCross = false, bool CallsStay = false, bool CeHeavy = false, bool SmallNet = false, bool AtmCalls = false, bool NoFlip = false, bool LateTurn = false);
 
     private static bool Near(decimal k) => Math.Abs(k - Axis) <= 100;
 
@@ -34,15 +34,16 @@ public sealed class SpotFlipStrategyTests
     private static decimal CeOi(Day d, decimal k, int m)
     {
         var baseOi = Near(k) && d.CeHeavy ? 4e6m : 2e6m;
+        var early = d.BothUp ? 0.0016m : 0.0006m;
         var leave = d.CallsStay ? 0m : 0.003m;
         var rate = d.AtmCalls ? (Math.Abs(k - Axis) <= 50 ? -0.002m : Near(k) ? 0.012m : leave) : leave;
-        return baseOi * (1 + 0.0006m * Math.Min(m, Turn) - rate * Math.Max(0, m - Turn));
+        return baseOi * (1 + early * Math.Min(m, Turn) - rate * Math.Max(0, m - Turn));
     }
 
     private static decimal PeOi(Day d, decimal k, int m)
     {
         var baseOi = Near(k) ? (d.CeHeavy ? 2e6m : d.SmallNet ? 2.4e6m : 3.5e6m) : 2e6m;
-        return baseOi * (1 + 0.0002m * Math.Min(m, Turn) + (d.NoFlip ? 0m : 0.0016m) * Math.Max(0, m - Turn));
+        return baseOi * (1 + (d.BothUp ? 0.0008m : 0.0002m) * Math.Min(m, Turn) + (d.NoFlip ? 0m : 0.0016m) * Math.Max(0, m - Turn));
     }
 
     private static BacktestStrategyContext Context(Day d, bool mirror = false)
@@ -104,6 +105,16 @@ public sealed class SpotFlipStrategyTests
         Assert.Empty(Entries(new Day(), tweak: p => p["netMinPct"] = 40));
         Assert.Single(Entries(new Day(AtmCalls: true), tweak: p => p["atmStrikes"] = 0));
         Assert.Single(Entries(new Day(), tweak: p => p["emaFast"] = 9));
+    }
+
+    [Fact]
+    public void The_cumulative_change_only_has_to_be_not_against_the_trade()
+    {
+        // Both sides up since the open: neither with nor against a long.
+        Assert.Single(Entries(new Day(BothUp: true)));
+        Assert.Empty(Entries(new Day(BothUp: true), tweak: p => p["cumDelta"] = 1));
+        Assert.Single(Entries(new Day(BothUp: true), tweak: p => p["cumDelta"] = 2));
+        Assert.Single(Entries(new Day(), tweak: p => p["cumDelta"] = 1));
     }
 
     [Fact]

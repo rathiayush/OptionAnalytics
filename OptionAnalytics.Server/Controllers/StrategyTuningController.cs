@@ -62,7 +62,7 @@ public sealed class StrategyTuningController : ControllerBase
         "tradeTape", "tradeBig", "tradeBook", "tradeCvd", "tradeVolume",
         // A strategy's OWN rules and its predefined blocks (strategyTuning.js entryDefsOf - tests/spot-flip.test.mjs is the guard
         // that every one of them is listed here): the lab scans the days again with them.
-        "armMin", "emaTf", "emaFast", "emaSlow", "emaMode", "wallMin", "nearStrikes", "atmStrikes", "netMinPct", "stopAtr", "targetAtr",
+        "armMin", "emaTf", "emaFast", "emaSlow", "emaMode", "cumDelta", "wallMin", "nearStrikes", "atmStrikes", "netMinPct", "stopAtr", "targetAtr",
     };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>

@@ -91,6 +91,7 @@ const STRATEGY_OWN_FILTERS = {
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
     { key: 'emaMode', label: 'Spot EMA: crossed on the candle that just closed, or (a trend under way) already in the trade\'s direction', type: 'select', default: 'cross', options: [{ value: 'cross', label: 'Crossed on the candle that just closed' }, { value: 'state', label: 'Already in direction counts too' }] },
+    { key: 'cumDelta', label: 'Cumulative CE / PE change since the open (the OI heatmap): not against the trade, or with it (puts rising / calls falling for a long), or not asked', type: 'select', default: 'notAgainst', options: [{ value: 'notAgainst', label: 'Not against the trade' }, { value: 'with', label: 'With the trade' }, { value: 'off', label: 'Not asked' }] },
     { key: 'wallMin', label: 'S / R OI near the ATM: over the last (minutes) the writers go the trade\'s way (puts added and calls leaving for a long)', type: 'number', default: 10, min: 3, max: 30, step: 1 },
     { key: 'nearStrikes', label: 'S / R OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
     { key: 'atmStrikes', label: 'The strikes right round the ATM (+/-) also go the trade\'s way', type: 'number', default: 1, min: 0, max: 3, step: 1 },

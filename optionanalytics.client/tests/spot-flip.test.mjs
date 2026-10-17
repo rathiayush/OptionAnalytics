@@ -55,7 +55,7 @@ test('not without each key condition', () => {
 
 test('configurable: how long to wait, the strikes, the net difference, the EMA candle and lengths, "already in direction"', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.wallMin, f.nearStrikes, f.atmStrikes, f.netMinPct, f.stopAtr, f.targetAtr], [30, 3, 7, 21, 'cross', 10, 2, 1, 25, 1.5, 3], 'the defaults')
+  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.cumDelta, f.wallMin, f.nearStrikes, f.atmStrikes, f.netMinPct, f.stopAtr, f.targetAtr], [30, 3, 7, 21, 'cross', 'notAgainst', 10, 2, 1, 25, 1.5, 3], 'the defaults')
   assert.equal(mine(crossLong({ lateTurn: true }), withF({ armMin: 120 })).length, 1, 'waiting longer lets the late EMA crossover through')
   assert.equal(mine(crossLong({ smallNet: true }), withF({ netMinPct: 10 })).length, 1, 'a smaller net difference asked')
   assert.equal(mine(crossLong(), withF({ netMinPct: 40 })).length, 0, 'a bigger one')
@@ -105,7 +105,7 @@ test('parameters: own rules + the exits block + the trade filters; the lab can c
   assert.deepEqual(Object.keys(PARAM_BLOCKS), ['exits'])
   const defs = STRATEGY_FILTERS.spotFlip
   assert.deepEqual([...new Set(defs.map(filterGroup))], ['Its own rules', 'Index stop-loss and target', 'How the trade is taken (every strategy)'])
-  assert.deepEqual(entryDefsFor(['spotFlip']).map((d) => d.key), ['armMin', 'emaTf', 'emaFast', 'emaSlow', 'emaMode', 'wallMin', 'nearStrikes', 'atmStrikes', 'netMinPct', 'stopAtr', 'targetAtr'])
+  assert.deepEqual(entryDefsFor(['spotFlip']).map((d) => d.key), ['armMin', 'emaTf', 'emaFast', 'emaSlow', 'emaMode', 'cumDelta', 'wallMin', 'nearStrikes', 'atmStrikes', 'netMinPct', 'stopAtr', 'targetAtr'])
   assert.deepEqual(labParams({ emaTf: 5, emaFast: 7, netMinPct: 40 }, 'spot', ['spotFlip']), { emaTf: 5, netMinPct: 40 })
   assert.deepEqual(labOverrides({ emaFast: 7 }, 'spot', ['spotFlip']), { emaFast: 7 })
   assert.deepEqual(paramsFromFilters({ emaTf: 5, wallMin: 10 }, 'spotFlip'), { emaTf: 5 })
@@ -142,4 +142,14 @@ test('the server accepts every rule setting in a lab job, and the Expired Backte
   assert.ok(shared >= 8, `${shared} shared numbers checked`)
   assert.match(cs, /SignalStartTimeParameter\(\) with \{ Default = 570 \}/)
   assert.match(cs, /MaxHoldingTimeParameter\(\) with \{ Default = 330 \}/)
+})
+
+test('the cumulative CE / PE change since the open (the OI heatmap) only has to be NOT AGAINST the trade - or with it, or not asked', () => {
+  // Both sides up since the open: neither with nor against a long.
+  const day = () => crossLong({ bothUp: true })
+  const cum = mine(day())[0]?.checks.Cumulative
+  assert.match(cum, /since the open CE \+[\d.]+% \/ PE \+[\d.]+%/, 'fires by default: not against')
+  assert.equal(mine(day(), withF({ cumDelta: 'with' })).length, 0, 'asked to be WITH the trade it is not')
+  assert.equal(mine(day(), withF({ cumDelta: 'off' })).length, 1, 'not asked')
+  assert.equal(mine(crossLong(), withF({ cumDelta: 'with' })).length, 1, 'a day with the puts clearly leading is with it too')
 })
