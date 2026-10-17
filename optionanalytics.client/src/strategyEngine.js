@@ -88,7 +88,7 @@ export const STRATEGY_FILTERS = {
   spotFlip: [
     { key: 'deltaMin', label: 'CE / PE change with the trade over the last (minutes)', type: 'number', default: 10, min: 3, max: 15, step: 1 },
     { key: 'nearStrikes', label: 'Support / resistance OI counted over ATM +/- (strikes)', type: 'number', default: 2, min: 1, max: 5, step: 1 },
-    { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 15, step: 1 },
+    { key: 'flipTf', label: 'The since-open CE - PE flip: it changed sign within the last (minutes)', type: 'number', default: 1, min: 1, max: 60, step: 1 },
     { key: 'emaTf', label: 'EMA timeframe (minutes per candle)', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
     { key: 'emaMode', label: 'Spot EMA: already in the direction, a fresh crossover, or not asked', type: 'select', default: 'state', options: [{ value: 'state', label: 'Already in direction (fast over/under slow)' }, { value: 'cross', label: 'Fresh crossover within the candles below' }, { value: 'off', label: 'Not asked' }] },
     { key: 'crossBars', label: 'A fresh crossover happened within the last (candles) - spot and ATM option EMAs', type: 'number', default: 3, min: 1, max: 20, step: 1 },

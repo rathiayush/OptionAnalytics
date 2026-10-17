@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import { SPOT_STRATEGIES, STRATEGY_BY_ID, STRATEGY_FILTERS, strategyFilters, trailedStop, applyTradeFilter } from '../src/strategyEngine.js'
 import { emaAgrees, evaluateSpotStrategies, scanSpotDay } from '../src/spotEngine.js'
 import { firstPerCooldown } from '../src/scanDay.js'
+import { DEFAULT_VARIANT, entryDefsFor, entryPartOf, filtersFromTuning, labOverrides, labParams, paramsFromFilters } from '../src/strategyTuning.js'
 import { MIN, T, flipLong, flipShort } from './spot-flip-world.mjs'
 
 const mine = (w, filters = {}) => scanSpotDay({ bars: w.bars, oi: w.oi, filters }).filter((s) => s.id === 'spotFlip')
@@ -152,4 +153,21 @@ test('the ATM CE / PE EMAs are configurable and off by default', () => {
   for (const o of [{ optEmaMode: 'state' }, { optEmaMode: 'cross' }, { optEmaMode: 'state', optEmaLegs: 'both' }]) {
     assert.ok(mine(flipLong(), { spotFlip: o }).length <= mine(flipLong()).length, JSON.stringify(o))
   }
+})
+
+test('the Strategy lab can change #101\'s own rules (timeframes, EMAs, VWAP, ATM option EMAs), not only the trade settings', () => {
+  const keys = entryDefsFor(['spotFlip']).map((d) => d.key)
+  for (const k of ['flipTf', 'emaTf', 'emaMode', 'crossBars', 'emaFast', 'emaSlow', 'vwapMode', 'optEmaMode', 'optEmaLegs', 'optEmaFast', 'optEmaSlow', 'deltaMin', 'nearStrikes', 'trailMode']) assert.ok(keys.includes(k), k)
+  assert.ok(!keys.includes('tradeSide'), 'the trade filters are not its own rules')
+  // Sent to the job: only what differs from as written (and every key set, as changes on top of several strategies' starts).
+  assert.deepEqual(labParams({ emaTf: 5, emaFast: 7, vwapMode: 'with' }, 'spot', ['spotFlip']), { emaTf: 5, vwapMode: 'with' })
+  assert.deepEqual(labOverrides({ emaFast: 7 }, 'spot', ['spotFlip']), { emaFast: 7 })
+  assert.deepEqual(labParams({ emaTf: 5 }, 'spot', []), {}, 'a key of a strategy not picked is not sent')
+  // What is applied reads back, and applying a lab setting writes the rules (and removes one set back to its default).
+  assert.deepEqual(paramsFromFilters({ emaTf: 5, deltaMin: 10 }, 'spotFlip'), { emaTf: 5 })
+  const next = filtersFromTuning({ emaTf: 5, nearStrikes: 3 }, { ...DEFAULT_VARIANT, emaTf: 3, vwapMode: 'with' }, { id: 'spotFlip' })
+  assert.equal(next.vwapMode, 'with')
+  assert.equal(next.emaTf, undefined, 'back at its default = removed')
+  assert.equal(next.nearStrikes, 3, 'a rule the lab setting does not mention stays')
+  assert.deepEqual(entryPartOf('spotFlip', { emaTf: 5, tradeSide: 'long' }), { emaTf: 5 })
 })

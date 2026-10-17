@@ -5,10 +5,10 @@
 // from the cache, so a run normally costs no Dhan calls); nothing is written to the tuning history. Apply it from here.
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, InputNumber, Progress, Row, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth, UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { ACTIVE_STRATEGIES, SPOT_STRATEGIES, STRATEGY_BY_ID, TRADE_FILTERS } from './strategyEngine.js'
-import { OPTION_DEFAULT, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, sumPoints, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
+import { OPTION_DEFAULT, entryDefsFor, labEditableKeys, labOverrides, labParams, optionText, paramsFromFilters, paramsFromSettingsRow, settingSignature, sumPoints, variantText, DEFAULT_VARIANT } from './strategyTuning.js'
 import { applyTunedFilters, putOnLiveList } from './scannerSettings.js'
 import { ApplyTunedButton } from './ApplyTuned.jsx'
 import AppliedLab from './AppliedLab.jsx'
@@ -91,7 +91,7 @@ export default function StrategyLabPage() {
   const startWith = (v) => {
     setStartFrom(v)
     if (!single || v === 'written') setParams({})
-    else if (v === 'applied') setParams(paramsFromFilters(applied))
+    else if (v === 'applied') setParams(paramsFromFilters(applied, id))
     else setParams(paramsFromSettingsRow(tuned[Number(v.slice(1))]?.row))
   }
 
@@ -133,7 +133,7 @@ export default function StrategyLabPage() {
   }, [waiting, data]) // eslint-disable-line react-hooks/exhaustive-deps
   const running = status?.state === 'running'
   const labRunning = running && status?.job?.what === 'lab'
-  const sent = () => (single ? { params: labParams(params, data) } : { params: labOverrides(params, data), labBase: startFrom === 'applied' ? 'applied' : 'written' })
+  const sent = () => (single ? { params: labParams(params, data, ids) } : { params: labOverrides(params, data, ids), labBase: startFrom === 'applied' ? 'applied' : 'written' })
   const job = (u) => ({
     underlying: u, data, strategies: ids, what: 'lab', ...sent(), minTrades: 2,
     ...(range?.[0] || range?.[1] ? { from: range?.[0]?.format('YYYY-MM-DD') ?? null, to: range?.[1]?.format('YYYY-MM-DD') ?? null, days: 250 } : { days }),
@@ -169,7 +169,9 @@ export default function StrategyLabPage() {
   const set = (k, v) => setParams((p) => ({ ...p, [k]: v }))
   const keys = labEditableKeys(data)
   const opt = params.optLeg === 'buy' || params.optLeg === 'sell'
-  const shown = labParams(params, data)
+  const shown = labParams(params, data, ids)
+  // The strategies' OWN rule settings (timeframes, EMA lengths, crossover / VWAP / ATM option EMAs ...), besides the trade settings.
+  const entryDefs = entryDefsFor(ids)
 
   // Every index × strategy picked, with its last lab result (or none yet).
   const entriesOf = (r) => (r?.ok && r?.lab ? (r.results ?? (r.strategy ? [{ strategy: r.strategy, base: 'written', asWritten: r.asWritten, applied: r.applied, yours: r.yours }] : [])) : [])
@@ -196,7 +198,7 @@ export default function StrategyLabPage() {
 
   const apply = async (row, addToLive, lots) => {
     try {
-      const p = labParams(row.entry.yours.params ?? {}, data)
+      const p = labParams(row.entry.yours.params ?? {}, data, [row.id])
       const leg = p.optLeg === 'buy' || p.optLeg === 'sell'
       await applyTunedFilters(row.id, { ...DEFAULT_VARIANT, ...OPTION_DEFAULT, ...p }, { option: leg, index: row.index, tuned: settingSignature(p) || null, lots })
       if (addToLive) await putOnLiveList(row.index, row.id)
@@ -244,7 +246,28 @@ export default function StrategyLabPage() {
             <Card size="small" type="inner" title={single ? 'The setting' : 'The changes - put on top of each strategy\'s start; only what you change here is changed'}
               extra={<Text type="secondary" style={{ fontSize: 12 }}>{single
                 ? `${variantText({ ...DEFAULT_VARIANT, ...shown })}${opt ? ` · ${optionText({ ...OPTION_DEFAULT, ...shown })}` : ''}`
-                : Object.keys(labOverrides(params, data)).length ? `${Object.keys(labOverrides(params, data)).length} change(s)` : 'no changes - each as it starts'}</Text>}>
+                : Object.keys(labOverrides(params, data, ids)).length ? `${Object.keys(labOverrides(params, data, ids)).length} change(s)` : 'no changes - each as it starts'}</Text>}>
+              {entryDefs.length > 0 && (
+                <Row gutter={[16, 8]} style={{ marginBottom: 12 }}>
+                  <Col span={24}><Text strong style={{ fontSize: 12 }}>The strategy&apos;s own rules - a change scans the days again</Text></Col>
+                  {entryDefs.map((f) => {
+                    const v = params[f.key] ?? f.default
+                    const changed = params[f.key] !== undefined && String(params[f.key]) !== String(f.default)
+                    return (
+                      <Col xs={24} md={12} xl={8} key={f.key}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                          <Text style={{ fontSize: 12, fontWeight: changed ? 600 : 400 }}>{f.label}</Text>
+                          {f.type === 'select'
+                            ? <Select size="small" value={v} onChange={(x) => set(f.key, x)} options={f.options} style={{ width: 200, flex: 'none' }} aria-label={f.key} />
+                            : f.type === 'switch'
+                              ? <Switch size="small" checked={!!v} onChange={(x) => set(f.key, x)} aria-label={f.key} />
+                              : <InputNumber size="small" min={f.min} max={f.max} step={f.step} value={v} onChange={(x) => set(f.key, x ?? f.default)} style={{ width: 100, flex: 'none' }} aria-label={f.key} />}
+                        </div>
+                      </Col>
+                    )
+                  })}
+                </Row>
+              )}
               <Row gutter={[16, 8]}>
                 {keys.map((k) => {
                   const f = TRADE_FILTERS.find((x) => x.key === k)

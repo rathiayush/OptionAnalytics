@@ -47,7 +47,7 @@ import { scannerProfileOf, trailFor } from '../src/scannerCore.js'
 import { defaultIndexTrade, defaultTradeLevels } from '../src/tradeDefaults.js'
 import { expiryFlagOf } from '../src/liveFeeds.js'
 import { dayFromOrderFlow, scanDaySetups } from '../src/scanDay.js'
-import { evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText, withWalkForward, heldToMinDays, MIN_TUNE_DAYS } from '../src/strategyTuning.js'
+import { entryDefsOf, entryPartOf, evaluateSetting, paramsFromFilters, DEFAULT_VARIANT, splitDays, OI_COMBO_CAP, OI_FACTORS, OPTION_GRID, countOiCombinations, oiFactorsFor, oiGridOf, optionText, rankStrategies, tradeDetails, tuneStrategy, tuningDay, TUNING_GRID, variantText, withWalkForward, heldToMinDays, MIN_TUNE_DAYS } from '../src/strategyTuning.js'
 import { DEFAULT_ROW_SIZES } from './indexScanner.mjs'
 import { createFetcher, isTransientText, pruneCache } from './tuneFetch.mjs'
 import { CHECK_COLUMNS, DAY_COLUMNS, RUN_COLUMNS, SETTING_COLUMNS, TRADE_COLUMNS, historyOf, runsCsvWith, toCsv } from './tuneHistory.mjs'
@@ -337,7 +337,7 @@ async function main() {
       // day; the server walks back over holidays. Without it the day is still scanned, the sweep simply cannot fire.
       const prevDay = await fetcher.dayApi('prevday', p.date, `/api/oi-replay/${U}/previous-day-volume-profile?date=${p.date}`, (b) => !!b?.success && b?.bars?.length > 0, { source: 'previous-day' })
         .then(prevDayOf).catch(() => null)
-      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, prevDay, underlying: U }), { minuteBars: bars, heatmap: [] }, oi), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', previousDay: prevDay?.date ?? null, ...(optionErrors ? { optionErrors } : {}) } }
+      return { ...tuningDay(p.date, scanSpotDay({ bars, oi, filters: entryFilters, prevDay, underlying: U }), { minuteBars: bars, heatmap: [] }, oi), ...(WHAT === 'lab' ? { raw: { bars, oi, prevDay } } : {}), estimated: false, quality: { minutes: bars.length, oiMinutes, source: 'spot', previousDay: prevDay?.date ?? null, ...(optionErrors ? { optionErrors } : {}) } }
     }
     const expiryQuery = p.expiry ? `&expiry=${p.expiry}` : ''
     const body = await fetcher.dayApi('flow', p.date, dayPath(p.date, rowSize, expiryQuery), (b) => b?.bars?.length >= MIN_SESSION_MINUTES, { source: 'futures-day' })
@@ -743,6 +743,10 @@ async function main() {
     const opts = { trail, underlying: U, optionLevels }
     const OPTION_KEYS = ['optLeg', 'optMoneyness', 'optExit', 'optSlPct', 'optTargetPct']
     const results = []
+    // The days scanned again with a strategy's OWN rule settings (timeframes, EMA lengths ... - what the lab changes besides
+    // the trade settings): the same bars and OI as the first scan, so only the signals differ. Same as before when they match.
+    const rescan = (id, entry) => (JSON.stringify(entry) === JSON.stringify(entryFilters[id] ?? {}) ? days
+      : days.map((d) => (d.raw ? { ...d, setups: scanSpotDay({ bars: d.raw.bars, oi: d.raw.oi, filters: { ...entryFilters, [id]: entry }, prevDay: d.raw.prevDay, underlying: U }) } : d)))
     for (let i = 0; i < ids.length; i++) {
       const id = ids[i]
       const meta = STRATEGY_BY_ID[id]
@@ -753,7 +757,12 @@ async function main() {
       const fromApplied = job.labBase === 'applied' && !!applied
       // Its own setting when the job gives one per strategy (a tuning run's settings tested on other days), else the one sent for all.
       const own = job.paramsById?.[id] ?? job.params ?? {}
-      let tried = { ...(fromApplied ? paramsFromFilters(applied) : {}), ...own }
+      let tried = { ...(fromApplied ? paramsFromFilters(applied, id) : {}), ...own }
+      // Its own rule settings split from the trade settings; the entry part is what the days are scanned with.
+      const triedEntry = entryPartOf(id, tried)
+      tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !(k in triedEntry)))
+      const entryNow = { ...(fromApplied ? entryPartOf(id, applied) : {}), ...entryPartOf(id, own) }
+      const entryHeld = Object.fromEntries(Object.entries(entryNow).filter(([k, v]) => v !== entryDefsOf(id).find((d) => d.key === k)?.default))
       if (tried.optLeg !== 'buy' && tried.optLeg !== 'sell' && tried.optLeg !== 'signal') tried = Object.fromEntries(Object.entries(tried).filter(([k]) => !OPTION_KEYS.includes(k)))
       // SEVERAL strategies: as written and as applied are read only as their summary (the comparison table), yet every
       // trade of them was carried in the result and shown nowhere - with all 22 picked that is two thirds of a file the
@@ -762,14 +771,17 @@ async function main() {
       const lean = ids.length > 1 ? summaryOnly : (m) => m
       // Nothing changed on top of the applied setting (the lab's "what is applied" run): the setting tried IS the applied
       // one, so it is measured once - the applied numbers are not worked out a second time under another name.
-      const appliedM = applied ? evaluateSetting(days, id, paramsFromFilters(applied), appliedOpts) : null
+      const appliedM = applied ? evaluateSetting(days, id, paramsFromFilters(applied, id), appliedOpts) : null
       const sameAsApplied = fromApplied && !!appliedM && Object.keys(own).length === 0
       results.push({
         strategy: { id, no: meta.no, name: meta.name },
         base: fromApplied ? 'applied' : 'written',
-        asWritten: lean(evaluateSetting(days, id, {}, opts)),
+        asWritten: lean(evaluateSetting(rescan(id, {}), id, {}, opts)),
         applied: appliedM ? { ...lean(appliedM), filters: applied } : null,
-        yours: sameAsApplied ? appliedM : evaluateSetting(days, id, tried, fromApplied ? appliedOpts : opts),
+        yours: sameAsApplied ? appliedM : (() => {
+          const m = evaluateSetting(rescan(id, entryHeld), id, tried, fromApplied ? appliedOpts : opts)
+          return Object.keys(entryHeld).length ? { ...m, entry: entryHeld, params: { ...m.params, ...entryHeld }, text: `${m.text} · rules: ${Object.entries(entryHeld).map(([k, v]) => `${k} ${v}`).join(', ')}` } : m
+        })(),
       })
     }
     await dhanBudgetLeft().catch(() => null)

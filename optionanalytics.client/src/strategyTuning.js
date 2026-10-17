@@ -11,7 +11,7 @@
 // score (average R minus one standard error), and is only recommended when it also beats the strategy as
 // written on the test days.
 
-import { ACTIVE_STRATEGIES, OPTION_TRADE_FILTERS, STRATEGY_BY_ID, TRADE_FILTERS, applyTradeFilter, capPoints, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
+import { ACTIVE_STRATEGIES, OPTION_TRADE_FILTERS, STRATEGY_BY_ID, STRATEGY_FILTERS, TRADE_FILTERS, applyTradeFilter, capPoints, oiGateText, optionStopTargetHit, optionTradeAt, premiumAt, simulateOutcome } from './strategyEngine.js'
 import { replayRange } from './orderFlowMath.js'
 import { MIN } from './scannerCore.js'
 import { firstPerCooldown } from './scanDay.js'
@@ -806,8 +806,10 @@ export function tuningDay(date, setups, replayDay, oi = null) {
 
 /** The filters to save for a tuned strategy: its own entry filters kept, the tuned trade filters on top (only
  *  the ones that differ from the default). */
-export function filtersFromTuning(current, params, { option = false } = {}) {
+export function filtersFromTuning(current, params, { option = false, id = null } = {}) {
   const out = { ...(current ?? {}) }
+  // The strategy's own rule settings a lab setting carries (timeframes, EMA lengths ...): set, or removed at their default.
+  if (id) for (const d of entryDefsOf(id)) if (params[d.key] !== undefined) { if (params[d.key] === d.default) delete out[d.key]; else out[d.key] = params[d.key] }
   // Every trade filter is either set to what was tuned or removed, so applying a new result REPLACES the last one
   // rather than leaving half of it behind. The strategy's own entry filters (its rules) are untouched.
   for (const f of TRADE_FILTERS) {
@@ -907,11 +909,29 @@ export function paramsFromSettingsRow(row) {
   return out
 }
 
+/** A strategy's OWN rule settings (its entry filters: timeframes, EMA lengths, windows ... - not the trade filters every
+ *  strategy has): what the Strategy lab can change besides the trade settings. A change of one is a different set of
+ *  signals, so the lab scans the days again for it. */
+export const entryDefsOf = (id) => (STRATEGY_FILTERS[id] ?? []).filter((f) => !TRADE_FILTERS.some((t) => t.key === f.key))
+/** The entry settings of several strategies together, one per key (the first strategy's wins). */
+export const entryDefsFor = (ids) => {
+  const seen = new Map()
+  for (const id of ids ?? []) for (const f of entryDefsOf(id)) if (!seen.has(f.key)) seen.set(f.key, f)
+  return [...seen.values()]
+}
+/** Only the entry settings of `id` out of `params`. */
+export const entryPartOf = (id, params) => {
+  const out = {}
+  for (const f of entryDefsOf(id)) if (params?.[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '') out[f.key] = params[f.key]
+  return out
+}
+
 /** The parameters a tuned setting is made of, as the lab and the tuning speak them (opt* for the option), read back from
  *  a strategy's APPLIED filters (tradeOpt* - filtersFromTuning's way round): what is applied, to start the lab from. */
-export function paramsFromFilters(filters) {
+export function paramsFromFilters(filters, id = null) {
   const f = filters ?? {}
   const out = {}
+  if (id) for (const d of entryDefsOf(id)) if (f[d.key] !== undefined && f[d.key] !== d.default) out[d.key] = f[d.key]
   for (const tf of TRADE_FILTERS) if (TUNED_SETTING_KEYS.includes(tf.key) && f[tf.key] !== undefined && f[tf.key] !== tf.default) out[tf.key] = f[tf.key]
   if (f.tradeOptLeg === 'buy' || f.tradeOptLeg === 'sell') {
     out.optLeg = f.tradeOptLeg
@@ -979,8 +999,9 @@ export function labEditableKeys(data) {
 /** The Strategy lab's CHANGES for several strategies at once, put on top of each one's own starting point (the job's
  *  labBase): every key set - one set back to its default too, since a starting point may have another - the option part
  *  as labParams has it, or optLeg 'none' to take an option leg off. Nothing set = each as its starting point. */
-export function labOverrides(params, data) {
+export function labOverrides(params, data, ids = []) {
   const out = {}
+  for (const f of entryDefsFor(ids)) if (params?.[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '') out[f.key] = params[f.key]
   for (const k of labEditableKeys(data)) if (params?.[k] !== undefined && params[k] !== null && params[k] !== '') out[k] = params[k]
   if (params?.optLeg === 'buy' || params?.optLeg === 'sell' || params?.optLeg === 'signal') {
     const full = labParams(params, data)
@@ -991,8 +1012,9 @@ export function labOverrides(params, data) {
 
 /** A lab setting as sent to the job (and applied): only what differs from the strategy as written, the option part only
  *  when an option leg is chosen, and of it only what that exit uses. */
-export function labParams(params, data) {
+export function labParams(params, data, ids = []) {
   const out = {}
+  for (const f of entryDefsFor(ids)) if (params?.[f.key] !== undefined && params[f.key] !== null && params[f.key] !== '' && params[f.key] !== f.default) out[f.key] = params[f.key]
   for (const k of labEditableKeys(data)) {
     const f = TRADE_FILTERS.find((x) => x.key === k)
     if (params?.[k] !== undefined && params[k] !== null && params[k] !== '' && params[k] !== f?.default) out[k] = params[k]

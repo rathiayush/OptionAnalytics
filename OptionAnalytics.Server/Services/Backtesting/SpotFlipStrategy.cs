@@ -67,7 +67,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.SignalStartTimeParameter(),
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         OptionTradeSimulator.MaxHoldingTimeParameter(),
-        new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 15, Step: 1),
+        new BacktestParameterSpec("flipTf", "CE-PE flip window (minutes)", Default: 1, Min: 1, Max: 60, Step: 1),
         new BacktestParameterSpec("emaTf", "EMA candle size (minutes)", Default: 3, Min: 1, Max: 15, Step: 1),
         new BacktestParameterSpec("emaMode", "Spot EMA", Default: ModeState, Min: ModeOff, Max: ModeCross, Step: 1, Options: ModeOptions("Already in direction (fast over/under slow)", "Fresh crossover within the candles below")),
         new BacktestParameterSpec("crossBars", "A fresh crossover happened within the last (candles) - spot and ATM option EMAs", Default: 3, Min: 1, Max: 20, Step: 1),

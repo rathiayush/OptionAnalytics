@@ -47,7 +47,7 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
   if (index) {
     const config = await getConfig()
     const base = filtersForIndex({ filters: config?.settings?.filters ?? readSettings().filters, filtersByIndex: config?.filtersByIndex ?? readFiltersByIndex() }, index)[id]
-    const next = filtersFromTuning(base, params, { option })
+    const next = filtersFromTuning(base, params, { option, id })
     // Which tuned setting this is (settingSignature) - the live list judges the strategy by that setting's own record
     // on unseen days. The scanner ignores the key (strategyFilters keeps only real filters).
     delete next._tuned
@@ -65,11 +65,11 @@ export async function applyTunedFilters(id, params, { option = false, index = nu
     return saveIndexFilters(index, id, next)
   }
   const local = readSettings()
-  const filters = filtersFromTuning(local.filters?.[id], params, { option })
+  const filters = filtersFromTuning(local.filters?.[id], params, { option, id })
   localStorage.setItem(SCANNER_SETTINGS_KEY, JSON.stringify({ ...local, filters: { ...(local.filters ?? {}), [id]: filters } }))
   const config = await getConfig()
   const serverSettings = config?.settings ?? local
-  const saved = filtersFromTuning(serverSettings.filters?.[id], params, { option })
+  const saved = filtersFromTuning(serverSettings.filters?.[id], params, { option, id })
   const res = await fetch('/api/scanner-runner/config', {
     method: 'PUT', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ settings: { ...serverSettings, filters: { ...(serverSettings.filters ?? {}), [id]: saved } } }),
