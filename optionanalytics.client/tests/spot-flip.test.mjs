@@ -201,3 +201,10 @@ test('predefined parameter blocks: a strategy lists the blocks it has; its filte
   assert.equal(pass.confirm(1).ok, true, 'no blocks = nothing asked')
   assert.deepEqual([pass.exits.stopPts, pass.exits.targetPts, pass.exits.trail], [3, 6, null], 'and the default 1.5 / 3 ATR, no trailing stop')
 })
+
+test('the server accepts every own rule and block setting in a lab job (StrategyTuningController LabParamKeys)', async () => {
+  const { readFileSync } = await import('node:fs')
+  const cs = readFileSync(new URL('../../OptionAnalytics.Server/Controllers/StrategyTuningController.cs', import.meta.url), 'utf8')
+  const missing = entryDefsFor(SPOT_STRATEGIES.map((s) => s.id)).map((d) => d.key).filter((k) => !cs.includes(`"${k}"`))
+  assert.deepEqual(missing, [], 'add these keys to LabParamKeys')
+})
