@@ -15,7 +15,7 @@
 
 import { pocIndexOf, valueAreaOf } from './orderFlowMath.js'
 import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, oiChange, oiOf, optionOiRead, optionTradesFor, oiRows, premiumAt, sideOiChanges, strategyFilters,
+  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
   valueAt, wallOiChanges, wallsAhead, wallsAt,
 } from './strategyEngine.js'
 
@@ -25,15 +25,6 @@ const istMinute = (ms) => Math.floor((ms / MIN + 330) % 1440)
 const FIRST_ENTRY = 9 * 60 + 30
 const LAST_ENTRY = 14 * 60 + 45
 const SIDE_BAR = 0.003 // a side's OI really rising / falling: 0.3% of its OI in 15 minutes (as the filters)
-const WALL_BAR = 0.005 // a wall's OI really growing / shrinking: 0.5% in 15 minutes
-const WRITING_BAR = 0.02 // fresh writing at a strike: its OI up 2% in 15 minutes (a hot cell of the OI heatmap)
-const COVERING_BAR = 0.01 // the other side covering: its OI near the price down 1% in 15 minutes
-const FLIP_BAR = 0.002 // a since-open lead worth reading: 0.2% of the chain's OI
-const LADDER_RATIO = 1.3 // support (or resistance) this much bigger than the other side, in the 3 strikes each side
-const LADDER_RISE = 0.1 // ... and that lead grown 10% in 15 minutes
-const STRADDLE_FALL = 0.005 // the ATM straddle decaying: down 0.5% in 10 minutes (same strike)
-const OI_LEAN = 0.2 // the whole chain's OI lean (since the open / on the window) counts as with / against at this (as the filters)
-const CUM_SIDE_BAR = 0.01 // a side's OI really added / shed since the open: 1% of it (as the filters)
 const BY_ID = Object.fromEntries(SPOT_STRATEGIES.map((s) => [s.id, s]))
 
 /** Spot candles as the engine reads them: { t (start, ms), time, open, high, low, close }. */
@@ -108,8 +99,6 @@ export function prevDayOf(result) {
   if (!bars.length) return null
   return { date: result.profileDate ?? null, high: Math.max(...bars.map((b) => b.high)), low: Math.min(...bars.map((b) => b.low)), close: bars.at(-1).close }
 }
-const ADAPTIVE_LEAN = 0.15 // #115: the whole chain's OI added since the open leans this much to call it one-sided
-const ADAPTIVE_BALANCE = [0.8, 1.25] // ... support OI (PE, 3 strikes under) / resistance OI (CE, 3 over) in this band = balanced
 
 // Our OWN spot profile (#111 - #113 read it): built here from the day's spot candles - no server profile, no futures. Spot
 // has no traded volume, so each finished minute counts once - time at price, a TPO profile - spread evenly over the rows
@@ -193,9 +182,87 @@ export function spotProfile(bars, step) {
  * #113 also read the day's own spot profile, built from those bars (spotProfile).
  * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
  */
-export function evaluateSpotStrategies() {
-  // No strategies: every spot rule was removed.
-  return []
+export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
+  if (!oi || bars.length < 15) return []
+  const minute = istMinute(nowMs)
+  if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
+  const last = bars.at(-1)
+  const spotNow = last.close
+  const rows = oiRows(oi, nowMs)
+  if (!rows.length || !(valueAt(oi.spot, nowMs)?.close > 0)) return []
+  const atr = Math.max(avgRange(bars), spotNow * 0.0004)
+  const read = optionOiRead(oi, spotNow, nowMs, 15)
+  if (!read) return []
+  const { support, resistance } = wallsAt(oi, rows, spotNow)
+  const ahead = wallsAhead(oi, rows, spotNow)
+  const sides = sideOiChanges(read, false)
+  const cum = sideOiChanges(read, true)
+  const out = []
+  const ctx = () => ({
+    flow: read.lean, cum: read.leanOpen, futOiPct: null, futPricePct: null,
+    ...wallOiChanges(oi, ahead, nowMs, 15), ...sides, ...cum, dayType: dayTypeAt(oi, bars, nowMs)?.type ?? null,
+    byWindow: Object.fromEntries([1, 3, 5].map((m) => {
+      const r = optionOiRead(oi, spotNow, nowMs, m)
+      return [m, { flow: r?.lean ?? null, futOiPct: null, futPricePct: null, ...wallOiChanges(oi, ahead, nowMs, m), ...sideOiChanges(r, false) }]
+    })),
+    support, resistance, spot: spotNow, ...ahead,
+  })
+  const push = (id, dir, stopPts, targetPts, timeStopMin, checks) => {
+    if (!(stopPts > 0) || !(targetPts > 0)) return
+    out.push({
+      id, name: BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: spotNow,
+      stop: spotNow - dir * stopPts, target: spotNow + dir * targetPts,
+      timeStopMs: Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN),
+      estimated: false, spot: true, options: optionTradesFor(oi, dir, spotNow, nowMs), oiCtx: ctx(), checks,
+    })
+  }
+  const pct = (v) => (v == null ? 'no read' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)
+
+  // 101. THE CE / PE FLIP ---------------------------------------------------------------------------------------------
+  const f = strategyFilters('spotFlip', filters?.spotFlip)
+  // The whole chain's CE - PE added since the open, as a share of the chain: > 0 calls written more (bearish), < 0 puts.
+  const leadAt = (ms) => {
+    const spot = valueAt(oi.spot, ms)?.close
+    const r = spot > 0 ? optionOiRead(oi, spot, ms, 15) : null
+    return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
+  }
+  const leadNow = leadAt(nowMs)
+  const leadPrev = leadAt(nowMs - MIN)
+  // The spot in 3-minute candles from 09:15 (a candle counts once its three minutes are in): EMA 7 / 21 of their closes.
+  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
+  const buckets = new Map()
+  for (const b of bars) {
+    if (b.t < sessionStart) continue
+    const k = Math.floor((b.t - sessionStart) / (3 * MIN))
+    buckets.set(k, [...(buckets.get(k) ?? []), b])
+  }
+  const closes3 = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === 3).map(([, xs]) => xs.at(-1).close)
+  const ema7 = emaSeries(closes3, 7).at(-1)
+  const ema21 = emaSeries(closes3, 21).at(-1)
+  // ATM +/- n strikes: the OI that holds the price up (puts) against the OI that caps it (calls).
+  const atmK = Math.round(spotNow / oi.step) * oi.step
+  const near = rows.filter((r) => Math.abs(r.strike - atmK) <= f.nearStrikes * oi.step)
+  const peNear = near.reduce((s, r) => s + (r.peOi ?? 0), 0)
+  const ceNear = near.reduce((s, r) => s + (r.ceOi ?? 0), 0)
+  const delta = sideOiChanges(optionOiRead(oi, spotNow, nowMs, f.deltaMin), false)
+  if (leadNow != null && leadPrev != null && ema7 != null && ema21 != null) {
+    for (const dir of [1, -1]) {
+      const flipped = dir > 0 ? leadPrev >= 0 && leadNow < 0 : leadPrev <= 0 && leadNow > 0
+      const emaWith = dir * (ema7 - ema21) > 0
+      const deltaWith = sideScore(dir, delta.ceD, delta.peD, 0.0005)
+      const wallsWith = dir > 0 ? peNear > ceNear : ceNear > peNear
+      if (flipped && emaWith && deltaWith != null && deltaWith >= 1 && wallsWith && ceNear > 0 && peNear > 0) {
+        push('spotFlip', dir, 1.5 * atr, 3 * atr, 330, {
+          OI: `since the open CE - PE flipped ${pct(leadPrev)} -> ${pct(leadNow)} of the chain (${dir > 0 ? 'puts added now lead' : 'calls added now lead'}); last ${f.deltaMin} min CE ${pct(delta.ceD)} / PE ${pct(delta.peD)}`,
+          Walls: `ATM +/- ${f.nearStrikes} strikes: PE ${(peNear / 1e5).toFixed(1)}L vs CE ${(ceNear / 1e5).toFixed(1)}L - ${dir > 0 ? 'support' : 'resistance'} heavier`,
+          Trend: `3-min EMA 7 ${ema7.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA 21 ${ema21.toFixed(1)}`,
+        })
+      }
+    }
+  }
+
+  // The trade filters (sides, entry window, stop / target size, time stop, trailing, OI filters) - defaults change nothing.
+  return out.map((s) => applyTradeFilter(s, strategyFilters(s.id, filters?.[s.id]))).filter(Boolean)
 }
 
 /**
