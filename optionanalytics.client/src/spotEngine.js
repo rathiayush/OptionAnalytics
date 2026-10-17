@@ -14,18 +14,11 @@
 // Flow page's scanner does not run them.
 
 import { pocIndexOf, valueAreaOf } from './orderFlowMath.js'
-import {
-  SPOT_STRATEGIES, SQUARE_OFF, applyTradeFilter, dayTypeAt, optionOiRead, optionTradesFor, oiRows, sideOiChanges, strategyFilters,
-  valueAt, wallOiChanges, wallsAhead, wallsAt,
-} from './strategyEngine.js'
 
 const MIN = 60_000
 const msOf = (t) => (typeof t === 'number' ? t : Date.parse(t))
 const istMinute = (ms) => Math.floor((ms / MIN + 330) % 1440)
-const FIRST_ENTRY = 9 * 60 + 30
-const LAST_ENTRY = 14 * 60 + 45
 const SIDE_BAR = 0.003 // a side's OI really rising / falling: 0.3% of its OI in 15 minutes (as the filters)
-const BY_ID = Object.fromEntries(SPOT_STRATEGIES.map((s) => [s.id, s]))
 
 /** Spot candles as the engine reads them: { t (start, ms), time, open, high, low, close }. */
 export const spotBarsOf = (candles) => (candles ?? []).map((c) => ({ t: msOf(c.time), time: c.time, open: c.open, high: c.high, low: c.low, close: c.close }))
@@ -69,11 +62,6 @@ export function emaCrossIndex(closes, fast, slow, dir) {
   let i = n - 1
   while (i > 0 && side(i - 1)) i--
   return i > 0 && side(i - 1) === false ? i : null
-}
-
-const avgRange = (bars, n = 14) => {
-  const last = bars.slice(-n)
-  return last.length ? last.reduce((s, b) => s + (b.high - b.low), 0) / last.length : 0
 }
 
 // ---- #115's three indicators: EMA, RSI and VWAP (and nothing else) ----
@@ -218,117 +206,11 @@ export function spotBlocks({ blocks = [], f, atr }) {
   return { exits: { stopPts: (has('exits') ? f.stopAtr : 1.5) * atr, targetPts: (has('exits') ? f.targetAtr : 3) * atr } }
 }
 
-/**
- * Every spot setup whose rules pass at `nowMs` (a whole minute). `bars` - the FINISHED spot minutes up to it (spotBarsOf,
- * start + 1 minute <= nowMs), `oi` - buildOiContext(run, expiry, { live: false }), `filters` - { [id]: overrides }. #111 -
- * #113 also read the day's own spot profile, built from those bars (spotProfile).
- * Setups have the futures setups' shape (id, name, side, t, entry, stop, target, timeStopMs, options, oiCtx, checks).
- */
-export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
-  if (!oi || bars.length < 15) return []
-  const minute = istMinute(nowMs)
-  if (minute < FIRST_ENTRY || minute > LAST_ENTRY) return []
-  const last = bars.at(-1)
-  const spotNow = last.close
-  const rows = oiRows(oi, nowMs)
-  if (!rows.length || !(valueAt(oi.spot, nowMs)?.close > 0)) return []
-  const atr = Math.max(avgRange(bars), spotNow * 0.0004)
-  const read = optionOiRead(oi, spotNow, nowMs, 15)
-  if (!read) return []
-  const { support, resistance } = wallsAt(oi, rows, spotNow)
-  const ahead = wallsAhead(oi, rows, spotNow)
-  const sides = sideOiChanges(read, false)
-  const cum = sideOiChanges(read, true)
-  const out = []
-  const ctx = () => ({
-    flow: read.lean, cum: read.leanOpen, futOiPct: null, futPricePct: null,
-    ...wallOiChanges(oi, ahead, nowMs, 15), ...sides, ...cum, dayType: dayTypeAt(oi, bars, nowMs)?.type ?? null,
-    byWindow: Object.fromEntries([1, 3, 5].map((m) => {
-      const r = optionOiRead(oi, spotNow, nowMs, m)
-      return [m, { flow: r?.lean ?? null, futOiPct: null, futPricePct: null, ...wallOiChanges(oi, ahead, nowMs, m), ...sideOiChanges(r, false) }]
-    })),
-    support, resistance, spot: spotNow, ...ahead,
-  })
-  const push = (id, dir, stopPts, targetPts, timeStopMin, checks, extra = null) => {
-    if (!(stopPts > 0) || !(targetPts > 0)) return
-    out.push({
-      ...extra,
-      id, name: BY_ID[id].name, side: dir > 0 ? 'LONG' : 'SHORT', t: nowMs, entry: spotNow,
-      stop: spotNow - dir * stopPts, target: spotNow + dir * targetPts,
-      timeStopMs: Math.min(nowMs + timeStopMin * MIN, nowMs + (SQUARE_OFF - minute) * MIN),
-      estimated: false, spot: true, options: optionTradesFor(oi, dir, spotNow, nowMs), oiCtx: ctx(), checks,
-    })
-  }
-  const pct = (v) => (v == null ? 'no read' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)
-
-  // 101. THE CE / PE CROSSOVER AND THE SPOT'S EMA CROSSOVER ---------------------------------------------------------------
-  // Two things only, in EITHER order: (1) the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the
-  // open, as a share of the chain: > 0 calls written more (bearish), < 0 puts (bullish) - and (2) the spot's `emaTf`-minute EMA fast / slow
-  // cross the SAME way. Both within `armMin` minutes of each other: the entry is taken when the LATER of the two completes - the EMA
-  // candle closing, or the lines crossing (the EMA having crossed a few minutes earlier and still being that way).
-  const f = strategyFilters('spotFlip', filters?.spotFlip)
-  const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, atr })
-  const leadAt = (ms) => {
-    const spot = valueAt(oi.spot, ms)?.close
-    const r = spot > 0 ? optionOiRead(oi, spot, ms, 15) : null
-    return r && r.ceNow + r.peNow > 0 ? (r.ceOpen - r.peOpen) / (r.ceNow + r.peNow) : null
-  }
-  // The spot in `emaTf`-minute candles from 09:15 (a candle counts once all its minutes are in).
-  const sessionStart = Math.floor(nowMs / MIN) * MIN - (minute - (9 * 60 + 15)) * MIN
-  const buckets = new Map()
-  for (const b of bars) {
-    if (b.t < sessionStart) continue
-    const k = Math.floor((b.t - sessionStart) / (f.emaTf * MIN))
-    buckets.set(k, [...(buckets.get(k) ?? []), b])
-  }
-  const candles = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
-  const closes = candles.map((xs) => xs.at(-1).close)
-  const closeAt = (i) => candles[i].at(-1).t + MIN // the clock a candle closes at
-  const candleJustClosed = candles.length > 0 && closeAt(candles.length - 1) === nowMs
-  const leadNow = leadAt(nowMs)
-  const leadPrev = leadAt(nowMs - MIN)
-  const done = new Set()
-  const fire = (dir, linesAt, emaAt, e) => {
-    if (done.has(dir)) return
-    done.add(dir)
-    push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
-      Alert: `since the open the CE - PE lines crossed at ${new Date(linesAt - MIN + 330 * MIN).toISOString().slice(11, 16)} (${pct(leadNow)} of the chain: ${dir > 0 ? 'puts' : 'calls'} added lead)`,
-      Trend: `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${emaAt == null ? '' : ` - crossed at ${new Date(emaAt + 330 * MIN).toISOString().slice(11, 16)}`}`,
-    })
-  }
-  if (leadNow != null) {
-    for (const dir of [1, -1]) {
-      if (!(dir * leadNow < 0)) continue
-      const e = emaAgrees(closes, f.emaFast, f.emaSlow, 'state', 1, dir)
-      if (!e.ok) continue
-      const linesJustCrossed = leadPrev != null && dir * leadPrev >= 0
-      // (a) an EMA candle just closed: the lines crossed to this side within armMin minutes (or - state - the EMA is simply that way)
-      if (candleJustClosed) {
-        const crossedNow = emaAgrees(closes, f.emaFast, f.emaSlow, 'cross', 1, dir).ok
-        if (crossedNow || f.emaMode === 'state') {
-          let linesAt = null
-          if (linesJustCrossed) linesAt = nowMs
-          else {
-            for (let k = 1; k <= f.armMin; k++) {
-              const before = leadAt(nowMs - k * MIN)
-              if (before == null) break
-              if (dir * before >= 0) { linesAt = nowMs - (k - 1) * MIN; break }
-            }
-          }
-          if (linesAt != null) fire(dir, linesAt, crossedNow ? closeAt(candles.length - 1) : null, e)
-        }
-      }
-      // (b) the lines just crossed: the EMA crossed to this side earlier (within armMin minutes) and is still that way - or, state, is that way
-      if (linesJustCrossed) {
-        const i = emaCrossIndex(closes, f.emaFast, f.emaSlow, dir)
-        const emaAt = i == null ? null : closeAt(i)
-        if (f.emaMode === 'state' || (emaAt != null && nowMs - emaAt <= f.armMin * MIN)) fire(dir, nowMs, emaAt, e)
-      }
-    }
-  }
-
-  // The trade filters (sides, entry window, stop / target size, time stop, trailing, OI filters) - defaults change nothing.
-  return out.map((s) => applyTradeFilter(s, strategyFilters(s.id, filters?.[s.id]))).filter(Boolean)
+/** Every setup of every spot strategy at `nowMs` - none at the moment (every spot strategy was removed on request). A strategy's rule goes
+ *  here: read what it needs (spotBlocks gives the predefined parameter blocks it lists), push its setups, then
+ *  `applyTradeFilter(setup, strategyFilters(id, filters?.[id]))` on each. */
+export function evaluateSpotStrategies() {
+  return []
 }
 
 /**

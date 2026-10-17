@@ -60,9 +60,6 @@ public sealed class StrategyTuningController : ControllerBase
         "optLeg", "optMoneyness", "optExit", "optSlPct", "optTargetPct",
         // The order-flow confirmation (the learning's filters - futures only).
         "tradeTape", "tradeBig", "tradeBook", "tradeCvd", "tradeVolume",
-        // A strategy's OWN rules and its predefined blocks (strategyTuning.js entryDefsOf - tests/spot-flip.test.mjs is the guard
-        // that every one of them is listed here): the lab scans the days again with them.
-        "armMin", "emaTf", "emaFast", "emaSlow", "emaMode", "stopAtr", "targetAtr",
     };
 
     /// <summary>POST /api/strategy-tuning/run - starts a job (one at a time).</summary>

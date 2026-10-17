@@ -7,17 +7,10 @@ Every strategy - the futures #1 - #37 and the spot + options #101 - #115 - and i
 that exercised a strategy's rules (and the runner / tuning tests that needed a signal to fire) were deleted. What stays:
 the scanner plumbing (the runner, the OI reads and walls, the outcome simulation, the paper / live order path, Trade
 settings, the Strategies / Tuning / Lab / Trades pages - which list nothing until a strategy is added) and the Dhan cache.
-One strategy is back: spot #101 `spotFlip` (spotEngine.js), cut down on request to TWO conditions (nothing else is asked - an earlier version with the walls, the
-cumulative / 10-minute CE / PE change, the ATM strikes and a net difference never fired, it is in git): (1) the ALERT - the whole chain's since-open CE - PE lines
-cross on the 1-minute clock (puts take the lead = long, calls = short) and (2) the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow` (7 / 21) cross the SAME way - in EITHER
-order, within `armMin` (10) minutes of each other: the entry is taken when the LATER one completes - the EMA candle closing (a), or the lines crossing while the EMA crossed
-earlier and is still that way (b; `emaCrossIndex`). `emaMode` `state` also lets an EMA simply already in direction count.
-Index stop / target `stopAtr` / `targetAtr` (1.5 / 3 x ATR, the `exits` block); no trailing stop of its own (the trade filters - base params - apply as to every
-strategy). 20-minute cooldown per side. The same rule runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, leaves on the
-index stop / target), and the Strategy lab changes these own rules (`entryDefsOf` / `entryDefsFor` / `entryPartOf` in strategyTuning.js; `labParams` / `labOverrides`
-take the picked ids; the lab job scans the days again for a changed rule - `rescan` in tune.mjs - and applying a lab setting writes them,
-`filtersFromTuning(..., { id })`); `StrategyTuningController.LabParamKeys` lists every setting (a test checks it). The alert itself is shown in the entry's
-`checks.Alert` (when the lines crossed), not as a separate message. `tests/spot-flip.test.mjs`, `SpotFlipStrategyTests.cs`.
+No strategy is in the app at the moment: spot #101 `spotFlip` (the since-open CE - PE crossover + the spot's 3-minute EMA crossover, in either order) was added back
+and then removed on request ("nothing is working") - its code, tests and the Expired Backtest's `SpotFlipStrategy` are in git. The framework it was built on stays:
+`PARAM_BLOCKS` (`exits` - the index stop / target in ATR), `spotBlocks`, `entryDefsOf` / `entryDefsFor` / `entryPartOf` and the Strategy lab's own-rule editing
+(`rescan` in tune.mjs, `filtersFromTuning(..., { id })`), `StrategyTuningController.LabParamKeys` (add a new strategy's own-rule keys there; a test should check it).
 The history before it is in git (`main`, and `git stash list` holds the #115 work in progress). The rules below describe
 how a strategy WOULD be added back; read them as the contract for any new one.
 

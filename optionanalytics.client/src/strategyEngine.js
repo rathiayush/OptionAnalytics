@@ -47,10 +47,7 @@ export const STRATEGIES = []
  *  chain's OI, no futures and no order flow. Measured by the Strategy tuning ("Spot + options only"); the live
  *  scanner does not run them, so they are not in STRATEGIES / ACTIVE_STRATEGIES. */
 export const SPOT_STRATEGIES = [
-  // 101: the since-open CE - PE lines cross on the 1-minute clock (the alert), then the spot's 3-minute EMA crosses the trade's way and
-  // the entry is taken when that candle closes - with the cumulative CE / PE change, the S / R OI near the ATM (writers adding on the
-  // holding side, leaving on the other, a big net difference) and the strikes right round the ATM all in the trade's direction.
-  { id: 'spotFlip', no: 101, name: 'Spot: CE / PE since-open crossover (1 min) -> spot 3-min EMA crossover, with the cumulative CE / PE change, S / R walls and ATM strikes in the trade\'s direction', short: 'Spot CE/PE cross + EMA', spot: true, blocks: ['exits'] },
+  // None: every spot strategy was removed on request (the parameter blocks below stay for the next one).
 ]
 export const STRATEGY_BY_ID = Object.fromEntries([...STRATEGIES, ...SPOT_STRATEGIES].map((s) => [s.id, s]))
 /** The strategies in use - what the scanner runs, lists, alerts on and scores. */
@@ -83,15 +80,7 @@ const PROFILE_REJECT_FILTERS = [
 // Per-strategy entry filters: none - every strategy was removed (the trade filters below stay available to any new one).
 // A strategy's OWN rules - what makes it that strategy. Everything else it can be given from PARAM_BLOCKS below.
 const STRATEGY_OWN_FILTERS = {
-  // #101: the since-open CE - PE lines cross on the 1-minute clock (the alert) -> wait for the spot's 3-minute EMA crossover the same way, entry
-  // when that candle closes. Nothing else.
-  spotFlip: [
-    { key: 'armMin', label: 'The CE - PE crossover and the spot EMA crossover must be within (minutes) of each other - either one first; the entry is taken when the later one completes', type: 'number', default: 10, min: 1, max: 120, step: 1 },
-    { key: 'emaTf', label: 'Spot EMA candle (minutes) - the entry is taken when the crossover candle closes', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
-    { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
-    { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },
-    { key: 'emaMode', label: 'Spot EMA: crossed on the candle that just closed, or (a trend under way) already in the trade\'s direction', type: 'select', default: 'cross', options: [{ value: 'cross', label: 'Crossed on the candle that just closed' }, { value: 'state', label: 'Already in direction counts too' }] },
-  ],
+  // None at the moment.
 }
 
 /**
