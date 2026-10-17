@@ -52,8 +52,9 @@ test('TREND day: the opening drive, past the opening range, VWAP and EMA 9 over 
     assert.equal(s.optLeg, 'buy')
     assert.match(s.checks.Day, side === 'LONG' ? /TREND up/ : /TREND down/)
     assert.match(s.checks.Plan, side === 'LONG' ? /^BUY the call - pulled back to EMA 9 and resumed/ : /^BUY the put - pulled back to EMA 9 and resumed/)
-    assert.match(s.checks.Indicators, /EMA 9 .* RSI .* VWAP/)
-    assert.match(s.checks.OI, /since the open CE .* PE .*ATM \+\/- 2/)
+    assert.match(s.checks.Indicators, side === 'LONG' ? /^spot EMA 9 .* RSI .* VWAP .*; ATM call .*its EMA 9 .* \/ 21/ : /^spot EMA 9 .* RSI .* VWAP .*; ATM put .*its EMA 9 .* \/ 21/)
+    assert.match(s.checks.OI, /^total CE .* \/ PE .* \(PCR .*\); since the open CE .* PE .*ATM \+\/- 2/)
+    assert.match(s.checks.Plan, /spot and the ATM (call|put) both over their EMAs/)
     const dir = side === 'LONG' ? 1 : -1
     assert.ok(dir * (s.target - s.entry) > 0 && dir * (s.entry - s.stop) > 0)
     assert.ok(Math.abs(Math.abs(s.target - s.entry) - 2 * Math.abs(s.entry - s.stop)) < 1e-6, 'target 2x the stop')
@@ -67,6 +68,7 @@ test('TREND: not without each key condition', () => {
     assert.ok(!find(make({ noDip: true }), side, 'trend'), `${side}: no pullback - RSI exhausted, nothing to enter on`)
     assert.ok(!find(make({ oiFlat: true }), side, 'trend'), `${side}: no writers on its side since the open`)
     assert.ok(!find(make({ sidesFlat: true }), side, 'trend'), `${side}: fewer than 2 OI confirmations`)
+    assert.ok(!find(make({ prem: 'flat' }), side, 'trend'), `${side}: the ATM option it would buy is not in direction (its EMAs flat)`)
   }
 })
 
@@ -89,6 +91,7 @@ test('RANGE: not without each key condition', () => {
     assert.ok(!find(make({ wallLeaving: true }), side, 'range'), `${side}: the wall's writers leaving`)
     assert.ok(!find(make({ noTurn: true }), side, 'range'), `${side}: no candle back off the wall`)
     assert.ok(!find(make({ trend: true }), side, 'range'), `${side}: a steady move, VWAP not crossed back and forth`)
+    assert.ok(!find(make({ prem: 'flat' }), side, 'range'), `${side}: the option it would sell is not coming off its high`)
   }
 })
 
@@ -109,6 +112,7 @@ test('SWEEP: not without each key condition - nor without yesterday', () => {
     assert.ok(!find(make({ noBack: true }), side, 'sweep', { prevDay }), `${side}: still beyond the level`)
     assert.ok(!find(make({ earlier: true }), side, 'sweep', { prevDay }), `${side}: not the first time today`)
     assert.ok(!find(make({ noDefence: true }), side, 'sweep', { prevDay }), `${side}: no writers defending, ATM +/- 2 not turning`)
+    assert.ok(!find(make({ prem: 'flat' }), side, 'sweep', { prevDay }), `${side}: the ATM option it would buy not back over its EMA 9`)
   }
 })
 

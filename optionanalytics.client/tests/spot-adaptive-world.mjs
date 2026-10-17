@@ -1,12 +1,33 @@
 // Scenario days for #115, the adaptive spot strategy (spotEngine.js): a TREND day (buy the option), a RANGE day (sell it
 // at the wall) and a failed SWEEP of the previous day's high / low (buy the turn). Written at NIFTY (22,500, step 50) - the
 // clock at 10:45 (minute 90) - and mapped strike for strike onto BANKNIFTY / SENSEX by spot-profile-world's `world`.
-import { world, c } from './spot-profile-world.mjs'
+import { buildOiContext } from '../src/strategyEngine.js'
+import { spotBarsOf } from '../src/spotEngine.js'
+import { MIN, T, NIFTY, c } from './spot-profile-world.mjs'
+
+const STRIKES = [22300, 22350, 22400, 22450, 22500, 22550, 22600, 22650, 22700]
+const iso = (m) => new Date(T + m * MIN).toISOString()
+/** spot-profile-world's day, with option premiums that MOVE with the index (#115 reads the ATM option's own EMA): a
+ *  strike's call is 40 plus half the index's distance over the strike (a delta of 0.5), its put 40 plus half the distance
+ *  under it - so on a rally the call climbs and the put falls.
+ *  `prem: 'flat'`: every premium stays 60 (the option going nowhere). */
+function world({ candle, ce = () => 2e6, pe = () => 2e6, minutes = 91, scale = NIFTY, prem = 'moves' }) {
+  const f = scale.step / 50
+  const px = (p) => scale.base + (p - 22500) * f
+  const spot = Array.from({ length: minutes }, (_, m) => {
+    const x = candle(m)
+    return { time: iso(m), open: px(x.open), high: px(x.high), low: px(x.low), close: px(x.close) }
+  })
+  const price = (side, k, m) => (prem === 'flat' ? 60 : Math.max(1, 40 + 0.5 * (side === 'CE' ? candle(m).close - k : k - candle(m).close))) * f
+  const points = (side, oiF) => spot.flatMap((_, m) => STRIKES.map((k) => ({ time: iso(m), strike: px(k), openInterest: Math.round(oiF(k, m)), price: price(side, k, m) })))
+  const run = { success: true, date: '2026-10-09', step: scale.step, cePoints: points('CE', ce), pePoints: points('PE', pe), futuresBars: [], spotCandlesOneMinute: spot }
+  return { oi: buildOiContext(run, null, { live: false }), bars: spotBarsOf(spot), scale }
+}
 
 const mirror = (candle, axis) => (m) => { const x = candle(m); return { open: 2 * axis - x.open, close: 2 * axis - x.close, high: 2 * axis - x.low, low: 2 * axis - x.high } }
 const flip = (oi, axis) => (k, m) => oi(2 * axis - k, m)
 const later = (oi, sign) => (k, m) => oi(k, m) * (m > 90 ? 1 + sign * 0.01 * (m - 90) : 1)
-const scaled = (o) => (o.scale ? { scale: o.scale } : {})
+const scaled = (o) => ({ ...(o.scale ? { scale: o.scale } : {}), ...(o.prem ? { prem: o.prem } : {}) })
 
 // ---- TREND (LONG): the opening drives up (three 5-minute candles up, 22400 -> 22430), the climb goes on all morning,
 // a pullback to EMA 9 over 10:39 - 10:43 and the 10:44 candle resumes up, closing over the one before's high.

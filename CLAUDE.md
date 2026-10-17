@@ -51,7 +51,8 @@ away, the day not trending against it - and buys the dip / sells the pop (`tests
 09:15 - 09:29 as three 5-minute candles, the previous day's high / low / close (`prevDay` - `prevDayOf` the server's previous-day
 spot bars, high / low / close only; passed to `evaluateSpotStrategies` / `scanSpotDay` / `spotScanTick` by the tuning, the runner
 and the page alike), the OI since the open and at ATM +/- 2, the S/R OI balance and the walls' writers, and only EMA 9 / 21,
-RSI 14 and VWAP (time-weighted: the index has no volume) - then plays a TREND day by BUYING the option, a RANGE day by SELLING
+RSI 14 and VWAP (time-weighted: the index has no volume) on the spot, EMA 9 / 21 on the ATM option's own premium (the
+option traded must be in direction too), the whole chain's total CE / PE OI (PCR) - spot + OI only, never order flow - then plays a TREND day by BUYING the option, a RANGE day by SELLING
 it at the wall, a failed SWEEP of yesterday's high / low by buying the turn. Each signal carries its own leg (`setup.optLeg`,
 `ownLeg` on the strategy): `optionPlanFor` takes it under "per strategy" after the index's own side and a tuned leg, the tuning
 measures it as `optLeg: 'signal'` (`legFor`); at most `maxPerDay` (5) signals a day, counted by `canFire` / `firable` in every
