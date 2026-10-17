@@ -28,12 +28,13 @@ function build(spotAt, ceAt, peAt, minutes) {
 // difference); `atmCalls` - the strikes right round the ATM keep ADDING calls while the wider strikes still shed them (the S / R OI over ATM +/- 2 goes the way, the strikes round the ATM do not);
 // `bothUp` - the calls were added much more before 10:15 (both sides up since the open: the cumulative change is neither with nor against a long);
 // `farCalls` - the strikes away from the ATM keep ADDING calls (the whole chain's calls are not leaving) while the ones near the ATM leave;
+// `emaFirst` - the spot turns up 14 minutes BEFORE the lines cross (the EMA crossover comes first, the lines after it);
 // `noFlip` - puts are not added, so the CE - PE lines never cross; `lateTurn` - the spot turns up 40 minutes after the lines cross
 // (too late to wait for); `minutes` - the length of the day.
 export const TURN = 60
 const longDay = (o = {}) => {
-  const turn = o.lateTurn ? TURN + 60 : TURN
-  const base = (m) => 22500 - 0.2 * Math.min(m, TURN) + (o.noCross ? -0.2 * Math.max(0, m - TURN) : 1.2 * Math.max(0, m - turn))
+  const turn = o.lateTurn ? TURN + 60 : o.emaFirst ? TURN - 14 : TURN
+  const base = (m) => 22500 - 0.2 * Math.min(m, turn) + (o.noCross ? -0.2 * Math.max(0, m - TURN) : 1.2 * Math.max(0, m - turn))
   const spotAt = (m) => c(base(m), base(m + 1))
   const pe = (k) => (near(k) ? (o.ceHeavy ? 2e6 : o.smallNet ? 2.4e6 : 3.5e6) : 2e6)
   const ce = (k) => (near(k) ? (o.ceHeavy ? 4e6 : 2e6) : 2e6)

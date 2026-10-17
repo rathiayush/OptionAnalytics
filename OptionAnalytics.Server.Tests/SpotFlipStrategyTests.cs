@@ -15,14 +15,14 @@ public sealed class SpotFlipStrategyTests
     private const decimal Axis = 23000;
     private static readonly decimal[] Strikes = { 22800, 22850, 22900, 22950, 23000, 23050, 23100, 23150, 23200 };
 
-    private sealed record Day(bool FarCalls = false, bool BothUp = false, bool NoCross = false, bool CallsStay = false, bool CeHeavy = false, bool SmallNet = false, bool AtmCalls = false, bool NoFlip = false, bool LateTurn = false);
+    private sealed record Day(bool EmaFirst = false, bool FarCalls = false, bool BothUp = false, bool NoCross = false, bool CallsStay = false, bool CeHeavy = false, bool SmallNet = false, bool AtmCalls = false, bool NoFlip = false, bool LateTurn = false);
 
     private static bool Near(decimal k) => Math.Abs(k - Axis) <= 100;
 
     private static List<Candle> Spot(Day d, bool mirror)
     {
-        var turn = d.LateTurn ? Turn + 60 : Turn;
-        decimal Base(int m) => Axis - 0.2m * Math.Min(m, Turn) + (d.NoCross ? -0.2m * Math.Max(0, m - Turn) : 1.2m * Math.Max(0, m - turn));
+        var turn = d.LateTurn ? Turn + 60 : d.EmaFirst ? Turn - 14 : Turn;
+        decimal Base(int m) => Axis - 0.2m * Math.Min(m, turn) + (d.NoCross ? -0.2m * Math.Max(0, m - Turn) : 1.2m * Math.Max(0, m - turn));
         return Enumerable.Range(0, Minutes).Select(m =>
         {
             var open = Base(m); var close = Base(m + 1);
@@ -102,10 +102,23 @@ public sealed class SpotFlipStrategyTests
     }
 
     [Fact]
+    public void Either_order_the_EMA_can_cross_first_and_the_lines_a_few_minutes_later()
+    {
+        void Small(Dictionary<string, decimal> p, int armMin) { p["emaFast"] = 3; p["emaSlow"] = 7; p["armMin"] = armMin; }
+        var entry = Assert.Single(Entries(new Day(EmaFirst: true), tweak: p => Small(p, 15)));
+        Assert.Equal(64, (entry.TimeUtc - T0).TotalMinutes);     // the bar whose close (minute 65) the lines cross at; the EMA crossed 13 minutes earlier
+        Assert.Contains("crossed at 10:06", entry.Summary);
+        Assert.Empty(Entries(new Day(EmaFirst: true), tweak: p => Small(p, 10)));   // 13 minutes apart - too far for 10
+        Assert.Single(Entries(new Day(EmaFirst: true), mirror: true, tweak: p => Small(p, 15)));
+        Assert.Single(Entries(new Day()));                         // lines first, the EMA candle later: unchanged
+    }
+
+    [Fact]
     public void Each_setting_changes_the_rule()
     {
         Assert.Single(Entries(new Day(LateTurn: true), tweak: p => p["armMin"] = 120));
-        Assert.Single(Entries(new Day(), tweak: p => p["emaFast"] = 9));
+        Assert.Single(Entries(new Day(), tweak: p => { p["emaFast"] = 9; p["armMin"] = 15; }));
+        Assert.Empty(Entries(new Day(), tweak: p => p["emaFast"] = 9));   // 11 minutes after the lines - too far for armMin 10
     }
 
     [Fact]

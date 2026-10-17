@@ -86,7 +86,7 @@ const STRATEGY_OWN_FILTERS = {
   // #101: the since-open CE - PE lines cross on the 1-minute clock (the alert) -> wait for the spot's 3-minute EMA crossover the same way, entry
   // when that candle closes. Nothing else.
   spotFlip: [
-    { key: 'armMin', label: 'After the CE - PE crossover (the alert) wait for the spot EMA crossover for at most (minutes)', type: 'number', default: 30, min: 1, max: 120, step: 1 },
+    { key: 'armMin', label: 'The CE - PE crossover and the spot EMA crossover must be within (minutes) of each other - either one first; the entry is taken when the later one completes', type: 'number', default: 10, min: 1, max: 120, step: 1 },
     { key: 'emaTf', label: 'Spot EMA candle (minutes) - the entry is taken when the crossover candle closes', type: 'select', default: 3, options: [1, 3, 5, 10, 15].map((m) => ({ value: m, label: `${m} min` })) },
     { key: 'emaFast', label: 'EMA fast (candles)', type: 'number', default: 7, min: 2, max: 50, step: 1 },
     { key: 'emaSlow', label: 'EMA slow (candles)', type: 'number', default: 21, min: 3, max: 100, step: 1 },

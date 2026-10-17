@@ -5,8 +5,9 @@ namespace OptionAnalytics.Server.Services.Backtesting;
 /// <summary>
 /// Spot #101 for the Expired Backtest - the same rule as the scanner's <c>spotFlip</c> (spotEngine.js), on the 1-minute clock:
 ///  1. the ALERT: the chain's since-open CE - PE OI lines cross (CE - PE going negative = puts added lead = Bullish; positive = Bearish);
-///  2. within <c>armMin</c> minutes the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles cross the trade's way - the
-///     entry is taken when THAT candle closes (emaMode: crossed on the candle that just closed, or already in direction too);
+///  2. the spot's <c>emaFast</c> / <c>emaSlow</c> on <c>emaTf</c>-minute candles cross the trade's way - in EITHER order, within <c>armMin</c>
+///     minutes of each other: the entry is taken when the LATER one completes (the EMA candle closing, or the lines crossing with the EMA
+///     having crossed earlier and still being that way; emaMode: or already in direction too);
 /// Nothing else is asked.
 /// The chain is the expired-option strike band the run fetched (ATM +/- 10 strikes), each ABSOLUTE strike read from its first bar of the
 /// day, so the lines are an approximation of the scanner's whole-chain read. OI is read from the minute before the clock (finished
@@ -34,7 +35,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         OptionTradeSimulator.SignalStartTimeParameter() with { Default = 570 },
         OptionTradeSimulator.ExcludeLastDaysParameter(),
         OptionTradeSimulator.MaxHoldingTimeParameter() with { Default = 330 },
-        new BacktestParameterSpec("armMin", "After the CE - PE crossover (the alert) wait for the spot EMA crossover for at most (minutes)", Default: 30, Min: 1, Max: 120, Step: 1),
+        new BacktestParameterSpec("armMin", "The CE - PE crossover and the spot EMA crossover must be within (minutes) of each other - either one first; the entry is taken when the later one completes", Default: 10, Min: 1, Max: 120, Step: 1),
         new BacktestParameterSpec("emaTf", "Spot EMA candle (minutes) - the entry is taken when the crossover candle closes", Default: 3, Min: 1, Max: 15, Step: 1),
         new BacktestParameterSpec("emaFast", "EMA fast (candles)", Default: 7, Min: 2, Max: 50, Step: 1),
         new BacktestParameterSpec("emaSlow", "EMA slow (candles)", Default: 21, Min: 3, Max: 100, Step: 1),
@@ -84,6 +85,20 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         for (var i = Math.Max(0, n - 1 - crossBars); i < n - 1; i++)
             if (f[i] is { } a && sl[i] is { } b && sign * (a - b) <= 0) return true;
         return false;
+    }
+
+    /// <summary>The candle at which the fast EMA last crossed to the trade's side of the slow one and has stayed there to the last candle
+    /// (the first candle with the fast on that side after one with it on the other), or null.</summary>
+    internal static int? EmaCrossIndex(IReadOnlyList<decimal> closes, int fast, int slow, int sign)
+    {
+        var n = closes.Count;
+        if (slow <= fast || n < 2) return null;
+        var f = EmaAll(closes, fast); var sl = EmaAll(closes, slow);
+        bool? Side(int i) => f[i] is { } a && sl[i] is { } b ? sign * (a - b) > 0 : null;
+        if (Side(n - 1) != true) return null;
+        var idx = n - 1;
+        while (idx > 0 && Side(idx - 1) == true) idx--;
+        return idx > 0 && Side(idx - 1) == false ? idx : null;
     }
 
     private static decimal AvgRange(IReadOnlyList<Candle> bars, DateTimeOffset upTo)
@@ -157,7 +172,7 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         var emaTf = Math.Max(1, (int)p["emaTf"]);
         var emaFast = Math.Max(2, (int)p["emaFast"]);
         var emaSlow = Math.Max(emaFast + 1, (int)p["emaSlow"]);
-        var emaMode = p.GetValueOrDefault("emaMode", EmaCross) >= 0.5m ? 1m : 2m; // EmaAgrees: 1 = state, 2 = cross
+        var emaState = p.GetValueOrDefault("emaMode", EmaCross) >= 0.5m; // already in direction counts too
         var signalStart = (int)p.GetValueOrDefault("signalStartMinutes", 570);
         var lastEntry = (int)p.GetValueOrDefault("lastEntryMinutes", 885);
         var indexExit = p.GetValueOrDefault("indexExit", 1m) >= 0.5m;
@@ -189,40 +204,58 @@ public sealed class SpotFlipStrategy : IBacktestStrategy
         }
         var lastFire = new Dictionary<int, DateTimeOffset>();
         var dayCloses = new List<decimal>();
+        var candleEnds = new List<DateTimeOffset>();
         var inBucket = 0;
         DateOnly curDay = default;
         foreach (var bar in bars)
         {
             var day = IstClock.IstDate(bar.Time);
-            if (day != curDay) { curDay = day; dayCloses.Clear(); inBucket = 0; }
-            // A candle counts once all its minutes are in; the entry is taken at the close of one.
+            if (day != curDay) { curDay = day; dayCloses.Clear(); candleEnds.Clear(); inBucket = 0; }
+            // A candle counts once all its minutes are in.
             var candleClosed = false;
-            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); inBucket = 0; candleClosed = true; }
-            if (!candleClosed) continue;
+            if (++inBucket == emaTf) { dayCloses.Add(bar.Close); candleEnds.Add(bar.Time + one); inBucket = 0; candleClosed = true; }
             var clock = bar.Time + one;
             var minute = IstClock.MinutesOfDay(clock);
             if (minute < signalStart || minute > lastEntry) continue;
             if (LeadAt(clock) is not { } now) continue;
+            var prev = LeadAt(clock - one);
 
             foreach (var dir in new[] { 1, -1 })
             {
                 var name = dir > 0 ? "Bullish" : "Bearish";
-                // (2) the spot's EMA crossing the trade's way on the candle that just closed (or already that way)
-                if (!EmaAgrees(dayCloses, emaFast, emaSlow, emaMode, 1, dir)) continue;
-                // (1) the since-open CE - PE lines crossed to this side within the last armMin minutes, and are still there
-                if (!(dir * now < 0)) continue;
-                DateTimeOffset? crossedAt = null;
-                for (var k = 1; k <= armMin; k++)
+                // The lines are on this side now, and the spot's EMA is that way now.
+                if (!(dir * now < 0) || !EmaAgrees(dayCloses, emaFast, emaSlow, ModeState, 1, dir)) continue;
+                var linesJustCrossed = prev is { } p0 && dir * p0 >= 0;
+                DateTimeOffset? crossedAt = null, emaAt = null;
+                // (a) an EMA candle just closed (crossed on it, or - state - simply that way): the lines crossed within the last armMin minutes
+                if (candleClosed)
                 {
-                    if (LeadAt(clock - TimeSpan.FromMinutes(k)) is not { } before) break;
-                    if (dir * before >= 0) { crossedAt = clock - TimeSpan.FromMinutes(k - 1); break; }
+                    var crossedNow = EmaAgrees(dayCloses, emaFast, emaSlow, ModeCross, 1, dir);
+                    if (crossedNow || emaState)
+                    {
+                        if (linesJustCrossed) crossedAt = clock;
+                        else
+                            for (var k = 1; k <= armMin; k++)
+                            {
+                                if (LeadAt(clock - TimeSpan.FromMinutes(k)) is not { } before) break;
+                                if (dir * before >= 0) { crossedAt = clock - TimeSpan.FromMinutes(k - 1); break; }
+                            }
+                        if (crossedAt is not null && crossedNow) emaAt = clock;
+                    }
+                }
+                // (b) the lines just crossed: the EMA crossed this way earlier (within armMin minutes) and still is - or, state, simply is
+                if (crossedAt is null && linesJustCrossed)
+                {
+                    var idx = EmaCrossIndex(dayCloses, emaFast, emaSlow, dir);
+                    var at = idx is { } i ? candleEnds[i] : (DateTimeOffset?)null;
+                    if (emaState || (at is { } a0 && clock - a0 <= TimeSpan.FromMinutes(armMin))) { crossedAt = clock; emaAt = at; }
                 }
                 if (crossedAt is null) continue;
                 var fast = Ema(dayCloses, emaFast)!.Value; var slow = Ema(dayCloses, emaSlow)!.Value;
-                var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}";
+                var detail = $"CE-PE since open crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(crossedAt.Value))} ({now:P2} of the chain); EMA {emaFast}/{emaSlow} {fast:0.0}/{slow:0.0}{(emaAt is { } ea ? $" crossed at {IstClock.FormatMinutesOfDay(IstClock.MinutesOfDay(ea))}" : "")}";
                 if (lastFire.TryGetValue(dir, out var last) && clock - last < TimeSpan.FromMinutes(CooldownMinutes))
                 {
-                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Crossover candle closed, but in the {CooldownMinutes}-minute cooldown - {detail}"));
+                    signals.Add(new BacktestSignal(context.Underlying, bar.Time, "Rejected", name, $"Both crossovers, but in the {CooldownMinutes}-minute cooldown - {detail}"));
                     continue;
                 }
                 lastFire[dir] = clock;

@@ -9,8 +9,9 @@ the scanner plumbing (the runner, the OI reads and walls, the outcome simulation
 settings, the Strategies / Tuning / Lab / Trades pages - which list nothing until a strategy is added) and the Dhan cache.
 One strategy is back: spot #101 `spotFlip` (spotEngine.js), cut down on request to TWO conditions (nothing else is asked - an earlier version with the walls, the
 cumulative / 10-minute CE / PE change, the ATM strikes and a net difference never fired, it is in git): (1) the ALERT - the whole chain's since-open CE - PE lines
-cross on the 1-minute clock (puts take the lead = long, calls = short) and (2) within `armMin` (30) minutes the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow`
-(7 / 21) cross the SAME way - the entry is taken when THAT candle closes (`emaMode` cross; `state` also lets an EMA already in direction enter at a candle close).
+cross on the 1-minute clock (puts take the lead = long, calls = short) and (2) the spot's `emaTf` (3) minute EMA `emaFast` / `emaSlow` (7 / 21) cross the SAME way - in EITHER
+order, within `armMin` (10) minutes of each other: the entry is taken when the LATER one completes - the EMA candle closing (a), or the lines crossing while the EMA crossed
+earlier and is still that way (b; `emaCrossIndex`). `emaMode` `state` also lets an EMA simply already in direction count.
 Index stop / target `stopAtr` / `targetAtr` (1.5 / 3 x ATR, the `exits` block); no trailing stop of its own (the trade filters - base params - apply as to every
 strategy). 20-minute cooldown per side. The same rule runs in the Expired Backtest (`SpotFlipStrategy.cs`, key `spot-flip`, every setting a parameter, leaves on the
 index stop / target), and the Strategy lab changes these own rules (`entryDefsOf` / `entryDefsFor` / `entryPartOf` in strategyTuning.js; `labParams` / `labOverrides`

@@ -57,6 +57,20 @@ export function emaAgrees(closes, fast, slow, mode, crossBars, sign) {
   return { ok, fast: f[n - 1], slow: sl[n - 1] }
 }
 
+/** Where the fast EMA last crossed to the trade's side of the slow one and has stayed there to the last candle: the index of that
+ *  candle (the one that closed with the fast on the trade's side after the one before had it on the other), or null. */
+export function emaCrossIndex(closes, fast, slow, dir) {
+  const f = emaSeries(closes, fast)
+  const sl = emaSeries(closes, slow)
+  const n = closes.length
+  if (!(slow > fast) || n < 2 || f[n - 1] == null || sl[n - 1] == null) return null
+  const side = (i) => (f[i] != null && sl[i] != null ? dir * (f[i] - sl[i]) > 0 : null)
+  if (!side(n - 1)) return null
+  let i = n - 1
+  while (i > 0 && side(i - 1)) i--
+  return i > 0 && side(i - 1) === false ? i : null
+}
+
 const avgRange = (bars, n = 14) => {
   const last = bars.slice(-n)
   return last.length ? last.reduce((s, b) => s + (b.high - b.low), 0) / last.length : 0
@@ -247,10 +261,11 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   }
   const pct = (v) => (v == null ? 'no read' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`)
 
-  // 101. THE CE / PE CROSSOVER, THEN THE SPOT'S EMA ---------------------------------------------------------------------
-  // Two things only. (1) The ALERT: the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the open,
-  // as a share of the chain: > 0 calls written more (bearish), < 0 puts (bullish). (2) Within `armMin` minutes the spot's `emaTf`-minute
-  // EMA fast / slow cross the SAME way: the entry is taken when THAT candle closes.
+  // 101. THE CE / PE CROSSOVER AND THE SPOT'S EMA CROSSOVER ---------------------------------------------------------------
+  // Two things only, in EITHER order: (1) the since-open CE - PE lines cross on the 1-minute clock - the chain's CE - PE added since the
+  // open, as a share of the chain: > 0 calls written more (bearish), < 0 puts (bullish) - and (2) the spot's `emaTf`-minute EMA fast / slow
+  // cross the SAME way. Both within `armMin` minutes of each other: the entry is taken when the LATER of the two completes - the EMA
+  // candle closing, or the lines crossing (the EMA having crossed a few minutes earlier and still being that way).
   const f = strategyFilters('spotFlip', filters?.spotFlip)
   const B = spotBlocks({ blocks: BY_ID.spotFlip.blocks, f, atr })
   const leadAt = (ms) => {
@@ -268,29 +283,47 @@ export function evaluateSpotStrategies({ nowMs, bars, oi, filters = {} }) {
   }
   const candles = [...buckets.entries()].sort((a, b) => a[0] - b[0]).filter(([, xs]) => xs.length === f.emaTf).map(([, xs]) => xs)
   const closes = candles.map((xs) => xs.at(-1).close)
-  // Entries are taken only at the close of a candle: this minute is the one that just finished it.
-  const candleJustClosed = candles.length > 0 && candles.at(-1).at(-1).t + MIN === nowMs
-  if (candleJustClosed) {
-    const leadNow = leadAt(nowMs)
+  const closeAt = (i) => candles[i].at(-1).t + MIN // the clock a candle closes at
+  const candleJustClosed = candles.length > 0 && closeAt(candles.length - 1) === nowMs
+  const leadNow = leadAt(nowMs)
+  const leadPrev = leadAt(nowMs - MIN)
+  const done = new Set()
+  const fire = (dir, linesAt, emaAt, e) => {
+    if (done.has(dir)) return
+    done.add(dir)
+    push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
+      Alert: `since the open the CE - PE lines crossed at ${new Date(linesAt - MIN + 330 * MIN).toISOString().slice(11, 16)} (${pct(leadNow)} of the chain: ${dir > 0 ? 'puts' : 'calls'} added lead)`,
+      Trend: `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${emaAt == null ? '' : ` - crossed at ${new Date(emaAt + 330 * MIN).toISOString().slice(11, 16)}`}`,
+    })
+  }
+  if (leadNow != null) {
     for (const dir of [1, -1]) {
-      // (2) the spot's EMA crossing the trade's way on the candle that just closed (or - emaMode state - already that way)
-      const e = emaAgrees(closes, f.emaFast, f.emaSlow, f.emaMode === 'state' ? 'state' : 'cross', 1, dir)
+      if (!(dir * leadNow < 0)) continue
+      const e = emaAgrees(closes, f.emaFast, f.emaSlow, 'state', 1, dir)
       if (!e.ok) continue
-      // (1) the since-open CE - PE lines crossed to this side on the 1-minute clock within the last armMin minutes, and still are
-      if (leadNow == null || !(dir * leadNow < 0)) continue
-      let crossedAt = null
-      let after = leadNow
-      for (let k = 1; k <= f.armMin; k++) {
-        const before = leadAt(nowMs - k * MIN)
-        if (before == null) break
-        if (dir * before >= 0) { crossedAt = nowMs - (k - 1) * MIN; break }
-        after = before
+      const linesJustCrossed = leadPrev != null && dir * leadPrev >= 0
+      // (a) an EMA candle just closed: the lines crossed to this side within armMin minutes (or - state - the EMA is simply that way)
+      if (candleJustClosed) {
+        const crossedNow = emaAgrees(closes, f.emaFast, f.emaSlow, 'cross', 1, dir).ok
+        if (crossedNow || f.emaMode === 'state') {
+          let linesAt = null
+          if (linesJustCrossed) linesAt = nowMs
+          else {
+            for (let k = 1; k <= f.armMin; k++) {
+              const before = leadAt(nowMs - k * MIN)
+              if (before == null) break
+              if (dir * before >= 0) { linesAt = nowMs - (k - 1) * MIN; break }
+            }
+          }
+          if (linesAt != null) fire(dir, linesAt, crossedNow ? closeAt(candles.length - 1) : null, e)
+        }
       }
-      if (crossedAt == null) continue
-      push('spotFlip', dir, B.exits.stopPts, B.exits.targetPts, 330, {
-        Alert: `since the open the CE - PE lines crossed at ${new Date(crossedAt - MIN + 330 * MIN).toISOString().slice(11, 16)} (${pct(after)} -> ${pct(leadNow)} of the chain: ${dir > 0 ? 'puts' : 'calls'} added lead)`,
-        Trend: `${f.emaTf}-min EMA ${f.emaFast} ${e.fast.toFixed(1)} ${dir > 0 ? 'over' : 'under'} EMA ${f.emaSlow} ${e.slow.toFixed(1)}${f.emaMode === 'state' ? '' : ' - crossed on the candle that just closed'}`,
-      })
+      // (b) the lines just crossed: the EMA crossed to this side earlier (within armMin minutes) and is still that way - or, state, is that way
+      if (linesJustCrossed) {
+        const i = emaCrossIndex(closes, f.emaFast, f.emaSlow, dir)
+        const emaAt = i == null ? null : closeAt(i)
+        if (f.emaMode === 'state' || (emaAt != null && nowMs - emaAt <= f.armMin * MIN)) fire(dir, nowMs, emaAt, e)
+      }
     }
   }
 

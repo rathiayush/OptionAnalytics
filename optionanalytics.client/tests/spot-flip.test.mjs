@@ -29,7 +29,7 @@ test('LONG and SHORT: the lines cross, the spot\'s 3-minute EMA crosses on the c
     assert.equal(s.side, side)
     assert.ok(((s.t - T) / MIN) % 3 === 0, 'the entry is at the close of a 3-minute candle')
     assert.match(s.checks.Alert, /since the open the CE - PE lines crossed at \d\d:\d\d .* (puts|calls) added lead/)
-    assert.match(s.checks.Trend, /3-min EMA 7 .* (over|under) EMA 21 .* crossed on the candle that just closed/)
+    assert.match(s.checks.Trend, /3-min EMA 7 .* (over|under) EMA 21 .* - crossed at \d\d:\d\d/)
     assert.deepEqual(Object.keys(s.checks), ['Alert', 'Trend'], 'nothing else is asked')
     assert.ok(s.options?.buy && s.options?.sell, 'both options priced for the trade')
   }
@@ -42,22 +42,42 @@ test('LONG and SHORT: the lines cross, the spot\'s 3-minute EMA crosses on the c
 test('not without either: the lines crossing, the spot EMA crossing the same way', () => {
   assert.equal(mine(crossLong({ noCross: true })).length, 0, 'the spot\'s EMA never crosses up')
   assert.equal(mine(crossLong({ noFlip: true, callsStay: true })).length, 0, 'the CE - PE lines never cross (puts not added, calls only stop being added)')
-  assert.equal(mine(crossLong({ lateTurn: true })).length, 0, 'the spot turns up too long after the lines crossed (armMin 30)')
+  assert.equal(mine(crossLong({ lateTurn: true })).length, 0, 'the spot turns up too long after the lines crossed (armMin 10)')
   // The OI behind a trade is not asked any more: calls staying, heavy calls, a small net difference, calls round the ATM do not stop it.
   for (const o of [{ callsStay: true }, { ceHeavy: true }, { smallNet: true }, { atmCalls: true }, { bothUp: true }, { farCalls: true }]) assert.equal(mine(crossLong(o)).length, 1, JSON.stringify(o))
 })
 
 test('configurable: how long to wait, the EMA candle and lengths, "already in direction"', () => {
   const f = strategyFilters('spotFlip', {})
-  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.stopAtr, f.targetAtr], [30, 3, 7, 21, 'cross', 1.5, 3], 'the defaults')
+  assert.deepEqual([f.armMin, f.emaTf, f.emaFast, f.emaSlow, f.emaMode, f.stopAtr, f.targetAtr], [10, 3, 7, 21, 'cross', 1.5, 3], 'the defaults')
   assert.equal(mine(crossLong({ lateTurn: true }), withF({ armMin: 120 })).length, 1, 'waiting longer lets the late EMA crossover through')
-  assert.deepEqual(mine(crossLong(), withF({ emaFast: 9 })).map((s) => (s.t - T) / MIN), [75], 'a 9 / 21 EMA crosses a candle later - the entry moves with it')
+  assert.deepEqual(mine(crossLong(), withF({ emaFast: 9, armMin: 15 })).map((s) => (s.t - T) / MIN), [75], 'a 9 / 21 EMA crosses a candle later (11 minutes after the lines) - the entry moves with it, and armMin 10 is too short for it')
   // "Already in direction" counts too: a trend under way (no fresh cross on this candle) can enter on any candle close while armed.
-  const fresh = all(crossLong())
-  const state = all(crossLong(), withF({ emaMode: 'state' }))
+  const fresh = all(crossLong(), withF({ armMin: 30 }))
+  const state = all(crossLong(), withF({ emaMode: 'state', armMin: 30 }))
   assert.ok(state.length > fresh.length, 'more candle closes qualify')
   assert.ok(state.every((s) => ((s.t - T) / MIN) % 3 === 0))
   assert.equal(strategyFilters('spotFlip', { emaTf: 4 }).emaTf, 3, 'only the listed candle sizes')
+})
+
+test('either order: the EMA crossover can come first and the lines cross a few minutes later - the entry is when the later one completes', () => {
+  const small = { emaFast: 3, emaSlow: 7 } // (a 21 EMA is not ready before the lines cross on this day)
+  const lines = (w) => mine(w, withF({ ...small, armMin: 15 }))
+  for (const make of [crossLong, crossShort]) {
+    const found = lines(make({ emaFirst: true }))
+    assert.equal(found.length, 1)
+    const minutes = (found[0].t - T) / MIN
+    assert.equal(minutes, 65, 'the minute the lines cross (the EMA crossed 13 minutes earlier at 10:06)')
+    assert.match(found[0].checks.Trend, /crossed at 10:06/)
+    assert.match(found[0].checks.Alert, /crossed at 10:19/)
+  }
+  assert.equal(mine(crossLong({ emaFirst: true }), withF({ ...small, armMin: 10 })).length, 0, 'the two crossovers are 13 minutes apart - too far for 10')
+  assert.equal(mine(crossLong({ emaFirst: true }), withF({ ...small, armMin: 30 })).length, 1)
+  // The EMA turning back before the lines cross takes the trade away: it has to still be that way when the later one completes.
+  assert.equal(mine(crossLong({ emaFirst: true, noCross: true }), withF({ ...small, armMin: 30 })).length, 0)
+  // And the other order is unchanged: lines first, the EMA candle closing later (within armMin).
+  assert.equal(mine(crossLong()).length, 1)
+  assert.equal(mine(crossLong({ lateTurn: true }), withF({ armMin: 10 })).length, 0)
 })
 
 test('no look-ahead: what happens after the clock changes nothing', () => {
@@ -96,7 +116,7 @@ test('parameters: own rules + the exits block + the trade filters; the lab can c
   assert.deepEqual(entryDefsFor(['spotFlip']).map((d) => d.key), ['armMin', 'emaTf', 'emaFast', 'emaSlow', 'emaMode', 'stopAtr', 'targetAtr'])
   assert.deepEqual(labParams({ emaTf: 5, emaFast: 7, armMin: 45 }, 'spot', ['spotFlip']), { emaTf: 5, armMin: 45 })
   assert.deepEqual(labOverrides({ emaFast: 7 }, 'spot', ['spotFlip']), { emaFast: 7 })
-  assert.deepEqual(paramsFromFilters({ emaTf: 5, armMin: 30 }, 'spotFlip'), { emaTf: 5 })
+  assert.deepEqual(paramsFromFilters({ emaTf: 5, armMin: 10 }, 'spotFlip'), { emaTf: 5 })
   const next = filtersFromTuning({ emaTf: 5, nearStrikes: 3 }, { ...DEFAULT_VARIANT, emaTf: 3, armMin: 45 }, { id: 'spotFlip' })
   assert.deepEqual([next.armMin, next.emaTf, next.nearStrikes], [45, undefined, 3])
   assert.deepEqual(entryPartOf('spotFlip', { emaTf: 5, tradeSide: 'long' }), { emaTf: 5 })
