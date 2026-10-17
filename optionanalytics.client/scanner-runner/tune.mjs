@@ -84,7 +84,7 @@ const DATA = job.data === 'spot' ? 'spot' : 'futures' // spot: the index candles
 const SEARCH = job.search === 'full' ? 'full' : 'step'
 // Spot + options has no futures, so a futures OI input is dropped here too - whatever the page sent.
 const USABLE_OI = oiFactorsFor(DATA).map((f) => f.key)
-const OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length
+let OI_KEYS = Array.isArray(job.oiFactors) && job.oiFactors.length
   ? job.oiFactors.filter((k) => USABLE_OI.includes(k))
   : (DATA === 'spot' ? USABLE_OI : null)
 const startedUtc = new Date().toISOString()
@@ -254,7 +254,13 @@ async function main() {
   const recorded = DATA === 'spot' ? [] : ((await api(`/api/order-flow/${U}/days`, { source: 'days' })) ?? []).filter((d) => !(d.isLive ?? d.live) && d.date < istToday && inRange(d.date))
   let plan = recorded.slice(0, MAX_DAYS).map((d) => ({ date: d.date, expiry: d.expiry ?? null, exact: true }))
   if (DATA === 'spot') plan = candidateWeekdays(MAX_DAYS + Math.ceil(MAX_DAYS / 4) + 6).map((date) => ({ date, expiry: null, exact: false }))
-  else if (job.includeEstimated && plan.length < MAX_DAYS) {
+  // A futures job asked for recorded days only, and the server has none in the range (it keeps just the last few, in
+  // memory - a restart empties it): rather than fail - every day again, for a scheduled job - it runs on the days rebuilt
+  // from 1-minute candles, and says so in its result.
+  let notice = null
+  const useEstimated = job.includeEstimated || (DATA !== 'spot' && !plan.length)
+  if (DATA !== 'spot' && !job.includeEstimated && !plan.length) notice = 'The server had no recorded days in this range, so the job ran on estimated days (rebuilt from 1-minute candles) instead of failing.'
+  if (DATA !== 'spot' && useEstimated && plan.length < MAX_DAYS) {
     for (const date of candidateWeekdays(MAX_DAYS * 2)) {
       if (plan.length >= MAX_DAYS) break
       if (!plan.some((p) => p.date === date)) plan.push({ date, expiry: null, exact: false })
@@ -263,6 +269,16 @@ async function main() {
   plan = plan.filter((p) => !isWeekend(p.date))
   plan.sort((a, b) => (a.date < b.date ? 1 : -1))
   if (DATA !== 'spot') plan = plan.slice(0, MAX_DAYS)
+  // On an estimated day the order-flow inputs (tape, big orders, book, delta, volume) let every trade through: tuning them
+  // there only fits the few recorded days, so they are left out of any futures run with an estimated day in it.
+  if (DATA !== 'spot' && plan.some((p) => !p.exact)) {
+    const flow = new Set(OI_FACTORS.filter((f) => f.flow).map((f) => f.key))
+    const before = OI_KEYS ?? OI_FACTORS.map((f) => f.key)
+    if (before.some((k) => flow.has(k))) {
+      OI_KEYS = before.filter((k) => !flow.has(k))
+      notice = `${notice ? `${notice} ` : ''}The order-flow inputs were left out: on estimated days they let every trade through.`
+    }
+  }
   if (!plan.length) {
     const range = RANGED ? ` between ${FROM ?? 'the start'} and ${TO ?? 'yesterday'}` : ''
     throw new Error(job.includeEstimated || DATA === 'spot' ? `no past days could be listed${range}` : `no recorded past days on the server${range} - include estimated days to tune on days rebuilt from 1-minute candles`)
@@ -851,7 +867,7 @@ async function main() {
   }
   write({
     // runId: the history run this result belongs to - so deleting the run (Strategy tuning page) removes this too.
-    ok: true, runId, underlying: U, job, startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, walkForward: WALK_FORWARD, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
+    ok: true, runId, underlying: U, job, ...(notice ? { notice } : {}), startedUtc, finishedUtc: new Date().toISOString(), rowSize, trail, minTrades: MIN_TRADES, minPerMonth: MIN_PER_MONTH, walkForward: WALK_FORWARD, what: WHAT, search: SEARCH, data: DATA, from: FROM, to: TO, oiFactors: OI_KEYS ?? OI_FACTORS.map((f) => f.key),
     grid: WHAT === 'check' ? null : WHAT === 'trade' ? TUNING_GRID : WHAT === 'oi' ? oiGridOf(OI_KEYS) : WHAT === 'option' ? OPTION_GRID : WHAT === 'all' ? { ...oiGridOf(OI_KEYS), ...TUNING_GRID, ...OPTION_GRID } : { ...oiGridOf(OI_KEYS), ...TUNING_GRID },
     days: days.map((d) => ({ date: d.date, estimated: d.estimated, setups: d.setups.length, ...d.quality })), skipped, ranked, results, checks: checkSummary, fetched: fetcher.stats, fastOi,
     strategies: ACTIVE_STRATEGIES.length, calls, budget,

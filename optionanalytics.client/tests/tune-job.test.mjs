@@ -173,13 +173,19 @@ test('the tuning job scans the recorded days, ranks the strategies and tunes the
   }
 })
 
-test('nothing recorded: a clear failure, written to the result', { timeout: 60_000 }, async () => {
+test('nothing recorded: the job runs on estimated days instead of failing - and says so', { timeout: 300_000 }, async () => {
+  // The server keeps only the last few recorded days, in memory - a restart empties it. A futures job asked for recorded
+  // days only (a scheduled one, every day) used to fail there; it now runs on the days rebuilt from 1-minute candles.
   const { server, base } = await fakeServer([])
   try {
-    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: 'top3', days: 10 })
-    assert.equal(code, 1)
-    assert.equal(result.ok, false)
-    assert.match(result.error, /no recorded past days/)
+    const { code, result } = await runJob(base, { underlying: 'NIFTY', strategies: 'top3', days: 10, oiFactors: ['tradeOiFlow', 'tradeTape', 'tradeBig'] })
+    assert.equal(code, 0, JSON.stringify(result))
+    assert.equal(result.ok, true)
+    assert.match(result.notice, /no recorded days in this range, so the job ran on estimated days/)
+    assert.ok(result.days.length > 0, 'it ran on the days rebuilt from candles (the fake server does not mark them estimated)')
+    // ...and the order-flow inputs are left out: on estimated days they let every trade through.
+    assert.deepEqual(result.oiFactors, ['tradeOiFlow'])
+    assert.match(result.notice, /order-flow inputs were left out/)
   } finally {
     server.close()
   }
@@ -197,10 +203,13 @@ test('a date range picks the days: only the recorded days inside it, both ends i
     // An open start: everything up to the end date.
     const upTo = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', to: '2026-09-30' })
     assert.deepEqual(upTo.result.days.map((d) => d.date), ['2026-09-30', '2026-09-29', '2026-09-28'])
-    // Nothing in the range: a clear failure naming it.
-    const none = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], from: '2026-08-01', to: '2026-08-31' })
-    assert.equal(none.code, 1)
-    assert.match(none.result.error, /no recorded past days on the server between 2026-08-01 and 2026-08-31/)
+    // Nothing recorded in the range: the job runs on that range's estimated days instead of failing, and says so.
+    const none = await runJob(base, { underlying: 'NIFTY', strategies: ['weakWall'], minTrades: 2, what: 'trade', from: '2026-08-24', to: '2026-08-28' })
+    assert.equal(none.code, 0, JSON.stringify(none.result))
+    assert.match(none.result.notice, /no recorded days in this range/)
+    assert.ok(none.result.days.length > 0 && none.result.days.every((d) => d.date >= '2026-08-24' && d.date <= '2026-08-28'), 'only that range')
+    // Recorded days in the range: they are used as before, and no notice.
+    assert.equal(result.notice, undefined)
   } finally {
     server.close()
   }
