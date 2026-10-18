@@ -158,9 +158,13 @@ public sealed class OiReplayService
     /// "took longer" - this says WHICH step it was stuck on).</summary>
     internal static readonly TimeSpan RunBudget = TimeSpan.FromSeconds(100);
 
+    /// <param name="forceFetch">Skip the saved days (the Dhan day cache and the stored database) and ask Dhan for everything afresh -
+    /// each day that comes back is written over what was kept, so the cache is updated too.</param>
     public async Task<OiReplayResult> RunAsync(
-        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false, bool forceFetch = false)
     {
+        using var force = forceFetch ? DhanDataCache.ForceRefreshScope() : null;
+        forceLive |= forceFetch; // no stored database either: straight from Dhan, like today's seed
         var stage = "starting";
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(RunBudget);

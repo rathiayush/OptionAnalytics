@@ -193,7 +193,8 @@ When adding or changing a strategy:
   Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
-  (`DhanDataCacheTests.cs`).
+  (`DhanDataCacheTests.cs`). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
+  the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
 
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with

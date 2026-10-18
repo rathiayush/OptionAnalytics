@@ -47,7 +47,8 @@ public sealed class PastFuturesCandleCache
         if (!cacheable) return await PastFuturesCandles.FetchAsync(historical, contract, listedThatDay, date, cancellationToken, nse);
 
         var key = (contract.SecurityId, date);
-        if (_kept.TryGetValue(key, out var hit))
+        // A force fetch skips what is kept and replaces it with what the sources answer now.
+        if (!DhanDataCache.ForceRefresh && _kept.TryGetValue(key, out var hit))
         {
             Interlocked.Increment(ref _hits);
             return hit.Result;

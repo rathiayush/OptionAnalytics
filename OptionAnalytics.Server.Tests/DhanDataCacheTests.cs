@@ -31,6 +31,26 @@ public sealed class DhanDataCacheTests : IDisposable
     private DhanDataCache Cache(DateOnly? today = null) => new(_dir, NullLogger<DhanDataCache>.Instance, () => today ?? new DateOnly(2026, 10, 12));
 
     [Fact]
+    public void AForceFetch_SkipsWhatIsKept_AndWritesTheFreshAnswerOverIt()
+    {
+        var cache = Cache();
+        var key = new { securityId = "13" };
+        cache.PutDay("/charts/intraday", key, PastDay, w => w.WriteRawValue("""{"close":[1],"timestamp":[1]}"""));
+        Assert.True(cache.HasDay("/charts/intraday", key, PastDay));
+
+        using (DhanDataCache.ForceRefreshScope())
+        {
+            Assert.True(DhanDataCache.ForceRefresh);
+            Assert.False(cache.HasDay("/charts/intraday", key, PastDay));          // asked of Dhan again
+            Assert.Null(cache.TryGetDay("/charts/intraday", key, PastDay));
+            cache.PutDay("/charts/intraday", key, PastDay, w => w.WriteRawValue("""{"close":[9],"timestamp":[9]}"""));   // and updated
+        }
+        Assert.False(DhanDataCache.ForceRefresh);
+        using var back = cache.TryGetDay("/charts/intraday", key, PastDay);
+        Assert.Contains("[9]", back!.RootElement.GetRawText());
+    }
+
+    [Fact]
     public void AClosedWindowWithData_IsKept_AndReadBack_ByItsRequest()
     {
         var cache = Cache();

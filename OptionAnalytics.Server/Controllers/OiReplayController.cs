@@ -37,6 +37,9 @@ public sealed class OiReplayController : ControllerBase
         // live tick feed anyway, so it always wants the freshest reading available, in every
         // environment including local dev - see OiReplayService.RunAsync's own doc comment.
         [FromQuery] bool forceLive = false,
+        // Opt-in: skip the saved days (Dhan day cache, stored database, the futures kept in memory), ask Dhan for the whole day afresh and
+        // write what comes back over the cache - the OI Replay page's "Force fetch from Dhan".
+        [FromQuery] bool forceFetch = false,
         // Opt-in, default false, so this endpoint behaves for every existing caller (the OI Replay
         // page, the server scanner, the tuning job, Scan day) exactly as it always has: true instead
         // serves the SAME single day through the range path (GET .../range's own machinery), so the
@@ -48,7 +51,7 @@ public sealed class OiReplayController : ControllerBase
         var flag = expiryFlag.ToUpperInvariant();
         if (!viaRange)
         {
-            var result = await _service.RunAsync(underlyingKey, date, timeframeMinutes, flag, cancellationToken, forceLive);
+            var result = await _service.RunAsync(underlyingKey, date, timeframeMinutes, flag, cancellationToken, forceLive, forceFetch);
             return Ok(result);
         }
 
