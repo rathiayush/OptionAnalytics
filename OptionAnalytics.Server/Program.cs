@@ -389,6 +389,8 @@ if (builder.Environment.IsDevelopment())
 var app = builder.Build();
 // Dhan's scrip master: one kept copy on the persistent volume, shared by the spot / futures / option-chain masters (DhanScripMasterFile).
 DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environment, app.Configuration), "scrip-master");
+// Days kept by an older cache version are never read again - their folder goes, in the background.
+_ = Task.Run(() => { try { app.Services.GetRequiredService<DhanDataCache>().DropOlderVersions(); } catch (Exception) { } });
 
 if (app.Environment.IsDevelopment())
 {

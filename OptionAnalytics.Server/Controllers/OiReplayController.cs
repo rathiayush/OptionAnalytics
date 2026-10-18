@@ -1,4 +1,6 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
@@ -14,11 +16,24 @@ public sealed class OiReplayController : ControllerBase
 {
     private readonly OiReplayService _service;
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly DhanDataCache? _cache;
 
-    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster)
+    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, DhanDataCache? cache = null)
     {
         _service = service;
         _optionChainMaster = optionChainMaster;
+        _cache = cache;
+    }
+
+    /// <summary>Deletes every past day of Dhan data the server kept (the OI Replay page's "Clear saved Dhan data", admin
+    /// only): each day is asked of Dhan again on its next load and kept afresh.</summary>
+    [HttpDelete("cache")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public ActionResult ClearCache()
+    {
+        if (_cache is null) return Ok(new { files = 0, bytes = 0L });
+        var (files, bytes) = _cache.ClearAll();
+        return Ok(new { files, bytes });
     }
 
     /// <summary>One full day's worth of spot candles (already aggregated to timeframeMinutes) plus

@@ -66,7 +66,7 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Null(cache.TryGet("/charts/rollingoption", payload, PastDay));
         // On disk as gzip JSON with the request beside the response - readable on the Data files page.
         var file = cache.FileOf("/charts/intraday", payload, PastDay);
-        Assert.Contains(Path.Combine("v1", "charts-intraday", "2025-09"), file);
+        Assert.Contains(Path.Combine($"v{DhanDataCache.Version}", "charts-intraday", "2025-09"), file);
         Assert.EndsWith(".json.gz", file);
     }
 
@@ -208,6 +208,30 @@ public sealed class DhanDataCacheTests : IDisposable
         var (again, _) = await whole.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+2", "CALL", PastDay, PastDay, 1, CancellationToken.None);
         Assert.Single(requests);
         Assert.Equal(375, again.Count);
+    }
+
+    [Fact]
+    public async Task ClearAll_DeletesEveryKeptDay_AndAnOlderVersionsFolderIsDropped()
+    {
+        var requests = new List<string>();
+        await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        var old = Path.Combine(_dir, "v1", "charts-rollingoption", "x.json.gz");
+        Directory.CreateDirectory(Path.GetDirectoryName(old)!);
+        File.WriteAllText(old, "x");
+        var nse = Path.Combine(_dir, "nse", "kept.json.gz");
+        Directory.CreateDirectory(Path.GetDirectoryName(nse)!);
+        File.WriteAllText(nse, "x");
+
+        Assert.Equal(1, Cache().DropOlderVersions().Files);
+        Assert.False(Directory.Exists(Path.Combine(_dir, "v1")));
+        Assert.True(Directory.Exists(Path.Combine(_dir, $"v{DhanDataCache.Version}")));
+
+        var (files, _) = Cache().ClearAll();
+        Assert.True(files >= 1);
+        Assert.True(File.Exists(nse)); // NSE's answers stay
+        requests.Clear();
+        await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests); // asked of Dhan again
     }
 
     [Fact]
@@ -447,7 +471,7 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Equal(10L * 1024 * 1024 * 1024, DhanDataCache.MaxBytesOf(new ConfigurationBuilder().Build()));
         var set = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:DhanCacheMaxGb"] = "2.5" }).Build();
         Assert.Equal((long)(2.5 * 1024 * 1024 * 1024), DhanDataCache.MaxBytesOf(set));
-        Assert.Contains(Path.Combine("v1", "charts-rollingoption", "days", "2025-09", "15"), Cache().FileOfDay("/charts/rollingoption", new { s = 1 }, PastDay));
+        Assert.Contains(Path.Combine($"v{DhanDataCache.Version}", "charts-rollingoption", "days", "2025-09", "15"), Cache().FileOfDay("/charts/rollingoption", new { s = 1 }, PastDay));
     }
 
     /// <summary>The (from, to) days a recorded request asked Dhan for.</summary>

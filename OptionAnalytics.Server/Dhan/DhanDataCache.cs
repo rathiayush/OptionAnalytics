@@ -21,13 +21,16 @@ namespace OptionAnalytics.Server.Dhan;
 /// again; a disk problem is logged and never fails the call.
 ///
 /// The folder is held to Storage:DhanCacheMaxGb (default 10 GB): once over it, the files read least recently go first,
-/// down to 90% of it. Files: {dir}/v1/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz, the hash of the endpoint, the
-/// request without its dates and the day (a folder a day - a full cache is some hundred thousand files). The older whole-window files ({dir}/v1/{kind}/{yyyy-MM}/{last day}-{hash}.json.gz)
+/// down to 90% of it. Files: {dir}/v{Version}/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz, the hash of the endpoint, the
+/// request without its dates and the day (a folder a day - a full cache is some hundred thousand files). The older whole-window files ({dir}/v{Version}/{kind}/{yyyy-MM}/{last day}-{hash}.json.gz)
 /// are still read for the very request they hold, and split into days as they are.
 /// </summary>
 public sealed class DhanDataCache
 {
-    public const int Version = 1;
+    /// <summary>The cache's format / rules version: files are kept under {dir}/v{Version}. Raised to 2 when a rolling-option day
+    /// with holes stopped being kept (DhanDayWindow / FullDayRows) - every day kept by the older rules is then fetched again
+    /// and kept properly; the older folders are deleted (DropOlderVersions).</summary>
+    public const int Version = 2;
     public const double DefaultMaxGb = 10;
     /// <summary>A trim goes down to this share of the cap, so it does not run again on the next write.</summary>
     internal const double TrimTo = 0.9;
@@ -215,6 +218,38 @@ public sealed class DhanDataCache
             _logger.LogWarning("Dhan response for {Endpoint} not cached ({Error}).", endpoint, ex.Message);
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
+    }
+
+    /// <summary>Deletes every Dhan day kept (this version's folder and any older one) - the next load of each day asks Dhan
+    /// and keeps it afresh. The NSE answers and the scrip master beside it are left. Returns the files and bytes deleted.</summary>
+    public (int Files, long Bytes) ClearAll()
+    {
+        var (files, bytes) = DeleteVersionFolders(_ => true);
+        Interlocked.Exchange(ref _bytes, -1);
+        _logger.LogInformation("Dhan cache cleared: {Files} file(s), {Size:0.##} GB.", files, bytes / 1073741824d);
+        return (files, bytes);
+    }
+
+    /// <summary>Deletes the folders of older cache versions (v1 ...) - what they hold is never read again.</summary>
+    public (int Files, long Bytes) DropOlderVersions() => DeleteVersionFolders(v => v < Version);
+
+    private (int Files, long Bytes) DeleteVersionFolders(Func<int, bool> which)
+    {
+        int files = 0;
+        long bytes = 0;
+        if (!System.IO.Directory.Exists(_dir)) return (0, 0);
+        foreach (var folder in System.IO.Directory.EnumerateDirectories(_dir, "v*"))
+        {
+            if (!int.TryParse(Path.GetFileName(folder)[1..], out var v) || !which(v)) continue;
+            foreach (var path in System.IO.Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories))
+            {
+                try { var length = new FileInfo(path).Length; File.Delete(path); files++; bytes += length; }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+            try { System.IO.Directory.Delete(folder, recursive: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return (files, bytes);
     }
 
     /// <summary>Counts a write; the first one, or one that takes the folder over the cap, starts a trim in the

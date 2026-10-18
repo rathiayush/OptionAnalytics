@@ -3114,6 +3114,16 @@ export default function OiReplayPage() {
   // starts on Paper, and switching to Live asks for confirmation first.
   const auth = useAuth()
   const isAdmin = auth?.user?.role === 'Admin'
+  const clearServerCache = useCallback(async () => {
+    try {
+      const res = await fetch('/api/oi-replay/cache', { method: 'DELETE' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const { files, bytes } = await res.json()
+      message.success(`Saved Dhan data deleted (${files} files, ${(bytes / 1048576).toFixed(0)} MB) - each day is fetched from Dhan again on its next load.`)
+    } catch (err) {
+      message.error(`Could not clear the saved Dhan data: ${err.message}`)
+    }
+  }, [])
   const [tradeMode, setTradeMode] = useState('paper')
   const [liveSlippage, setLiveSlippageState] = useState(() => loadTradeDefaults(underlying).slippage)
   const setLiveSlippage = (v) => { setLiveSlippageState(v); if (v >= 0) saveTradeDefaults(underlying, { slippage: v }) }
@@ -4875,6 +4885,17 @@ export default function OiReplayPage() {
               <Tooltip title="Skip the saved copy of this day (the server's Dhan cache and its stored database), ask Dhan for all of it again and update the cache with what comes back. Slower - use it when a day looks wrong or will not load from the cache. Unticks itself after the load.">
                 <Checkbox checked={forceFetch} onChange={(e) => setForceFetch(e.target.checked)} disabled={loading}>Force fetch from Dhan</Checkbox>
               </Tooltip>
+              {isAdmin && (
+                <Popconfirm
+                  title="Delete every saved past day of Dhan data?"
+                  description="The server's whole Dhan cache (every index and day). Each day is asked of Dhan again on its next load - slower once - and kept afresh."
+                  onConfirm={clearServerCache}
+                  okText="Delete"
+                  okButtonProps={{ danger: true }}
+                >
+                  <Button danger disabled={loading}>Clear saved Dhan data</Button>
+                </Popconfirm>
+              )}
               {isTodayDate && !isLive && oneMinBars.length > 0 && (
                 <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>
               )}
