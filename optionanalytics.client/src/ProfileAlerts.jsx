@@ -47,8 +47,7 @@ export function useServerProfileAlerts(underlying) {
 }
 
 /** Alerts when price reaches a level of the previous session's profiles, or enters one of their gaps -
- *  futures: its volume profile (POC / VAH / VAL / HVN, LVN gaps) and market profile (POC / VAH / VAL, LVN gaps,
- *  single prints), confluences flagged; spot: the previous day's spot volume and market profiles (`spotVp` -
+ *  futures: its volume profile (POC / HVN, LVN gaps) and market profile (POC / HVN, LVN gaps, single prints), confluences flagged; spot: the previous day's spot volume and market profiles (`spotVp` -
  *  the lines on the OI Replay charts), else the futures levels less the premium. Futures and spot are separate
  *  switches (synced to the server scanner, which sends the same alerts to Telegram with no page open). Live
  *  only. Chime, spoken words and notification follow the scanner's Voice switch; Telegram is sent from here
@@ -105,7 +104,7 @@ export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot,
   if (!levelCount) return null
   return (
     <Space wrap size={10} align="center" style={{ marginBottom: 6 }} aria-label="Profile level alerts">
-      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC / VAH / VAL (and the volume profile's HVN), or enters a gap: the volume profile's LVN gaps, the market profile's LVN gaps and single prints${spotProfileLevels ? '; on spot, the previous day\'s spot volume and market profiles (the volume profile is the lines on the OI Replay charts)' : ''}. ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
+      <Tooltip title={`Alert when price reaches the previous session's volume-profile or market-profile POC or HVN, or enters a gap: the volume profile's LVN gaps, the market profile's LVN gaps and single prints${spotProfileLevels ? '; on spot, the previous day\'s spot volume and market profiles (the volume profile is the lines on the OI Replay charts)' : ''}. ${confluences} level${confluences === 1 ? '' : 's'} where both profiles agree are marked as a confluence.${live ? '' : ' Replay: alerts fire only live.'}`}>
         <Text style={{ fontSize: 12 }}>📊 Profile level alerts</Text>
       </Tooltip>
       {!spotOnly && <Space size={4}><Switch size="small" checked={on.futures} onChange={(v) => change('futures', v)} aria-label="Profile alerts futures" /><Text style={{ fontSize: 12 }}>Futures</Text></Space>}

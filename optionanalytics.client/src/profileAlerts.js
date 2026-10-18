@@ -1,19 +1,20 @@
-// Profile-level alerts: tell the trader when price reaches a level of the previous session's volume
-// profile (POC, VAH, VAL, HVN) or market profile / TPO (POC, VAH, VAL), or enters one of their gaps - the
-// volume profile's LVN gaps, the market profile's LVN gaps and single prints, thin stretches price tends to
-// cross fast - and say so when the two profiles agree on the same price (a confluence), the stronger level.
+// Profile-level alerts: tell the trader when price reaches the previous session's POC or HVN - of its volume
+// profile and of its market profile / TPO - or enters one of their gaps - the volume profile's LVN gaps, the market
+// profile's LVN gaps and single prints, thin stretches price tends to cross fast - and say so when the two profiles
+// agree on the same price (a confluence), the stronger level. The value area's edges (VAH / VAL) do not alert.
 //
 // Pure: no clock, no storage. The page feeds it the price each tick and fires the notification for
 // whatever it returns. Levels are the previous session's, so they never move and a hit means the same
 // thing all day (today's developing profile moves under the price and would alert on its own drift).
 
-import { profileGaps, tpoProfile } from './profiles.js'
+import { profileGaps, tpoHighNodes, tpoProfile } from './profiles.js'
 
 const round2 = (v) => Math.round(v * 100) / 100
 
-/** Levels from a volume profile (`vp`: poc / vah / val / hvn[] / lvn[], and its `rows`) and a TPO profile
- *  (`tpo`: poc / vah / val, and its `rows`). Levels within `tolerance` of each other are one level, at their
- *  average price; it is a confluence when the volume profile and the TPO profile both have a part in it.
+/** Levels from a volume profile (`vp`: poc / hvn[] / lvn[], and its `rows`) and a TPO profile (`tpo`: poc, and its
+ *  `rows` - its HVN, tpoHighNodes, from them): the POCs and HVNs (not VAH / VAL). Levels within `tolerance` of
+ *  each other are one level, at their average price; it is a confluence when the volume profile and the TPO
+ *  profile both have a part in it.
  *  With the profiles' rows, their gaps too (profileGaps): zones { low, high } that alert on price entering
  *  them - each LVN is then its gap (without rows, a level at its price). Sorted by price. */
 export function profileLevels(vp, tpo, tolerance) {
@@ -21,11 +22,11 @@ export function profileLevels(vp, tpo, tolerance) {
   const add = (price, label) => { if (Number.isFinite(price) && price > 0) raw.push({ price, label }) }
   const gaps = profileGaps(vp, tpo, tolerance)
   if (vp) {
-    add(vp.poc, 'VP POC'); add(vp.vah, 'VP VAH'); add(vp.val, 'VP VAL')
+    add(vp.poc, 'VP POC')
     for (const p of vp.hvn ?? []) add(p, 'VP HVN')
     if (!vp.rows?.length) for (const p of vp.lvn ?? []) add(p, 'VP LVN')
   }
-  if (tpo) { add(tpo.poc, 'TPO POC'); add(tpo.vah, 'TPO VAH'); add(tpo.val, 'TPO VAL') }
+  if (tpo) { add(tpo.poc, 'TPO POC'); for (const p of tpoHighNodes(tpo)) add(p, 'TPO HVN') }
   raw.sort((a, b) => a.price - b.price)
   const groups = []
   for (const item of raw) {
@@ -61,13 +62,13 @@ export function shiftLevels(levels, offset) {
 }
 
 /** The previous day's SPOT profiles as alert levels, labelled "Spot VP ..." / "Spot TPO ...": the server's
- *  volume profile (the POC / VAH / VAL / HVN / LVN lines drawn on the OI Replay charts - the strongest HVN;
- *  each LVN as its gap, from the server's `bins`) and the day's market profile from its one-minute `bars`
- *  (tpoProfile, rows of `tpoRow`): POC / VAH / VAL, LVN gaps and single prints. */
+ *  volume profile (the POC / HVN / LVN lines drawn on the OI Replay charts - the strongest HVN; each LVN as its
+ *  gap, from the server's `bins`) and the day's market profile from its one-minute `bars` (tpoProfile, rows of
+ *  `tpoRow`): POC, HVN, LVN gaps and single prints. */
 export function spotProfileLevels(spotVp, tpoRow) {
   if (!spotVp || !(spotVp.poc > 0)) return []
   const rows = (spotVp.bins ?? []).map((b) => ({ price: b.price, total: b.volume }))
-  const vp = { poc: spotVp.poc, vah: spotVp.vah, val: spotVp.val, hvn: (spotVp.hvn ?? []).slice(0, 1), lvn: rows.length ? spotVp.lvn ?? [] : (spotVp.lvn ?? []).slice(0, 1), rows }
+  const vp = { poc: spotVp.poc, hvn: (spotVp.hvn ?? []).slice(0, 1), lvn: rows.length ? spotVp.lvn ?? [] : (spotVp.lvn ?? []).slice(0, 1), rows }
   const tpo = spotVp.bars?.length ? tpoProfile(spotVp.bars, tpoRow) : null
   const date = spotVp.profileDate ? String(spotVp.profileDate).slice(0, 10) : null
   return profileLevels(vp, tpo, tpoRow).map((l) => ({

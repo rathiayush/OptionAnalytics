@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { profileLevels, shiftLevels, profileHits, profileAlertText, spotProfileLevels, alertOptions, newProfileWatch, watchProfiles, spotLevelsOf } from '../src/profileAlerts.js'
-import { lowNodeGaps, profileGaps, sessionVolumeProfile, singlePrintGaps, tpoProfile } from '../src/profiles.js'
+import { lowNodeGaps, profileGaps, sessionVolumeProfile, singlePrintGaps, tpoHighNodes, tpoProfile } from '../src/profiles.js'
 
 const vp = { poc: 24500, vah: 24600, val: 24400, hvn: [24700], lvn: [24550] }
 const tpo = { poc: 24502, vah: 24650, val: 24400 }
@@ -13,10 +13,11 @@ test('volume and market profile levels at the same price are one confluence leve
   assert.deepEqual(poc.labels, ['VP POC', 'TPO POC'])
   assert.equal(poc.confluence, true)
   assert.equal(poc.price, 24501)
-  assert.equal(levels.find((l) => l.labels.includes('VP VAL')).confluence, true) // 24400 on both
   const lvn = levels.find((l) => l.labels.includes('VP LVN'))
   assert.equal(lvn.confluence, false)
-  assert.equal(levels.length, 6) // VAL, POC, LVN, VP VAH, TPO VAH, HVN
+  assert.equal(levels.length, 3) // POC, LVN, HVN
+  // The value area's edges do not alert - only POC, HVN, LVN and single prints.
+  assert.ok(!levels.some((l) => l.labels.some((x) => /VAH|VAL/.test(x))), levels.map((l) => l.labels.join('+')).join(' | '))
 })
 
 test('profile levels from only one profile are never a confluence', () => {
@@ -27,7 +28,7 @@ test('profile levels from only one profile are never a confluence', () => {
 test('a hit alerts once, then not again until price has moved away', () => {
   const levels = profileLevels(vp, null, 5)
   const armed = new Set()
-  assert.deepEqual(profileHits(levels, 0, 24450, armed, opts), []) // first look: only arms (price is >20 from VAH 24600 etc.)
+  assert.deepEqual(profileHits(levels, 0, 24450, armed, opts), []) // first look: only arms (price is >20 from POC 24500 etc.)
   const hit = profileHits(levels, 24450, 24498, armed, opts)
   assert.deepEqual(hit.map((l) => l.labels[0]), ['VP POC'])
   assert.deepEqual(profileHits(levels, 24498, 24501, armed, opts), []) // still on it
@@ -39,8 +40,8 @@ test('a gap straight through a level still alerts, and opening next to a level d
   const levels = profileLevels(vp, null, 5)
   const armed = new Set()
   profileHits(levels, 0, 24300, armed, opts) // far below everything: all armed
-  const hit = profileHits(levels, 24300, 24420, armed, opts) // jumps over VAL 24400
-  assert.deepEqual(hit.map((l) => l.labels[0]), ['VP VAL'])
+  const hit = profileHits(levels, 24300, 24520, armed, opts) // jumps over POC 24500
+  assert.deepEqual(hit.map((l) => l.labels[0]), ['VP POC'])
   const next = new Set()
   assert.deepEqual(profileHits(levels, 0, 24501, next, opts), []) // starts on POC: not armed
   assert.deepEqual(profileHits(levels, 24501, 24503, next, opts), [])
@@ -72,7 +73,7 @@ test('the bug that hid spot alerts: the premium ticking as spot walks up to the 
 test('the previous day\'s spot volume profile (the OI Replay lines) as spot levels', () => {
   const spotVp = { success: true, poc: 22473.98, vah: 22564.47, val: 22380.1, hvn: [22420, 22300], lvn: [22402.89, 22500], profileDate: '2026-10-08' }
   const levels = spotProfileLevels(spotVp, 5)
-  assert.deepEqual(levels.map((l) => l.labels[0]), ['Spot VP VAL', 'Spot VP LVN', 'Spot VP HVN', 'Spot VP POC', 'Spot VP VAH'])
+  assert.deepEqual(levels.map((l) => l.labels[0]), ['Spot VP LVN', 'Spot VP HVN', 'Spot VP POC'])
   assert.ok(levels.every((l) => l.id.startsWith('spot:') && l.date === '2026-10-08'))
   assert.deepEqual(spotProfileLevels(null, 5), [])
   // Spot at 22470.8 - 3.2 below that POC - counts as reaching it (NIFTY tolerance ~4 points).
@@ -126,7 +127,8 @@ test('a fast move leaves a gap: the volume profile\'s LVN gap and the market pro
   assert.ok(gap.low >= 22535 && gap.low <= 22542, `low ${gap.low}`)
   assert.ok(gap.high >= 22595 && gap.high <= 22605, `high ${gap.high}`)
   assert.equal(levels.filter((l) => l.gap).length, 1, 'one zone, not one per LVN')
-  assert.ok(levels.some((l) => l.labels.includes('VP POC')) && levels.some((l) => l.labels.includes('TPO VAH')), 'POC / VAH / VAL still alert')
+  assert.ok(levels.some((l) => l.labels.includes('VP POC')) && levels.some((l) => l.labels.includes('TPO POC')), 'the POCs still alert')
+  assert.ok(!levels.some((l) => l.labels.some((x) => /VAH|VAL/.test(x))), 'no VAH / VAL')
   assert.ok(!levels.some((l) => l.labels.includes('VP LVN')), 'the LVNs are their gap')
   assert.match(profileAlertText(gap, 22603.5, 'NIFTY futures'), /^NIFTY futures 22603\.5 entered VP LVN gap \+ TPO single prints 225\d\d\.0-22\d\d\d\.0 \(volume \+ market profile confluence\)$/)
 })
@@ -189,7 +191,8 @@ test('spot: the server\'s spot volume profile gives LVN gaps from its bins, its 
   const levels = spotProfileLevels(spotVp, 5)
   assert.ok(levels.every((l) => l.id.startsWith('spot:') && l.date === '2026-10-08'))
   assert.ok(levels.some((l) => l.labels.includes('Spot VP POC')))
-  assert.ok(levels.some((l) => l.labels.includes('Spot TPO POC') || l.labels.includes('Spot TPO VAH')), 'the spot market profile')
+  assert.ok(levels.some((l) => l.labels.includes('Spot TPO POC')), 'the spot market profile')
+  assert.ok(levels.some((l) => l.labels.includes('Spot TPO HVN')), 'and its HVN')
   const gap = gapOf(levels)
   assert.ok(gap, levels.map((l) => l.labels.join('+')).join(' | '))
   assert.ok(gap.labels.includes('Spot VP LVN gap') && gap.labels.includes('Spot TPO single prints'), gap.labels.join('+'))
@@ -213,4 +216,23 @@ test('spot uses its own profiles when it has them; the futures levels moved onto
   assert.equal(gap.low, gapOf(futures).low - 60)
   assert.equal(gapOf(spotLevelsOf(futures, 61, [])).id, gap.id)
   assert.deepEqual(spotLevelsOf(futures, null, []), [])
+})
+
+test('the market profile\'s HVN: its strongest TPO-count peak that is not the POC - and it alerts', () => {
+  const bars = gapDay()
+  const tpo = tpoProfile(bars, 5)
+  const [hvn] = tpoHighNodes(tpo)
+  // The afternoon range holds the POC; the morning range (22502-22538) is the other high-count area.
+  assert.ok(hvn >= 22500 && hvn <= 22540, `TPO HVN ${hvn} (POC ${tpo.poc})`)
+  assert.ok(Math.abs(hvn - tpo.poc) > 5)
+  const levels = gapLevels()
+  const level = levels.find((l) => l.labels.includes('TPO HVN'))
+  assert.ok(level, levels.map((l) => l.labels.join('+')).join(' | '))
+  const watch = newProfileWatch()
+  watchProfiles(watch, { levels: { futures: levels }, prices: { futures: level.price - 40 }, tpoRow: 5 })
+  const hits = watchProfiles(watch, { levels: { futures: levels }, prices: { futures: level.price + 1 }, tpoRow: 5 })
+  assert.ok(hits.some((h) => h.level.labels.includes('TPO HVN')), hits.map((h) => h.level.labels.join('+')).join(' | '))
+  // A flat profile (one peak - the POC) has no HVN of its own; no rows, none either.
+  assert.deepEqual(tpoHighNodes({ poc: 110, rows: [1, 2, 4, 8, 4, 2, 1].map((count, i) => ({ price: 95 + i * 5, count })) }), [])
+  assert.deepEqual(tpoHighNodes({ poc: 100 }), [])
 })
