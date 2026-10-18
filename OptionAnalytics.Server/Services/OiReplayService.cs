@@ -57,6 +57,10 @@ public sealed class OiReplayService
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
     private const int NearestExpiryCode = 1;
 
+    /// <summary>How long a day's futures may take (counted from the start of the load, running alongside the options) before the page is
+    /// shown without them - they are never worth holding the whole page for.</summary>
+    internal static readonly TimeSpan FuturesBudget = TimeSpan.FromSeconds(30);
+
     /// <summary>How many strike/side fetches (out of the 42 the ATM+-10 band needs - 21 strikes x
     /// CE/PE) may be IN FLIGHT at once, when they end up needing a live Dhan call. This used to be
     /// a plain sequential loop - correct, but on a deployed environment with no stored database
@@ -194,6 +198,13 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
+        // The futures are asked for at the same time as the spot and the 42 option series, not after them: an expired contract's day goes
+        // Dhan -> NSE's archive (30 s) -> NSE's chart (20 s) -> other contracts, and when NSE does not answer that used to sit on top of
+        // the whole load. It is also given a budget (FuturesBudget) - past it the page loads without futures, saying why.
+        var futuresClock = System.Diagnostics.Stopwatch.StartNew();
+        var futuresTask = GetFuturesAsync(underlying, date, cancellationToken);
+        _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+
         var (spotBarsRaw, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, date, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
         if (spotBarsRaw.Count == 0)
@@ -246,14 +257,24 @@ public sealed class OiReplayService
             ceTasks.Add(FetchPointsAsync(token, "CALL"));
             peTasks.Add(FetchPointsAsync(token, "PUT"));
         }
+        var optionsClock = System.Diagnostics.Stopwatch.StartNew();
         await Task.WhenAll(ceTasks.Concat(peTasks));
+        var optionsSeconds = optionsClock.Elapsed.TotalSeconds;
 
         var cePoints = ceTasks.SelectMany(t => t.Result).ToList();
         var pePoints = peTasks.SelectMany(t => t.Result).ToList();
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
-        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await GetFuturesAsync(underlying, date, cancellationToken);
+        var futuresLeft = FuturesBudget - futuresClock.Elapsed;
+        var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
+        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = futuresDone
+            ? await futuresTask
+            : (Array.Empty<FuturesBar>(), (DateOnly?)null, false,
+                $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (the contract's expired day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them.");
+
+        _logger?.LogInformation("OI Replay {Underlying} {Date:yyyy-MM-dd}: option series {Options:0.0} s ({Errors} failed), futures {Futures:0.0} s ({Outcome}).",
+            underlying, date, optionsSeconds, optionErrors.Count, futuresClock.Elapsed.TotalSeconds, futuresDone ? (futuresError is null ? "ok" : "error") : "over budget");
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
             spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
