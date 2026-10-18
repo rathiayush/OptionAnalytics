@@ -4938,6 +4938,11 @@ export default function OiReplayPage() {
             )}
             {isLive && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
+            {!isLive && result?.optionErrors?.length > 0 && (
+              <Alert type="warning" showIcon closable
+                message={`${result.optionErrors.length} of 42 strike series did not load from Dhan - strikes they cover show gaps / [STALE]. Load the day again (tick "Force fetch from Dhan" if it repeats).`}
+                description={result.optionErrors.slice(0, 4).join(' · ')} />
+            )}
           </Space>
         </Card>
 

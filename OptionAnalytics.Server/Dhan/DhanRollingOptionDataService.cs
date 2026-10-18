@@ -123,24 +123,27 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         _cache = cache;
     }
 
+    /// <summary>The request without its dates - the name of the series' files on disk (one per day).</summary>
+    internal static object KeyOf(string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType, int intervalMinutes) => new
+    {
+        exchangeSegment = ResolveFnoSegment(underlying),
+        interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+        securityId = underlyingSecurityId,
+        instrument = OptionInstrument,
+        expiryFlag,
+        expiryCode,
+        strike,
+        drvOptionType,
+        requiredData = RequiredData,
+    };
+
     /// <summary>True when every day of [fromDay,toDay] of this contract is already kept on disk (DhanDataCache), so
     /// <see cref="GetRollingOptionCandlesAsync"/> would make no Dhan call - the caller then need not pace itself.</summary>
     public bool IsFullyCached(string underlying, uint underlyingSecurityId, string expiryFlag, int expiryCode, string strike, string drvOptionType,
         DateOnly fromDay, DateOnly toDay, int intervalMinutes)
     {
         if (_cache is null || toDay < fromDay) return false;
-        var key = new
-        {
-            exchangeSegment = ResolveFnoSegment(underlying),
-            interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-            securityId = underlyingSecurityId,
-            instrument = OptionInstrument,
-            expiryFlag,
-            expiryCode,
-            strike,
-            drvOptionType,
-            requiredData = RequiredData,
-        };
+        var key = KeyOf(underlying, underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, intervalMinutes);
         for (var d = fromDay; d <= toDay; d = d.AddDays(1))
             if (!_cache.HasDay(RollingPath, key, d)) return false;
         return true;
@@ -180,18 +183,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
 
             // The request without its dates names the series on disk (one file per day); the payload is Dhan's request
             // (and the key of an older whole-chunk file).
-            var key = new
-            {
-                exchangeSegment = ResolveFnoSegment(underlying),
-                interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-                securityId = underlyingSecurityId,
-                instrument = OptionInstrument,
-                expiryFlag,
-                expiryCode,
-                strike,
-                drvOptionType,
-                requiredData = RequiredData,
-            };
+            var key = KeyOf(underlying, underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, intervalMinutes);
             object PayloadFor(DateOnly from, DateOnly to) => new
             {
                 exchangeSegment = ResolveFnoSegment(underlying),
@@ -216,13 +208,18 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             // Each closed day kept before comes from disk - no Dhan call, no pacing, and no session needed; the rest of
             // the chunk is one call, and each final day of it is kept. A day not kept yet may be in an older whole-chunk
             // file of this very request: then that is read instead (and its days kept).
-            var (parts, ask) = DhanDayWindow.Plan(_cache, RollingPath, key, chunkStart, chunkEnd);
+            var (parts, ask) = DhanDayWindow.Plan(_cache, RollingPath, key, chunkStart, chunkEnd, FullDayRows, root => SideOf(root, drvOptionType), intervalMinutes);
             var whole = ask is null ? null : _cache?.TryGet(RollingPath, PayloadFor(chunkStart, chunkEnd), chunkEnd);
+            if (whole is not null && DhanDayWindow.HasHoles(SideOf(whole.RootElement, drvOptionType), FullDayRows, intervalMinutes))
+            {
+                whole.Dispose();
+                whole = null;
+            }
             if (whole is not null)
             {
                 foreach (var part in parts) part.Dispose();
                 using var kept = new DhanApiResponse(true, HttpStatusCode.OK, whole, null);
-                DhanDayWindow.Keep(_cache, RollingPath, key, chunkStart, chunkEnd, SideOf(kept.Root, drvOptionType), Wrap, intervalMinutes);
+                DhanDayWindow.Keep(_cache, RollingPath, key, chunkStart, chunkEnd, SideOf(kept.Root, drvOptionType), Wrap, intervalMinutes, FullDayRows);
                 all.AddRange(ParseSide(kept.Root, drvOptionType));
                 chunkStart = chunkEnd.AddDays(1);
                 continue;
@@ -255,7 +252,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 {
                     // A day is kept once Dhan sent a full session of it - its own minutes, a thin strike's untraded ones
                     // (0 prices the parser drops) included - or a later past day (DhanDayWindow.Keep).
-                    DhanDayWindow.Keep(_cache, RollingPath, key, span.From, span.To, SideOf(response.Root, drvOptionType), Wrap, intervalMinutes);
+                    DhanDayWindow.Keep(_cache, RollingPath, key, span.From, span.To, SideOf(response.Root, drvOptionType), Wrap, intervalMinutes, FullDayRows);
                     all.AddRange(ParseSide(response.Root, drvOptionType));
                 }
             }
@@ -360,6 +357,11 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             await Task.Delay(delay, cancellationToken);
         }
     }
+
+    /// <summary>The 1-minute rows a strike's full session has at least (375 minutes, a few allowed missing). Dhan sends
+    /// every minute of a rolling strike, untraded ones at a 0 price, so a day with fewer has holes - the OI Replay ladder
+    /// then shows strikes [STALE] - and is asked again rather than kept (DhanDayWindow).</summary>
+    internal const int FullDayRows = 365;
 
     private static string SideKey(string drvOptionType) => string.Equals(drvOptionType, "PUT", StringComparison.OrdinalIgnoreCase) ? "pe" : "ce";
 

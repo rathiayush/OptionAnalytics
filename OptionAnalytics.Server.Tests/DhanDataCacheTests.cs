@@ -174,6 +174,43 @@ public sealed class DhanDataCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task AStrikeDayWithHoles_IsNeverKept_AndOneKeptBeforeIsAskedAgain()
+    {
+        // Dhan answered 15-09 with 35 minutes missing (a later day in the same answer used to make it "final" anyway):
+        // kept like that, the OI Replay ladder showed strikes [STALE] on that day for good. Now it is asked again.
+        var requests = new List<string>();
+        var day2 = PastDay.AddDays(1);
+        var (api, limiter) = Api(requests, session: true, bars: 375, barsOn: d => d == PastDay ? 340 : 375);
+        var holey = new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
+        await holey.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+1", "CALL", PastDay, day2, 1, CancellationToken.None);
+        Assert.Single(requests);
+
+        requests.Clear();
+        var whole = Rolling(requests, Cache(), session: true);
+        await whole.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+1", "CALL", day2, day2, 1, CancellationToken.None);
+        Assert.Empty(requests); // the whole day was kept
+        var (bars, _) = await whole.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+1", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests); // the holey one was not
+        Assert.Equal(375, bars.Count);
+        await whole.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+1", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests); // and now it is
+
+        // A holey day kept by an older build is dropped on read and asked again.
+        using (var doc = JsonDocument.Parse("{\"data\":{\"ce\":{\"close\":[1,2],\"timestamp\":[1757908500,1757908560]}}}"))
+        {
+            var cache = Cache();
+            var key = DhanRollingOptionDataService.KeyOf("NIFTY", 13, "WEEK", 1, "ATM+2", "CALL", 1);
+            var ce = doc.RootElement.GetProperty("data").GetProperty("ce");
+            cache.PutDay("/charts/rollingoption", key, PastDay, w => { w.WriteStartObject(); w.WritePropertyName("data"); w.WriteStartObject(); w.WritePropertyName("ce"); ce.WriteTo(w); w.WriteEndObject(); w.WriteEndObject(); });
+            Assert.True(cache.HasDay("/charts/rollingoption", key, PastDay));
+        }
+        requests.Clear();
+        var (again, _) = await whole.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+2", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Single(requests);
+        Assert.Equal(375, again.Count);
+    }
+
+    [Fact]
     public async Task AThinOptionStrike_WhoseUntradedMinutesComeAtZero_IsKeptLikeAnyOther()
     {
         // BANKNIFTY's monthly options away from the money: Dhan sends every minute of the session, the ones the strike did

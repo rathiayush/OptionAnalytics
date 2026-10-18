@@ -120,6 +120,12 @@ public sealed class DhanDataCache
     public JsonDocument? TryGetDay(string endpoint, object key, DateOnly day) =>
         !ForceRefresh && Cacheable(day) ? Read(FileOfDay(endpoint, key, day)) : null;
 
+    /// <summary>Removes a kept day (one found incomplete) so it is asked of Dhan again and kept afresh.</summary>
+    public void DropDay(string endpoint, object key, DateOnly day)
+    {
+        try { File.Delete(FileOfDay(endpoint, key, day)); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+    }
+
     /// <summary>Keeps Dhan's response to this request as a whole window - only for a closed window, and only when it
     /// had data (<paramref name="hasData"/>). A disk problem is logged, never thrown.</summary>
     public void Put(string endpoint, object payload, DateOnly lastDay, JsonElement response, bool hasData)

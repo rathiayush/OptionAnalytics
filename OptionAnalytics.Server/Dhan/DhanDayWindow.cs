@@ -13,7 +13,10 @@ internal static class DhanDayWindow
 {
     /// <summary>The days of [from, to] read from disk (wrapped as Dhan's own answer, the caller disposes them) and the
     /// span still to ask Dhan for (null = every day was kept). Kept days inside that span come with the call instead.</summary>
-    public static (List<DhanApiResponse> Kept, (DateOnly From, DateOnly To)? Ask) Plan(DhanDataCache? cache, string endpoint, object key, DateOnly from, DateOnly to)
+    /// <paramref name="fullDayRows"/> (0 = any): a kept day with fewer rows than that (but some) has holes - it is dropped and
+    /// asked again (<paramref name="seriesOf"/> finds the arrays in a kept answer).
+    public static (List<DhanApiResponse> Kept, (DateOnly From, DateOnly To)? Ask) Plan(DhanDataCache? cache, string endpoint, object key, DateOnly from, DateOnly to,
+        int fullDayRows = 0, Func<JsonElement, JsonElement>? seriesOf = null, int intervalMinutes = 1)
     {
         if (cache is null) return (new List<DhanApiResponse>(), (from, to));
         DateOnly? askFrom = null, askTo = null;
@@ -29,6 +32,12 @@ internal static class DhanDayWindow
         {
             if (askFrom is not null && d >= askFrom && d <= askTo) continue;
             var doc = cache.TryGetDay(endpoint, key, d);
+            if (doc is not null && HasHoles(seriesOf is null ? doc.RootElement : seriesOf(doc.RootElement), fullDayRows, intervalMinutes))
+            {
+                doc.Dispose();
+                doc = null;
+                cache.DropDay(endpoint, key, d);
+            }
             if (doc is not null) kept[d] = doc;
             else Ask(d); // gone or broken since (a broken file is deleted): asked too
         }
@@ -46,10 +55,11 @@ internal static class DhanDayWindow
     /// <paramref name="wrap"/> writes a day's part back in the answer's shape. A day is final when it is before today
     /// AND Dhan sent a full session of it (its own minutes - a thin strike's 0-priced ones count) or has already sent a
     /// LATER past day in this answer (then a holiday has nothing - kept empty - and a short session stays short). The
-    /// last day of an answer with less than a session is asked again; a day already on disk is left as it is. Returns the
-    /// days written.</summary>
+    /// last day of an answer with less than a session is asked again; a day already on disk is left as it is. With
+    /// <paramref name="fullDayRows"/> (1-minute rows, 0 = off) a day with data is kept only when it has that many - one
+    /// with holes in it is asked again next time rather than kept with them for good. Returns the days written.</summary>
     public static int Keep(DhanDataCache? cache, string endpoint, object key, DateOnly from, DateOnly to, JsonElement series,
-        Func<Action<Utf8JsonWriter>, Action<Utf8JsonWriter>> wrap, int intervalMinutes)
+        Func<Action<Utf8JsonWriter>, Action<Utf8JsonWriter>> wrap, int intervalMinutes, int fullDayRows = 0)
     {
         if (cache is null) return 0;
         var ranges = DayRanges(series);
@@ -65,6 +75,7 @@ internal static class DhanDayWindow
             if (ranges.TryGetValue(d, out var r))
             {
                 if (r.End - r.Start < minimum && !answeredPast) continue;
+                if (r.End > r.Start && r.End - r.Start < fullDayRows / Math.Max(1, intervalMinutes)) continue;
                 cache.PutDay(endpoint, key, d, wrap(w => WriteSlice(w, series, r.Start, r.End)));
             }
             else if (answeredPast) cache.PutDay(endpoint, key, d, wrap(w => WriteSlice(w, series, 0, 0)));
@@ -72,6 +83,14 @@ internal static class DhanDayWindow
             kept++;
         }
         return kept;
+    }
+
+    /// <summary>Whether any day of the answer has data but fewer than <paramref name="fullDayRows"/> rows (0 = never).</summary>
+    public static bool HasHoles(JsonElement series, int fullDayRows, int intervalMinutes = 1)
+    {
+        if (fullDayRows <= 0) return false;
+        var ranges = DayRanges(series);
+        return ranges is not null && ranges.Values.Any(r => r.End > r.Start && r.End - r.Start < fullDayRows / Math.Max(1, intervalMinutes));
     }
 
     /// <summary>Each IST day's [Start, End) of the answer's arrays - empty when it has none; null when its timestamps are

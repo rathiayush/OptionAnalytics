@@ -190,7 +190,8 @@ When adding or changing a strategy:
   when it is before today and Dhan sent a full session of it (its own timestamps - a thin option strike's untraded minutes
   come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept) or a later past day
   in the same answer (a holiday is then kept empty, a short session short); today, empty answers and a half LAST day go to
-  Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
+  Dhan again. A rolling-option strike day with data is kept only when it has a full session (`FullDayRows`, 365 of 375 minutes) - one
+  with holes (it showed strikes [STALE] on the OI Replay ladder for good) is asked again, and one kept before with holes is dropped on read. Older whole-window files are still read for their exact request and split into days. The folder is held to
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
