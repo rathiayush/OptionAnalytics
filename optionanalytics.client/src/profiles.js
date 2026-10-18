@@ -160,6 +160,33 @@ export function tpoLowNodes(tpo) {
   return troughs.filter((t) => t.price > lo && t.price < hi).sort((a, b) => a.v - b.v).slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
 }
 
+/** A market profile's own high-count node (its HVN): the centre of its strongest busy area other than the POC's -
+ *  a peak (or a flat top - its middle row) of at least 0.4 x the POC's count, with the count dipping below 0.7 x
+ *  the peak's between it and the POC, so a bump inside the POC's own area is not one (counts smoothed over three
+ *  rows, as the LVN rule). `count` of them, strongest first, one per area. */
+export function tpoHighNodes(tpo, count = 1) {
+  const g = gridOf(tpo?.rows, (r) => r.count)
+  if (!g || !(g.mean > 0) || !Number.isFinite(tpo?.poc)) return []
+  const n = g.prices.length
+  const at = (price) => Math.max(0, Math.min(n - 1, Math.round((price - g.prices[0]) / g.step)))
+  const apart = (i, j) => { const [a, b] = i < j ? [i, j] : [j, i]; let low = Infinity; for (let k = a; k <= b; k++) low = Math.min(low, g.smooth[k]); return low < 0.7 * Math.min(g.smooth[i], g.smooth[j]) }
+  const poc = at(tpo.poc)
+  const floor = 0.4 * g.smooth[poc]
+  const peaks = []
+  for (let i = 1; i < n - 1; i++) {
+    if (g.smooth[i] >= g.smooth[i - 1] && g.smooth[i] >= g.smooth[i + 1] && g.smooth[i] >= floor && apart(i, poc)) peaks.push(i)
+  }
+  // A flat top is one peak, at its middle row.
+  const centre = (i) => { let a = i; let b = i; while (a > 0 && Math.abs(g.smooth[a - 1] - g.smooth[i]) < 1e-9) a--; while (b < n - 1 && Math.abs(g.smooth[b + 1] - g.smooth[i]) < 1e-9) b++; return Math.round((a + b) / 2) }
+  const out = []
+  for (const i of peaks.sort((a, b) => g.smooth[b] - g.smooth[a] || a - b)) {
+    const c = centre(i)
+    if (out.every((j) => j !== c && apart(c, j))) out.push(c)
+    if (out.length >= count) break
+  }
+  return out.map((i) => g.prices[i])
+}
+
 /** A market profile's single-print gaps: runs of rows only one period visited (or none - a jump), with more
  *  than one period on BOTH sides. A single-print run at the day's high or low is a tail, not a gap. */
 export function singlePrintGaps(tpo) {
