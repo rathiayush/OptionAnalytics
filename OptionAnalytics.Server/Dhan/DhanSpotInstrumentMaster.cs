@@ -76,10 +76,8 @@ public sealed class DhanSpotInstrumentMaster
     {
         _logger.LogInformation("Downloading Dhan scrip master from {Url}...", _options.ScripMasterUrl);
 
-        using var response = await _httpClient.GetAsync(_options.ScripMasterUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        // One kept copy shared by every instrument master (DhanScripMasterFile), not a download each.
+        await using var stream = await DhanScripMasterFile.OpenAsync(_httpClient, _options.ScripMasterUrl, _logger, cancellationToken);
         var parsed = ParseSpotRows(stream);
 
         // Same rule as DhanOptionChainMaster: a refresh that parses to NOTHING must never replace a

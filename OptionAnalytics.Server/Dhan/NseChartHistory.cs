@@ -37,10 +37,17 @@ public sealed class NseChartHistory
 
     public sealed record Result(IReadOnlyList<CandleWithVolume> Bars, string? Error);
 
-    public NseChartHistory(HttpClient http, ILogger<NseChartHistory> logger)
+    private readonly NseDayStore _disk;
+    private readonly NseBackoff _backoff = new();
+    /// <summary>For the tests: the pause after NSE did not answer.</summary>
+    internal NseBackoff Backoff => _backoff;
+
+    /// <param name="disk">Where a past contract-day's bars are kept across restarts (null = memory only).</param>
+    public NseChartHistory(HttpClient http, ILogger<NseChartHistory> logger, NseDayStore? disk = null)
     {
         _http = http;
         _logger = logger;
+        _disk = disk ?? new NseDayStore(null);
         if (_http.DefaultRequestHeaders.UserAgent.Count == 0)
             _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
         if (!_http.DefaultRequestHeaders.Contains("Origin")) _http.DefaultRequestHeaders.Add("Origin", "https://charting.nseindia.com");
@@ -60,6 +67,13 @@ public sealed class NseChartHistory
         var today = IstClock.Today();
         if (today != _cacheDay) { _days.Clear(); _cacheDay = today; }
         var key = (contract.SecurityId, date);
+        var name = $"{contract.SecurityId}-{date:yyyy-MM-dd}";
+        // Kept on disk from an earlier run: a past day's bars never change.
+        if (date < today && !_days.ContainsKey(key) && _disk.Read<List<CandleWithVolume>>("chart", name) is { Count: > 0 } kept)
+            _days[key] = Task.FromResult(new Result(kept, null));
+        // NSE did not answer a moment ago: say so at once rather than wait out the timeout again.
+        if (!_days.ContainsKey(key) && _backoff.IsDown(out var until))
+            return Task.FromResult(new Result(Array.Empty<CandleWithVolume>(), $"NSE chart data not asked - NSE did not answer a few minutes ago (asked again after {until.ToOffset(Ist):HH:mm} IST)"));
         var task = _days.GetOrAdd(key, _ => FetchAsync(contract, date));
         // A network failure is not remembered - asked again next time. "No candles" is.
         _ = task.ContinueWith(t => { if (t.IsFaulted || t.Result.Error is not null) _days.TryRemove(key, out _); }, TaskScheduler.Default);
@@ -87,14 +101,18 @@ public sealed class NseChartHistory
             };
             using var response = await _http.PostAsJsonAsync(HistoryUrl, payload);
             var body = await response.Content.ReadAsStringAsync();
+            if (response.StatusCode is System.Net.HttpStatusCode.Forbidden or System.Net.HttpStatusCode.TooManyRequests) _backoff.Failed();
             if (!response.IsSuccessStatusCode)
                 return Fail(ticker, date, $"NSE chart data answered HTTP {(int)response.StatusCode}{(body.Contains("Access Denied", StringComparison.OrdinalIgnoreCase) ? " (Access Denied - NSE blocks this server's address)" : "")}");
             var bars = Parse(body, date);
+            _backoff.Answered();
             _logger.LogInformation("NSE chart data {Ticker} ({Token}) {Date}: {Count} one-minute bar(s).", ticker, contract.SecurityId, date, bars.Count);
+            if (date < IstClock.Today() && bars.Count > 0) _disk.Write("chart", $"{contract.SecurityId}-{date:yyyy-MM-dd}", bars);
             return new Result(bars, null);
         }
         catch (Exception e) when (e is HttpRequestException or TaskCanceledException or JsonException)
         {
+            if (e is not JsonException) _backoff.Failed();
             return Fail(ticker, date, $"NSE chart data could not be read: {e.Message}");
         }
     }
