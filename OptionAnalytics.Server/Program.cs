@@ -350,6 +350,17 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>
 builder.Services.AddHostedService<ScannerRunnerHostedService>();
 
 builder.Services.AddSignalR();
+// A day of OI Replay is ~16,000 option points of verbose JSON (3 - 5 MB) - on a phone's mobile connection that download alone is many
+// seconds. Brotli / gzip for the JSON API answers (and the page's own files) cuts it about tenfold; a reverse proxy that already
+// compresses passes a Content-Encoding it finds through untouched.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+    options.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+});
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -380,6 +391,7 @@ if (app.Environment.IsDevelopment())
     app.UseCors(DevCorsPolicy);
 }
 
+app.UseResponseCompression();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 
