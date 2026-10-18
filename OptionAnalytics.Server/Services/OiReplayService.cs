@@ -154,8 +154,31 @@ public sealed class OiReplayService
         _pastFutures = pastFutures;
     }
 
+    /// <summary>How long one day's load may take before it is stopped with a plain reason (the page gives up at 120 s and says only
+    /// "took longer" - this says WHICH step it was stuck on).</summary>
+    internal static readonly TimeSpan RunBudget = TimeSpan.FromSeconds(100);
+
     public async Task<OiReplayResult> RunAsync(
         string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
+    {
+        var stage = "starting";
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(RunBudget);
+        try
+        {
+            return await RunCoreAsync(underlying, date, timeframeMinutes, expiryFlag, deadline.Token, forceLive, s => Volatile.Write(ref stage, s));
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            var where = Volatile.Read(ref stage);
+            _logger?.LogWarning("OI Replay {Underlying} {Date:yyyy-MM-dd} gave up after {Seconds:0} s while {Stage}.", underlying, date, RunBudget.TotalSeconds, where);
+            return OiReplayResult.Failed(underlying, date, Math.Max(1, timeframeMinutes),
+                $"Gave up after {RunBudget.TotalSeconds:0} s while {where}. What was fetched before it is kept for the next try - reload.");
+        }
+    }
+
+    private async Task<OiReplayResult> RunCoreAsync(
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive, Action<string> stage)
     {
         var timeframe = Math.Max(1, timeframeMinutes);
         // forceLive folds into the SAME isAlwaysLive treatment SENSEX already gets (skip stored
@@ -193,6 +216,7 @@ public sealed class OiReplayService
         DhanSpotInstrument? instrument = null;
         if (isAlwaysLive || _allowLiveDataFallback)
         {
+            stage("loading Dhan's instrument list (the scrip master file)");
             await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
             instrument = _instrumentMaster.FindSpot(underlying);
         }
@@ -201,6 +225,7 @@ public sealed class OiReplayService
         // The futures are asked for at the same time as the spot and the 42 option series, not after them: an expired contract's day goes
         // Dhan -> NSE's archive (30 s) -> NSE's chart (20 s) -> other contracts, and when NSE does not answer that used to sit on top of
         // the whole load. It is also given a budget (FuturesBudget) - past it the page loads without futures, saying why.
+        stage("fetching the spot candles");
         var futuresClock = System.Diagnostics.Stopwatch.StartNew();
         var futuresTask = GetFuturesAsync(underlying, date, cancellationToken);
         _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
@@ -230,6 +255,9 @@ public sealed class OiReplayService
         using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
 
         var optionErrors = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var optionsDone = 0;
+        var optionsTotal = (2 * StrikeBandSteps + 1) * 2;
+        stage($"fetching the option series (0 of {optionsTotal} done)");
         async Task<List<OiReplayPoint>> FetchPointsAsync(string strikeToken, string drvOptionType)
         {
             await throttle.WaitAsync(cancellationToken);
@@ -241,6 +269,7 @@ public sealed class OiReplayService
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
                         points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low, bar.Bar.Volume));
+                stage($"fetching the option series ({Interlocked.Increment(ref optionsDone)} of {optionsTotal} done)");
                 return points;
             }
             finally
@@ -266,6 +295,7 @@ public sealed class OiReplayService
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
+        stage("waiting for the futures (Dhan, then NSE's own chart data for an expired contract)");
         var futuresLeft = FuturesBudget - futuresClock.Elapsed;
         var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
         var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = futuresDone
