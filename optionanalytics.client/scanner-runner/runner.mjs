@@ -10,6 +10,7 @@ import { createRequire } from 'node:module'
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fetchPreviousSession } from '../src/profiles.js'
+import { SPOT_STRATEGIES, STRATEGIES } from '../src/strategyEngine.js'
 import { IndexScanner, istDate, topFromSignalsCsv, FINISH_BACK_DAYS } from './indexScanner.mjs'
 
 const require = createRequire(import.meta.url)
@@ -27,6 +28,11 @@ const startedUtc = new Date().toISOString()
 mkdirSync(DATA, { recursive: true })
 
 const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`)
+
+// With no strategy in the app there is nothing to scan: the runner stays up (status, the Server scanner card) but loads no day, evaluates nothing and
+// holds no live feed - on a weekday it used to read the whole day's OI for the three indices (about 130 Dhan calls and a lot of CPU) for nothing,
+// competing with the pages for both.
+const NO_STRATEGIES = STRATEGIES.length + SPOT_STRATEGIES.length === 0
 
 // Every relative /api call (ours and the shared modules' own, e.g. fetchPreviousSession) goes to this server
 // with the runner's key.
@@ -187,7 +193,7 @@ async function loop() {
   const today = istDate(now)
   // The three indices side by side: each look reads this server (the day's data, the spot candles) and waits on
   // nothing of the others', so one index's slow read no longer holds up the other two's signals.
-  await Promise.all(scanners.map(async (s) => {
+  if (!NO_STRATEGIES) await Promise.all(scanners.map(async (s) => {
     if (!s.enabled) return
     try {
       await s.ensureDay(today)
@@ -216,10 +222,11 @@ for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { connection.stop
 log(`scanner runner starting - ${UNDERLYINGS.join(', ')}, paper only, server ${BASE}`)
 await refreshConfig()
 lastConfig = Date.now()
-await finishPastDays()
+if (!NO_STRATEGIES) await finishPastDays()
 // The ask already standing is covered by the sweep above - only a NEW one makes this process reconcile again.
 reconcileDone = reconcileAsk?.nonce ?? null
-connect()
+if (NO_STRATEGIES) log('no strategy in the app - nothing to scan, the live feed is not joined')
+else connect()
 for (;;) {
   await loop()
   await new Promise((r) => setTimeout(r, LOOP_MS))

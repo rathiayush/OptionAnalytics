@@ -352,6 +352,9 @@ public sealed class StrategyTuningService
                 process.Dispose();
                 return $"{node} could not be started: {ex.Message}";
             }
+            // A job is background work: below normal priority (nice) so the pages and the Dhan feed keep the CPU while it scans days.
+            try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or PlatformNotSupportedException) { /* not allowed here - it runs at normal priority */ }
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
             _process = process;

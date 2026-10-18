@@ -141,14 +141,17 @@ public sealed class DhanDataCache
         if (!File.Exists(path)) return null;
         try
         {
-            JsonDocument doc;
+            // Decompressed once, then only the "response" part is parsed (ParseValue) - the file's own envelope (endpoint, request) is skipped,
+            // not parsed whole and written out again as text to be parsed a second time, which doubled the cost of every one of a day's ~45 files.
+            byte[] bytes;
             using (var file = File.OpenRead(path))
             using (var gz = new GZipStream(file, CompressionMode.Decompress))
-            using (var kept = JsonDocument.Parse(gz))
+            using (var buffer = new MemoryStream())
             {
-                if (!kept.RootElement.TryGetProperty("response", out var response)) throw new InvalidDataException("no response in it");
-                doc = JsonDocument.Parse(response.GetRawText());
+                gz.CopyTo(buffer);
+                bytes = buffer.ToArray();
             }
+            var doc = ParseResponsePart(bytes);
             Interlocked.Increment(ref _hits);
             // Read now: the size cap removes the files read least recently first.
             try { File.SetLastAccessTimeUtc(path, DateTime.UtcNow); } catch (IOException) { } catch (UnauthorizedAccessException) { }
@@ -160,6 +163,21 @@ public sealed class DhanDataCache
             try { File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             return null;
         }
+    }
+
+    /// <summary>The "response" property of a cache file's JSON, as its own document.</summary>
+    internal static JsonDocument ParseResponsePart(byte[] json)
+    {
+        var reader = new Utf8JsonReader(json);
+        if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) throw new InvalidDataException("not an object");
+        while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+        {
+            var isResponse = reader.ValueTextEquals("response"u8);
+            reader.Read();
+            if (isResponse) return JsonDocument.ParseValue(ref reader);
+            reader.Skip();
+        }
+        throw new InvalidDataException("no response in it");
     }
 
     private void Write(string path, string endpoint, object request, Action<Utf8JsonWriter> writeResponse)

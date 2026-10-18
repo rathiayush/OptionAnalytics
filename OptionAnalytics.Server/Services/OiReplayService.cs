@@ -170,7 +170,14 @@ public sealed class OiReplayService
         deadline.CancelAfter(RunBudget);
         try
         {
-            return await RunCoreAsync(underlying, date, timeframeMinutes, expiryFlag, deadline.Token, forceLive, s => Volatile.Write(ref stage, s));
+            // Not only the token: a step that does not look at it (a blocking read, a slow download) would hold the answer past the budget,
+            // so the answer is also given when the budget's clock runs out, whatever the work is still doing.
+            var core = RunCoreAsync(underlying, date, timeframeMinutes, expiryFlag, deadline.Token, forceLive, s => Volatile.Write(ref stage, s));
+            _ = core.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+            var clock = Task.Delay(RunBudget + TimeSpan.FromSeconds(3), cancellationToken);
+            if (await Task.WhenAny(core, clock) == core) return await core;
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new OperationCanceledException();
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
