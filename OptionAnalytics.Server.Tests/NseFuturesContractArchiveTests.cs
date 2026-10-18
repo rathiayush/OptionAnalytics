@@ -87,7 +87,36 @@ FinInstrmId,UndrlygFinInstrmId,FinInstrmNm,TckrSymb,XpryDt,StrkPric,OptnTp,PrtdT
         // Not an OperationCanceledException: callers' "not a cancellation" catches see it (it used to escape as a 500).
         await Assert.ThrowsAsync<TimeoutException>(() => archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
         await Task.Delay(50); // the cache drops the failed download
+        // Right after NSE did not answer it is not asked again (callers fall back at once) ...
+        Assert.Empty(await archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+        Assert.Equal(1, nse.Calls);
+        // ... and once the pause is over it is.
+        archive.Backoff.Answered();
         Assert.NotEmpty(await archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
         Assert.Equal(2, nse.Calls);
+    }
+
+    [Fact]
+    public async Task APastDaysContracts_AreKeptOnDisk_AndReadAfterARestart_WithNoNseCall()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"nse-{Guid.NewGuid():N}");
+        try
+        {
+            var day = new DateOnly(2026, 10, 1);
+            var first = new CountingNse();
+            var before = new NseFuturesContractArchive(new HttpClient(first), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance, new NseDayStore(dir));
+            var listed = await before.ContractsOnAsync("NIFTY", day, CancellationToken.None);
+            Assert.Equal(1, first.Calls);
+
+            // A new process (a redeploy): the day comes from disk, NSE is not asked.
+            var second = new CountingNse();
+            var after = new NseFuturesContractArchive(new HttpClient(second), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance, new NseDayStore(dir));
+            Assert.Equal(listed, await after.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+            Assert.Equal(0, second.Calls);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
     }
 }

@@ -117,10 +117,8 @@ public sealed class DhanOptionChainMaster
 
     private async Task RefreshFromDhanAsync(CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(_options.ScripMasterUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-        response.EnsureSuccessStatusCode();
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        // One kept copy shared by every instrument master (DhanScripMasterFile), not a download each.
+        await using var stream = await DhanScripMasterFile.OpenAsync(_httpClient, _options.ScripMasterUrl, _logger, cancellationToken);
         var (options, stats) = ParseOptionRows(stream);
 
         // A refresh that parses to NOTHING must never replace a master that works.

@@ -38,10 +38,17 @@ public sealed class NseFuturesContractArchive
     private readonly ConcurrentDictionary<DateOnly, long> _used = new();
     private long _clock;
 
-    public NseFuturesContractArchive(HttpClient http, ILogger<NseFuturesContractArchive> logger)
+    private readonly NseDayStore _disk;
+    private readonly NseBackoff _backoff = new();
+    /// <summary>For the tests: the pause after NSE did not answer.</summary>
+    internal NseBackoff Backoff => _backoff;
+
+    /// <param name="disk">Where a past day's contract list is kept across restarts (null = memory only).</param>
+    public NseFuturesContractArchive(HttpClient http, ILogger<NseFuturesContractArchive> logger, NseDayStore? disk = null)
     {
         _http = http;
         _logger = logger;
+        _disk = disk ?? new NseDayStore(null);
         if (_http.DefaultRequestHeaders.UserAgent.Count == 0)
             _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (X11; Linux x86_64) OptionAnalytics");
         _http.Timeout = TimeSpan.FromSeconds(30);
@@ -77,6 +84,14 @@ public sealed class NseFuturesContractArchive
         if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return Task.FromResult<IReadOnlyList<DhanFuturesInstrument>?>(null);
         var today = IstClock.Today();
         if (today != _cacheDay) { _files.Clear(); _used.Clear(); _cacheDay = today; }
+        // Kept on disk from an earlier run (a past day never changes): no NSE call at all. "No file that day" is kept too (an empty list).
+        if (day < today && !_files.ContainsKey(day) && _disk.Has("contracts", $"{day:yyyy-MM-dd}"))
+        {
+            var kept = _disk.Read<List<DhanFuturesInstrument>>("contracts", $"{day:yyyy-MM-dd}");
+            if (kept is not null) _files[day] = Task.FromResult<IReadOnlyList<DhanFuturesInstrument>?>(kept.Count == 0 ? null : kept);
+        }
+        // NSE did not answer a moment ago: fall back at once rather than wait out the timeout again (nothing is remembered for the day).
+        if (!_files.ContainsKey(day) && _backoff.IsDown(out _)) return Task.FromResult<IReadOnlyList<DhanFuturesInstrument>?>(null);
         var task = _files.GetOrAdd(day, d => DownloadAsync(d));
         _used[day] = Interlocked.Increment(ref _clock);
         // A failed download (network, a timeout - not a missing file) is not remembered - try again next time.
@@ -102,16 +117,29 @@ public sealed class NseFuturesContractArchive
         {
             // HttpClient's own timeout (no caller token here): a plain failure, so callers' "not a cancellation" catches
             // handle it (it used to escape them as an unhandled 500) and the cache forgets it.
+            _backoff.Failed();
             throw new TimeoutException($"NSE contract master {day:yyyy-MM-dd} did not answer within {_http.Timeout.TotalSeconds:0} s.", ex);
         }
+        catch (HttpRequestException)
+        {
+            _backoff.Failed();
+            throw;
+        }
         using var response = responseMessage;
-        if (response.StatusCode is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Forbidden) return null;
+        if (response.StatusCode is System.Net.HttpStatusCode.Forbidden) { _backoff.Failed(); return null; } // NSE blocking this address
+        _backoff.Answered();
+        if (response.StatusCode is System.Net.HttpStatusCode.NotFound)
+        {
+            if (day < IstClock.Today()) _disk.Write("contracts", $"{day:yyyy-MM-dd}", new List<DhanFuturesInstrument>());
+            return null;
+        }
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync();
         await using var gzip = new GZipStream(stream, CompressionMode.Decompress);
         using var reader = new StreamReader(gzip);
         var contracts = Parse(reader);
         _logger.LogInformation("NSE contract master {Day}: {Count} index futures contract(s).", day, contracts.Count);
+        if (day < IstClock.Today() && contracts.Count > 0) _disk.Write("contracts", $"{day:yyyy-MM-dd}", contracts);
         return contracts;
     }
 
