@@ -164,9 +164,13 @@ public sealed class OiReplayService
         _allowLiveDataFallback = !appEnvironment.IsLocal;
     }
 
+    /// <param name="forceFetch">Skip the saved days (the Dhan day cache and the stored database) and ask Dhan for everything afresh -
+    /// each day that comes back is written over what was kept, so the cache is updated too.</param>
     public async Task<OiReplayResult> RunAsync(
-        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false, bool forceFetch = false)
     {
+        using var force = forceFetch ? DhanDataCache.ForceRefreshScope() : null;
+        forceLive |= forceFetch; // no stored database either: straight from Dhan, like today's seed
         var timeframe = Math.Max(1, timeframeMinutes);
         // forceLive folds into the SAME isAlwaysLive treatment SENSEX already gets (skip stored
         // entirely, always call Dhan, ignore AppEnvironment.IsLocal) - set by OiReplayPage's own

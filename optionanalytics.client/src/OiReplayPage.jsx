@@ -2963,6 +2963,9 @@ export default function OiReplayPage() {
   }
 
   const [loading, setLoading] = useState(false)
+  // "Force fetch from Dhan": the next Load day skips every saved copy of the day (the server's Dhan cache, its stored database) and asks Dhan
+  // afresh - what comes back is written over the cache. One-shot: it unticks itself when that load has finished.
+  const [forceFetch, setForceFetch] = useState(false)
   const [error, setError] = useState(null)
   const [result, setResult] = useState(null)
 
@@ -3365,6 +3368,7 @@ export default function OiReplayPage() {
       ...(effectiveIsToday ? { forceLive: 'true' } : {}),
       // Clear cache: the server drops today's held backfill of this index and asks Dhan afresh.
       ...(refresh ? { refresh: 'true' } : {}),
+      ...(forceFetch ? { forceFetch: 'true' } : {}),
     })
     const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`, { signal: controller.signal })
@@ -3421,6 +3425,7 @@ export default function OiReplayPage() {
         if (activeLoadController.current === controller) {
           setLoading(false)
           activeLoadController.current = null
+          if (forceFetch) setForceFetch(false)
         }
       })
   }
@@ -4913,6 +4918,9 @@ export default function OiReplayPage() {
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
                 <Button type="primary" onClick={loadDayAndAnnounce} loading={loading} disabled={!canLoad}>Load day</Button>
+              </Tooltip>
+              <Tooltip title="Skip the saved copy of this day (the server's Dhan cache and its stored database), ask Dhan for all of it again and update the cache with what comes back. Slower - use it when a day looks wrong or will not load from the cache. Unticks itself after the load.">
+                <Checkbox checked={forceFetch} onChange={(e) => setForceFetch(e.target.checked)} disabled={loading}>Force fetch from Dhan</Checkbox>
               </Tooltip>
               {isTodayDate && !isLive && oneMinBars.length > 0 && (
                 <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>

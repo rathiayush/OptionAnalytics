@@ -90,14 +90,35 @@ public sealed class DhanDataCache
     /// <summary>Dhan's response to this request from a whole-window file (the caller disposes it), else null - never
     /// for a window not yet closed.</summary>
     public JsonDocument? TryGet(string endpoint, object payload, DateOnly lastDay) =>
-        Cacheable(lastDay) ? Read(FileOf(endpoint, payload, lastDay)) : null;
+        !ForceRefresh && Cacheable(lastDay) ? Read(FileOf(endpoint, payload, lastDay)) : null;
 
-    /// <summary>Whether this day of the series is on disk (not read).</summary>
-    public bool HasDay(string endpoint, object key, DateOnly day) => Cacheable(day) && File.Exists(FileOfDay(endpoint, key, day));
+    // Set for the length of one request that asked to fetch from Dhan afresh ("force fetch" on the OI Replay page): every read below
+    // then misses - so Dhan is asked for the days - and every day that comes back is written over what was kept (PutDay / Put always
+    // overwrite). Flows with the request's async work, like the rate limiter's priority scope.
+    private static readonly AsyncLocal<bool> ForceRefreshRequested = new();
+
+    /// <summary>True while the current request asked to skip the cache for reading and update it with what Dhan sends.</summary>
+    public static bool ForceRefresh => ForceRefreshRequested.Value;
+
+    /// <summary>Marks the current async flow as a force fetch until disposed.</summary>
+    public static IDisposable ForceRefreshScope()
+    {
+        var before = ForceRefreshRequested.Value;
+        ForceRefreshRequested.Value = true;
+        return new RestoreForce(before);
+    }
+
+    private sealed class RestoreForce(bool before) : IDisposable
+    {
+        public void Dispose() => ForceRefreshRequested.Value = before;
+    }
+
+    /// <summary>Whether this day of the series is on disk (not read) - never, for a force fetch.</summary>
+    public bool HasDay(string endpoint, object key, DateOnly day) => !ForceRefresh && Cacheable(day) && File.Exists(FileOfDay(endpoint, key, day));
 
     /// <summary>One day of the series from disk, in Dhan's own response shape (the caller disposes it), else null.</summary>
     public JsonDocument? TryGetDay(string endpoint, object key, DateOnly day) =>
-        Cacheable(day) ? Read(FileOfDay(endpoint, key, day)) : null;
+        !ForceRefresh && Cacheable(day) ? Read(FileOfDay(endpoint, key, day)) : null;
 
     /// <summary>Keeps Dhan's response to this request as a whole window - only for a closed window, and only when it
     /// had data (<paramref name="hasData"/>). A disk problem is logged, never thrown.</summary>
