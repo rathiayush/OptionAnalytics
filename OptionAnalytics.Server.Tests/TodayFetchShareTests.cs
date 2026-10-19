@@ -84,3 +84,20 @@ public class TodayFetchShareDayTests
         Assert.Equal(2, calls);
     }
 }
+
+public class TodayWarmupWindowTests
+{
+    [Theory]
+    [InlineData("2026-10-19T09:15:00+05:30", false)] // before the first minute has closed
+    [InlineData("2026-10-19T09:16:00+05:30", true)]
+    [InlineData("2026-10-19T13:00:00+05:30", true)]
+    [InlineData("2026-10-19T15:35:00+05:30", true)]
+    [InlineData("2026-10-19T15:40:00+05:30", false)]
+    [InlineData("2026-10-18T11:00:00+05:30", false)] // Sunday
+    public void Warms_only_on_a_weekday_in_market_hours(string at, bool expected) =>
+        Assert.Equal(expected, TodayWarmupService.InWindow(DateTimeOffset.Parse(at)));
+
+    [Fact]
+    public void Warms_every_index_the_live_page_shows() =>
+        Assert.Equal(new[] { "NIFTY", "BANKNIFTY", "SENSEX" }, TodayWarmupService.Chains.Select(c => c.Underlying));
+}
