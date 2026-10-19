@@ -106,6 +106,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     internal sealed record FuturesLeg(string Underlying, DateOnly Expiry);
 
+    private readonly LiveOptionLegStore? _legStore;
     private readonly SpotFeedHostedService _spotFeed;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly DhanFuturesInstrumentMaster _futuresInstrumentMaster;
@@ -135,9 +136,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanMarketFeedClient feedClient, DhanOptionChainQuotes chainQuotes, IHubContext<SpotHub> hub, LiveBroadcastBatcher batcher,
-        ILogger<OiReplayLiveFeedService> logger, OiDivergenceMonitor? divergence = null)
+        ILogger<OiReplayLiveFeedService> logger, OiDivergenceMonitor? divergence = null, LiveOptionLegStore? legStore = null)
     {
         _divergence = divergence;
+        _legStore = legStore;
         _batcher = batcher;
         _spotFeed = spotFeed;
         _optionChainMaster = optionChainMaster;
@@ -516,10 +518,13 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             // minute, folded with any earlier ticks the browser hasn't received yet (keeps their
             // open and widens high/low). Keyed by minute so a candle never absorbs the previous
             // minute's range.
-            _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", new LiveOptionTick(
+            var optionTick = new LiveOptionTick(
                 leg.Underlying, leg.ExpiryFlag, leg.Strike, side,
                 Open: tick.LastPrice, Price: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice,
-                OpenInterest: tick.OpenInterest, Time: observedAt));
+                OpenInterest: tick.OpenInterest, Time: observedAt);
+            _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
+            // Each leg's newest reading, in memory - a page reads an index's current option prices from it, no Dhan call.
+            if (tick.LastPrice > 0) _legStore?.Record(optionTick);
 
             // The raw per-tick tape, on its own "t:" group, for the Live Strike Data page - its whole
             // purpose is to show every individual tick, so only a page that joined it pays for that

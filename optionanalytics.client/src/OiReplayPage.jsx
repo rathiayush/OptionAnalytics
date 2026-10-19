@@ -3150,44 +3150,44 @@ export default function OiReplayPage() {
     .filter((p) => p.status === 'OPEN' && p.underlying && p.expiryFlag && !(p.underlying === underlying && p.expiryFlag === liveExpiryFlag))
     .map((p) => `${p.underlying}:${p.expiryFlag}:${p.side}:${p.strike}`)), [paperPositions, isLive, underlying, liveExpiryFlag])
   const [foreignPoints, setForeignPoints] = useState({})
-  // Seeded at once from that index's own day so far (its run, the same the page loads), so an open
-  // position on another index shows its live P&L straight away - not only after its strike next ticks
-  // (a quiet strike can go minutes without one). Once per chain; the live ticks carry it on from there.
-  // N1 only: the run's chain is the nearest expiry (a later expiry has no run data - its ticks only).
-  const seededChainsRef = useRef(new Set())
+  // Seeded at once from the server's memory of each leg's newest live price (GET live-legs - the live
+  // feed's own readings, never a Dhan call), so an open position on another index shows its live P&L
+  // straight away - not only after its strike next ticks; the live ticks carry it on from there. At most
+  // once every 30 s per chain (a leg the feed has not seen yet is asked again then).
+  const seededChainsRef = useRef(new Map())
   useEffect(() => {
     if (!isLive) return
     const chains = new Map()
     for (const leg of foreignLegs) {
       const [u, flag, side, strike] = leg.split(':')
-      if (flag !== 'N1' || seededChainsRef.current.has(`${u}:${flag}`)) continue
-      const chain = chains.get(`${u}:${flag}`) ?? { u, flag, legs: new Set() }
+      const key = `${u}:${flag}`
+      if (Date.now() - (seededChainsRef.current.get(key) ?? 0) < 30_000) continue
+      const chain = chains.get(key) ?? { u, flag, legs: new Set() }
       chain.legs.add(`${side}:${strike}`)
-      chains.set(`${u}:${flag}`, chain)
+      chains.set(key, chain)
     }
     for (const [key, { u, flag, legs }] of chains) {
-      seededChainsRef.current.add(key)
-      const params = new URLSearchParams({ date: dayjs().format('YYYY-MM-DD'), timeframeMinutes: '1', expiryFlag: u === 'BANKNIFTY' ? 'MONTH' : 'WEEK', forceLive: 'true' })
-      fetch(`/api/oi-replay/${u}/run?${params.toString()}`)
+      seededChainsRef.current.set(key, Date.now())
+      fetch(`/api/oi-replay/${u}/live-legs?expiryFlag=${flag}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((body) => {
-          if (!body?.success) { seededChainsRef.current.delete(key); return }
-          const held = (points, side) => (points ?? []).filter((pt) => legs.has(`${side}:${pt.strike}`)).map((pt) => ({ ...pt, ms: new Date(pt.time).getTime() }))
+        .then((rows) => {
+          if (!Array.isArray(rows)) return
+          const fresh = rows.filter((row) => legs.has(`${row.side}:${row.strike}`) && row.price > 0)
+          if (!fresh.length) return
           setForeignPoints((prev) => {
             const next = { ...prev }
-            for (const [side, points] of [['CE', body.cePoints], ['PE', body.pePoints]]) {
+            for (const side of ['CE', 'PE']) {
               const sideKey = `${u}:${flag}:${side}`
-              const live = prev[sideKey] ?? []
-              // The day so far, then the live points already kept (none of the history after the first of them).
-              const firstLive = new Map()
-              for (const pt of live) if (!firstLive.has(pt.strike)) firstLive.set(pt.strike, pointMs(pt))
-              const history = held(points, side).filter((pt) => !(pt.ms >= (firstLive.get(pt.strike) ?? Infinity)))
-              if (history.length) next[sideKey] = [...history, ...live].sort((x, y) => pointMs(x) - pointMs(y))
+              const have = prev[sideKey] ?? []
+              // Only legs with no live point yet - a leg already ticking here is newer than this.
+              const add = fresh.filter((row) => row.side === side && !have.some((pt) => pt.strike === row.strike))
+                .map((row) => ({ time: row.time, ms: new Date(row.time).getTime(), strike: row.strike, openInterest: row.openInterest, price: row.price, open: row.price, high: row.price, low: row.price }))
+              if (add.length) next[sideKey] = [...have, ...add].sort((x, y) => pointMs(x) - pointMs(y))
             }
             return next
           })
         })
-        .catch(() => { seededChainsRef.current.delete(key) })
+        .catch(() => {})
     }
   }, [foreignLegs, isLive])
   const feedLag = useFeedLag(isLive)
@@ -3666,8 +3666,11 @@ export default function OiReplayPage() {
     const key = `${underlying}|${liveExpiryFlag}`
     const previous = liveSelectionRef.current
     liveSelectionRef.current = key
-    if (previous == null || previous === key || !isLive) return
-    load(dayjs(), { live: true })
+    if (previous == null || previous === key || !isLive) return undefined
+    // A moment's pause, so clicking through several indices loads only the one settled on (each load
+    // is a full day of option data from Dhan).
+    const id = setTimeout(() => load(dayjs(), { live: true }), 700)
+    return () => clearTimeout(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, liveExpiryFlag, isLive])
   const foreignChainKey = [...new Set([...foreignLegs].map((leg) => leg.split(':').slice(0, 2).join(':')))].sort().join('|')
