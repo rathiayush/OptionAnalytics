@@ -310,6 +310,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Se
 // notification on the OI Replay page, with or without a browser open. See OiDivergenceMonitor.
 builder.Services.AddSingleton<OiDivergenceMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
+builder.Services.AddSingleton<LiveOptionLegStore>();
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
 
 // The strategy scanner run on the server for NIFTY, BANKNIFTY and SENSEX (alerts + paper trades), with or

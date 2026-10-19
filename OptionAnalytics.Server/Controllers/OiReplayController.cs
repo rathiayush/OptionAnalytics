@@ -13,12 +13,22 @@ public sealed class OiReplayController : ControllerBase
 {
     private readonly OiReplayService _service;
     private readonly DhanOptionChainMaster _optionChainMaster;
+    private readonly LiveOptionLegStore? _legs;
 
-    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster)
+    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, LiveOptionLegStore? legs = null)
     {
         _service = service;
         _optionChainMaster = optionChainMaster;
+        _legs = legs;
     }
+
+    /// <summary>Today's newest live reading of each option leg of one chain (index + expiry flag N1, N2 ...) - from
+    /// the live feed's memory (LiveOptionLegStore), never a Dhan call, so a page can poll it freely. Empty before
+    /// the feed has seen that chain today.</summary>
+    [HttpGet("{underlying}/live-legs")]
+    public ActionResult LiveLegs(string underlying, [FromQuery] string expiryFlag = "N1") =>
+        Ok((_legs?.Latest(underlying.ToUpperInvariant(), expiryFlag.ToUpperInvariant(), IstClock.Today()) ?? Array.Empty<LiveOptionTick>())
+            .Select(t => new { t.Strike, t.Side, t.Price, t.OpenInterest, t.Time }));
 
     /// <summary>One full day's worth of spot candles (already aggregated to timeframeMinutes) plus
     /// the same day's CE/PE OI/IV history across the fetched strike band, in one response - the
