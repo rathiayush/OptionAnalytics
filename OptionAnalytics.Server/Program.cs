@@ -311,6 +311,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Se
 builder.Services.AddSingleton<OiDivergenceMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
 builder.Services.AddSingleton<LiveOptionLegStore>();
+// Today ready for every index before anyone switches to it - see TodayWarmupService.
+builder.Services.AddHostedService<TodayWarmupService>();
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
 
 // The strategy scanner run on the server for NIFTY, BANKNIFTY and SENSEX (alerts + paper trades), with or
