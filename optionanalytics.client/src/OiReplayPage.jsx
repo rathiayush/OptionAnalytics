@@ -3000,12 +3000,10 @@ export default function OiReplayPage() {
   const [lastOiChangeMs, setLastOiChangeMs] = useState(null)
   const [spotSilentMs, setSpotSilentMs] = useState(0)
 
-  // Session VWAP - only meaningful for isLive (see oneMinBars' own identical isLive split just
-  // below): the live GET .../vwap-series endpoint reflects SpotUnderlyingState's own in-memory
-  // volume bars, i.e. recent/current days, not whatever historical day this page might otherwise be
-  // replaying. A genuinely historical day's own spotCandlesOneMinute carries no volume at all (see
-  // OiReplayResult), so VWAP simply isn't shown while replaying one - reset on every load() like
-  // liveBars above, seeded once isLive in load()'s own .then(), grown live by handleSpotUpdate.
+  // Session VWAP. Live: the GET .../vwap-series endpoint (SpotUnderlyingState's own in-memory volume
+  // bars), grown live by handleSpotUpdate. A replayed day: the run's own spotVwap (the server's VWAP off
+  // that day's index volume - empty for a day Dhan sent no index volume for), shown only up to the replay
+  // clock (shownVwap). Reset on every load() like liveBars above.
   const [vwapSeries, setVwapSeries] = useState([])
   const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
 
@@ -3329,7 +3327,7 @@ export default function OiReplayPage() {
       setPaperPositions(effectiveLive ? readPersistedPaperPositions(dateKey) : [])
       setVwapSeries([])
     }
-    // Only for today - see vwapSeries' own doc comment on why a historical day has no VWAP to show
+    // Only for today - a replayed day's VWAP comes with the run itself (see vwapSeries' own doc comment)
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
     // only recent/in-memory days). Independent of the main run fetch below so a slow/failed VWAP
     // fetch never blocks or fails the actual replay load.
@@ -3380,6 +3378,9 @@ export default function OiReplayPage() {
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(usesRunsCePeData ? body : { ...body, cePoints: [], pePoints: [] })
+        // A replayed day's VWAP comes with the day (the server's, off the spot's own index volume); today's live
+        // VWAP is the vwap-series fetch above, grown by the live feed.
+        if (!effectiveLive) setVwapSeries((body.spotVwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
         // This fresh, authoritative result now covers everything up to THIS moment - reset the live
         // arrays so only ticks arriving AFTER it (genuinely new) populate them again. Only needed on
         // the cache-restore path: its own liveBars/etc could still be holding whatever accumulated
@@ -3731,6 +3732,12 @@ export default function OiReplayPage() {
   // there is no separate piece of state that could ever fall behind and need a manual nudge to catch
   // up. A historical day uses the manually-chosen replay position instead, exactly as before.
   const visibleCount = isLive ? oneMinBars.length : manualVisibleCount
+  // Replaying: VWAP only up to the replay clock (the last bar shown) - the day's later VWAP is never drawn early.
+  const replayEndTime = oneMinBars[visibleCount - 1]?.time
+  const shownVwap = useMemo(
+    () => (isLive ? vwapSeries : replayEndTime == null ? EMPTY_ARRAY : vwapSeries.filter((p) => p.time <= replayEndTime)),
+    [isLive, vwapSeries, replayEndTime],
+  )
 
   const currentBar = oneMinBars[visibleCount - 1] ?? null
   // oneMinBars' own .time is chart time (shifted +5.5h by toChartTime, for the chart library's own
@@ -4835,7 +4842,7 @@ export default function OiReplayPage() {
               atmStrike={atmStrike}
               step={step}
               top5Only={top5WallsOnly}
-              vwapSeries={vwapSeries}
+              vwapSeries={shownVwap}
               showVwap={showVwap}
               onStrikeClick={setDrilldownStrike}
               height={spotChartHeight}
@@ -5284,7 +5291,7 @@ export default function OiReplayPage() {
                                 ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
                                 ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
                                 dayKey={`emaB-${underlying}-${result.date}`}
-                                vwapSeries={vwapSeries} showVwap={showVwap}
+                                vwapSeries={shownVwap} showVwap={showVwap}
                                 height={560}
                                 volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
                               />
@@ -5316,7 +5323,7 @@ export default function OiReplayPage() {
                               ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
                               ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
                               dayKey={`emaC-${underlying}-${result.date}`}
-                              vwapSeries={vwapSeries} showVwap={showVwap}
+                              vwapSeries={shownVwap} showVwap={showVwap}
                               height={560}
                               volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
                             />
@@ -5667,7 +5674,7 @@ export default function OiReplayPage() {
           underlying={underlying} dateKey={result?.date} asOfMs={asOfMs} isLive={isLive}
           totals={{ totalCeOi, totalPeOi, pcr, maxPain }} dayOi={dayOiSummary}
           ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} step={step}
-          spotBars={displayBars} ladderRows={ladderRows} vwapSeries={vwapSeries} showVwap={showVwap} top5Only={top5WallsOnly}
+          spotBars={displayBars} ladderRows={ladderRows} vwapSeries={shownVwap} showVwap={showVwap} top5Only={top5WallsOnly}
           dayKey={`${underlying}-${result?.date}-${timeframe}`}
         />
       )}

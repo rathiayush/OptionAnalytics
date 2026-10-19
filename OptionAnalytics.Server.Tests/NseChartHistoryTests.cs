@@ -68,7 +68,7 @@ public sealed class NseChartHistoryTests
     }
 
     [Fact]
-    public async Task ABlockedNse_IsReportedNotThrown_AndAskedAgainNextTime()
+    public async Task ABlockedNse_IsReportedNotThrown_PausedForAFewMinutes_ThenAskedAgain()
     {
         var nse = new FakeNse(HttpStatusCode.Forbidden, "<HTML><TITLE>Access Denied</TITLE></HTML>");
         var history = new NseChartHistory(new HttpClient(nse), NullLogger<NseChartHistory>.Instance);
@@ -76,11 +76,16 @@ public sealed class NseChartHistoryTests
 
         var result = await history.DayAsync(expired, Day, CancellationToken.None);
         await Task.Delay(50); // the failed answer is dropped from the cache in a continuation
+        // Asked again at once, it is NOT asked of NSE (it just refused): the caller falls back straight away.
+        var paused = await history.DayAsync(expired, Day, CancellationToken.None);
+        // Once the pause is over it is asked again.
+        history.Backoff.Answered();
         await history.DayAsync(expired, Day, CancellationToken.None);
 
         Assert.Empty(result.Bars);
         Assert.Contains("403", result.Error);
         Assert.Contains("Access Denied", result.Error);
+        Assert.Contains("not asked", paused.Error);
         Assert.Equal(2, nse.Posts.Count);
     }
 

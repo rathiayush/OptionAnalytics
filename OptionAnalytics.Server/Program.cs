@@ -160,9 +160,12 @@ builder.Services.AddSingleton<DhanFuturesInstrumentMaster>(sp => new DhanFutures
     sp.GetRequiredService<ILogger<DhanFuturesInstrumentMaster>>()));
 // The futures listed on PAST dates, expired ones included (Dhan's scrip master has live contracts only)
 // - see NseFuturesContractArchive. A singleton: it caches the parsed NSE files.
+// What NSE answered for past days, kept beside the Dhan cache on the persistent volume - asked of NSE once, not after every redeploy.
+builder.Services.AddSingleton(sp => new NseDayStore(Path.Combine(DhanDataCache.PathOf(sp.GetRequiredService<IHostEnvironment>(), sp.GetRequiredService<IConfiguration>()), "nse")));
 builder.Services.AddSingleton(sp => new NseFuturesContractArchive(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseFuturesContractArchive)),
-    sp.GetRequiredService<ILogger<NseFuturesContractArchive>>()));
+    sp.GetRequiredService<ILogger<NseFuturesContractArchive>>(),
+    sp.GetRequiredService<NseDayStore>()));
 // An expired futures contract's past day from NSE's chart data (Dhan has no intraday history for
 // expired contracts) - see NseChartHistory. Keeps NSE's cookies, like the chart page does.
 builder.Services.AddHttpClient(nameof(NseChartHistory))
@@ -174,7 +177,8 @@ builder.Services.AddHttpClient(nameof(NseChartHistory))
     });
 builder.Services.AddSingleton(sp => new NseChartHistory(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseChartHistory)),
-    sp.GetRequiredService<ILogger<NseChartHistory>>()));
+    sp.GetRequiredService<ILogger<NseChartHistory>>(),
+    sp.GetRequiredService<NseDayStore>()));
 builder.Services.AddSingleton<DhanMarketFeedClient>();
 // AddHttpClient<DhanOptionChainMaster>() (the pattern every other typed client here uses) registers
 // it TRANSIENT - a brand new instance, with its own empty in-memory dictionary, for every distinct
@@ -355,6 +359,8 @@ if (builder.Environment.IsDevelopment())
 }
 
 var app = builder.Build();
+// Dhan's scrip master: one kept copy on the persistent volume, shared by the spot / futures / option-chain masters (DhanScripMasterFile).
+DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environment, app.Configuration), "scrip-master");
 
 if (app.Environment.IsDevelopment())
 {

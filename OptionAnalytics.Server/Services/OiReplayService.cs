@@ -54,6 +54,8 @@ public sealed class OiReplayService
     private const int StrikeBandSteps = 10;
     /// <summary>How many more times a strike series that came back empty is asked for, and the pause before each round.</summary>
     private const int MissingSeriesRetryRounds = 2;
+    /// <summary>How long a day's load waits for its futures (started with the options) before showing the day without them.</summary>
+    internal static readonly TimeSpan FuturesBudget = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan MissingSeriesRetryDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
@@ -215,6 +217,14 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
+        // The futures are asked for at the same time as the spot and the 42 option series, not after them: a past day's contract can
+        // go Dhan -> NSE's archive (30 s) -> NSE's chart (20 s), and a slow NSE used to sit on top of the whole load. Past
+        // FuturesBudget the page is shown without them, saying why.
+        var futuresClock = System.Diagnostics.Stopwatch.StartNew();
+        var futuresTask = _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
+            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
+        _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+
         var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date) : null;
         var (spotBarsRaw, spotError) = fromFeed is not null ? (fromFeed, null) : await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
@@ -307,8 +317,13 @@ public sealed class OiReplayService
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
-        var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = await _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
-            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
+        var futuresLeft = FuturesBudget - futuresClock.Elapsed;
+        var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
+        var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = futuresDone
+            ? await futuresTask
+            : ((Array.Empty<FuturesBar>(), (DateOnly?)null, false,
+                $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (an expired contract's day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them."),
+               DateTimeOffset.UtcNow);
         if (_liveBars is not null && date == IstClock.Today() && futuresBars.Count > 0)
         {
             var cutoff = futuresAt.ToUnixTimeSeconds() / 60 * 60;
@@ -317,7 +332,10 @@ public sealed class OiReplayService
         }
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
-            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
+            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
+        {
+            SpotVwap = VwapCalculator.ComputeSeries(spotBarsRaw),
+        };
     }
 
     /// <summary>The day's futures contract, OHLC + (best-effort) OI - ALWAYS a live Dhan call, per

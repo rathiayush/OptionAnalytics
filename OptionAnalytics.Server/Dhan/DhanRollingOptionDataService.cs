@@ -101,7 +101,8 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     // multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
     private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
     private const int MaxRateLimitRetries = 3;
-    private static readonly TimeSpan RateLimitRetryDelay = TimeSpan.FromSeconds(2);
+    // 0.5 / 1 / 2 s: Dhan's Data-API limit is per second, so half a second already clears most of the window.
+    private static TimeSpan RateLimitRetryDelay(int attempt) => TimeSpan.FromMilliseconds(500 << Math.Clamp(attempt, 0, 3));
 
     // Bounds how long a single chunk call may hang waiting for Dhan before giving up - see
     // DhanHistoricalDataService.CallTimeout's own doc comment for the full reasoning (same value,
@@ -357,8 +358,8 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             if (!isRateLimited || attempt >= MaxRateLimitRetries) return (null, error);
 
             _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.",
-                context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay);
-            await Task.Delay(RateLimitRetryDelay, cancellationToken);
+                context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay(attempt));
+            await Task.Delay(RateLimitRetryDelay(attempt), cancellationToken);
         }
     }
 

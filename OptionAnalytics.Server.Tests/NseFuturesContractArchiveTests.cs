@@ -48,4 +48,75 @@ FinInstrmId,UndrlygFinInstrmId,FinInstrmNm,TckrSymb,XpryDt,StrkPric,OptnTp,PrtdT
         Assert.True(NseFuturesContractArchive.Covers("BANKNIFTY"));
         Assert.False(NseFuturesContractArchive.Covers("SENSEX"));
     }
+
+    /// <summary>Serves the sample contract master for any date (gzip), counting downloads; the first `timeouts` calls
+    /// time out the way HttpClient's own timeout does.</summary>
+    private sealed class CountingNse(int timeouts = 0) : HttpMessageHandler
+    {
+        public int Calls;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref Calls) <= timeouts) throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout");
+            var ms = new MemoryStream();
+            using (var gz = new System.IO.Compression.GZipStream(ms, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+            using (var w = new StreamWriter(gz)) w.Write(Sample);
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(ms.ToArray()) });
+        }
+    }
+
+    [Fact]
+    public async Task ALongNewestFirstScan_KeepsEveryFile_NoDownloadTwice()
+    {
+        var nse = new CountingNse();
+        var archive = new NseFuturesContractArchive(new HttpClient(nse), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance);
+        var days = Enumerable.Range(0, 120).Select(i => new DateOnly(2026, 10, 23).AddDays(-i)).Where(d => d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)).ToList();
+        foreach (var d in days) Assert.NotEmpty(await archive.ContractsOnAsync("NIFTY", d, CancellationToken.None));
+        var first = nse.Calls;
+        Assert.Equal(days.Count, first);
+        // The same range again (a second tuning job, or the previous-session reads): all from the cache.
+        foreach (var d in days) await archive.ContractsOnAsync("NIFTY", d, CancellationToken.None);
+        Assert.Equal(first, nse.Calls);
+    }
+
+    [Fact]
+    public async Task ATimeout_IsAPlainFailure_AndIsNotRemembered()
+    {
+        var nse = new CountingNse(timeouts: 1);
+        var archive = new NseFuturesContractArchive(new HttpClient(nse), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance);
+        var day = new DateOnly(2026, 10, 1);
+        // Not an OperationCanceledException: callers' "not a cancellation" catches see it (it used to escape as a 500).
+        await Assert.ThrowsAsync<TimeoutException>(() => archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+        await Task.Delay(50); // the cache drops the failed download
+        // Right after NSE did not answer it is not asked again (callers fall back at once) ...
+        Assert.Empty(await archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+        Assert.Equal(1, nse.Calls);
+        // ... and once the pause is over it is.
+        archive.Backoff.Answered();
+        Assert.NotEmpty(await archive.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+        Assert.Equal(2, nse.Calls);
+    }
+
+    [Fact]
+    public async Task APastDaysContracts_AreKeptOnDisk_AndReadAfterARestart_WithNoNseCall()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"nse-{Guid.NewGuid():N}");
+        try
+        {
+            var day = new DateOnly(2026, 10, 1);
+            var first = new CountingNse();
+            var before = new NseFuturesContractArchive(new HttpClient(first), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance, new NseDayStore(dir));
+            var listed = await before.ContractsOnAsync("NIFTY", day, CancellationToken.None);
+            Assert.Equal(1, first.Calls);
+
+            // A new process (a redeploy): the day comes from disk, NSE is not asked.
+            var second = new CountingNse();
+            var after = new NseFuturesContractArchive(new HttpClient(second), Microsoft.Extensions.Logging.Abstractions.NullLogger<NseFuturesContractArchive>.Instance, new NseDayStore(dir));
+            Assert.Equal(listed, await after.ContractsOnAsync("NIFTY", day, CancellationToken.None));
+            Assert.Equal(0, second.Calls);
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+    }
 }

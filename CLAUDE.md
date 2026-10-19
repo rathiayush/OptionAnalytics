@@ -80,6 +80,10 @@ When adding or changing a strategy:
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
   the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
+  What NSE answers for a PAST day (the contract list - `NseFuturesContractArchive` - and an expired contract's 1-minute bars - `NseChartHistory`) is kept on
+  disk too (`NseDayStore`, `{DhanCachePath}/nse`), and after NSE does not answer it is not asked again for 10 minutes (`NseBackoff`) - callers fall back at once
+  instead of waiting out a 20 - 30 s timeout per request. Dhan's scrip master is ONE kept file shared by the spot / futures / option-chain masters
+  (`DhanScripMasterFile`, `{DhanCachePath}/scrip-master`, re-downloaded after 4 h; a failed download uses the copy kept) - not three downloads after every start.
 
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
