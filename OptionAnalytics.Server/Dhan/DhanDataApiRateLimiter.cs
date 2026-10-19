@@ -1,4 +1,3 @@
-using System.Threading.RateLimiting;
 using Microsoft.Extensions.Options;
 
 namespace OptionAnalytics.Server.Dhan;
@@ -23,11 +22,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// those into one limiter would either starve Order APIs of headroom they are documented to have,
 /// or under-use what Data APIs are actually allowed.
 ///
-/// A SlidingWindowRateLimiter, not a plain concurrency semaphore (the previous approach in
-/// OiReplayService, before this change): a semaphore caps how many requests may be IN FLIGHT
-/// simultaneously, which does not bound the RATE new requests start at when responses return
-/// quickly - exactly what a fast Dhan response would do. Only a real rate limiter enforces "at
-/// most N per second," the actual shape of Dhan's documented limit.
+/// Calls are evenly spaced (see the class body), not counted in a sliding window: a window lets a
+/// burst through that Dhan, counting on arrival, can see as more than its limit. Dhan's Option Chain
+/// API (DhanOptionChainQuotes) also takes a slot here, on top of its own one-call-per-3-seconds rule.
 ///
 /// Two lanes - interactive and background - rather
 /// than one shared FIFO queue for every caller. A real deployment showed exactly why a single
@@ -49,68 +46,94 @@ namespace OptionAnalytics.Server.Dhan;
 public sealed class DhanDataApiRateLimiter : IDisposable
 {
     private static readonly TimeSpan BackgroundPoll = TimeSpan.FromMilliseconds(100);
-    // Every call takes a permit of _total (the configured 5/s - nothing ever goes over it). A page load takes all of
-    // it while the app is quiet; background work is also held to its own small lane (_background, 1/5th, floor 1) and
-    // never takes the last free permit or one a page load is queued for, so a page arriving a moment later is served at once.
-    private readonly RateLimiter _total;
-    private readonly RateLimiter _background;
+    /// <summary>After Dhan answers "too many requests" (DH-904 / 805 / 429), every Data-API call waits this long
+    /// before the next one goes - so the calls already queued do not keep hitting the limit, one after another.</summary>
+    internal static readonly TimeSpan RateLimitPause = TimeSpan.FromSeconds(1.5);
+
+    // Calls go out EVENLY SPACED, one slot every _spacing (a 10% margin over 1 s / the configured per-second limit -
+    // 220 ms for 5/s), never in a burst: Dhan counts calls as they ARRIVE, and a burst allowed by a windowed counter
+    // (5 at once, then 5 more as the window slides) reaches Dhan as 6+ within its second whenever the network bunches
+    // them. A page load (interactive) takes the next slot; background work takes one only while no page load is
+    // waiting, and at most its own 1/5th share.
+    private readonly TimeSpan _spacing;
+    private readonly TimeSpan _backgroundSpacing;
+    private readonly object _lock = new();
+    private DateTimeOffset _nextSlot = DateTimeOffset.MinValue;
+    private DateTimeOffset _nextBackgroundSlot = DateTimeOffset.MinValue;
+    private int _interactiveWaiting;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
+    private readonly Func<DateTimeOffset> _clock;
 
     public DhanDataApiRateLimiter(IOptions<DhanOptions> options, ILogger<DhanDataApiRateLimiter> logger)
+        : this(options, logger, () => DateTimeOffset.UtcNow) { }
+
+    internal DhanDataApiRateLimiter(IOptions<DhanOptions> options, ILogger<DhanDataApiRateLimiter> logger, Func<DateTimeOffset> clock)
     {
         _logger = logger;
-        var total = Math.Max(1, options.Value.DataApiRequestsPerSecond);
-        _total = CreateLimiter(total);
-        _background = CreateLimiter(Math.Max(1, total / 5));
+        _clock = clock;
+        var perSecond = Math.Max(1, options.Value.DataApiRequestsPerSecond);
+        _spacing = TimeSpan.FromMilliseconds(1100.0 / perSecond);
+        _backgroundSpacing = TimeSpan.FromMilliseconds(1100.0 / Math.Max(1, perSecond / 5));
     }
 
-    private static RateLimiter CreateLimiter(int permitsPerSecond) => new SlidingWindowRateLimiter(new SlidingWindowRateLimiterOptions
-    {
-        PermitLimit = permitsPerSecond,
-        Window = TimeSpan.FromSeconds(1),
-        SegmentsPerWindow = permitsPerSecond,
-        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
-        // RateLimiter requires a finite queue - generous rather than tight, since OiReplayService's
-        // own worst case (42 strike/side fetches queuing at once) comfortably fits well within it.
-        QueueLimit = 200,
-    });
-
-    /// <summary>Waits until Dhan's documented per-second Data-API ceiling allows one more call, then returns - the
-    /// caller sends its request immediately after. <paramref name="interactive"/>: true for a call made for a waiting
-    /// user (a page load, a "Run" click) - it may use the whole per-second allowance; false for a hosted service's own
-    /// prefetch / backfill / recenter work - at most its lane's share, and only from permits no page load is waiting
-    /// for. A full queue is waited out, never sent over the limit.</summary>
+    /// <summary>Waits for this call's slot, then returns - the caller sends its request immediately after.
+    /// <paramref name="interactive"/>: true for a call made for a waiting user (a page load, a "Run" click, the live
+    /// scanner); false for a hosted service's own prefetch / backfill / recenter work.</summary>
     public async Task WaitForPermitAsync(bool interactive, CancellationToken cancellationToken)
     {
         if (interactive)
         {
-            while (true)
-            {
-                using var lease = await _total.AcquireAsync(1, cancellationToken);
-                if (lease.IsAcquired) return;
-                _logger.LogDebug("Dhan data-API rate limiter's queue was full - waiting rather than sending over the limit.");
-                await Task.Delay(BackgroundPoll, cancellationToken);
-            }
+            Interlocked.Increment(ref _interactiveWaiting);
+            try { await Task.Delay(Reserve(background: false), cancellationToken); }
+            finally { Interlocked.Decrement(ref _interactiveWaiting); }
+            return;
         }
         while (true)
         {
-            var stats = _total.GetStatistics();
-            if (stats is { CurrentQueuedCount: 0, CurrentAvailablePermits: > 1 })
+            TimeSpan? wait = null;
+            lock (_lock)
             {
-                using var own = _background.AttemptAcquire(1);
-                if (own.IsAcquired)
-                {
-                    using var shared = _total.AttemptAcquire(1);
-                    if (shared.IsAcquired) return;
-                }
+                var now = _clock();
+                if (Volatile.Read(ref _interactiveWaiting) == 0 && now >= _nextBackgroundSlot && _nextSlot <= now + _spacing)
+                    wait = Reserve(background: true);
             }
+            if (wait is { } w) { await Task.Delay(w, cancellationToken); return; }
             await Task.Delay(BackgroundPoll, cancellationToken);
         }
     }
 
-    public void Dispose()
+    internal TimeSpan Reserve(bool background)
     {
-        _total.Dispose();
-        _background.Dispose();
+        lock (_lock)
+        {
+            var now = _clock();
+            var slot = _nextSlot > now ? _nextSlot : now;
+            _nextSlot = slot + _spacing;
+            if (background) _nextBackgroundSlot = slot + _backgroundSpacing;
+            return slot - now;
+        }
     }
+
+    /// <summary>Dhan said "too many requests": hold every following call back for <see cref="RateLimitPause"/>.</summary>
+    public void NoteRateLimited()
+    {
+        lock (_lock)
+        {
+            var resume = _clock() + RateLimitPause;
+            if (_nextSlot < resume) _nextSlot = resume;
+        }
+        _logger.LogWarning("Dhan answered \"too many requests\" - pausing every Data-API call for {Seconds} s.", RateLimitPause.TotalSeconds);
+    }
+
+    /// <summary>Whether a failed Dhan response is its rate limit - HTTP 429, DH-904 ("Too many requests on server from
+    /// single user breaching rate limits") or 805 ("Too many requests or connections"), per Dhan's annexure - worth a
+    /// short wait and another try, unlike a bad parameter or no data.</summary>
+    public static bool IsRateLimited(System.Net.HttpStatusCode statusCode, string? message) =>
+        (int)statusCode == 429
+        || (message is { Length: > 0 } m && (m.Contains("DH-904", StringComparison.OrdinalIgnoreCase)
+            || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|\D)805(\D|$)")
+            || m.Contains("too many", StringComparison.OrdinalIgnoreCase)
+            || (m.Contains("rate", StringComparison.OrdinalIgnoreCase) && m.Contains("limit", StringComparison.OrdinalIgnoreCase))));
+
+    public void Dispose() { }
 }

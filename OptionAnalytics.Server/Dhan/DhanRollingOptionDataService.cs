@@ -350,8 +350,8 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             }
             if (response.Success) return (response, null);
 
-            var isRateLimited = response.ErrorMessage?.Contains("rate", StringComparison.OrdinalIgnoreCase) == true
-                && response.ErrorMessage.Contains("limit", StringComparison.OrdinalIgnoreCase);
+            var isRateLimited = DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage);
+            if (isRateLimited) _rateLimiter.NoteRateLimited();
             var error = response.ErrorMessage;
             response.Dispose();
 

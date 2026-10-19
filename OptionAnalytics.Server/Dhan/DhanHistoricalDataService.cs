@@ -53,6 +53,7 @@ public sealed class DhanHistoricalDataService
 
     private readonly DhanApiClient _api;
     private readonly DhanDataApiRateLimiter _rateLimiter;
+    private const int MaxRateLimitRetries = 3;
     private readonly ILogger<DhanHistoricalDataService> _logger;
     private readonly DhanDataCache? _cache;
 
@@ -86,18 +87,30 @@ public sealed class DhanHistoricalDataService
     private async Task<(DhanApiResponse? Response, string? Error)> SendDataApiCallAsync(
         string path, object payload, string context, bool interactive, CancellationToken cancellationToken)
     {
-        await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
+        for (var attempt = 0; ; attempt++)
+        {
+            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
 
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(CallTimeout);
-        try
-        {
-            return (await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token), null);
-        }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
-            return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(CallTimeout);
+            DhanApiResponse response;
+            try
+            {
+                response = await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
+                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+            }
+            // Dhan's rate limit: every Data-API call pauses (NoteRateLimited), then this one is asked again - up to
+            // MaxRateLimitRetries times, after 0.5 / 1 / 2 s - instead of failing the spot / futures of a day load.
+            if (response.Success || attempt >= MaxRateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage))
+                return (response, null);
+            response.Dispose();
+            _rateLimiter.NoteRateLimited();
+            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - retrying.", context, attempt + 1, MaxRateLimitRetries);
+            await Task.Delay(TimeSpan.FromMilliseconds(500 << attempt), cancellationToken);
         }
     }
 
