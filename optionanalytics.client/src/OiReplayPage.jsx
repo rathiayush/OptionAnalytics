@@ -58,7 +58,7 @@ const FEED_STALL_WARNING_MS = 3 * 60_000
 // exposed to a carrier's own idle-connection timeout, and a backgrounded tab (screen lock, app
 // switch) can suspend or kill the fetch outright - either way, the user gets a clear message and a
 // live Cancel button instead of an indefinite spinner with no way out.
-const LOAD_TIMEOUT_MS = 120_000
+const LOAD_TIMEOUT_MS = 240_000
 
 // Bare withAutomaticReconnect() uses SignalR's own default retry policy - 0s/2s/10s/30s, then it
 // gives up FOR GOOD and fires onclose, leaving the connection permanently dead until the page is
