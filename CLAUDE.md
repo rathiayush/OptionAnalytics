@@ -60,6 +60,12 @@ When adding or changing a strategy:
 
 ## Other rules
 
+- OI Replay's TODAY comes from the server's memory, not Dhan, after one backfill per series per day: the live feed
+  (`OiReplayLiveFeedService`) keeps every tracked index's option legs and near futures as 1-minute bars
+  (`LiveOptionLegStore`, all day, page open or not), spot is the spot feed's own day (`SpotFeedHostedService`), and
+  `OiReplayService` joins the one backfill (`TodayFetchShare`) to the feed's bars since (`MergeTodayLive`) - so
+  switching index on the live page asks Dhan nothing. The page's Clear cache drops it (`refresh=true`).
+
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.

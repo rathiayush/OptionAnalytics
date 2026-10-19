@@ -116,12 +116,43 @@ public sealed class OiReplayService
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
 
+    // Today's answers from Dhan, shared by every request (see TodayFetchShare): a minute - or, with the live
+    // feed's own bars to carry on from (LiveOptionLegStore), the rest of the day: today's option series and
+    // futures are backfilled from Dhan ONCE per series per day, then served from the backfill plus the feed's
+    // minute bars since (MergeTodayLive). Spot comes from the spot feed's own day of bars (SpotFeedHostedService).
+    private readonly TodayFetchShare _today = new();
+    private readonly LiveOptionLegStore? _liveBars;
+    private readonly SpotFeedHostedService? _spotFeed;
+    private TimeSpan TodayWindow => _liveBars is null ? TodayFetchShare.DefaultWindow : TimeSpan.MaxValue;
+    private Task<T> ReuseTodayAsync<T>(string key, DateOnly date, Func<CancellationToken, Task<T>> fetch, Func<T, bool> keep, CancellationToken cancellationToken) =>
+        _today.ReuseAsync(key, date, IstClock.Today(), fetch, keep, cancellationToken);
+
+    /// <summary>Forgets today's held backfill of `underlying` - its next run asks Dhan afresh (the page's Clear
+    /// cache).</summary>
+    public void RefreshToday(string underlying) => _today.Invalidate($"{underlying.ToUpperInvariant()}|");
+
+    /// <summary>Today's spot bars from the spot feed's memory when it holds the whole day so far (from the open to a
+    /// few minutes ago) - null otherwise (then Dhan is asked).</summary>
+    private IReadOnlyList<CandleWithVolume>? TodaySpotFromFeed(string underlying, DateOnly date)
+    {
+        if (_spotFeed is null || date != IstClock.Today() || !_spotFeed.States.TryGetValue(underlying.ToUpperInvariant(), out var state)) return null;
+        var bars = state.GetVolumeBars().Where(b => DateOnly.FromDateTime(b.Time.ToOffset(IstClock.Offset).DateTime) == date).OrderBy(b => b.Time).ToList();
+        if (bars.Count == 0) return null;
+        var open = new DateTimeOffset(date.ToDateTime(new TimeOnly(9, 16)), IstClock.Offset);
+        var close = new DateTimeOffset(date.ToDateTime(new TimeOnly(15, 29)), IstClock.Offset);
+        var recent = DateTimeOffset.UtcNow.AddMinutes(-3) < close ? DateTimeOffset.UtcNow.AddMinutes(-3) : close;
+        return bars[0].Time <= open && bars[^1].Time >= recent ? bars : null;
+    }
+
     public OiReplayService(
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
-        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null)
+        AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
+        LiveOptionLegStore? liveBars = null, SpotFeedHostedService? spotFeed = null)
     {
+        _liveBars = liveBars;
+        _spotFeed = spotFeed;
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
         _storedSpot = storedSpot;
@@ -177,7 +208,8 @@ public sealed class OiReplayService
         }
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
-        var (spotBarsRaw, spotError) = await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+        var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date) : null;
+        var (spotBarsRaw, spotError) = fromFeed is not null ? (fromFeed, null) : await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
         if (spotBarsRaw.Count == 0)
             return OiReplayResult.Failed(underlying, date, timeframe,
@@ -200,13 +232,14 @@ public sealed class OiReplayService
         // cePoints/pePoints list directly - List<T> is not safe for concurrent writers, and
         // collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
         using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
+        var backfilledAt = new System.Collections.Concurrent.ConcurrentBag<DateTimeOffset>();
 
         async Task<List<OiReplayPoint>> FetchPointsAsync(string strikeToken, string drvOptionType)
         {
             await throttle.WaitAsync(cancellationToken);
             try
             {
-                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive);
+                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive, backfilledAt.Add);
                 var points = new List<OiReplayPoint>(bars.Count);
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
@@ -231,10 +264,24 @@ public sealed class OiReplayService
 
         var cePoints = ceTasks.SelectMany(t => t.Result).ToList();
         var pePoints = peTasks.SelectMany(t => t.Result).ToList();
+        // Today, live: the backfill up to when it was taken, the live feed's minute bars from then on.
+        if (_liveBars is not null && date == IstClock.Today() && !backfilledAt.IsEmpty)
+        {
+            var from = backfilledAt.Min();
+            cePoints = MergeTodayLive(cePoints, _liveBars.OptionPointsFrom(underlying, expiryFlag, "CE", from), from);
+            pePoints = MergeTodayLive(pePoints, _liveBars.OptionPointsFrom(underlying, expiryFlag, "PE", from), from);
+        }
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
-        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await GetFuturesAsync(underlying, date, cancellationToken);
+        var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = await _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
+            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
+        if (_liveBars is not null && date == IstClock.Today() && futuresBars.Count > 0)
+        {
+            var cutoff = futuresAt.ToUnixTimeSeconds() / 60 * 60;
+            var live = _liveBars.FuturesBarsFrom(underlying, futuresAt);
+            if (live.Count > 0) futuresBars = futuresBars.Where(b => b.Time.ToUnixTimeSeconds() < cutoff).Concat(live).ToList();
+        }
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
             spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
@@ -304,7 +351,7 @@ public sealed class OiReplayService
     /// all.</summary>
     private async Task<IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>> GetSeriesAsync(
         string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
-        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false)
+        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false, Action<DateTimeOffset>? backfilledAt = null)
     {
         var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
@@ -320,9 +367,20 @@ public sealed class OiReplayService
         var instrument = await resolveInstrument();
         if (instrument is null) return storedBars;
 
-        var (liveBars, _) = await _rollingOption.GetRollingOptionCandlesAsync(
-            underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken);
+        var ((liveBars, _), fetchedAt) = await _today.ReuseWithTimeAsync($"{underlying}|opt|{expiryFlag}|{strikeToken}|{drvOptionType}", date, IstClock.Today(),
+            ct => _rollingOption.GetRollingOptionCandlesAsync(underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, ct),
+            r => r.Bars.Count > 0, cancellationToken, TodayWindow);
+        if (liveBars.Count > 0) backfilledAt?.Invoke(fetchedAt);
         return liveBars.Count > 0 ? liveBars : storedBars;
+    }
+
+    /// <summary>Today's points: the backfill's before the minute it was taken (`from`), the live feed's minute bars
+    /// from that minute on (whole minutes the feed saw - the backfill's last one was still forming), by time.</summary>
+    internal static List<OiReplayPoint> MergeTodayLive(IReadOnlyList<OiReplayPoint> backfill, IReadOnlyList<OiReplayPoint> live, DateTimeOffset from)
+    {
+        if (live.Count == 0) return backfill.ToList();
+        var cutoff = from.ToUnixTimeSeconds() / 60 * 60;
+        return backfill.Where(p => p.Time.ToUnixTimeSeconds() < cutoff).Concat(live).OrderBy(p => p.Time).ThenBy(p => p.Strike).ToList();
     }
 
     /// <summary>Whether a stored result for `date` is trustworthy enough to skip a live Dhan
@@ -358,8 +416,9 @@ public sealed class OiReplayService
             var liveInstrument = await resolveInstrument();
             if (liveInstrument is not null)
             {
-                var (liveSpotBars, liveSpotError) = await _historicalData.GetIntradayCandlesAsync(
-                    liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, cancellationToken);
+                var (liveSpotBars, liveSpotError) = await ReuseTodayAsync($"{underlying}|spot", date,
+                    ct => _historicalData.GetIntradayCandlesAsync(liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, ct),
+                    r => r.Candles.Count > 0, cancellationToken);
                 // Only trust the live call over whatever's already stored if it actually found
                 // something - a live error (auth, market holiday) should never blank out a
                 // perfectly good, merely slightly-stale stored result.

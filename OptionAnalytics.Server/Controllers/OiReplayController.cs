@@ -45,8 +45,11 @@ public sealed class OiReplayController : ControllerBase
         // Live" mode), for which stored-vs-live has no good default: it's about to hand off to the
         // live tick feed anyway, so it always wants the freshest reading available, in every
         // environment including local dev - see OiReplayService.RunAsync's own doc comment.
-        [FromQuery] bool forceLive = false)
+        [FromQuery] bool forceLive = false,
+        // The page's Clear cache: today's held backfill of this index is dropped and asked of Dhan afresh.
+        [FromQuery] bool refresh = false)
     {
+        if (refresh) _service.RefreshToday(underlying);
         var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive);
         return Ok(result);
     }
