@@ -1,4 +1,5 @@
 using OptionAnalytics.Server;
+using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
 using Xunit;
 
@@ -29,5 +30,63 @@ public class LiveOptionLegStoreTests
         Assert.Equal("PE", legs[1].Side);
         Assert.Single(store.Latest("NIFTY", "N2", today));
         Assert.Empty(store.Latest("BANKNIFTY", "N1", today));
+    }
+}
+
+/// <summary>Today's minute bars the live feed keeps for every index (LiveOptionLegStore) and how today's run joins
+/// them to its one backfill (OiReplayService.MergeTodayLive) - switching index on the live page asks Dhan nothing.</summary>
+public class TodayLiveBarsTests
+{
+    private static readonly DateTimeOffset Open = new(2026, 10, 19, 9, 15, 0, IstClock.Offset);
+    private static LiveOptionTick Tick(decimal strike, string side, decimal price, long oi, DateTimeOffset at) =>
+        new("NIFTY", "WEEK", strike, side, price, price, price, price, oi, at);
+
+    [Fact]
+    public void Each_leg_gets_minute_bars_with_its_oi_and_traded_volume()
+    {
+        var store = new LiveOptionLegStore();
+        store.Record(Tick(23100, "CE", 50, 1000, Open.AddSeconds(5)), dayVolume: 100, keepBars: true);
+        store.Record(Tick(23100, "CE", 55, 1200, Open.AddSeconds(40)), dayVolume: 160, keepBars: true);
+        store.Record(Tick(23100, "CE", 48, 1300, Open.AddSeconds(55)), dayVolume: 175, keepBars: true);
+        store.Record(Tick(23100, "CE", 52, 1350, Open.AddMinutes(1).AddSeconds(3)), dayVolume: 200, keepBars: true);
+        store.Record(Tick(23100, "PE", 70, 900, Open.AddSeconds(10)), dayVolume: 10, keepBars: true);
+        store.Record(Tick(23200, "CE", 30, 500, Open.AddSeconds(10)), dayVolume: 5, keepBars: false); // an N-expiry: newest only
+
+        var ce = store.OptionPointsFrom("NIFTY", "WEEK", "CE", Open);
+        Assert.Equal(2, ce.Count);
+        var first = ce[0];
+        Assert.Equal((Open, 23100m, 50m, 55m, 48m, 48m, 1300L, 75L), (first.Time, first.Strike, first.Open!.Value, first.High!.Value, first.Low!.Value, first.Price, first.OpenInterest!.Value, first.Volume));
+        Assert.Equal((52m, 25L), (ce[1].Price, ce[1].Volume));
+        Assert.Single(store.OptionPointsFrom("NIFTY", "WEEK", "PE", Open));
+        Assert.Single(store.OptionPointsFrom("NIFTY", "WEEK", "CE", Open.AddMinutes(1)));
+        Assert.Empty(store.OptionPointsFrom("NIFTY", "MONTH", "CE", Open));
+        // A new day starts empty.
+        store.Record(Tick(23100, "CE", 40, 10, Open.AddDays(1)), dayVolume: 1, keepBars: true);
+        Assert.Empty(store.OptionPointsFrom("NIFTY", "WEEK", "CE", Open));
+    }
+
+    [Fact]
+    public void Futures_get_minute_bars_too()
+    {
+        var store = new LiveOptionLegStore();
+        store.RecordFutures("NIFTY", 23150, 9_000_000, 1_000, Open.AddSeconds(2));
+        store.RecordFutures("NIFTY", 23160, 9_000_500, 1_400, Open.AddSeconds(30));
+        store.RecordFutures("NIFTY", 23140, 9_001_000, 1_500, Open.AddMinutes(1));
+        var bars = store.FuturesBarsFrom("NIFTY", Open);
+        Assert.Equal(2, bars.Count);
+        Assert.Equal((23150m, 23160m, 23160m, 400L, 9_000_500L), (bars[0].Open, bars[0].High, bars[0].Close, bars[0].Volume, bars[0].OpenInterest!.Value));
+        Assert.Empty(store.FuturesBarsFrom("SENSEX", Open));
+    }
+
+    [Fact]
+    public void Todays_run_is_the_backfill_up_to_when_it_was_taken_then_the_live_bars()
+    {
+        static OiReplayPoint P(DateTimeOffset t, decimal price) => new(t, 23100, 1000, null, price);
+        var backfill = new[] { P(Open, 50), P(Open.AddMinutes(1), 51), P(Open.AddMinutes(2), 52) }; // taken during 09:17
+        var live = new[] { P(Open.AddMinutes(2), 52.5m), P(Open.AddMinutes(3), 53) };
+        var merged = OiReplayService.MergeTodayLive(backfill, live, Open.AddMinutes(2).AddSeconds(20));
+        Assert.Equal(new[] { 50m, 51m, 52.5m, 53m }, merged.Select(p => p.Price));
+        // Nothing live yet: the backfill as it is.
+        Assert.Equal(3, OiReplayService.MergeTodayLive(backfill, Array.Empty<OiReplayPoint>(), Open.AddMinutes(2)).Count);
     }
 }

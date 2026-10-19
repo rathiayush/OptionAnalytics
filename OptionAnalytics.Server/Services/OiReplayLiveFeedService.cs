@@ -524,7 +524,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 OpenInterest: tick.OpenInterest, Time: observedAt);
             _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
             // Each leg's newest reading, in memory - a page reads an index's current option prices from it, no Dhan call.
-            if (tick.LastPrice > 0) _legStore?.Record(optionTick);
+            // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService); the newest reading for every leg.
+            if (tick.LastPrice > 0) _legStore?.Record(optionTick, tick.Volume, keepBars: leg.ExpiryFlag is "WEEK" or "MONTH");
 
             // The raw per-tick tape, on its own "t:" group, for the Live Strike Data page - its whole
             // purpose is to show every individual tick, so only a page that joined it pays for that
@@ -560,6 +561,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 futuresUnderlying,
                 Open: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice, Price: tick.LastPrice,
                 OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume));
+            _legStore?.RecordFutures(futuresUnderlying, tick.LastPrice, tick.OpenInterest, tick.Volume, observedAt);
         }
     }
 

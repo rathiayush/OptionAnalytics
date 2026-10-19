@@ -59,3 +59,28 @@ public class TodayFetchShareTests
         Assert.Equal(1, calls);
     }
 }
+
+public class TodayFetchShareDayTests
+{
+    private static readonly DateOnly Today = new(2026, 10, 19);
+
+    [Fact]
+    public async Task A_backfill_kept_for_the_day_is_asked_once_until_refreshed()
+    {
+        var now = DateTimeOffset.Parse("2026-10-19T04:00:00Z");
+        var share = new TodayFetchShare(clock: () => now);
+        var calls = 0;
+        Task<int[]> Fetch(CancellationToken _) { calls++; return Task.FromResult(new[] { calls }); }
+        var (first, at) = await share.ReuseWithTimeAsync("NIFTY|opt|WEEK|ATM|CALL", Today, Today, Fetch, r => r.Length > 0, default, TimeSpan.MaxValue);
+        Assert.Equal(now, at);
+        now = now.AddHours(5);
+        var (again, at2) = await share.ReuseWithTimeAsync("NIFTY|opt|WEEK|ATM|CALL", Today, Today, Fetch, r => r.Length > 0, default, TimeSpan.MaxValue);
+        Assert.Equal((1, 1, at), (first[0], again[0], at2));
+        share.Invalidate("SENSEX|");
+        await share.ReuseWithTimeAsync("NIFTY|opt|WEEK|ATM|CALL", Today, Today, Fetch, r => r.Length > 0, default, TimeSpan.MaxValue);
+        Assert.Equal(1, calls);
+        share.Invalidate("NIFTY|");
+        await share.ReuseWithTimeAsync("NIFTY|opt|WEEK|ATM|CALL", Today, Today, Fetch, r => r.Length > 0, default, TimeSpan.MaxValue);
+        Assert.Equal(2, calls);
+    }
+}

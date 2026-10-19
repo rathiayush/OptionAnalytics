@@ -3262,7 +3262,7 @@ export default function OiReplayPage() {
   // "Load day," or the live feed's own reconnect-triggered load() - it never skips THIS call's own
   // real fetch, only paints from the cache first while that fetch is still in flight (see
   // LIVE_DAY_CACHE_STORAGE_KEY's own doc comment).
-  const load = (overrideDate, { preferCache = false, live } = {}) => {
+  const load = (overrideDate, { preferCache = false, live, refresh = false } = {}) => {
     const effectiveDate = overrideDate ?? date
     if (!underlying || !effectiveDate) return
     const effectiveIsToday = effectiveDate.format('YYYY-MM-DD') === istDateKey(new Date())
@@ -3363,6 +3363,8 @@ export default function OiReplayPage() {
       timeframeMinutes: String(timeframe),
       expiryFlag: requestFlag,
       ...(effectiveIsToday ? { forceLive: 'true' } : {}),
+      // Clear cache: the server drops today's held backfill of this index and asks Dhan afresh.
+      ...(refresh ? { refresh: 'true' } : {}),
     })
     const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
     fetch(`/api/oi-replay/${underlying}/run?${params.toString()}`, { signal: controller.signal })
@@ -3436,7 +3438,7 @@ export default function OiReplayPage() {
   // was never cached in the first place, so there'd be nothing here to clear.
   const handleClearLiveCache = () => {
     clearLiveDayCache()
-    load(date)
+    load(date, { refresh: true })
   }
 
   // One click for "switch to today and start following it live" - the user's own "if tomorrow
@@ -4930,7 +4932,7 @@ export default function OiReplayPage() {
                 // not just a no-op reset, so an accidental click deserves one more step before it fires.
                 <Popconfirm
                   title="Clear cached data and refetch?"
-                  description="Removes today's cached run and live ticks from this browser, then re-fetches fresh from the server right now."
+                  description="Removes today's cached run and live ticks from this browser and the server's held copy, then re-fetches fresh from Dhan right now."
                   onConfirm={handleClearLiveCache}
                   okText="Clear & refetch"
                 >
