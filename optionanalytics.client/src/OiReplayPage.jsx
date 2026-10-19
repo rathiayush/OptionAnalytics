@@ -3150,6 +3150,46 @@ export default function OiReplayPage() {
     .filter((p) => p.status === 'OPEN' && p.underlying && p.expiryFlag && !(p.underlying === underlying && p.expiryFlag === liveExpiryFlag))
     .map((p) => `${p.underlying}:${p.expiryFlag}:${p.side}:${p.strike}`)), [paperPositions, isLive, underlying, liveExpiryFlag])
   const [foreignPoints, setForeignPoints] = useState({})
+  // Seeded at once from that index's own day so far (its run, the same the page loads), so an open
+  // position on another index shows its live P&L straight away - not only after its strike next ticks
+  // (a quiet strike can go minutes without one). Once per chain; the live ticks carry it on from there.
+  // N1 only: the run's chain is the nearest expiry (a later expiry has no run data - its ticks only).
+  const seededChainsRef = useRef(new Set())
+  useEffect(() => {
+    if (!isLive) return
+    const chains = new Map()
+    for (const leg of foreignLegs) {
+      const [u, flag, side, strike] = leg.split(':')
+      if (flag !== 'N1' || seededChainsRef.current.has(`${u}:${flag}`)) continue
+      const chain = chains.get(`${u}:${flag}`) ?? { u, flag, legs: new Set() }
+      chain.legs.add(`${side}:${strike}`)
+      chains.set(`${u}:${flag}`, chain)
+    }
+    for (const [key, { u, flag, legs }] of chains) {
+      seededChainsRef.current.add(key)
+      const params = new URLSearchParams({ date: dayjs().format('YYYY-MM-DD'), timeframeMinutes: '1', expiryFlag: u === 'BANKNIFTY' ? 'MONTH' : 'WEEK', forceLive: 'true' })
+      fetch(`/api/oi-replay/${u}/run?${params.toString()}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((body) => {
+          if (!body?.success) { seededChainsRef.current.delete(key); return }
+          const held = (points, side) => (points ?? []).filter((pt) => legs.has(`${side}:${pt.strike}`)).map((pt) => ({ ...pt, ms: new Date(pt.time).getTime() }))
+          setForeignPoints((prev) => {
+            const next = { ...prev }
+            for (const [side, points] of [['CE', body.cePoints], ['PE', body.pePoints]]) {
+              const sideKey = `${u}:${flag}:${side}`
+              const live = prev[sideKey] ?? []
+              // The day so far, then the live points already kept (none of the history after the first of them).
+              const firstLive = new Map()
+              for (const pt of live) if (!firstLive.has(pt.strike)) firstLive.set(pt.strike, pointMs(pt))
+              const history = held(points, side).filter((pt) => !(pt.ms >= (firstLive.get(pt.strike) ?? Infinity)))
+              if (history.length) next[sideKey] = [...history, ...live].sort((x, y) => pointMs(x) - pointMs(y))
+            }
+            return next
+          })
+        })
+        .catch(() => { seededChainsRef.current.delete(key) })
+    }
+  }, [foreignLegs, isLive])
   const feedLag = useFeedLag(isLive)
 
   // Keeps today's own paper positions in storage as they change (punched, exited, SL/target hit) so
