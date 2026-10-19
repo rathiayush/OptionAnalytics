@@ -3658,6 +3658,18 @@ export default function OiReplayPage() {
     })
   }
   const handleLiveReconnected = () => { if (isLive) load() }
+  // Today's live view follows the index / expiry picked - switching either loads it live at once, no
+  // Go Live / Load day click needed (the page's first load is the mount effect's; a replayed day is
+  // never reloaded by this).
+  const liveSelectionRef = useRef(null)
+  useEffect(() => {
+    const key = `${underlying}|${liveExpiryFlag}`
+    const previous = liveSelectionRef.current
+    liveSelectionRef.current = key
+    if (previous == null || previous === key || !isLive) return
+    load(dayjs(), { live: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, liveExpiryFlag, isLive])
   const foreignChainKey = [...new Set([...foreignLegs].map((leg) => leg.split(':').slice(0, 2).join(':')))].sort().join('|')
   const feedGroups = useMemo(() => [...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : [])], [liveExtraGroups, foreignChainKey])
   const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, feedGroups, handleDivergenceAlert)
@@ -4937,7 +4949,7 @@ export default function OiReplayPage() {
             {isLive && liveExpiryFlag !== 'N1' && (
               <Alert
                 type="info" showIcon
-                message="This expiry isn't the nearest one - its CE/PE data has no since-open history yet (Dhan's historical endpoint only reliably covers the nearest weekly/monthly), so it'll build up from live ticks starting now rather than showing the whole day. Click Load day/Go Live again after picking it if you haven't already."
+                message="This expiry isn't the nearest one - its CE/PE data has no since-open history yet (Dhan's historical endpoint only reliably covers the nearest weekly/monthly), so it builds up from live ticks starting now rather than showing the whole day."
               />
             )}
             {isLive && liveConnectionState === 'disconnected' && (
