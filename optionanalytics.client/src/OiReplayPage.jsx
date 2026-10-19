@@ -2018,21 +2018,26 @@ const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
 // Survives a page reload for TODAY's own live session only - a historical replay day's positions
 // still reset on every load() the same as before (see PaperTradePanel's own doc comment: "a paper
 // position only means something against the ONE day's premium series it was punched into"), which is
-// exactly why this is scoped to BOTH the underlying and the calendar day, not a single flat key -
-// restoring blindly from storage regardless of which underlying/day is now loaded would resurrect
-// yesterday's (or a different underlying's) positions against today's entirely different premium
-// series. Real order placement was never in scope here (see PAPER_TRADE_LOT_SIZE's own comment) - a
+// why it is scoped to the calendar day - restoring yesterday's positions against today's entirely
+// different premium series would be meaningless. One entry holds every index's positions: each
+// position carries its own `underlying` (and live expiry) and is always priced from its own chain,
+// whichever index the page shows. Real order placement was never in scope here (see PAPER_TRADE_LOT_SIZE's own comment) - a
 // stale localStorage entry from an old session, or one edited by hand, only ever skews a SIMULATED
 // PnL number, so restoring it needs no more validation than "does the shape look like an array."
 const PAPER_POSITIONS_STORAGE_KEY = 'optionanalytics.oiReplay.livePaperPositions'
 
-function readPersistedPaperPositions(underlying, dateKey) {
+// A position saved before positions carried their own index: its lot size says which one it was (each
+// index has its own), else the index the old entry was saved under.
+const underlyingOfLotSize = (lotSize) => Object.keys(PAPER_TRADE_LOT_SIZE).find((u) => PAPER_TRADE_LOT_SIZE[u] === lotSize) ?? null
+
+function readPersistedPaperPositions(dateKey) {
   try {
     const raw = window.localStorage.getItem(PAPER_POSITIONS_STORAGE_KEY)
     if (!raw) return []
     const parsed = JSON.parse(raw)
-    if (parsed?.underlying !== underlying || parsed?.dateKey !== dateKey || !Array.isArray(parsed.positions)) return []
-    return parsed.positions
+    if (parsed?.dateKey !== dateKey || !Array.isArray(parsed.positions)) return []
+    // Saved positions are today's live ones - punched on the live view's expiry (N1 unless another was picked).
+    return parsed.positions.map((p) => ({ ...p, underlying: p.underlying ?? underlyingOfLotSize(p.lotSize) ?? parsed.underlying ?? null, expiryFlag: p.expiryFlag ?? 'N1' }))
   } catch {
     // Storage can throw outright (private browsing, blocked site data) - the feature still works,
     // it just doesn't remember, same as usePersistedState elsewhere on this page.
@@ -2040,9 +2045,9 @@ function readPersistedPaperPositions(underlying, dateKey) {
   }
 }
 
-function writePersistedPaperPositions(underlying, dateKey, positions) {
+function writePersistedPaperPositions(dateKey, positions) {
   try {
-    window.localStorage.setItem(PAPER_POSITIONS_STORAGE_KEY, JSON.stringify({ underlying, dateKey, positions }))
+    window.localStorage.setItem(PAPER_POSITIONS_STORAGE_KEY, JSON.stringify({ dateKey, positions }))
   } catch {
     // Same as above - remembering is a convenience, never a requirement.
   }
@@ -2145,10 +2150,10 @@ function PaperTradePanel({
       title: 'Action', dataIndex: 'direction', key: 'direction', width: 60,
       render: (d, r) => <Tag color={d === 'BUY' ? 'success' : 'error'}>{d} {r.side}</Tag>,
     },
-    { title: 'Strike', dataIndex: 'strike', key: 'strike', width: 70 },
+    { title: 'Strike', dataIndex: 'strike', key: 'strike', width: 105, render: (s, r) => <span>{r.underlying && r.underlying !== underlying && <Tag style={{ fontSize: 10, marginRight: 4, paddingInline: 3 }}>{r.underlying}</Tag>}{s}</span> },
     { title: 'Qty', dataIndex: 'qtyLots', key: 'qtyLots', width: 60, render: (q, r) => `${q}×${r.lotSize}` },
     { title: 'Entry', dataIndex: 'entryPrice', key: 'entryPrice', width: 65, render: (v) => v.toFixed(2) },
-    { title: 'LTP', dataIndex: 'ltp', key: 'ltp', width: 65, render: (v) => v.toFixed(2) },
+    { title: 'LTP', dataIndex: 'ltp', key: 'ltp', width: 65, render: (v, r) => (r.stale ? <Tooltip title="No live price of this option yet - its last price on screen (or its entry). It updates when its own index's ticks arrive."><Text type="secondary">{v.toFixed(2)}*</Text></Tooltip> : v.toFixed(2)) },
     {
       title: 'PnL', dataIndex: 'pnl', key: 'pnl', width: 85,
       render: (v) => <Text strong style={{ color: v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{v >= 0 ? '+' : ''}{v.toFixed(0)}</Text>,
@@ -2202,9 +2207,9 @@ function PaperTradePanel({
           />
           {onTrailGapChange && (
             <Tooltip title="Trailing stop on the premium: once the trade is 'Trail after' points in profit, the stop follows the best premium 'Follow' points behind and only tightens. Follow 0 = off. Paper here; live, the server moves the super order's stop-loss leg.">
-              <Space size={4}>
-                <InputNumber value={trailStart} onChange={(v) => onTrailStartChange?.(v ?? 0)} min={0} step={5} style={{ width: 130 }} addonBefore="Trail after" addonAfter="pts" aria-label="Trail after points" />
-                <InputNumber value={trailGap} onChange={(v) => onTrailGapChange(v ?? 0)} min={0} step={1} style={{ width: 120 }} addonBefore="Follow" addonAfter="pts" aria-label="Trail follow points" />
+              <Space size={8} wrap>
+                <InputNumber value={trailStart} onChange={(v) => onTrailStartChange?.(v ?? 0)} min={0} step={5} style={{ width: 165 }} addonBefore="Trail after" addonAfter="pts" aria-label="Trail after points" />
+                <InputNumber value={trailGap} onChange={(v) => onTrailGapChange(v ?? 0)} min={0} step={1} style={{ width: 145 }} addonBefore="Follow" addonAfter="pts" aria-label="Trail follow points" />
               </Space>
             </Tooltip>
           )}
@@ -2246,7 +2251,7 @@ function PaperTradePanel({
             {/* scroll.x - the panel itself is capped to fit a phone's viewport width (see
                 DraggableFloatingPanel below), narrower than these columns' own combined width, so
                 the table needs to scroll horizontally within the panel rather than overflow it. */}
-            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 475, y: 220 }} />
+            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 510, y: 220 }} />
             <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
               <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
                 Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
@@ -3081,7 +3086,9 @@ export default function OiReplayPage() {
   // click-outside-to-dismiss behavior to fight in the first place). Position lives here, not inside
   // the panel component, so it survives closing and reopening rather than resetting every time.
   const [paperPanelOpen, setPaperPanelOpen] = useState(false)
-  const [paperPanelPos, setPaperPanelPos] = useState(() => ({
+  // A phone: from the left edge, below the page's menu button (top right) so the panel's header and ✕
+  // stay reachable.
+  const [paperPanelPos, setPaperPanelPos] = useState(() => (window.innerWidth < 600 ? { x: 12, y: 72 } : {
     x: Math.max(24, window.innerWidth - 480), y: 140,
   }))
   // null (the default) keeps DraggableFloatingPanel's own original fixed-440px-wide, grow-to-content
@@ -3120,7 +3127,11 @@ export default function OiReplayPage() {
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
   // is a direct response to that one user action, not a value derived from external state.
+  // Called before the page switches to another index / expiry: each open paper position of the chain on
+  // screen keeps its last price, shown until its own chain's live ticks arrive (see markOf).
+  const rememberMarksRef = useRef(null)
   const selectUnderlying = (value) => {
+    if (value !== underlying) rememberMarksRef.current?.()
     setUnderlying(value)
     if (value === 'BANKNIFTY' && expiryFlag === 'WEEK') setExpiryFlag('MONTH')
   }
@@ -3132,6 +3143,13 @@ export default function OiReplayPage() {
   const [todayMode, setTodayMode] = useState('live')
   const isTodayDate = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
   const isLive = isTodayDate && todayMode === 'live'
+  // Open paper positions on ANOTHER index (or another expiry) than the one on screen, live: their legs
+  // ("NIFTY:N1:CE:23100") - the page also listens to their chains and keeps those legs' prices
+  // (foreignPoints), so each position is marked to its own option whichever index is shown.
+  const foreignLegs = useMemo(() => new Set(!isLive ? [] : paperPositions
+    .filter((p) => p.status === 'OPEN' && p.underlying && p.expiryFlag && !(p.underlying === underlying && p.expiryFlag === liveExpiryFlag))
+    .map((p) => `${p.underlying}:${p.expiryFlag}:${p.side}:${p.strike}`)), [paperPositions, isLive, underlying, liveExpiryFlag])
+  const [foreignPoints, setForeignPoints] = useState({})
   const feedLag = useFeedLag(isLive)
 
   // Keeps today's own paper positions in storage as they change (punched, exited, SL/target hit) so
@@ -3140,9 +3158,9 @@ export default function OiReplayPage() {
   // they were never meant to survive past that one load() in the first place. Clear all clearing the
   // array back to [] flows through this same effect, no separate storage write needed there.
   useEffect(() => {
-    if (!isLive || !underlying || !date) return
-    writePersistedPaperPositions(underlying, date.format('YYYY-MM-DD'), paperPositions)
-  }, [paperPositions, isLive, underlying, date])
+    if (!isLive || !date) return
+    writePersistedPaperPositions(date.format('YYYY-MM-DD'), paperPositions)
+  }, [paperPositions, isLive, date])
 
   // Keeps today's own fetched run PLUS everything the live feed has appended since in storage, so a
   // reload can restore it instantly instead of re-fetching (see load()'s own preferCache branch, and
@@ -3238,7 +3256,7 @@ export default function OiReplayPage() {
         // cached NON-default expiry (N2+) would show that expiry's frozen snapshot while the live feed
         // silently rejoins N1's group instead, ticking an expiry the screen isn't even showing.
         if (cached.liveExpiryFlag) setLiveExpiryFlag(cached.liveExpiryFlag)
-        setPaperPositions(readPersistedPaperPositions(underlying, dateKey))
+        setPaperPositions(readPersistedPaperPositions(dateKey))
         setVwapSeries(cached.vwapSeries ?? [])
       }
     }
@@ -3262,10 +3280,10 @@ export default function OiReplayPage() {
       lastOiByLegRef.current = new Map()
       setLastOiChangeMs(null)
       // Today's own positions survive THIS reload (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) -
-      // restored from storage rather than reset, so long as they were punched against the SAME
-      // underlying and the SAME calendar day now loading. Any other day (or a stale/foreign entry)
+      // restored from storage rather than reset, every index's, so long as they were punched on the
+      // SAME calendar day now loading. Any other day (or a stale/foreign entry)
       // still resets to empty exactly as before.
-      setPaperPositions(effectiveLive ? readPersistedPaperPositions(underlying, dateKey) : [])
+      setPaperPositions(effectiveLive ? readPersistedPaperPositions(dateKey) : [])
       setVwapSeries([])
     }
     // Only for today - see vwapSeries' own doc comment on why a historical day has no VWAP to show
@@ -3500,9 +3518,25 @@ export default function OiReplayPage() {
     if (!isLive) return
     const ce = []
     const pe = []
+    const foreign = new Map()
     for (const tick of batch) {
-      if (tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) continue
+      if (tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) {
+        // A leg an open paper position on another index holds: kept for its own P&L / SL / target.
+        if (foreignLegs.has(`${tick?.underlying}:${tick?.expiryFlag}:${tick?.side}:${tick?.strike}`)) {
+          const key = `${tick.underlying}:${tick.expiryFlag}:${tick.side}`
+          if (!foreign.has(key)) foreign.set(key, [])
+          foreign.get(key).push(tick)
+        }
+        continue
+      }
       ;(tick.side === 'CE' ? ce : pe).push(tick)
+    }
+    if (foreign.size) {
+      setForeignPoints((prev) => {
+        const next = { ...prev }
+        for (const [key, ticks] of foreign) next[key] = mergeLiveOptionTicks(prev[key] ?? [], ticks, null)
+        return next
+      })
     }
     if (ce.length === 0 && pe.length === 0) return
     const receivedAt = Date.now()
@@ -3584,7 +3618,9 @@ export default function OiReplayPage() {
     })
   }
   const handleLiveReconnected = () => { if (isLive) load() }
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, liveExtraGroups, handleDivergenceAlert)
+  const foreignChainKey = [...new Set([...foreignLegs].map((leg) => leg.split(':').slice(0, 2).join(':')))].sort().join('|')
+  const feedGroups = useMemo(() => [...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : [])], [liveExtraGroups, foreignChainKey])
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, feedGroups, handleDivergenceAlert)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -3918,7 +3954,7 @@ export default function OiReplayPage() {
   }, [paperSide, paperStrike, ceByStrike, peByStrike, asOfMs])
 
   // Paper trades are announced like real ones (Telegram only on today's live view, never a replay).
-  const paperTradeText = (p, price) => `${p.direction} ${underlying} ${p.strike} ${p.side} x${p.qtyLots} lot${p.qtyLots === 1 ? '' : 's'} @ ${Number(price).toFixed(1)}`
+  const paperTradeText = (p, price) => `${p.direction} ${p.underlying ?? underlying} ${p.strike} ${p.side} x${p.qtyLots} lot${p.qtyLots === 1 ? '' : 's'} @ ${Number(price).toFixed(1)}`
   // `overrides` (the keyboard ticket): { direction, side, strike, lots, slPts, targetPts } for this one order;
   // anything not given is the panel's. A button's click event is not overrides.
   const tradeOf = (overrides) => {
@@ -3928,6 +3964,18 @@ export default function OiReplayPage() {
       sl: o.slPts ?? paperSlPoints, target: o.targetPts ?? paperTargetPoints,
     }
   }
+  // Each position is priced from ITS OWN option chain: the one on screen (ceByStrike / peByStrike, as of
+  // the replay clock), else - an open position on another index / expiry, live - that leg's own ticks
+  // (foreignPoints); with neither yet, the last price it had on screen (lastPrice), else its entry.
+  const ownChainOf = useCallback((p) => (p.underlying ?? underlying) === underlying && (!isLive || !p.expiryFlag || p.expiryFlag === liveExpiryFlag), [underlying, isLive, liveExpiryFlag])
+  const seriesOf = useCallback((p) => (ownChainOf(p)
+    ? (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike) ?? []
+    : (foreignPoints[`${p.underlying}:${p.expiryFlag}:${p.side}`] ?? []).filter((pt) => pt.strike === p.strike)), [ownChainOf, ceByStrike, peByStrike, foreignPoints])
+  const markOf = useCallback((p) => {
+    const at = ownChainOf(p) ? asOfMs : Number.MAX_SAFE_INTEGER
+    return at == null ? null : latestAtOrBefore(seriesOf(p), at)?.price ?? null
+  }, [ownChainOf, seriesOf, asOfMs])
+  const exitPriceOf = (p) => markOf(p) ?? p.lastPrice ?? p.entryPrice
   const premiumOf = (side, strike) => (strike == null || asOfMs == null ? null : latestAtOrBefore((side === 'CE' ? ceByStrike : peByStrike).get(strike) ?? [], asOfMs)?.price ?? null)
   const handlePaperPunch = (overrides) => {
     const t = tradeOf(overrides)
@@ -3938,7 +3986,7 @@ export default function OiReplayPage() {
       telegramText: isLive ? `Paper ${text}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
-      side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots,
+      side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots, underlying, expiryFlag: isLive ? liveExpiryFlag : null,
       lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
       entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null,
     }])
@@ -3954,17 +4002,8 @@ export default function OiReplayPage() {
   }
   const handlePaperExit = (id) => {
     const open = paperPositions.find((p) => p.id === id && p.status === 'OPEN')
-    if (open) {
-      const series = (open.side === 'CE' ? ceByStrike : peByStrike).get(open.strike)
-      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
-      announcePaperExit(open, point?.price ?? open.entryPrice, 'Manual')
-    }
-    setPaperPositions((prev) => prev.map((p) => {
-      if (p.id !== id || p.status !== 'OPEN') return p
-      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
-      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice, exitReason: 'Manual' }
-    }))
+    if (open) announcePaperExit(open, exitPriceOf(open), 'Manual')
+    setPaperPositions((prev) => prev.map((p) => (p.id !== id || p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual' })))
   }
 
   const handlePaperClearAll = () => setPaperPositions([])
@@ -4090,18 +4129,8 @@ export default function OiReplayPage() {
   // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
   // the table afterward, distinct from Clear all's "wipe the list" ask.
   const handlePaperExitAll = () => {
-    for (const p of paperPositions) {
-      if (p.status !== 'OPEN') continue
-      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
-      announcePaperExit(p, point?.price ?? p.entryPrice, 'Manual')
-    }
-    setPaperPositions((prev) => prev.map((p) => {
-      if (p.status !== 'OPEN') return p
-      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-      const point = asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
-      return { ...p, status: 'CLOSED', exitPrice: point?.price ?? p.entryPrice, exitReason: 'Manual' }
-    }))
+    for (const p of paperPositions) if (p.status === 'OPEN') announcePaperExit(p, exitPriceOf(p), 'Manual')
+    setPaperPositions((prev) => prev.map((p) => (p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual' })))
   }
 
   // Live PnL for every position, OPEN or CLOSED - an OPEN one is marked to the replay's CURRENT
@@ -4110,12 +4139,19 @@ export default function OiReplayPage() {
   // mirror of a BUY's - the writer profits as the premium FALLS, not rises - so the ltp/entry delta
   // flips sign for it rather than sharing one formula both directions would get backwards for one.
   const enrichedPaperPositions = useMemo(() => paperPositions.map((p) => {
-    const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-    const livePoint = p.status === 'OPEN' && asOfMs != null ? latestAtOrBefore(series ?? [], asOfMs) : null
-    const ltp = p.status === 'OPEN' ? (livePoint?.price ?? p.entryPrice) : p.exitPrice
+    const mark = p.status === 'OPEN' ? markOf(p) : null
+    const ltp = p.status === 'OPEN' ? (mark ?? p.lastPrice ?? p.entryPrice) : p.exitPrice
     const priceDelta = p.direction === 'SELL' ? p.entryPrice - ltp : ltp - p.entryPrice
-    return { ...p, ltp, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize }
-  }), [paperPositions, ceByStrike, peByStrike, asOfMs])
+    // stale: open with no price of its own chain yet (another index's position before its first tick).
+    return { ...p, underlying: p.underlying ?? underlying, ltp, mark, stale: p.status === 'OPEN' && mark == null, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize }
+  }), [paperPositions, markOf, underlying])
+  // Before the page leaves this index / expiry, the open positions it prices keep their last price.
+  useEffect(() => {
+    rememberMarksRef.current = () => {
+      const marks = new Map(enrichedPaperPositions.filter((p) => p.mark != null).map((p) => [p.id, p.mark]))
+      if (marks.size) setPaperPositions((prev) => prev.map((p) => (p.status === 'OPEN' && marks.has(p.id) ? { ...p, lastPrice: marks.get(p.id) } : p)))
+    }
+  })
   const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
 
@@ -4131,8 +4167,7 @@ export default function OiReplayPage() {
     const hits = new Map()
     for (const p of paperPositions) {
       if (p.status !== 'OPEN' || p.entryTime == null) continue
-      const series = (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike)
-      const hit = computeStopTargetHit(series, p.entryTime, asOfMs, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap)
+      const hit = computeStopTargetHit(seriesOf(p), p.entryTime, ownChainOf(p) ? asOfMs : null, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap)
       if (hit) hits.set(p.id, hit)
     }
     if (hits.size === 0) return
@@ -4147,7 +4182,7 @@ export default function OiReplayPage() {
       return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: hit.kind === 'sl' ? 'SL' : hit.kind === 'trail' ? 'Trailing SL' : 'Target' } : p
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paperPositions, ceByStrike, peByStrike, asOfMs, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
+  }, [paperPositions, seriesOf, ownChainOf, asOfMs, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
   // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
@@ -4804,7 +4839,7 @@ export default function OiReplayPage() {
                 // expiries (see resolvedExpiries' own doc comment) instead of an ambiguous Weekly/
                 // Monthly toggle, so the exact contract being tracked is never in doubt.
                 <Select
-                  value={liveExpiryFlag} onChange={setLiveExpiryFlag} style={{ width: 220 }}
+                  value={liveExpiryFlag} onChange={(v) => { if (v !== liveExpiryFlag) rememberMarksRef.current?.(); setLiveExpiryFlag(v) }} style={{ width: 220 }}
                   options={resolvedExpiries.expiries.map((d, i) => {
                     const tag = d === resolvedExpiries.week ? ' (Weekly)' : d === resolvedExpiries.month ? ' (Monthly)' : ''
                     return { value: `N${i + 1}`, label: `${fmtDateOnly(d)}${tag}` }

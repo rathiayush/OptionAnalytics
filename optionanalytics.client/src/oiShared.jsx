@@ -1470,7 +1470,8 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
         position: 'fixed', left: pos.x, top: pos.y, zIndex,
         width: width != null ? `${width}px` : 'min(440px, calc(100vw - 24px))',
         height: height != null ? `${height}px` : undefined,
-        maxWidth: 'calc(100vw - 24px)', maxHeight: 'calc(100vh - 24px)',
+        // A phone keeps the top strip free for the page's menu button (fixed top right), so the header and ✕ stay reachable.
+        maxWidth: 'calc(100vw - 24px)', maxHeight: window.innerWidth < 600 ? 'calc(100dvh - 84px)' : 'calc(100vh - 24px)',
         display: 'flex', flexDirection: 'column',
         background: '#1f1f1f', border: `1px solid ${BORDER_COLOR}`, borderRadius: 8,
         boxShadow: '0 8px 28px rgba(0, 0, 0, 0.55)',
