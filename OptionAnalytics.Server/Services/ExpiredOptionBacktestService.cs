@@ -851,11 +851,13 @@ public sealed class ExpiredOptionBacktestService
             // comment. AnyLiveCall below stays scoped to the DHAN path specifically: a Postgres read
             // needs none of BandFetchDelay's pacing, only an actual Dhan call does.
             IRollingOptionDataSource source = useStoredData ? _storedRollingOption : _rollingOption;
+            // Every day of this segment already in the Dhan day cache: the read below makes no Dhan call, so no pacing.
+            var cachedOnDisk = !useStoredData && _rollingOption.IsFullyCached(underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1);
             var (segmentBars, segmentError) = await source.GetRollingOptionCandlesAsync(
                 underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
-            if (!useStoredData) anyLiveDhanCall = true;
+            if (!useStoredData && !cachedOnDisk) anyLiveDhanCall = true;
         }
 
         return (bars, error, anyLiveDhanCall);

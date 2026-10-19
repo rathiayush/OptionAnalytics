@@ -47,10 +47,13 @@ public sealed class OiReplayController : ControllerBase
         // environment including local dev - see OiReplayService.RunAsync's own doc comment.
         [FromQuery] bool forceLive = false,
         // The page's Clear cache: today's held backfill of this index is dropped and asked of Dhan afresh.
-        [FromQuery] bool refresh = false)
+        [FromQuery] bool refresh = false,
+        // Opt-in: skip the saved days (the Dhan day cache, the stored database), ask Dhan for the whole day afresh and write
+        // what comes back over the cache - the OI Replay page's "Force fetch from Dhan".
+        [FromQuery] bool forceFetch = false)
     {
         if (refresh) _service.RefreshToday(underlying);
-        var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive);
+        var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive, forceFetch);
         return Ok(result);
     }
 

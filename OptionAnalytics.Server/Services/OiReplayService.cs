@@ -52,6 +52,9 @@ public sealed class OiReplayService
     /// default CollectorOptions.StrikesEachSide, so a band this wide is exactly what a normal local
     /// collector setup has actually backfilled.</summary>
     private const int StrikeBandSteps = 10;
+    /// <summary>How many more times a strike series that came back empty is asked for, and the pause before each round.</summary>
+    private const int MissingSeriesRetryRounds = 2;
+    private static readonly TimeSpan MissingSeriesRetryDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
     private const int NearestExpiryCode = 1;
@@ -164,9 +167,13 @@ public sealed class OiReplayService
         _allowLiveDataFallback = !appEnvironment.IsLocal;
     }
 
+    /// <param name="forceFetch">Skip the saved days (the Dhan day cache and the stored database) and ask Dhan for everything afresh -
+    /// each day that comes back is written over what was kept, so the cache is updated too.</param>
     public async Task<OiReplayResult> RunAsync(
-        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false)
+        string underlying, DateOnly date, int timeframeMinutes, string expiryFlag, CancellationToken cancellationToken, bool forceLive = false, bool forceFetch = false)
     {
+        using var force = forceFetch ? DhanDataCache.ForceRefreshScope() : null;
+        forceLive |= forceFetch; // no stored database either: straight from Dhan, like today's seed
         var timeframe = Math.Max(1, timeframeMinutes);
         // forceLive folds into the SAME isAlwaysLive treatment SENSEX already gets (skip stored
         // entirely, always call Dhan, ignore AppEnvironment.IsLocal) - set by OiReplayPage's own
@@ -262,8 +269,26 @@ public sealed class OiReplayService
         }
         await Task.WhenAll(ceTasks.Concat(peTasks));
 
-        var cePoints = ceTasks.SelectMany(t => t.Result).ToList();
-        var pePoints = peTasks.SelectMany(t => t.Result).ToList();
+        // A strike series that came back empty (a Dhan error - usually its rate limit - after its own retries) is asked
+        // again, one at a time after a pause, rather than leaving that strike blank for the whole day.
+        var ceResults = ceTasks.Select(t => t.Result).ToList();
+        var peResults = peTasks.Select(t => t.Result).ToList();
+        for (var round = 0; round < MissingSeriesRetryRounds; round++)
+        {
+            var missing = Enumerable.Range(0, ceResults.Count).Where(i => ceResults[i].Count == 0).Select(i => (i, Ce: true))
+                .Concat(Enumerable.Range(0, peResults.Count).Where(i => peResults[i].Count == 0).Select(i => (i, Ce: false))).ToList();
+            if (missing.Count == 0) break;
+            await Task.Delay(MissingSeriesRetryDelay, cancellationToken);
+            foreach (var (i, ce) in missing)
+            {
+                var token = ExpiredOptionBacktestService.StrikeToken(i - StrikeBandSteps);
+                var points = await FetchPointsAsync(token, ce ? "CALL" : "PUT");
+                if (ce) ceResults[i] = points; else peResults[i] = points;
+            }
+        }
+
+        var cePoints = ceResults.SelectMany(p => p).ToList();
+        var pePoints = peResults.SelectMany(p => p).ToList();
         // Today, live: the backfill up to when it was taken, the live feed's minute bars from then on.
         if (_liveBars is not null && date == IstClock.Today() && !backfilledAt.IsEmpty)
         {
@@ -271,6 +296,14 @@ public sealed class OiReplayService
             cePoints = MergeTodayLive(cePoints, _liveBars.OptionPointsFrom(underlying, expiryFlag, "CE", from), from);
             pePoints = MergeTodayLive(pePoints, _liveBars.OptionPointsFrom(underlying, expiryFlag, "PE", from), from);
         }
+
+        // Every minute shows every strike in the band: a minute a strike has no reading for (an untraded minute, a gap in
+        // Dhan's answer) holds its last value - only ever an EARLIER reading, so nothing is seen before it happened.
+        // Today's running minute is left to the live feed.
+        var fillMinutes = spotBars1m.Select(b => (b.Time, b.Close)).ToList();
+        if (date == IstClock.Today() && fillMinutes.Count > 0) fillMinutes.RemoveAt(fillMinutes.Count - 1);
+        cePoints = CarryForward(cePoints, fillMinutes, step, StrikeBandSteps);
+        pePoints = CarryForward(pePoints, fillMinutes, step, StrikeBandSteps);
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
@@ -372,6 +405,39 @@ public sealed class OiReplayService
             r => r.Bars.Count > 0, cancellationToken, TodayWindow);
         if (liveBars.Count > 0) backfilledAt?.Invoke(fetchedAt);
         return liveBars.Count > 0 ? liveBars : storedBars;
+    }
+
+    /// <summary>`points` with a point at every spot minute for every strike within `bandSteps` strikes of that minute's
+    /// ATM that has had a reading earlier in the day but none in that minute: its last reading carried forward (same
+    /// OI, IV and premium, no volume). Strikes never seen yet, and strikes outside the band, get nothing.</summary>
+    internal static List<OiReplayPoint> CarryForward(IReadOnlyList<OiReplayPoint> points, IReadOnlyList<(DateTimeOffset Time, decimal Close)> spotMinutes, decimal step, int bandSteps)
+    {
+        if (points.Count == 0 || spotMinutes.Count == 0 || step <= 0) return points.ToList();
+        static long MinuteOf(DateTimeOffset t) => t.ToUnixTimeSeconds() / 60;
+        var readings = points.OrderBy(p => p.Time).ToList();
+        var next = 0;
+        var last = new Dictionary<decimal, OiReplayPoint>();
+        var result = new List<OiReplayPoint>(points);
+        long? previousMinute = null;
+        foreach (var (time, close) in spotMinutes.OrderBy(m => m.Time))
+        {
+            var minute = MinuteOf(time);
+            if (minute == previousMinute) continue;
+            previousMinute = minute;
+            // Readings up to and including this minute first (one that came in between two spot minutes counts too).
+            while (next < readings.Count && MinuteOf(readings[next].Time) <= minute) { last[readings[next].Strike] = readings[next]; next++; }
+            var atm = Math.Round(close / step, MidpointRounding.AwayFromZero) * step;
+            for (var k = -bandSteps; k <= bandSteps; k++)
+            {
+                var strike = atm + k * step;
+                if (!last.TryGetValue(strike, out var prev) || MinuteOf(prev.Time) == minute) continue;
+                var carried = new OiReplayPoint(DateTimeOffset.FromUnixTimeSeconds(minute * 60).ToOffset(time.Offset), strike, prev.OpenInterest,
+                    prev.ImpliedVolatility, prev.Price, prev.Price, prev.Price, prev.Price, 0);
+                result.Add(carried);
+                last[strike] = carried;
+            }
+        }
+        return result.OrderBy(p => p.Time).ThenBy(p => p.Strike).ToList();
     }
 
     /// <summary>Today's points: the backfill's before the minute it was taken (`from`), the live feed's minute bars
