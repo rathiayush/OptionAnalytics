@@ -21,6 +21,8 @@ import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaul
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
+import { LoadProgressPanel } from './LoadProgressPanel.jsx'
+import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
@@ -2963,6 +2965,10 @@ export default function OiReplayPage() {
   }
 
   const [loading, setLoading] = useState(false)
+  // The current / last day load's id - the server records what that load is doing under it, and the progress panel
+  // below shows it live (every Dhan call, from disk or not, rate-limited, retried, failed).
+  const [loadProgressId, setLoadProgressId] = useState(null)
+  const loadProgress = useLoadProgress(loadProgressId, loading)
   // "Force fetch from Dhan": the next Load day skips every saved copy of the day (the server's Dhan cache, its stored database) and asks Dhan
   // afresh - what comes back is written over the cache. One-shot: it unticks itself when that load has finished.
   const [forceFetch, setForceFetch] = useState(false)
@@ -3349,6 +3355,8 @@ export default function OiReplayPage() {
     // history would be for the WRONG expiry, so it's discarded below and the CE/PE series instead
     // start empty, filled in going forward purely by this page's own live ticks for the ACTUAL picked
     // expiry - less convenient than a full day's history, but never wrong data.
+    const progressId = newLoadProgressId()
+    setLoadProgressId(progressId)
     const requestFlag = effectiveLive ? (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK') : expiryFlag
     const usesRunsCePeData = !effectiveLive || liveExpiryFlag === 'N1'
     // forceLive for today: this page's own "today, live" mode has no scenario where preferring
@@ -3366,6 +3374,7 @@ export default function OiReplayPage() {
       ...(effectiveIsToday ? { forceLive: 'true' } : {}),
       // Clear cache: the server drops today's held backfill of this index and asks Dhan afresh.
       ...(refresh ? { refresh: 'true' } : {}),
+      progressId,
       ...(forceFetch ? { forceFetch: 'true' } : {}),
     })
     const timeoutId = setTimeout(() => controller.abort('timeout'), LOAD_TIMEOUT_MS)
@@ -4992,6 +5001,31 @@ export default function OiReplayPage() {
             )}
             {isLive && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
+            {!loading && loadProgress && (
+              <details style={{ margin: '4px 0 8px' }}>
+                <summary style={{ cursor: 'pointer', fontSize: 12 }}>
+                  Last load: {loadProgress.error ? 'failed' : 'done'} in {loadProgress.elapsedSeconds}s · {loadProgress.dhanCalls} Dhan calls · {loadProgress.fromDisk} from disk
+                  {loadProgress.rateLimited > 0 ? ` · ${loadProgress.rateLimited} rate-limited` : ''}{loadProgress.failed > 0 ? ` · ${loadProgress.failed} failed` : ''}
+                </summary>
+                <div style={{ marginTop: 6 }}><LoadProgressPanel progress={loadProgress} height={260} /></div>
+              </details>
+            )}
+            {loading && (
+              <Alert
+                type="info"
+                showIcon
+                message="Loading…"
+                description={
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    <LoadProgressPanel progress={loadProgress} />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Days already loaded once come from disk; the rest is asked of Dhan at up to 5 calls a second. Gives up after {LOAD_TIMEOUT_MS / 1000}s.
+                    </Text>
+                    <Button size="small" onClick={cancelLoad}>Cancel</Button>
+                  </Space>
+                }
+              />
+            )}
           </Space>
         </Card>
 
@@ -5547,26 +5581,6 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
           </>
-        )}
-
-        {loading && (
-          <Card size="small">
-            <Alert
-              type="info"
-              showIcon
-              message="Loading…"
-              description={
-                <Space direction="vertical" size={8}>
-                  <Text>
-                    Fetching each strike's OI/IV history directly from Dhan (no local cache is configured on this server) -
-                    this can take up to 10-15 seconds for the full ATM±10 band, longer if Dhan itself is slow to respond right
-                    now. Will cancel itself and show an error after {LOAD_TIMEOUT_MS / 1000}s if nothing comes back.
-                  </Text>
-                  <Button size="small" onClick={cancelLoad}>Cancel</Button>
-                </Space>
-              }
-            />
-          </Card>
         )}
 
         {!result && !loading && (

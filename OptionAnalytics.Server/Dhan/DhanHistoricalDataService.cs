@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using System.Globalization;
 using System.Net;
 using System.Text.Json;
@@ -107,6 +108,9 @@ public sealed class DhanHistoricalDataService
             // MaxRateLimitRetries times, after 0.5 / 1 / 2 s - instead of failing the spot / futures of a day load.
             if (response.Success || attempt >= MaxRateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage))
                 return (response, null);
+            LoadProgress.RateLimited();
+            LoadProgress.Retry();
+            LoadProgress.Warn($"⚠ Dhan rate limit on {context} - {response.ErrorMessage} - retry {attempt + 1}/{MaxRateLimitRetries} in {0.5 * (1 << attempt):0.0} s");
             response.Dispose();
             _rateLimiter.NoteRateLimited();
             _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - retrying.", context, attempt + 1, MaxRateLimitRetries);
@@ -287,12 +291,19 @@ public sealed class DhanHistoricalDataService
         LogLevel failureLevel, bool interactive, CancellationToken cancellationToken)
     {
         var (parts, ask) = DhanDayWindow.Plan(_cache, IntradayPath, key, fromDay, toDay);
-        if (ask is not { } span) return (parts, null);
+        if (ask is not { } span)
+        {
+            LoadProgress.FromDisk();
+            LoadProgress.Info($"{what}: from disk");
+            return (parts, null);
+        }
 
         // A day not kept yet may be in an older whole-window file of this very request: read, and its days kept.
         var whole = _cache?.TryGet(IntradayPath, payloadFor(fromDay, toDay), toDay);
         if (whole is not null)
         {
+            LoadProgress.FromDisk();
+            LoadProgress.Info($"{what}: from disk");
             foreach (var part in parts) part.Dispose();
             var kept = FromCache(whole);
             DhanDayWindow.Keep(_cache, IntradayPath, key, fromDay, toDay, kept.Root, AsIs, intervalMinutes);
@@ -304,16 +315,25 @@ public sealed class DhanHistoricalDataService
             return (parts, "Dhan is not authenticated");
         }
 
+        LoadProgress.DhanCall();
+        LoadProgress.Info($"→ Dhan: {what}, {span.From:dd MMM}{(span.To != span.From ? $"..{span.To:dd MMM}" : "")}");
+        var clock = System.Diagnostics.Stopwatch.StartNew();
         var (response, timeoutError) = await SendDataApiCallAsync(IntradayPath, payloadFor(span.From, span.To), $"{what}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd}", interactive, cancellationToken);
-        if (response is null) return (parts, timeoutError);
+        if (response is null)
+        {
+            LoadProgress.Error($"✗ Dhan: {what} - {timeoutError}");
+            return (parts, timeoutError);
+        }
         if (!response.Success)
         {
+            LoadProgress.Error($"✗ Dhan: {what} - {response.ErrorMessage ?? $"HTTP {(int)response.StatusCode}"}");
             _logger.Log(failureLevel, "Request for {What} ({From}..{To}) failed - {Error}", what, span.From, span.To, response.ErrorMessage);
             var error = string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage;
             response.Dispose();
             return (parts, error);
         }
         DhanDayWindow.Keep(_cache, IntradayPath, key, span.From, span.To, response.Root, AsIs, intervalMinutes);
+        LoadProgress.Ok($"✓ Dhan: {what} in {clock.Elapsed.TotalSeconds:0.0} s");
         parts.Add(response);
         return (parts, null);
     }

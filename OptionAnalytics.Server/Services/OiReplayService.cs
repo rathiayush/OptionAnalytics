@@ -220,6 +220,9 @@ public sealed class OiReplayService
         // The futures are asked for at the same time as the spot and the 42 option series, not after them: a past day's contract can
         // go Dhan -> NSE's archive (30 s) -> NSE's chart (20 s), and a slow NSE used to sit on top of the whole load. Past
         // FuturesBudget the page is shown without them, saying why.
+        LoadProgress.Stage("spot, futures and the option series");
+        LoadProgress.AddTotal(2 + 2 * (2 * StrikeBandSteps + 1));
+        LoadProgress.Info($"Loading {underlying} {date:dd MMM yyyy} ({expiryFlag}): spot, futures and {2 * (2 * StrikeBandSteps + 1)} option series (ATM±{StrikeBandSteps}, CE and PE).");
         var futuresClock = System.Diagnostics.Stopwatch.StartNew();
         var futuresTask = _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
             ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
@@ -228,6 +231,10 @@ public sealed class OiReplayService
         var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date) : null;
         var (spotBarsRaw, spotError) = fromFeed is not null ? (fromFeed, null) : await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
 
+        LoadProgress.Done(failed: spotBarsRaw.Count == 0);
+        if (fromFeed is not null) LoadProgress.Ok($"Spot: {spotBarsRaw.Count} bars from the live feed's memory (no Dhan call).");
+        else if (spotBarsRaw.Count > 0) LoadProgress.Ok($"Spot: {spotBarsRaw.Count} bars.");
+        else LoadProgress.Error($"Spot: nothing - {spotError ?? "no data"}");
         if (spotBarsRaw.Count == 0)
             return OiReplayResult.Failed(underlying, date, timeframe,
                 spotError ?? $"No stored spot data for {underlying} on {date:dd MMM yyyy} - has NiftyDataCollector backfilled this date yet?");
@@ -261,6 +268,9 @@ public sealed class OiReplayService
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
                         points.Add(new OiReplayPoint(bar.Bar.Time, strike, bar.OpenInterest, bar.ImpliedVolatility, bar.Bar.Close, bar.Bar.Open, bar.Bar.High, bar.Bar.Low, bar.Bar.Volume));
+                var label = $"{(drvOptionType == "CALL" ? "CE" : "PE")} {strikeToken}";
+                if (points.Count > 0) LoadProgress.Ok($"{label}: {points.Count} minutes");
+                else LoadProgress.Error($"{label}: nothing came back");
                 return points;
             }
             finally
@@ -269,13 +279,20 @@ public sealed class OiReplayService
             }
         }
 
+        async Task<List<OiReplayPoint>> CountedAsync(string strikeToken, string drvOptionType)
+        {
+            var points = await FetchPointsAsync(strikeToken, drvOptionType);
+            LoadProgress.Done(failed: points.Count == 0);
+            return points;
+        }
+
         var ceTasks = new List<Task<List<OiReplayPoint>>>();
         var peTasks = new List<Task<List<OiReplayPoint>>>();
         for (var steps = -StrikeBandSteps; steps <= StrikeBandSteps; steps++)
         {
             var token = ExpiredOptionBacktestService.StrikeToken(steps);
-            ceTasks.Add(FetchPointsAsync(token, "CALL"));
-            peTasks.Add(FetchPointsAsync(token, "PUT"));
+            ceTasks.Add(CountedAsync(token, "CALL"));
+            peTasks.Add(CountedAsync(token, "PUT"));
         }
         await Task.WhenAll(ceTasks.Concat(peTasks));
 
@@ -288,11 +305,15 @@ public sealed class OiReplayService
             var missing = Enumerable.Range(0, ceResults.Count).Where(i => ceResults[i].Count == 0).Select(i => (i, Ce: true))
                 .Concat(Enumerable.Range(0, peResults.Count).Where(i => peResults[i].Count == 0).Select(i => (i, Ce: false))).ToList();
             if (missing.Count == 0) break;
+            LoadProgress.Stage($"asking again for {missing.Count} empty series (round {round + 1} of {MissingSeriesRetryRounds})");
+            LoadProgress.Warn($"{missing.Count} series came back empty - asking again, one at a time (round {round + 1} of {MissingSeriesRetryRounds}).");
             await Task.Delay(MissingSeriesRetryDelay, cancellationToken);
             foreach (var (i, ce) in missing)
             {
                 var token = ExpiredOptionBacktestService.StrikeToken(i - StrikeBandSteps);
+                LoadProgress.Retry();
                 var points = await FetchPointsAsync(token, ce ? "CALL" : "PUT");
+                if (points.Count > 0) LoadProgress.Recovered();
                 if (ce) ceResults[i] = points; else peResults[i] = points;
             }
         }
@@ -317,6 +338,7 @@ public sealed class OiReplayService
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
+        LoadProgress.Stage("futures");
         var futuresLeft = FuturesBudget - futuresClock.Elapsed;
         var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
         var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = futuresDone
@@ -324,6 +346,9 @@ public sealed class OiReplayService
             : ((Array.Empty<FuturesBar>(), (DateOnly?)null, false,
                 $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (an expired contract's day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them."),
                DateTimeOffset.UtcNow);
+        LoadProgress.Done(failed: futuresBars.Count == 0);
+        if (futuresBars.Count > 0) LoadProgress.Ok($"Futures: {futuresBars.Count} bars ({futuresClock.Elapsed.TotalSeconds:0.0} s).");
+        else LoadProgress.Warn($"Futures: none - {futuresError ?? "no data"}");
         if (_liveBars is not null && date == IstClock.Today() && futuresBars.Count > 0)
         {
             var cutoff = futuresAt.ToUnixTimeSeconds() / 60 * 60;

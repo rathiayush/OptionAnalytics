@@ -122,6 +122,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
             var resume = _clock() + RateLimitPause;
             if (_nextSlot < resume) _nextSlot = resume;
         }
+        OptionAnalytics.Server.Services.LoadProgress.Warn($"⏸ Dhan said too many requests - every Dhan call pauses {RateLimitPause.TotalSeconds:0.0} s");
         _logger.LogWarning("Dhan answered \"too many requests\" - pausing every Data-API call for {Seconds} s.", RateLimitPause.TotalSeconds);
     }
 

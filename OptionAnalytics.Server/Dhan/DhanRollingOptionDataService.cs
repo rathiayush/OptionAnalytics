@@ -230,7 +230,13 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 chunkStart = chunkEnd.AddDays(1);
                 continue;
             }
+            var label = $"{(SideKey(drvOptionType) == "pe" ? "PE" : "CE")} {strike} ({expiryFlag})";
             foreach (var part in parts) using (part) all.AddRange(ParseSide(part.Root, drvOptionType));
+            if (ask is null)
+            {
+                LoadProgress.FromDisk();
+                LoadProgress.Info($"{label}: from disk");
+            }
             if (ask is { } span)
             {
                 if (!_api.HasSession)
@@ -242,9 +248,13 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 isFirstChunk = false;
 
                 var context = $"rolling option candles ({underlyingSecurityId}, {expiryFlag}+{expiryCode}, {strike} {drvOptionType}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd})";
+                LoadProgress.DhanCall();
+                LoadProgress.Info($"→ Dhan: {label}, {span.From:dd MMM}{(span.To != span.From ? $"..{span.To:dd MMM}" : "")}");
+                var clock = System.Diagnostics.Stopwatch.StartNew();
                 var (response, error) = await SendWithRateLimitRetryAsync(PayloadFor(span.From, span.To), context, cancellationToken, interactive);
                 if (response is null)
                 {
+                    LoadProgress.Error($"✗ Dhan: {label} - {error}");
                     _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
                         underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, span.From, span.To, error);
                     return (Ordered(all, fromDay, toDay), error);
@@ -259,7 +269,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                     // A day is kept once Dhan sent a full session of it - its own minutes, a thin strike's untraded ones
                     // (0 prices the parser drops) included - or a later past day (DhanDayWindow.Keep).
                     DhanDayWindow.Keep(_cache, RollingPath, key, span.From, span.To, SideOf(response.Root, drvOptionType), Wrap, intervalMinutes);
+                    var before = all.Count;
                     all.AddRange(ParseSide(response.Root, drvOptionType));
+                    LoadProgress.Ok($"✓ Dhan: {label} - {all.Count - before} bars in {clock.Elapsed.TotalSeconds:0.0} s");
                 }
             }
 
@@ -356,6 +368,9 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             response.Dispose();
 
             if (!isRateLimited || attempt >= MaxRateLimitRetries) return (null, error);
+            LoadProgress.RateLimited();
+            LoadProgress.Retry();
+            LoadProgress.Warn($"⚠ Dhan rate limit - {error} - retry {attempt + 1}/{MaxRateLimitRetries} in {RateLimitRetryDelay(attempt).TotalSeconds:0.0} s");
 
             _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.",
                 context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay(attempt));
