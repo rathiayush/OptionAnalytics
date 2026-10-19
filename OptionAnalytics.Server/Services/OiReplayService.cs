@@ -116,6 +116,11 @@ public sealed class OiReplayService
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
 
+    // Today's answers from Dhan, shared for a minute by every request (see TodayFetchShare).
+    private readonly TodayFetchShare _today = new();
+    private Task<T> ReuseTodayAsync<T>(string key, DateOnly date, Func<CancellationToken, Task<T>> fetch, Func<T, bool> keep, CancellationToken cancellationToken) =>
+        _today.ReuseAsync(key, date, IstClock.Today(), fetch, keep, cancellationToken);
+
     public OiReplayService(
         StoredSpotDataService storedSpot, StoredRollingOptionDataService storedRollingOption,
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
@@ -234,7 +239,8 @@ public sealed class OiReplayService
 
         var spotCandlesTf = BacktestUtil.AggregateCandles(spotBars1m, timeframe);
 
-        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await GetFuturesAsync(underlying, date, cancellationToken);
+        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError) = await ReuseTodayAsync($"fut|{underlying}", date,
+            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken);
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
             spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
@@ -320,8 +326,9 @@ public sealed class OiReplayService
         var instrument = await resolveInstrument();
         if (instrument is null) return storedBars;
 
-        var (liveBars, _) = await _rollingOption.GetRollingOptionCandlesAsync(
-            underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, cancellationToken);
+        var (liveBars, _) = await ReuseTodayAsync($"opt|{instrument.SecurityId}|{expiryFlag}|{strikeToken}|{drvOptionType}", date,
+            ct => _rollingOption.GetRollingOptionCandlesAsync(underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, ct),
+            r => r.Bars.Count > 0, cancellationToken);
         return liveBars.Count > 0 ? liveBars : storedBars;
     }
 
@@ -358,8 +365,9 @@ public sealed class OiReplayService
             var liveInstrument = await resolveInstrument();
             if (liveInstrument is not null)
             {
-                var (liveSpotBars, liveSpotError) = await _historicalData.GetIntradayCandlesAsync(
-                    liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, cancellationToken);
+                var (liveSpotBars, liveSpotError) = await ReuseTodayAsync($"spot|{liveInstrument.SecurityId}", date,
+                    ct => _historicalData.GetIntradayCandlesAsync(liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, ct),
+                    r => r.Candles.Count > 0, cancellationToken);
                 // Only trust the live call over whatever's already stored if it actually found
                 // something - a live error (auth, market holiday) should never blank out a
                 // perfectly good, merely slightly-stale stored result.
