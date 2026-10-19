@@ -113,6 +113,11 @@ public sealed record OiReplayResult(
     /// shown on the page instead of an empty chart with no explanation.</summary>
     string? FuturesError)
 {
+    /// <summary>The day's session VWAP off the spot's own index volume (VwapCalculator, one point per 1-minute bar
+    /// from the first with volume) - so a past day shows VWAP like today does. Empty when the spot carried no volume
+    /// (a day before Dhan sent index volume, or one read from the stored database).</summary>
+    public IReadOnlyList<ObvPoint> SpotVwap { get; init; } = Array.Empty<ObvPoint>();
+
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);

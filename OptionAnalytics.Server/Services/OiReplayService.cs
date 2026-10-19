@@ -332,7 +332,10 @@ public sealed class OiReplayService
         }
 
         return new OiReplayResult(true, null, underlying, date, timeframe, step, expiryFlag, NearestExpiryCode,
-            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError);
+            spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
+        {
+            SpotVwap = VwapCalculator.ComputeSeries(spotBarsRaw),
+        };
     }
 
     /// <summary>The day's futures contract, OHLC + (best-effort) OI - ALWAYS a live Dhan call, per
