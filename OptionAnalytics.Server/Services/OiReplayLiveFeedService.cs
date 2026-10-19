@@ -56,12 +56,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// that loop is about keeping the SUBSCRIBED strike band/legs correct, this one is purely about
     /// OI/price freshness for whichever strikes are already tracked. 30 seconds comfortably clears
     /// DhanOptionChainQuotes' own "one call every 3.5s per underlying/expiry" self-throttle (one call
-    /// per combo per cycle, 5 combos, nowhere near Dhan's account-wide 5/sec, 100k/day Data-API cap),
-    /// so this always runs - there is no per-client toggle server-side; the frontend's own toggle
-    /// only decides whether to PREFER this broadcast over the live tick feed's own OI, never whether
-    /// the server bothers fetching it (broadcasting to Clients.All whether or not anyone is currently
-    /// listening is the same "server doesn't track per-client interest" shape every other event on
-    /// this hub already uses).</summary>
+    /// per combo per cycle). Only for a combo a page is watching, in market hours (see ShouldPollChain) -
+    /// the page reads just the IV from it (the live tick feed has none); price and OI come from the feed.</summary>
     private static readonly TimeSpan RestQuoteInterval = TimeSpan.FromSeconds(30);
 
     /// <summary>Same width as OiReplayService.StrikeBandSteps - the live band must match the
@@ -332,8 +328,22 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         return combos;
     }
 
+    /// <summary>Whether the IV snapshot (Dhan's Option Chain API) is worth asking for one combo now: only in market hours
+    /// (IST weekdays 09:15 - 15:30 - outside them IV does not move and Dhan answers nothing new) and only while a page is
+    /// watching that combo (its "c:" group has a member) - the snapshot only feeds an open page's IV. It used to be asked
+    /// for every index and expiry (~18 chains) all day and night, one call every 3.5 s without end.</summary>
+    internal static bool ShouldPollChain(DateTimeOffset now, bool watched)
+    {
+        if (!watched) return false;
+        var ist = now.ToOffset(IstClock.Offset);
+        if (ist.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
+        return ist.TimeOfDay >= new TimeSpan(9, 15, 0) && ist.TimeOfDay <= new TimeSpan(15, 30, 0);
+    }
+
     private async Task BroadcastRestQuotesAsync(Combo combo, CancellationToken cancellationToken)
     {
+        if (!ShouldPollChain(DateTimeOffset.UtcNow, _batcher.HasMembers($"c:{combo.Underlying}:{combo.ExpiryFlag}")))
+            return;
         if (!_spotFeed.States.TryGetValue(combo.Underlying, out var spotState) || spotState.Instrument is null)
             return;
 

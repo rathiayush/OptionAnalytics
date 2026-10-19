@@ -90,3 +90,21 @@ public class TodayLiveBarsTests
         Assert.Equal(3, OiReplayService.MergeTodayLive(backfill, Array.Empty<OiReplayPoint>(), Open.AddMinutes(2)).Count);
     }
 }
+
+public class OptionChainPollTests
+{
+    private static DateTimeOffset Ist(int day, int hour, int minute) => new(2026, 10, day, hour, minute, 0, IstClock.Offset);
+
+    [Fact]
+    public void The_chain_is_asked_only_for_a_watched_combo_in_market_hours()
+    {
+        Assert.True(OiReplayLiveFeedService.ShouldPollChain(Ist(19, 10, 0), watched: true));
+        // Nobody watching: no call.
+        Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(19, 10, 0), watched: false));
+        // Before the open, after the close, at night and at the weekend: no call.
+        Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(19, 9, 0), watched: true));
+        Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(19, 15, 45), watched: true));
+        Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(19, 22, 0), watched: true));
+        Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(18, 11, 0), watched: true)); // Sunday
+    }
+}
