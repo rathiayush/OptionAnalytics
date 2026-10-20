@@ -22,6 +22,7 @@ import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
+import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -672,6 +673,7 @@ const SECTION_OPTIONS = [
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
+  { value: 'optionFlow', label: 'Option CDV / OBV (past days)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -683,7 +685,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -5436,6 +5438,23 @@ export default function OiReplayPage() {
                             />
                           </ChartErrorBoundary>
                         )}
+                  </Card>
+                </Col>
+              </Row>
+              </LiveSection>
+            )}
+
+            {/* The dashboard's option CDV / OBV for a replayed day - worked out from the day's own option bars, up to the
+                replay clock. Not while live: the dashboard has today's from the live feed. */}
+            {visibleSections.includes('optionFlow') && !isLive && (
+              <LiveSection version={sectionVersion}>
+              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('optionFlow')}>
+                <Col span={24}>
+                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard)</Space>}>
+                    <OptionFlowCard
+                      cePoints={result.cePoints} pePoints={result.pePoints} spotBars={result.spotCandlesOneMinute}
+                      endTime={replayEndTime} dayKey={`${underlying}-${result.date}`}
+                    />
                   </Card>
                 </Col>
               </Row>
