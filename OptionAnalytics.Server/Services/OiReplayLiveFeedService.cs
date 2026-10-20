@@ -531,7 +531,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             var optionTick = new LiveOptionTick(
                 leg.Underlying, leg.ExpiryFlag, leg.Strike, side,
                 Open: tick.LastPrice, Price: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice,
-                OpenInterest: tick.OpenInterest, Time: observedAt);
+                OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume);
             _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
             // Each leg's newest reading, in memory - a page reads an index's current option prices from it, no Dhan call.
             // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService); the newest reading for every leg.
@@ -595,10 +595,11 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
 /// <summary>One option leg's conflated live state - the newest reading, plus the open/high/low of
 /// every tick folded into it since the browser last received this leg (see LiveBroadcastBatcher).
-/// Only what the charts use; the full Dhan packet stays on the raw "t:" tape.</summary>
+/// Only what the charts use; the full Dhan packet stays on the raw "t:" tape. DayVolume: Dhan's cumulative volume for
+/// the day (0 unknown) - the page turns its rise within a minute into that minute's volume (option CDV / OBV).</summary>
 public sealed record LiveOptionTick(
     string Underlying, string ExpiryFlag, decimal Strike, string Side,
-    decimal Open, decimal Price, decimal High, decimal Low, long OpenInterest, DateTimeOffset Time) : ILiveMergeable
+    decimal Open, decimal Price, decimal High, decimal Low, long OpenInterest, DateTimeOffset Time, long DayVolume = 0) : ILiveMergeable
 {
     public ILiveMergeable MergeAfter(ILiveMergeable older) => older is LiveOptionTick o
         ? this with { Open = o.Open, High = Math.Max(o.High, High), Low = Math.Min(o.Low, Low) }

@@ -70,3 +70,13 @@ test('the EMA is seeded like the server (raw before 9 values, then SMA, then EMA
   assert.equal(out[8], 5)
   assert.ok(Math.abs(out[9] - (10 * 0.2 + 5 * 0.8)) < 1e-12)
 })
+
+test('live: the run\'s bars and the live minutes together - a later point of the same strike and minute replaces it, keeping the larger volume', () => {
+  const b = (m, close, volume) => bar(m, 24000, { open: 100, high: 110, low: 100, close, volume })
+  // The run has minutes 0-1 (minute 1 only partly seen), the live feed minute 1 again (newer price, its own part) and 2.
+  const run = [b(0, 110, 1000), b(1, 105, 600)]
+  const live = [b(1, 110, 400), b(2, 110, 1000)]
+  const flow = optionFlowSeries([...run, ...live], [], spot([24000, 24000, 24000]))
+  // Minute 1: the live point's close (110, all buying) with the run's larger 600 - not both bars counted.
+  assert.deepEqual(flow.ceCdv.map((p) => p.value), [500, 800, 1300])
+})

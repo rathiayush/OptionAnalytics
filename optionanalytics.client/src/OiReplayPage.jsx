@@ -281,15 +281,21 @@ function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_
     const tickLow = Number.isFinite(tick.low) ? tick.low : tick.price
     const idx = lastIndex.get(tick.strike)
     const last = idx != null ? next[idx] : null
+    // The minute's volume from Dhan's cumulative day volume, as the futures do (mergeLiveFuturesTicks): its rise since
+    // the minute began - dayVolumeOpen is the strike's previous live minute's last figure, else this minute's first.
+    const dayVolume = tick.dayVolume > 0 ? tick.dayVolume : null
     if (last && Math.floor(pointMs(last) / slotMs) === Math.floor(ms / slotMs)) {
       const high = Number.isFinite(last.high) ? Math.max(last.high, tickHigh) : tickHigh
       const low = Number.isFinite(last.low) ? Math.min(last.low, tickLow) : tickLow
-      next[idx] = { ...last, time: tick.time, ms, openInterest: tick.openInterest, price: tick.price, high, low }
+      const volume = dayVolume != null && last.dayVolumeOpen != null ? Math.max(0, dayVolume - last.dayVolumeOpen) : last.volume
+      next[idx] = { ...last, time: tick.time, ms, openInterest: tick.openInterest, price: tick.price, high, low, volume, dayVolume: dayVolume ?? last.dayVolume }
     } else if (!last || ms >= pointMs(last)) {
+      const dayVolumeOpen = dayVolume == null ? null : last?.dayVolume ?? dayVolume
       next.push({
         time: tick.time, ms, strike: tick.strike, openInterest: tick.openInterest,
         impliedVolatility: ivByStrike?.get(tick.strike) ?? last?.impliedVolatility ?? null,
         price: tick.price, open: Number.isFinite(tick.open) ? tick.open : tick.price, high: tickHigh, low: tickLow,
+        volume: dayVolume != null ? Math.max(0, dayVolume - dayVolumeOpen) : null, dayVolume, dayVolumeOpen,
       })
       lastIndex.set(tick.strike, next.length - 1)
     }
@@ -673,7 +679,7 @@ const SECTION_OPTIONS = [
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
-  { value: 'optionFlow', label: 'Option CDV / OBV (past days)' },
+  { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -3526,6 +3532,11 @@ export default function OiReplayPage() {
     () => groupByStrike(isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
     [result, livePePoints, isLive],
   )
+  // The option CDV / OBV card's inputs: the run's option bars plus (live) each live minute - later points of the same
+  // strike and minute win - and the spot the page shows (the run's 1-minute bars plus the live tail).
+  const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
+  const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
+  const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
 
   // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
   // own onStrikeClick), answering the "how can I see per-minute OI change AND total OI for one
@@ -5444,15 +5455,15 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
-            {/* The dashboard's option CDV / OBV for a replayed day - worked out from the day's own option bars, up to the
-                replay clock. Not while live: the dashboard has today's from the live feed. */}
-            {visibleSections.includes('optionFlow') && !isLive && (
+            {/* The dashboard's option CDV / OBV - worked out from the day's own option bars: a replayed day up to the
+                replay clock, today live (the backfill plus every live tick's minute, ticking). */}
+            {visibleSections.includes('optionFlow') && (
               <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('optionFlow')}>
                 <Col span={24}>
-                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard)</Space>}>
+                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}>
                     <OptionFlowCard
-                      cePoints={result.cePoints} pePoints={result.pePoints} spotBars={result.spotCandlesOneMinute}
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
                       endTime={replayEndTime} dayKey={`${underlying}-${result.date}`}
                     />
                   </Card>
