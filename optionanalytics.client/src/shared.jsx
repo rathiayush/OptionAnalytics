@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
+import { reconcileCardOrder } from './cardOrder.js'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -458,20 +459,18 @@ export function usePersistedState(key, fallback) {
 // Deliberately reconciles against a stale persisted order rather than trusting it outright: a page
 // that later adds or removes a card must not end up silently dropping the new one (it would never
 // render at all) or keeping a ghost id around forever from before a card was removed. A newly added
-// card is appended at the end - the least surprising place for something that wasn't part of
-// whatever arrangement was saved.
+// card goes where the page puts it by default - after the card before it in `cardIds` - rather than at
+// the very end, where it was easy to miss on a long page (reconcileCardOrder).
 export function useCardOrder(storageKey, cardIds) {
   const [storedOrder, setStoredOrder] = usePersistedState(storageKey, cardIds)
   const dragIdRef = useRef(null)
   const [dragOverId, setDragOverId] = useState(null)
 
-  const order = useMemo(() => {
-    const known = new Set(cardIds)
-    const kept = storedOrder.filter((id) => known.has(id))
-    const missing = cardIds.filter((id) => !kept.includes(id))
-    return [...kept, ...missing]
+  const order = useMemo(
+    () => reconcileCardOrder(storedOrder, cardIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storedOrder, cardIds.join(',')])
+    [storedOrder, cardIds.join(',')],
+  )
 
   const dragHandleProps = (id) => ({
     draggable: true,
