@@ -23,6 +23,7 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
+import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -675,6 +676,7 @@ const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 const SECTION_OPTIONS = [
   { value: 'topStats', label: 'Top stats' },
   { value: 'marketRead', label: 'Market Read' },
+  { value: 'entryChecklist', label: 'Entry checklist' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
@@ -691,7 +693,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -3537,6 +3539,8 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
+  // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
+  const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
 
   // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
   // own onStrikeClick), answering the "how can I see per-minute OI change AND total OI for one
@@ -5118,6 +5122,19 @@ export default function OiReplayPage() {
                     Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself. IV skew is read as a CHANGE since the open, not its raw level - index options almost always price puts richer than calls (a permanent structural premium, not a daily sentiment signal), so only the trend is informative.
                   </Text>
                 </Space>
+              </Card>
+              </LiveSection>
+            )}
+
+            {/* Which of a good option-buying entry's usual conditions hold at the replay clock (or now, live) - CE and PE. */}
+            {visibleSections.includes('entryChecklist') && (
+              <LiveSection version={sectionVersion}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('entryChecklist')} />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>} {...orderedDropProps('entryChecklist')}>
+                <EntryChecklistCard
+                  asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
+                  spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
+                  step={step} profile={volumeProfile}
+                />
               </Card>
               </LiveSection>
             )}
