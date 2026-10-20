@@ -317,6 +317,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Se
 builder.Services.AddSingleton<OiDivergenceMonitor>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonitor>());
 builder.Services.AddSingleton<LiveOptionLegStore>();
+// What each OI Replay day load is doing, for the page's progress panel (GET /api/oi-replay/progress/{id}).
+builder.Services.AddSingleton<LoadProgressStore>();
 // Today ready for every index before anyone switches to it - see TodayWarmupService.
 builder.Services.AddHostedService<TodayWarmupService>();
 builder.Services.AddHostedService<OiReplayLiveFeedService>();

@@ -14,13 +14,22 @@ public sealed class OiReplayController : ControllerBase
     private readonly OiReplayService _service;
     private readonly DhanOptionChainMaster _optionChainMaster;
     private readonly LiveOptionLegStore? _legs;
+    private readonly LoadProgressStore? _progress;
 
-    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, LiveOptionLegStore? legs = null)
+    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, LiveOptionLegStore? legs = null, LoadProgressStore? progress = null)
     {
         _service = service;
         _optionChainMaster = optionChainMaster;
         _legs = legs;
+        _progress = progress;
     }
+
+    /// <summary>What a day load started with ?progressId= is doing - the page polls this while it waits: series done of
+    /// the total, how many came from disk or from Dhan, rate limits, retries and failures, and the log entries after
+    /// the first <paramref name="since"/>.</summary>
+    [HttpGet("progress/{id}")]
+    public ActionResult Progress(string id, [FromQuery] int since = 0) =>
+        _progress?.Get(id) is { } progress ? Ok(progress.Snapshot(since)) : NotFound();
 
     /// <summary>Today's newest live reading of each option leg of one chain (index + expiry flag N1, N2 ...) - from
     /// the live feed's memory (LiveOptionLegStore), never a Dhan call, so a page can poll it freely. Empty before
@@ -50,11 +59,24 @@ public sealed class OiReplayController : ControllerBase
         [FromQuery] bool refresh = false,
         // Opt-in: skip the saved days (the Dhan day cache, the stored database), ask Dhan for the whole day afresh and write
         // what comes back over the cache - the OI Replay page's "Force fetch from Dhan".
-        [FromQuery] bool forceFetch = false)
+        [FromQuery] bool forceFetch = false,
+        // The page's own id for this load - its progress is then readable at GET progress/{id} while it runs.
+        [FromQuery] string? progressId = null)
     {
+        var progress = !string.IsNullOrWhiteSpace(progressId) && progressId.Length <= 64 ? _progress?.Start(progressId) : null;
+        using var recording = LoadProgress.Use(progress);
         if (refresh) _service.RefreshToday(underlying);
-        var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive, forceFetch);
-        return Ok(result);
+        try
+        {
+            var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive, forceFetch);
+            progress?.Finish(result.Success ? null : result.Error);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            progress?.Finish(ex is OperationCanceledException ? "cancelled" : ex.Message);
+            throw;
+        }
     }
 
     /// <summary>The previous trading day's volume profile (POC/VAH/VAL/HVN/LVN) relative to

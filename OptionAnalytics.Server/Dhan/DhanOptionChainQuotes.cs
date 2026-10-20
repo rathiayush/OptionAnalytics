@@ -46,10 +46,15 @@ public sealed class DhanOptionChainQuotes
 
     private DateTimeOffset _lastCallAt = DateTimeOffset.MinValue;
 
-    public DhanOptionChainQuotes(DhanApiClient api, ILogger<DhanOptionChainQuotes> logger)
+    private readonly DhanDataApiRateLimiter? _rateLimiter;
+
+    /// <param name="rateLimiter">The shared Data-API limiter - each Option Chain call also takes a slot there, so it
+    /// never goes out on top of the other Data-API calls' 5 a second.</param>
+    public DhanOptionChainQuotes(DhanApiClient api, ILogger<DhanOptionChainQuotes> logger, DhanDataApiRateLimiter? rateLimiter = null)
     {
         _api = api;
         _logger = logger;
+        _rateLimiter = rateLimiter;
     }
 
     /// <summary>Every strike's CE/PE quote for one underlying/expiry, or an EMPTY list whenever the
@@ -97,12 +102,14 @@ public sealed class DhanOptionChainQuotes
                 Expiry = expiry.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             };
 
+            if (_rateLimiter is not null) await _rateLimiter.WaitForPermitAsync(true, cancellationToken);
             _lastCallAt = DateTimeOffset.UtcNow;
             using var response = await _api.SendAsync(HttpMethod.Post, "/optionchain", payload,
                 $"option chain quotes ({underlyingSegment}:{underlyingSecurityId}, {expiry:yyyy-MM-dd})", cancellationToken);
 
             if (!response.Success)
             {
+                if (DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage)) _rateLimiter?.NoteRateLimited();
                 // Debug, not Warning: this is an optional decoration, and the most common failure
                 // (called again inside the 3-second window, or outside market hours) is expected.
                 _logger.LogDebug("Option chain quotes unavailable for {Segment}:{Id} {Expiry} - {Error}",
