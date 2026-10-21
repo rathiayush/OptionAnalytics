@@ -80,3 +80,18 @@ test('live: the run\'s bars and the live minutes together - a later point of the
   // Minute 1: the live point's close (110, all buying) with the run's larger 600 - not both bars counted.
   assert.deepEqual(flow.ceCdv.map((p) => p.value), [500, 800, 1300])
 })
+
+test('smoothLine: EMA(9) as the Pine plots CDV - a prefix smooths the same as the whole, so a replay cut sees nothing early', async () => {
+  const { smoothLine, smoothEma } = await import('../src/optionFlow.js')
+  const series = Array.from({ length: 30 }, (_, i) => ({ time: 1_000 + i * 60, value: (i % 2 ? 5 : -5) + i }))
+  const whole = smoothLine(series)
+  assert.deepEqual(smoothLine(series.slice(0, 17)), whole.slice(0, 17))
+  assert.deepEqual(whole.map((p) => p.value), smoothEma(series.map((p) => p.value), 9))
+  assert.deepEqual(whole.map((p) => p.time), series.map((p) => p.time))
+  // The zig-zag of +-5 around the trend is mostly gone once the EMA has seeded: much smaller minute-to-minute steps.
+  const meanStep = (vals) => {
+    const tail = vals.slice(10)
+    return tail.slice(1).reduce((sum, v, i) => sum + Math.abs(v - tail[i]), 0) / (tail.length - 1)
+  }
+  assert.ok(meanStep(whole.map((p) => p.value)) < meanStep(series.map((p) => p.value)) / 3)
+})
