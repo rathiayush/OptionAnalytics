@@ -4112,9 +4112,12 @@ export default function OiReplayPage() {
   // entry checklist show it in place of the minute-bar estimate; null / unavailable -> they keep their own.
   const dashboardFlowState = useDashboardFlow(underlying, typeof liveExpiryDate === 'string' ? liveExpiryDate.slice(0, 10) : null, isLive)
   const dashboardFlow = dashboardFlowState?.status === 'ok' ? dashboardFlowState.flow : null
-  const flowSourceNote = !isLive ? null
-    : dashboardFlow ? "Live: the dashboard's own numbers (every tick classified), updating every 2 s."
-      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard has no CDV for this expiry - worked out from the minute bars instead." : null
+  // The dashboard's CDV / OBV sum its ATM±16 window (16 ITM + 16 OTM, CE and PE - CdvHostedService.StrikeRange); the
+  // replayed day's own bars are ATM±10, as far as Dhan's expired-option data goes (rolling option: ATM-10..ATM+10).
+  const flowBand = dashboardFlow ? 16 : 10
+  const flowSourceNote = !isLive ? "ATM±10: Dhan's data for a past day's options stops at 10 strikes either side of ATM (live uses the dashboard's ATM±16)."
+    : dashboardFlow ? "Live: the dashboard's own numbers - ATM±16 (16 ITM + 16 OTM), every tick classified, updating every 2 s."
+      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard has no CDV for this expiry - worked out from the minute bars instead (ATM±10)." : null
   const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
     : !isLive ? "Live orders need today's live view - press Go Live." : null
 
@@ -5487,7 +5490,7 @@ export default function OiReplayPage() {
               <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('optionFlow')}>
                 <Col span={24}>
-                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}>
+                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±{flowBand}, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}>
                     <OptionFlowCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
                       endTime={isLive && dashboardFlow ? null : replayEndTime} dayKey={`${underlying}-${result.date}`}
