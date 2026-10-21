@@ -14,13 +14,22 @@
 //    spiked tends to lose to the IV falling back);
 //  - time: between 09:30 and 14:45 IST (not the opening whipsaw, not the last stretch where theta and the square-off bite).
 //
-// A check without the data to judge it is `null` (shown as unknown), never a pass. It is a checklist, not a signal: it
-// places nothing and alerts nothing.
+// A check without the data to judge it is `null` (shown as unknown), never a pass. Only the session of `asOfMs`'s day
+// counts (09:15 on): before it - the index's pre-open prints, yesterday's VWAP, no option data yet - there is nothing to
+// judge, and the result says when the session opens. It is a checklist, not a signal: it places nothing and alerts
+// nothing.
 
 import { optionFlowSeries } from './optionFlow.js'
 
 const MIN = 60_000
+const DAY = 24 * 60 * MIN
 const IST_OFFSET_MS = 330 * MIN
+const SESSION_OPEN_MIN = 9 * 60 + 15
+
+/** 09:15 IST of the IST day `ms` falls in (epoch ms). */
+export function sessionOpenMs(ms) {
+  return Math.floor((ms + IST_OFFSET_MS) / DAY) * DAY - IST_OFFSET_MS + SESSION_OPEN_MIN * MIN
+}
 
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
@@ -87,14 +96,17 @@ const fmtM = (n) => `${n >= 0 ? '+' : ''}${(n / 1e6).toFixed(2)}M`
  * empty), the CE / PE option points (the OI Replay run's - time, strike, openInterest, impliedVolatility, price,
  * open / high / low / volume), the strike step, the previous day's volume profile (`{ poc, vah, val, hvn, lvn }`) and
  * optionally a precomputed `flow` (optionFlowSeries of the same points). Times are ISO strings or epoch ms.
- * Returns `{ spot, atm, ce, pe }` - each side `{ checks: [{ key, label, pass, detail }], passed, judged, strikes }`.
+ * Returns `{ spot, atm, ce, pe }` - each side `{ checks: [{ key, label, pass, detail }], passed, judged, strikes }` - or
+ * `{ waiting: true, opensAt }` before the session's first minute (null without spot or a strike step).
  */
 export function entryChecklist({
   asOfMs, spotBars, vwap = [], cePoints, pePoints, step, profile = null, flow = null,
   ceIndex = null, peIndex = null, windowMin = 15, wallShare = 0.8, wallProminence = 1.5, levelTolerance = 0.0015, ivStretch = 1.1,
 }) {
-  const spots = (spotBars ?? []).map((b) => ({ ms: msOf(b.time), close: b.close })).filter((b) => b.ms <= asOfMs && b.close > 0)
-  if (spots.length === 0 || !(step > 0)) return null
+  if (!(step > 0) || !(spotBars?.length)) return null
+  const open = sessionOpenMs(asOfMs)
+  const spots = spotBars.map((b) => ({ ms: msOf(b.time), close: b.close })).filter((b) => b.ms >= open && b.ms <= asOfMs && b.close > 0)
+  if (spots.length === 0) return { waiting: true, opensAt: open }
   const spot = spots.at(-1).close
   const atm = Math.round(spot / step) * step
   const fromMs = asOfMs - windowMin * MIN
@@ -102,7 +114,7 @@ export function entryChecklist({
   const pe = peIndex ?? indexByStrike(pePoints)
 
   // Direction: VWAP, else EMA(20) of the closes so far.
-  const vwapNow = (vwap ?? []).map((p) => ({ ms: msOf(p.time), value: p.value })).filter((p) => p.ms <= asOfMs && p.value > 0).at(-1)?.value
+  const vwapNow = (vwap ?? []).map((p) => ({ ms: msOf(p.time), value: p.value })).filter((p) => p.ms >= open && p.ms <= asOfMs && p.value > 0).at(-1)?.value
   const reference = vwapNow ?? (spots.length >= 5 ? ema(spots.map((b) => b.close), 20) : null)
   const refName = vwapNow != null ? 'VWAP' : 'EMA20'
   const direction = (side) => {
@@ -160,7 +172,7 @@ export function entryChecklist({
   const nearest = levels.map(([name, price]) => ({ name, price, away: Math.abs(spot - price) })).sort((a, b) => a.away - b.away)[0]
   const tolerance = spot * levelTolerance
   const location = nearest
-    ? { pass: nearest.away <= tolerance, detail: `${nearest.away <= tolerance ? 'at' : 'nearest'} previous-day ${nearest.name} ${nearest.price} (${nearest.away.toFixed(1)} pts away)` }
+    ? { pass: nearest.away <= tolerance, detail: `${nearest.away <= tolerance ? 'at' : 'nearest'} previous-day ${nearest.name} ${nearest.price.toFixed(1)} (${nearest.away.toFixed(1)} pts away)` }
     : { pass: null, detail: 'no previous-day profile' }
 
   // IV: the ATM option's IV now vs its median so far today (strikes within one step of today's ATM).

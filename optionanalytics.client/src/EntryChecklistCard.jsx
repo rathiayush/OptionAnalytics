@@ -49,6 +49,14 @@ export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints,
     [asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex],
   )
   if (!result) return <Text type="secondary">Load a day to see the checklist.</Text>
+  if (result.waiting) {
+    return (
+      <Text type="secondary">
+        The market opens at 09:15 - the checklist starts with today&apos;s first minute (the index&apos;s pre-open prices and
+        yesterday&apos;s VWAP are not used, and today&apos;s option OI, flow and IV start then too).
+      </Text>
+    )
+  }
   return (
     <>
       <Row gutter={[24, 12]}>
