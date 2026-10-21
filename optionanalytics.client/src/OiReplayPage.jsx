@@ -4161,7 +4161,7 @@ export default function OiReplayPage() {
   const flowBand = dashboardFlow ? 16 : 10
   const flowSourceNote = !isLive ? "ATM±10: Dhan's data for a past day's options stops at 10 strikes either side of ATM (live uses the dashboard's ATM±16)."
     : dashboardFlow ? "Live: the dashboard's own numbers - ATM±16 (16 ITM + 16 OTM), every tick classified, updating every 2 s."
-      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard has no CDV for this expiry - worked out from the minute bars instead (ATM±10)." : null
+      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard's CDV for this expiry is not ready (after a server restart it is rebuilt for a few minutes) - worked out from the minute bars instead (ATM±10)." : null
   const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
     : !isLive ? "Live orders need today's live view - press Go Live." : null
 

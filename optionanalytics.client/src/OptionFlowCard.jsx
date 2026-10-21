@@ -4,7 +4,7 @@ import { CrosshairMode, LineSeries } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime } from './shared.jsx'
 import { formatOiMillions, useFitContentAsDataGrows } from './oiShared.jsx'
-import { optionFlowSeries } from './optionFlow.js'
+import { optionFlowSeries, smoothLine } from './optionFlow.js'
 import { sanitizeLine } from './chartLine.js'
 
 const { Text } = Typography
@@ -65,7 +65,8 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
   const flow = dashboardFlow ?? ownFlow
   const lines = useMemo(() => {
     const cut = (series) => (endTime == null ? toLine(series) : toLine(series).filter((p) => p.time <= endTime))
-    return { ceCdv: cut(flow.ceCdv), peCdv: cut(flow.peCdv), ceObv: cut(flow.ceObv), peObv: cut(flow.peObv) }
+    // CDV EMA(9)-smoothed as the Pine indicator plots it (OBV already is); smoothed before the cut - no look-ahead.
+    return { ceCdv: cut(smoothLine(flow.ceCdv)), peCdv: cut(smoothLine(flow.peCdv)), ceObv: cut(flow.ceObv), peObv: cut(flow.peObv) }
   }, [flow, endTime])
   const last = (series) => series.at(-1)?.value
   const hasVolume = flow.ceCdv.some((p) => p.value !== 0) || flow.peCdv.some((p) => p.value !== 0)
@@ -76,7 +77,7 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
     {sourceNote && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>{sourceNote}</Text>}
     <Row gutter={[16, 12]}>
       <Col xs={24} lg={12}>
-        <Text strong style={{ fontSize: 12 }}>CDV (cumulative delta volume) </Text>
+        <Text strong style={{ fontSize: 12 }}>CDV (cumulative delta volume, EMA 9) </Text>
         <Text style={{ fontSize: 12, color: CE_COLOR }}>CE {formatOiMillions(last(lines.ceCdv) ?? 0, { signed: true })}</Text>
         <Text style={{ fontSize: 12 }}> · </Text>
         <Text style={{ fontSize: 12, color: PE_COLOR }}>PE {formatOiMillions(last(lines.peCdv) ?? 0, { signed: true })}</Text>

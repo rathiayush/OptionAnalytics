@@ -49,6 +49,13 @@ export function smoothEma(values, len = SMOOTH_LEN) {
   return out
 }
 
+/** `[{ time, value }]` with its values EMA(len)-smoothed (smoothEma) - how the Pine indicator plots CDV (its smoothLen,
+ *  9): each point uses only itself and the points before it, so cutting the result at a replay clock shows nothing early. */
+export function smoothLine(series, len = SMOOTH_LEN) {
+  const values = smoothEma((series ?? []).map((p) => p.value), len)
+  return (series ?? []).map((p, i) => ({ time: p.time, value: values[i] }))
+}
+
 // One bar per strike and minute. Live, the run's bars and the live minutes are passed together: a later point of the same
 // strike and minute is the newer reading of it and replaces the earlier one, keeping the larger volume (the run's bar of
 // the minute the page loaded in and that minute's live point each saw only part of it).
