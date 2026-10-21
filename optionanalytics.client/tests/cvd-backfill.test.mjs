@@ -29,3 +29,17 @@ test('nothing to add leaves the bars alone', () => {
   assert.equal(withBackfill(bars, [], 1).bars, bars)
   assert.equal(withBackfill([], [fill(0, 1, 0)], 1).offset, 0)
 })
+
+// OI Replay's futures delta pane: the minutes before a restart come from the estimate, the rest from the recording.
+test('deltaMinutes puts the estimated minutes before the first recorded one in front, marked', async () => {
+  const { deltaMinutes } = await import('../src/cvdBackfill.js')
+  const t = (hhmm) => `2026-10-21T${hhmm}:00+05:30`
+  const recorded = [{ time: t('13:29'), buy: 900, sell: 400 }, { time: t('13:28'), buy: 100, sell: 300 }]
+  const backfill = [{ time: t('09:15'), buy: 50, sell: 20 }, { time: t('13:27'), buy: 10, sell: 40 }, { time: t('13:28'), buy: 999, sell: 0 }]
+  const minutes = deltaMinutes(recorded, backfill)
+  assert.deepEqual(minutes.map((m) => [new Date(m.ms).toISOString().slice(11, 16), m.delta, m.estimated]), [
+    ['03:45', 30, true], ['07:57', -30, true], ['07:58', -200, false], ['07:59', 500, false],
+  ])
+  assert.deepEqual(deltaMinutes([], backfill).map((m) => m.estimated), [true, true, true])
+  assert.deepEqual(deltaMinutes(recorded, null).map((m) => m.delta), [-200, 500])
+})

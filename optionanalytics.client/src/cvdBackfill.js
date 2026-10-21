@@ -28,3 +28,16 @@ export function withBackfill(bars, backfill, timeframeMinutes) {
   const shifted = bars.map((b) => ({ ...b, cvd: b.cvd + cvd }))
   return { bars: shifted, chartBars: [...prior, ...shifted], offset: cvd, priorCount: prior.length }
 }
+
+/**
+ * A day's per-minute delta for a chart: the exact minutes (`bars`, each `{ time, buy, sell }`) with the estimated ones
+ * before the first of them in front (`backfill` - the minutes before the server started recording a live day) -
+ * `[{ ms, delta, estimated }]` in time order. A replay cut at its clock still sees only minutes up to it.
+ */
+export function deltaMinutes(bars, backfill) {
+  const minute = (m, estimated) => ({ ms: typeof m.time === 'number' ? m.time : new Date(m.time).getTime(), delta: (m.buy ?? 0) - (m.sell ?? 0), estimated })
+  const exact = (bars ?? []).map((b) => minute(b, false)).filter((m) => Number.isFinite(m.ms)).sort((a, b) => a.ms - b.ms)
+  const firstMs = exact.length ? exact[0].ms : Infinity
+  const prior = (backfill ?? []).map((b) => minute(b, true)).filter((m) => Number.isFinite(m.ms) && m.ms < firstMs).sort((a, b) => a.ms - b.ms)
+  return [...prior, ...exact]
+}
