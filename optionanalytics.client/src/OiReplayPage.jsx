@@ -17,6 +17,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
+import { mergeFuturesLive } from './futuresLive.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
@@ -1856,11 +1857,11 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // shift actually started, the "show me when what happened" read for a future's own OI - unlike an
 // option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
 // entirely about ITS OWN change over time rather than a level.
-// profile: the session volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
-// rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines.
+// profile: the previous session's volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
+// rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines (profileLabel on the POC).
 // deltaBars: [{ time (chart time), delta, cvd }] per candle - each candle's delta as a histogram and
 // the cumulative delta as a line, in a band under the candles (own scales).
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, deltaBars = null, vwap = EMPTY_ARRAY }) {
+function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const vwapSeriesRef = useRef(null)
@@ -1958,8 +1959,8 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
   useEffect(() => {
     if (!seriesRef.current) return
     profilePrimitiveRef.current?.setProfile(profile, profileRowSize)
-    profileLinesRef.current = setProfileLines(seriesRef.current, profileLinesRef.current, profile, profileRowSize)
-  }, [profile, profileRowSize, height])
+    profileLinesRef.current = setProfileLines(seriesRef.current, profileLinesRef.current, profile, profileRowSize, profileLabel)
+  }, [profile, profileRowSize, profileLabel, height])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -2935,7 +2936,7 @@ export default function OiReplayPage() {
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
   // The futures DOM (full market depth ladder) drawer - see DomDrawer.jsx.
   const [domOpen, setDomOpen] = useState(false)
-  // Volume profile on the futures chart (POC / value area lines) - see futuresProfile below.
+  // The previous session's volume profile on the futures chart (POC / value area lines) - see futuresProfile below.
   const [futuresProfileOn, setFuturesProfileOn] = usePersistedState('optionanalytics.oiReplay.futuresProfile', true)
   // Delta / cumulative delta under the futures candles - from the order flow server: exact for a day it
   // saw live, else estimated from 1-minute candles (see futuresFlow below).
@@ -3838,16 +3839,10 @@ export default function OiReplayPage() {
   // Merged the same way oneMinBars merges liveBars: an exact same-minute match REPLACES the
   // existing point (the still-forming current bar keeps updating in place), a genuinely newer one
   // is appended.
-  const futuresPointsRaw = useMemo(() => {
-    const base = [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time))
-    if (!isLive || liveFuturesPoints.length === 0) return base
-    const merged = base.slice()
-    for (const point of liveFuturesPoints) {
-      if (merged.length > 0 && merged[merged.length - 1].time === point.time) merged[merged.length - 1] = point
-      else if (merged.length === 0 || new Date(point.time) > new Date(merged[merged.length - 1].time)) merged.push(point)
-    }
-    return merged
-  }, [result, liveFuturesPoints, isLive])
+  const futuresPointsRaw = useMemo(
+    () => mergeFuturesLive(result?.futuresBars ?? [], isLive ? liveFuturesPoints : []),
+    [result, liveFuturesPoints, isLive],
+  )
   const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
   // The futures' session VWAP from its 1-minute bars (they carry volume - toBar drops it), read at each
   // displayed candle - never past the replay clock (the last candle would otherwise take later VWAP).
@@ -3893,10 +3888,29 @@ export default function OiReplayPage() {
     return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, delta]) => { cvd += delta; return { time, delta, cvd } })
   }, [futuresDeltaOn, futuresFlow, asOfMs, futuresTimeframe])
   const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
-  const futuresProfile = useMemo(() => {
-    if (!futuresProfileOn || asOfMs == null) return null
-    return volumeProfileFromCandles(futuresPointsRaw.filter((p) => new Date(p.time).getTime() <= asOfMs), futuresProfileRow)
-  }, [futuresProfileOn, futuresPointsRaw, asOfMs, futuresProfileRow])
+  // The previous trading day's volume profile of the same futures contract (its bars from the server - Dhan, kept on
+  // disk): fixed levels for the whole day, nothing of the day itself in them, so nothing shows early in a replay.
+  const prevFuturesKey = result?.success && result.date ? `${underlying}|${result.date}|${String(result.futuresExpiry ?? '').slice(0, 10)}` : null
+  const [prevFutures, setPrevFutures] = useState(null)
+  useEffect(() => {
+    if (!futuresProfileOn || !prevFuturesKey) return undefined
+    const [u, day, expiry] = prevFuturesKey.split('|')
+    let cancelled = false
+    const query = new URLSearchParams({ date: day, ...(expiry ? { expiry } : {}) })
+    fetch(`/api/oi-replay/${u}/previous-day-futures?${query}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((body) => { if (!cancelled) setPrevFutures(body?.success ? { ...body, key: prevFuturesKey } : { key: prevFuturesKey, error: body?.error ?? 'not available' }) })
+      .catch(() => { if (!cancelled) setPrevFutures({ key: prevFuturesKey, error: 'could not be loaded' }) })
+    return () => { cancelled = true }
+  }, [futuresProfileOn, prevFuturesKey])
+  const prevFuturesShown = futuresProfileOn && prevFutures?.key === prevFuturesKey ? prevFutures : null
+  const futuresProfile = useMemo(
+    () => (prevFuturesShown?.bars?.length ? volumeProfileFromCandles(prevFuturesShown.bars, futuresProfileRow) : null),
+    [prevFuturesShown, futuresProfileRow],
+  )
+  const futuresProfileLabel = prevFuturesShown?.date ? ` (${fmtDateOnly(prevFuturesShown.date)})` : ''
+  const futuresProfileOtherContract = prevFuturesShown?.expiry && result?.futuresExpiry
+    && String(prevFuturesShown.expiry).slice(0, 10) !== String(result.futuresExpiry).slice(0, 10)
   const currentFutures = useMemo(
     () => (asOfMs != null ? latestAtOrBefore(futuresPointsRaw, asOfMs) : null),
     [futuresPointsRaw, asOfMs],
@@ -5542,7 +5556,7 @@ export default function OiReplayPage() {
                         <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta under the candles - exact for a day the order flow server saw live, else estimated from 1-minute candles">
                           <Space size={4}><Switch size="small" checked={futuresDeltaOn} onChange={setFuturesDeltaOn} /><Text style={{ fontSize: 12 }}>Δ / ΣΔ</Text></Space>
                         </Tooltip>
-                        <Tooltip title={`Volume profile of the session so far (${futuresProfileRow}-pt rows) with POC and the 70% value area (VAH/VAL)`}>
+                        <Tooltip title={`The previous trading day's volume profile of this futures contract (${futuresProfileRow}-pt rows) with its POC and 70% value area (VAH/VAL) - fixed levels for the day`}>
                           <Space size={4}><Switch size="small" checked={futuresProfileOn} onChange={setFuturesProfileOn} /><Text style={{ fontSize: 12 }}>Profile</Text></Space>
                         </Tooltip>
                         {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
@@ -5610,7 +5624,7 @@ export default function OiReplayPage() {
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
                             height={320}
-                            profile={futuresProfile} profileRowSize={futuresProfileRow}
+                            profile={futuresProfile} profileRowSize={futuresProfileRow} profileLabel={futuresProfileLabel}
                             deltaBars={futuresDeltaBars}
                           />
                         </ChartErrorBoundary>
@@ -5622,9 +5636,13 @@ export default function OiReplayPage() {
                         )}
                         {futuresProfile?.poc != null && (
                           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                            Volume profile: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
+                            Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
                             {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
+                            {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
                           </Text>
+                        )}
+                        {prevFuturesShown?.error && (
+                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
                         )}
                         {result.futuresOiAvailable && (
                           <Text type="secondary" style={{ fontSize: 11 }}>

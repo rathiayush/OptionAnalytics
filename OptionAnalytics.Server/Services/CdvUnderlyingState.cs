@@ -76,7 +76,21 @@ internal sealed class CdvStrikeRuntime
     /// SpotUnderlyingState.BarClosed already uses.</summary>
     public Candle? ApplyPriceTick(decimal price, long tickVolume, DateTimeOffset timestamp)
     {
+        // Only a trade moves the bars. A tick with no new volume is an OI / depth update or a re-subscribe's snapshot,
+        // stamped with the contract's LAST trade time - minutes, or a day, old - and it opened a bar back at that minute:
+        // bars out of order, a minute twice, a point before the open (OBV's timeline, the ATM premium chart). It still
+        // opens the very first bar (the price OBV's first change is measured from).
+        if (tickVolume <= 0 && (_currentBar is not null || _closedBars.Count > 0)) return null;
         var minute = new DateTimeOffset(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+        // Never back in time: a trade stamped before the forming minute (packets of different strikes interleave) is
+        // folded into it, and the backfill's last bar - fetched while it was still forming - is carried on, not replaced.
+        if (_currentBar is { } forming && minute < forming.Bar.Time) minute = forming.Bar.Time;
+        if (_currentBar is null && _closedBars.Count > 0 && minute <= _closedBars[^1].Bar.Time)
+        {
+            _currentBar = _closedBars[^1];
+            _closedBars.RemoveAt(_closedBars.Count - 1);
+            minute = _currentBar.Value.Bar.Time;
+        }
         Candle? justClosed = null;
 
         if (_currentBar is not { } cur || cur.Bar.Time != minute)
@@ -167,6 +181,15 @@ public sealed class CdvUnderlyingState
     private readonly Dictionary<DateTimeOffset, decimal> _backfillCeIncrements = new();
     private readonly Dictionary<DateTimeOffset, decimal> _backfillPeIncrements = new();
 
+    // Set while today's CDV is being rebuilt from the strikes' own history (BeginCdvBackfill - the day's first backfill
+    // batch, which fetches its strikes one by one for minutes). Their live ticks arrive all the while (the feed is shared:
+    // OI Replay subscribes the same contracts), and drawing the total then made it jump up and down as each strike's
+    // history landed; the rebuilt morning was then put in front of those minutes - repeated and out-of-order bars. So
+    // until the rebuild is in: ticks keep each strike's price / volume baseline, a strike not yet seeded does not move its
+    // running total (its fetched bars hold those trades), and no aggregate bar is drawn.
+    private bool _cdvBackfillPending;
+    private DateTimeOffset _cdvBackfillStartedAt;
+
     // Same increments-then-finalize shape as the pair above, but for EVERY PAST trading day in the
     // backfill window rather than today (see SeedHistoricalDayStrike/FinalizeHistory) - a
     // completely separate series from _closedBars/_backfillCe/PeIncrements, never merged into
@@ -216,6 +239,7 @@ public sealed class CdvUnderlyingState
             _strikes.Clear();
             _closedBars.Clear();
             _currentBar = null;
+            _cdvBackfillPending = false;
             _backfillCeIncrements.Clear();
             _backfillPeIncrements.Clear();
             _historyCeIncrements.Clear();
@@ -375,7 +399,7 @@ public sealed class CdvUnderlyingState
 
             if (currentSpot > 0) LastSpot = currentSpot;
 
-            if (deltaVolume > 0 && currentSpot > 0)
+            if (deltaVolume > 0 && currentSpot > 0 && !(_cdvBackfillPending && !strike.Backfilled))
             {
                 var weight = ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall);
                 strike.RunningCdv += strike.Direction * deltaVolume * weight;
@@ -389,7 +413,10 @@ public sealed class CdvUnderlyingState
             }
 
             LastUpdateUtc = DateTimeOffset.UtcNow;
-            closedAggregateBar = UpdateBar_NoLock(tick.ExchangeTimestamp);
+            // Only a trade moves the total, so only a trade moves its bars (a tick without one carries an old trade time -
+            // see CdvStrikeRuntime.ApplyPriceTick) - bar the very first one.
+            var hasBars = _currentBar is not null || _closedBars.Count > 0;
+            closedAggregateBar = _cdvBackfillPending || (deltaVolume <= 0 && hasBars) ? null : UpdateBar_NoLock(tick.ExchangeTimestamp);
         }
 
         if (closedIsCall is { } isCall) AtmBarClosed?.Invoke(isCall, closedBar);
@@ -420,9 +447,9 @@ public sealed class CdvUnderlyingState
     /// TODAY's CDV running total from <paramref name="todayBars"/> ONLY, via the bar-proxy delta
     /// formula (BarProxyDelta below - the same close-in-range approximation LiveSpreadCalculator's
     /// own CDV backfill uses, since historical OHLCV candles carry no real trade-by-trade buy/sell
-    /// tagging the way live ticks do), weighted by delta at the CURRENT spot as a fixed reference
-    /// for the day (an accepted approximation - a full per-minute historical spot series isn't
-    /// available). CDV is a SESSION indicator in the source Pine script (see TradingDay/Reset) -
+    /// tagging the way live ticks do), weighted by delta at each bar's own minute's spot
+    /// (<paramref name="spotByTime"/> - the spot feed's 1-minute closes, as the live ticks and the past days are
+    /// weighted; <paramref name="currentSpot"/> for a minute it has none). CDV is a SESSION indicator in the source Pine script (see TradingDay/Reset) -
     /// summing bar-proxy deltas across multiple days here, like an early version of this method
     /// did, made the total compound without bound day over day instead of the source indicator's
     /// bounded, day-scoped oscillation. The strike's own RunningCdv is left seeded at its final
@@ -437,7 +464,8 @@ public sealed class CdvUnderlyingState
     /// series - the same limitation LiveSpreadCalculator's own CDV backfill accepts (it backfills
     /// only once, at the day's first recenter, and pads any later-added strike's contribution with
     /// zero instead of reconstructing it).</param>
-    public void SeedStrikeHistory(uint securityId, IReadOnlyList<CandleWithVolume> allBars, IReadOnlyList<CandleWithVolume> todayBars, decimal currentSpot, bool includeInCdvHistory)
+    public void SeedStrikeHistory(uint securityId, IReadOnlyList<CandleWithVolume> allBars, IReadOnlyList<CandleWithVolume> todayBars, decimal currentSpot, bool includeInCdvHistory,
+        IReadOnlyDictionary<DateTimeOffset, decimal>? spotByTime = null)
     {
         lock (_lock)
         {
@@ -447,16 +475,42 @@ public sealed class CdvUnderlyingState
             strike.Backfilled = true;
             if (!includeInCdvHistory || todayBars.Count == 0) return;
 
-            var weight = currentSpot > 0 ? ComputeDeltaWeight(strike.Strike, currentSpot, strike.IsCall) : 0m;
             var increments = strike.IsCall ? _backfillCeIncrements : _backfillPeIncrements;
             decimal running = 0;
             foreach (var bar in todayBars.OrderBy(b => b.Time))
             {
+                var spot = spotByTime is not null && spotByTime.TryGetValue(bar.Time, out var atBar) && atBar > 0 ? atBar : currentSpot;
+                var weight = spot > 0 ? ComputeDeltaWeight(strike.Strike, spot, strike.IsCall) : 0m;
                 var delta = BarProxyDelta(bar) * weight;
                 increments[bar.Time] = increments.GetValueOrDefault(bar.Time) + delta;
                 running += delta;
             }
             strike.RunningCdv = running;
+        }
+    }
+
+    /// <summary>Today's CDV is about to be rebuilt from the strikes' history (the day's first backfill batch,
+    /// fetched from `startedAt` on): until FinalizeCdvBackfill / AbandonCdvBackfill, live ticks draw no aggregate bar
+    /// and a strike not yet seeded does not move its running total - see _cdvBackfillPending.</summary>
+    public void BeginCdvBackfill(DateTimeOffset startedAt)
+    {
+        lock (_lock)
+        {
+            _cdvBackfillPending = true;
+            _cdvBackfillStartedAt = startedAt;
+        }
+    }
+
+    /// <summary>The rebuild did not happen (nothing came back) - live ticks draw the total again. A no-op once
+    /// FinalizeCdvBackfill has run.</summary>
+    public void AbandonCdvBackfill()
+    {
+        lock (_lock)
+        {
+            if (!_cdvBackfillPending) return;
+            _cdvBackfillPending = false;
+            _backfillCeIncrements.Clear();
+            _backfillPeIncrements.Clear();
         }
     }
 
@@ -469,9 +523,17 @@ public sealed class CdvUnderlyingState
     {
         lock (_lock)
         {
+            // Rebuilt from minutes before the batch began: every strike was fetched after that, so each of those minutes
+            // holds every strike in full. A later minute would miss the trades the strikes fetched first made after
+            // their fetch (those are in their live running totals) - the live bars carry on from the totals instead.
+            DateTimeOffset? cutoff = _cdvBackfillPending
+                ? new DateTimeOffset(_cdvBackfillStartedAt.UtcTicks - _cdvBackfillStartedAt.UtcTicks % TimeSpan.TicksPerMinute, TimeSpan.Zero)
+                : null;
+            _cdvBackfillPending = false;
             if (_backfillCeIncrements.Count == 0 && _backfillPeIncrements.Count == 0) return;
 
-            var minutes = _backfillCeIncrements.Keys.Concat(_backfillPeIncrements.Keys).Distinct().OrderBy(t => t).ToList();
+            var minutes = _backfillCeIncrements.Keys.Concat(_backfillPeIncrements.Keys).Distinct()
+                .Where(t => cutoff is null || t < cutoff).OrderBy(t => t).ToList();
             decimal ce = 0, pe = 0;
             var seeded = new List<CdvBarPoint>(minutes.Count);
             foreach (var minute in minutes)
@@ -481,10 +543,11 @@ public sealed class CdvUnderlyingState
                 seeded.Add(new CdvBarPoint(minute, ce, pe));
             }
 
-            // Backfilled minutes are always earlier than anything a live tick could have produced
-            // (RecenterAsync backfills before subscribing new strikes), so this always belongs at
-            // the front - InsertRange rather than a full re-sort of what could already be a large
-            // live series.
+            // The rebuilt minutes replace whatever bars were drawn for them before (a retried rebuild: live bars from
+            // totals that did not hold the strikes' history yet) and go in front - one bar per minute, in time order.
+            var replaceBefore = cutoff ?? (seeded.Count > 0 ? seeded[^1].Time.AddTicks(1) : DateTimeOffset.MinValue);
+            _closedBars.RemoveAll(b => b.Time < replaceBefore);
+            if (_currentBar is { } forming && forming.Time < replaceBefore) _currentBar = null;
             _closedBars.InsertRange(0, seeded);
             _backfillCeIncrements.Clear();
             _backfillPeIncrements.Clear();
@@ -616,6 +679,8 @@ public sealed class CdvUnderlyingState
         // tick, firing AggregateBarClosed (a full multi-day recompute under this lock, which the Dhan
         // receive thread then queued behind) constantly and filling the history with out-of-order bars.
         if (_currentBar is { } forming && minute < forming.Time) minute = forming.Time;
+        // Nor before the bars already drawn (the rebuilt day's last minute, when no bar is forming yet).
+        if (_currentBar is null && _closedBars.Count > 0 && minute < _closedBars[^1].Time) minute = _closedBars[^1].Time;
         CdvBarPoint? justClosed = null;
 
         if (_currentBar is not { } bar || bar.Time != minute)

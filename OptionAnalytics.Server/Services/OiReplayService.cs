@@ -587,6 +587,68 @@ public sealed class OiReplayService
         return ComputeVolumeProfile(underlying, resolvedDate.Value, foundBars);
     }
 
+    /// <summary>The previous trading day's 1-minute bars of the futures contract the chart shows for `date` - `expiry` (the
+    /// run's FuturesExpiry), else that day's front month - for OI Replay's futures chart, which draws the PREVIOUS
+    /// session's volume profile in that same contract's prices (another month trades higher - cost of carry - so its
+    /// levels would sit off the candles). Walks back like GetPreviousDayVolumeProfileAsync (weekends skipped, a day
+    /// with no bars - a holiday - stepped over). A contract still live comes from Dhan (a past day kept on disk -
+    /// DhanDataCache); an expired one as the chart's own day does (PastFuturesCandles - its Note says what was used).</summary>
+    public async Task<PreviousDayFuturesResult> GetPreviousDayFuturesAsync(string underlying, DateOnly date, DateOnly? expiry, CancellationToken cancellationToken)
+    {
+        if (!StrikeStepByUnderlying.ContainsKey(underlying))
+            return PreviousDayFuturesResult.Failed(underlying, $"'{underlying}' is not supported - only NIFTY, BANKNIFTY, and SENSEX.");
+        try
+        {
+            await _futuresInstrumentMaster.EnsureLoadedAsync(cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return PreviousDayFuturesResult.Failed(underlying, $"Could not load the futures instrument master: {ex.Message}");
+        }
+
+        var archive = _futuresArchive is not null && NseFuturesContractArchive.Covers(underlying) ? _futuresArchive : null;
+        var contract = expiry is { } wanted ? _futuresInstrumentMaster.GetContract(underlying, wanted) : null;
+        if (contract is null && archive is not null)
+        {
+            try { contract = await archive.ContractOnAsync(underlying, date, expiry, cancellationToken); }
+            catch (Exception e) when (e is not OperationCanceledException) { contract = null; }
+        }
+        if (contract is null && expiry is null) contract = _futuresInstrumentMaster.GetNearestContract(underlying, date);
+        if (contract is null)
+            return PreviousDayFuturesResult.Failed(underlying, $"No {underlying} futures contract{(expiry is { } x ? $" expiring {x:dd MMM yyyy}" : "")} found for {date:dd MMM yyyy}.");
+
+        async Task<IReadOnlyList<DhanFuturesInstrument>> ListedOnAsync(DateOnly day)
+        {
+            if (archive is null) return Array.Empty<DhanFuturesInstrument>();
+            try { return await archive.ContractsOnAsync(underlying, day, cancellationToken); }
+            catch (Exception e) when (e is not OperationCanceledException) { return Array.Empty<DhanFuturesInstrument>(); }
+        }
+
+        var found = await PreviousDayFuturesBarsAsync(_historicalData, contract, date, ListedOnAsync, _nseChart, cancellationToken);
+        if (found is not { } f)
+            return PreviousDayFuturesResult.Failed(underlying, $"No {contract.TradingSymbol} bars on the trading days before {date:dd MMM yyyy}.");
+        var bars = f.Fetched.Bars.Select(b => new FuturesBar(b.Bar.Time, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Close, b.Bar.Volume, b.OpenInterest)).ToList();
+        return new PreviousDayFuturesResult(true, null, underlying, f.Day, f.Fetched.Contract.Expiry, f.Fetched.Contract.TradingSymbol, bars, f.Fetched.Note);
+    }
+
+    /// <summary>The nearest trading day before `date` on which `contract` has 1-minute bars, and those bars
+    /// (ResolvePreviousTradingDayAsync over PastFuturesCandles) - null when none of the last week has any.</summary>
+    internal static async Task<(DateOnly Day, PastFuturesCandles.Result Fetched)?> PreviousDayFuturesBarsAsync(
+        DhanHistoricalDataService historical, DhanFuturesInstrument contract, DateOnly date,
+        Func<DateOnly, Task<IReadOnlyList<DhanFuturesInstrument>>> listedOnAsync, NseChartHistory? nse, CancellationToken cancellationToken)
+    {
+        PastFuturesCandles.Result? found = null;
+        var day = await ResolvePreviousTradingDayAsync(date, async candidate =>
+        {
+            var listed = contract.Expiry < IstClock.Today() ? await listedOnAsync(candidate) : Array.Empty<DhanFuturesInstrument>();
+            var fetched = await PastFuturesCandles.FetchAsync(historical, contract, listed, candidate, cancellationToken, nse);
+            if (fetched.Bars.Count == 0) return false;
+            found = fetched;
+            return true;
+        });
+        return day is { } d && found is not null ? (d, found) : null;
+    }
+
     /// <summary>How many calendar days back GetPreviousDayVolumeProfileAsync will walk before giving
     /// up - comfortably covers any ordinary single holiday (or one adjacent to a weekend) without
     /// needing a full NSE holiday calendar.</summary>

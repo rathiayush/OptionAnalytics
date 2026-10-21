@@ -84,11 +84,12 @@ const LINE_STYLES = { POC: { color: RUNNING_PROFILE.poc, lineStyle: 0 }, VAH: { 
 
 // Replaces the POC / VAH / VAL price lines on `series`; returns the new lines for the next call.
 // A row's line sits at the row's middle (POC) or its outer edge (VAH top, VAL bottom).
-export function setProfileLines(series, previous, profile, rowSize) {
+// `pocLabel` is added to the POC line's title (" (20 Oct)" for a previous day's profile).
+export function setProfileLines(series, previous, profile, rowSize, pocLabel = '') {
   for (const line of previous ?? []) series.removePriceLine(line)
   if (!profile?.rows?.length || !(rowSize > 0)) return []
   const at = { POC: profile.poc + rowSize / 2, VAH: profile.vah + rowSize, VAL: profile.val }
   return Object.entries(at).map(([title, price]) => series.createPriceLine({
-    price, title, lineWidth: 1, axisLabelVisible: true, ...LINE_STYLES[title],
+    price, title: title === 'POC' ? `${title}${pocLabel}` : title, lineWidth: 1, axisLabelVisible: true, ...LINE_STYLES[title],
   }))
 }
