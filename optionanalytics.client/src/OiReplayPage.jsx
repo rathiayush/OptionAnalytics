@@ -16,6 +16,7 @@ import {
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth,
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
+import { sanitizeLine } from './chartLine.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
@@ -1943,7 +1944,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
     }
   }, [height])
   // The futures' session VWAP, already on these candles' times (the caller aligns it).
-  useEffect(() => { vwapSeriesRef.current?.setData(vwap) }, [vwap])
+  useEffect(() => { vwapSeriesRef.current?.setData(sanitizeLine(vwap)) }, [vwap])
 
   useEffect(() => {
     if (!deltaSeriesRef.current || !cvdSeriesRef.current || !seriesRef.current) return

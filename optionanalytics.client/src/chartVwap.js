@@ -1,3 +1,5 @@
+import { sanitizeLine } from './chartLine.js'
+
 // Session VWAP for a candle chart, on the chart's OWN candles - one point per candle, at the candle's
 // time, never anywhere else.
 //
@@ -61,5 +63,5 @@ export function alignToBars(series, bars) {
 /** The VWAP line for a candle chart: from its own candles when they carry volume, else the given
  *  server series aligned to them. */
 export function chartVwap(bars, serverSeries = null) {
-  return sessionVwapFromBars(bars) ?? alignToBars(serverSeries ?? [], bars)
+  return sanitizeLine(sessionVwapFromBars(bars) ?? alignToBars(serverSeries ?? [], bars))
 }
