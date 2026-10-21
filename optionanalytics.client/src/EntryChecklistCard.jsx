@@ -38,10 +38,12 @@ function SideList({ name, color, side }) {
  * PE buy side by side (entryChecklist.js: direction, writers, wall ahead, option flow, location, IV, time), with the
  * ATM / 1-ITM strikes and their premiums. Display only: it places and alerts nothing.
  */
-export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile }) {
+export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, dashboardFlow = null }) {
   const ceIndex = useMemo(() => indexByStrike(cePoints), [cePoints])
   const peIndex = useMemo(() => indexByStrike(pePoints), [pePoints])
-  const flow = useMemo(() => optionFlowSeries(cePoints, pePoints, spotBars), [cePoints, pePoints, spotBars])
+  // Live, the option-flow check reads the dashboard's own CDV (the same numbers the CDV / OBV card shows).
+  const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars)), [dashboardFlow, cePoints, pePoints, spotBars])
+  const flow = dashboardFlow ?? ownFlow
   const result = useMemo(
     () => (asOfMs == null ? null : entryChecklist({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex })),
     [asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex],

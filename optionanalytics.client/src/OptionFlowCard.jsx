@@ -55,12 +55,15 @@ function FlowChart({ ce, pe, dayKey, height }) {
 /**
  * The day's option CDV and OBV, CE against PE, as the dashboard shows them for today - worked out from the replayed
  * day's own 1-minute option bars (optionFlow.js: the dashboard's formulas) and drawn only up to the replay clock
- * (`endTime`, chart time), so nothing later in the day shows early.
+ * (`endTime`, chart time; null - live - draws it all), so nothing later in the day shows early. Live, `dashboardFlow`
+ * (the dashboard's own tick-by-tick series - dashboardFlow.js) is shown instead when the dashboard has it.
  */
-export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, height = 260 }) {
-  const flow = useMemo(() => optionFlowSeries(cePoints, pePoints, spotBars), [cePoints, pePoints, spotBars])
+export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, dashboardFlow = null, sourceNote = null, height = 260 }) {
+  // Live, the dashboard's own tick-by-tick numbers when it has them (dashboardFlow.js); else worked out from the bars.
+  const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars)), [dashboardFlow, cePoints, pePoints, spotBars])
+  const flow = dashboardFlow ?? ownFlow
   const lines = useMemo(() => {
-    const cut = (series) => (endTime == null ? [] : toLine(series).filter((p) => p.time <= endTime))
+    const cut = (series) => (endTime == null ? toLine(series) : toLine(series).filter((p) => p.time <= endTime))
     return { ceCdv: cut(flow.ceCdv), peCdv: cut(flow.peCdv), ceObv: cut(flow.ceObv), peObv: cut(flow.peObv) }
   }, [flow, endTime])
   const last = (series) => series.at(-1)?.value
@@ -68,6 +71,8 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
 
   if (!hasVolume) return <Text type="secondary">No option volume for this day - CDV and OBV need each strike&apos;s traded volume.</Text>
   return (
+    <>
+    {sourceNote && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>{sourceNote}</Text>}
     <Row gutter={[16, 12]}>
       <Col xs={24} lg={12}>
         <Text strong style={{ fontSize: 12 }}>CDV (cumulative delta volume) </Text>
@@ -84,5 +89,6 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
         <FlowChart ce={lines.ceObv} pe={lines.peObv} dayKey={`obv-${dayKey}`} height={height} />
       </Col>
     </Row>
+    </>
   )
 }

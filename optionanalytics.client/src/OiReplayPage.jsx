@@ -24,6 +24,7 @@ import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
+import { useDashboardFlow } from './dashboardFlow.js'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -4106,6 +4107,13 @@ export default function OiReplayPage() {
   // ---- Live mode (real Dhan orders) ----
   // The expiry the page is showing live (N1 = nearest listed, ...) as the date the order is for.
   const liveExpiryDate = resolvedExpiries.expiries[Number(liveExpiryFlag.slice(1)) - 1] ?? null
+  // Live: the dashboard's own option CDV / OBV for this chain (tick by tick, server memory) - the CDV / OBV card and the
+  // entry checklist show it in place of the minute-bar estimate; null / unavailable -> they keep their own.
+  const dashboardFlowState = useDashboardFlow(underlying, typeof liveExpiryDate === 'string' ? liveExpiryDate.slice(0, 10) : null, isLive)
+  const dashboardFlow = dashboardFlowState?.status === 'ok' ? dashboardFlowState.flow : null
+  const flowSourceNote = !isLive ? null
+    : dashboardFlow ? "Live: the dashboard's own numbers (every tick classified), updating every 2 s."
+      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard has no CDV for this expiry - worked out from the minute bars instead." : null
   const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
     : !isLive ? "Live orders need today's live view - press Go Live." : null
 
@@ -5133,7 +5141,7 @@ export default function OiReplayPage() {
                 <EntryChecklistCard
                   asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
                   spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
-                  step={step} profile={volumeProfile}
+                  step={step} profile={volumeProfile} dashboardFlow={dashboardFlow}
                 />
               </Card>
               </LiveSection>
@@ -5481,7 +5489,8 @@ export default function OiReplayPage() {
                   <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}>
                     <OptionFlowCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
-                      endTime={replayEndTime} dayKey={`${underlying}-${result.date}`}
+                      endTime={isLive && dashboardFlow ? null : replayEndTime} dayKey={`${underlying}-${result.date}`}
+                      dashboardFlow={dashboardFlow} sourceNote={flowSourceNote}
                     />
                   </Card>
                 </Col>
