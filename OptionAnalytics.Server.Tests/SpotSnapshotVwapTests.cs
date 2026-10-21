@@ -47,4 +47,25 @@ public sealed class SpotSnapshotVwapTests
     {
         Assert.Empty(new SpotUnderlyingState("NIFTY", 50).GetCurrentSessionVolumeBars());
     }
+
+    [Fact]
+    public void LiveIndexTicks_CarryNoVolume_TheMinuteCandlesFromDhanGiveTheSessionItsVwap()
+    {
+        var state = new SpotUnderlyingState("NIFTY", 50);
+        // The live index feed: last price only, volume 0 - five minutes of ticks, the fifth still forming.
+        for (var m = 0; m < 5; m++)
+            state.ApplyTick(new SpotTick(1, 25200 + m, 0, 0, 0, 0, 0, 0, 0, 0, DayTwoOpen.AddMinutes(m).AddSeconds(10)));
+        Assert.Null(state.ToSnapshot().Vwap);
+
+        // Dhan's candles for the day so far (with volume), including the minute still forming from ticks.
+        var dhan = Bars(DayTwoOpen, 25200, 5);
+        state.MergeVolumeBars(dhan);
+
+        Assert.Equal(VwapCalculator.ComputeSeries(dhan.Take(4).ToList())[^1].Obv, state.ToSnapshot().Vwap);
+        var bars = state.GetVolumeBars();
+        Assert.Equal(dhan.Take(4).Select(b => b.Volume), bars.Take(4).Select(b => b.Volume));
+        // The forming minute is still the live ticks' own.
+        Assert.Equal(DayTwoOpen.AddMinutes(4), bars[^1].Time);
+        Assert.Equal(0, bars[^1].Volume);
+    }
 }

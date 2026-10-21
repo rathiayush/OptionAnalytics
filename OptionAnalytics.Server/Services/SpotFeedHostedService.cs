@@ -146,6 +146,52 @@ public sealed class SpotFeedHostedService : BackgroundService
         // See WatchForStaleTicksAsync's own doc comment for why this exists alongside
         // DhanMarketFeedClient's own connection-wide stall watchdog, not instead of it.
         _ = WatchForStaleTicksAsync(stoppingToken);
+
+        // Today's index volume (live VWAP) - see RefreshTodayVolumeLoopAsync.
+        _ = RefreshTodayVolumeLoopAsync(stoppingToken);
+    }
+
+    /// <summary>How often today's 1-minute index candles are re-read from Dhan in market hours for their volume.</summary>
+    private static readonly TimeSpan VolumeRefreshInterval = TimeSpan.FromSeconds(60);
+
+    /// <summary>Dhan's live feed sends an index (IDX_I) as ticker packets only - last price and time, no volume - so the
+    /// volume bars built from live ticks stay at zero all session and the live session VWAP (vwap-series, the spot
+    /// snapshot's vwap, the OI Replay / dashboard VWAP line) had nothing to work with; only the history seeded at startup
+    /// carried volume. Every VolumeRefreshInterval in market hours this re-reads today's 1-minute candles from Dhan's
+    /// historical endpoint (which does carry index volume) for each underlying and puts their volume into the finished
+    /// minutes (SpotUnderlyingState.MergeVolumeBars) - one background-lane Data-API call per underlying per minute.</summary>
+    private async Task RefreshTodayVolumeLoopAsync(CancellationToken stoppingToken)
+    {
+        var warnedNoVolume = new HashSet<string>();
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try { await Task.Delay(VolumeRefreshInterval, stoppingToken); }
+            catch (OperationCanceledException) { return; }
+            if (!TodayWarmupService.InWindow(DateTimeOffset.UtcNow) || !_session.IsAuthenticated) continue;
+
+            var today = IstToday();
+            foreach (var state in States.Values)
+            {
+                if (state.Instrument is not { } instrument) continue;
+                try
+                {
+                    var (candles, _) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, today, 1, stoppingToken, interactive: false);
+                    var withVolume = candles.Where(c => IstDate(c.Time) == today).ToList();
+                    if (withVolume.Count == 0) continue;
+                    if (withVolume.All(c => c.Volume == 0))
+                    {
+                        if (warnedNoVolume.Add(state.Underlying))
+                            _logger.LogWarning("Today's candles for {Underlying} carry no volume - the live session VWAP stays empty.", state.Underlying);
+                        continue;
+                    }
+                    state.MergeVolumeBars(withVolume);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "Refreshing today's volume for {Underlying} failed - trying again next minute.", state.Underlying);
+                }
+            }
+        }
     }
 
     /// <summary>How long a spot instrument may go without a live tick, during market hours, before
