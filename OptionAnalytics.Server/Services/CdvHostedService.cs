@@ -1069,112 +1069,121 @@ public sealed class CdvHostedService : BackgroundService
         // Every batch still seeds each strike's own price/volume history regardless, which is what
         // backs that strike's ATM CE/PE chart once it becomes the ATM contract.
         var includeInCdvHistory = _cdvHistorySeeded.Add((underlying, expiry));
-
-        // Counted so a batch that returns NOTHING can say so once, with Dhan's own reason, instead
-        // of disappearing into per-strike Debug lines. "No option history for this underlying at
-        // all" and "these particular strikes didn't trade" look identical from the dashboard and
-        // from the logs, but the first is a broken exchange/entitlement/segment and the second is
-        // ordinary - and only the aggregate can tell them apart.
-        var withData = 0;
-        var failed = 0;
-        string? lastError = null;
-        string? failedSegment = null;
-
-        for (var i = 0; i < securityIds.Count; i++)
+        // Today's CDV is drawn again once it is rebuilt (or the rebuild fails) - see CdvUnderlyingState.BeginCdvBackfill.
+        if (includeInCdvHistory) state.BeginCdvBackfill(DateTimeOffset.UtcNow);
+        try
         {
-            if (i > 0) await Task.Delay(BackfillCallDelay, cancellationToken);
+            // Counted so a batch that returns NOTHING can say so once, with Dhan's own reason, instead
+            // of disappearing into per-strike Debug lines. "No option history for this underlying at
+            // all" and "these particular strikes didn't trade" look identical from the dashboard and
+            // from the logs, but the first is a broken exchange/entitlement/segment and the second is
+            // ordinary - and only the aggregate can tell them apart.
+            var withData = 0;
+            var failed = 0;
+            string? lastError = null;
+            string? failedSegment = null;
 
-            var securityId = securityIds[i];
-            var dhanSegment = _optionChainMaster.FindBySecurityId(securityId)?.DhanSegment ?? "NSE_FNO";
-
-            // Stamped BEFORE the call, so a request that throws or is cancelled still counts as an
-            // attempt - otherwise exactly the strikes that fail hardest would be the ones retried
-            // most often, which is backwards.
-            state.MarkBackfillAttempted(securityId);
-
-            IReadOnlyList<CandleWithVolume> bars;
-            try
+            for (var i = 0; i < securityIds.Count; i++)
             {
-                var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
-                bars = fetched;
-                if (error is not null)
+                if (i > 0) await Task.Delay(BackfillCallDelay, cancellationToken);
+
+                var securityId = securityIds[i];
+                var dhanSegment = _optionChainMaster.FindBySecurityId(securityId)?.DhanSegment ?? "NSE_FNO";
+
+                // Stamped BEFORE the call, so a request that throws or is cancelled still counts as an
+                // attempt - otherwise exactly the strikes that fail hardest would be the ones retried
+                // most often, which is backwards.
+                state.MarkBackfillAttempted(securityId);
+
+                IReadOnlyList<CandleWithVolume> bars;
+                try
                 {
-                    failed++;
-                    lastError = error;
-                    failedSegment = dhanSegment;
+                    var (fetched, error) = await _historicalData.GetIntradayOptionCandlesAsync(securityId, dhanSegment, fromDay, today, 1, cancellationToken, interactive: false);
+                    bars = fetched;
+                    if (error is not null)
+                    {
+                        failed++;
+                        lastError = error;
+                        failedSegment = dhanSegment;
+                    }
                 }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug(ex, "CDV backfill: request threw for {Underlying} security {SecurityId}", underlying, securityId);
+                    failed++;
+                    lastError = ex.Message;
+                    failedSegment = dhanSegment;
+                    continue;
+                }
+
+                if (bars.Count == 0) continue;
+                withData++;
+
+                var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
+                if (trimmed.Count == 0) continue;
+
+                // trimmed spans up to HistoryTradingDays. Today's own slice feeds the LIVE running
+                // total that ticks then continue from; the earlier days are reconstructed separately
+                // just below, each restarting at its own zero (CDV is a session indicator - see
+                // CdvUnderlyingState.TradingDay).
+                var todayBars = trimmed.Where(b => IstDate(b.Time) == today).ToList();
+                state.SeedStrikeHistory(securityId, trimmed, todayBars, currentSpot, includeInCdvHistory, spotByTime);
+
+                if (includeInCdvHistory)
+                {
+                    // EVERY past day in the window, not just yesterday - CDV still restarts at zero for
+                    // each of them (see CdvUnderlyingState.FinalizeHistory), it is simply retained now
+                    // rather than discarded, so a backtest can ask a CDV question about any day.
+                    var pastBars = trimmed.Where(b => IstDate(b.Time) != today).ToList();
+                    state.SeedHistoricalDayStrike(securityId, pastBars, spotByTime, currentSpot);
+                }
+
+                seededCount++;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+
+            // One line, once per batch, and only when the whole batch came back with nothing - loud
+            // enough to find a broken exchange/entitlement, quiet enough not to fire on the ordinary
+            // case of some strikes not having traded.
+            if (withData == 0 && securityIds.Count > 0)
             {
-                _logger.LogDebug(ex, "CDV backfill: request threw for {Underlying} security {SecurityId}", underlying, securityId);
-                failed++;
-                lastError = ex.Message;
-                failedSegment = dhanSegment;
-                continue;
+                _logger.LogWarning(
+                    "CDV backfill got NO option history for {Underlying} {Expiry} on segment {Segment}: {Failed} of {Total} request(s) failed. {Reason} " +
+                    "Backtests on this underlying will find no option premiums until this resolves.",
+                    underlying, expiry, failedSegment ?? "?", failed, securityIds.Count,
+                    lastError is null
+                        ? "Dhan returned no candles rather than an error, so these contracts exist but have no intraday history in the requested window."
+                        : $"Last error from Dhan: {lastError}.");
             }
-
-            if (bars.Count == 0) continue;
-            withData++;
-
-            var trimmed = TrimToRecentTradingDays(bars, HistoryTradingDays);
-            if (trimmed.Count == 0) continue;
-
-            // trimmed spans up to HistoryTradingDays. Today's own slice feeds the LIVE running
-            // total that ticks then continue from; the earlier days are reconstructed separately
-            // just below, each restarting at its own zero (CDV is a session indicator - see
-            // CdvUnderlyingState.TradingDay).
-            var todayBars = trimmed.Where(b => IstDate(b.Time) == today).ToList();
-            state.SeedStrikeHistory(securityId, trimmed, todayBars, currentSpot, includeInCdvHistory);
 
             if (includeInCdvHistory)
             {
-                // EVERY past day in the window, not just yesterday - CDV still restarts at zero for
-                // each of them (see CdvUnderlyingState.FinalizeHistory), it is simply retained now
-                // rather than discarded, so a backtest can ask a CDV question about any day.
-                var pastBars = trimmed.Where(b => IstDate(b.Time) != today).ToList();
-                state.SeedHistoricalDayStrike(securityId, pastBars, spotByTime, currentSpot);
+                if (seededCount == 0)
+                {
+                    // Every strike in the underlying's first CDV-history batch failed - most likely
+                    // this raced Dhan TOTP auth the same way SpotFeedHostedService's backfill can (see
+                    // its AuthWaitTimeout doc comment). FinalizeCdvBackfill/FinalizePreviousDay are
+                    // no-ops with nothing seeded, so there is no partial state to unwind - just undo
+                    // the mark so the next RecenterAsync cycle (state.NeedsBackfill still true for
+                    // every strike here, since SeedStrikeHistory never got to set Backfilled) retries
+                    // this batch as a fresh "first batch" instead of being locked out of CDV history
+                    // for the rest of the trading day.
+                    _cdvHistorySeeded.Remove((underlying, expiry));
+                }
+                else
+                {
+                    state.FinalizeCdvBackfill();
+                    state.FinalizeHistory();
+                }
             }
-
-            seededCount++;
+            _logger.LogInformation("CDV: backfilled {Seeded}/{Total} contract(s) for {Underlying} {Expiry} (CDV history {Included}).",
+                seededCount, securityIds.Count, underlying, expiry,
+                includeInCdvHistory ? (seededCount > 0 ? "included" : "failed - will retry") : "not included - later batch");
         }
-
-        // One line, once per batch, and only when the whole batch came back with nothing - loud
-        // enough to find a broken exchange/entitlement, quiet enough not to fire on the ordinary
-        // case of some strikes not having traded.
-        if (withData == 0 && securityIds.Count > 0)
+        finally
         {
-            _logger.LogWarning(
-                "CDV backfill got NO option history for {Underlying} {Expiry} on segment {Segment}: {Failed} of {Total} request(s) failed. {Reason} " +
-                "Backtests on this underlying will find no option premiums until this resolves.",
-                underlying, expiry, failedSegment ?? "?", failed, securityIds.Count,
-                lastError is null
-                    ? "Dhan returned no candles rather than an error, so these contracts exist but have no intraday history in the requested window."
-                    : $"Last error from Dhan: {lastError}.");
+            // Not finalized (nothing came back, or the batch stopped part way) - the live ticks draw the total again.
+            if (includeInCdvHistory) state.AbandonCdvBackfill();
         }
-
-        if (includeInCdvHistory)
-        {
-            if (seededCount == 0)
-            {
-                // Every strike in the underlying's first CDV-history batch failed - most likely
-                // this raced Dhan TOTP auth the same way SpotFeedHostedService's backfill can (see
-                // its AuthWaitTimeout doc comment). FinalizeCdvBackfill/FinalizePreviousDay are
-                // no-ops with nothing seeded, so there is no partial state to unwind - just undo
-                // the mark so the next RecenterAsync cycle (state.NeedsBackfill still true for
-                // every strike here, since SeedStrikeHistory never got to set Backfilled) retries
-                // this batch as a fresh "first batch" instead of being locked out of CDV history
-                // for the rest of the trading day.
-                _cdvHistorySeeded.Remove((underlying, expiry));
-            }
-            else
-            {
-                state.FinalizeCdvBackfill();
-                state.FinalizeHistory();
-            }
-        }
-        _logger.LogInformation("CDV: backfilled {Seeded}/{Total} contract(s) for {Underlying} {Expiry} (CDV history {Included}).",
-            seededCount, securityIds.Count, underlying, expiry,
-            includeInCdvHistory ? (seededCount > 0 ? "included" : "failed - will retry") : "not included - later batch");
     }
 
 
