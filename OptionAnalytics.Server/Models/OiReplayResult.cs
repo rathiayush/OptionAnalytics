@@ -71,6 +71,16 @@ public sealed record VolumeProfileResult(
         new(false, error, underlying, null, null, null, null, Array.Empty<decimal>(), Array.Empty<decimal>());
 }
 
+/// <summary>The previous trading day's 1-minute bars of a day's futures contract (OiReplayService.GetPreviousDayFuturesAsync) -
+/// OI Replay's futures chart draws the previous session's volume profile from them. Date: the day they are from;
+/// Contract / Expiry: the contract they are of; Note: set when an expired contract's day came from elsewhere.</summary>
+public sealed record PreviousDayFuturesResult(
+    bool Success, string? Error, string Underlying, DateOnly? Date, DateOnly? Expiry, string? Contract, IReadOnlyList<FuturesBar> Bars, string? Note)
+{
+    public static PreviousDayFuturesResult Failed(string underlying, string error) =>
+        new(false, error, underlying, null, null, null, Array.Empty<FuturesBar>(), null);
+}
+
 /// <summary>One bin of the previous day's volume profile: its middle price and the volume traded in it.</summary>
 public sealed record VolumeProfileBin(decimal Price, long Volume);
 

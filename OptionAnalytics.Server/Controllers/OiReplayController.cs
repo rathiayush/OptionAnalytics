@@ -91,6 +91,16 @@ public sealed class OiReplayController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>The previous trading day's 1-minute bars of the futures contract `expiry` (the chart's; omitted = that
+    /// day's front month) before `date` - OI Replay's futures chart draws the previous session's volume profile from
+    /// them (OiReplayService.GetPreviousDayFuturesAsync).</summary>
+    [HttpGet("{underlying}/previous-day-futures")]
+    public async Task<ActionResult> GetPreviousDayFutures(string underlying, [FromQuery] DateOnly date, [FromQuery] DateOnly? expiry, CancellationToken cancellationToken)
+    {
+        var result = await _service.GetPreviousDayFuturesAsync(underlying.ToUpperInvariant(), date, expiry, cancellationToken);
+        return Ok(result);
+    }
+
     /// <summary>The REAL calendar date "Weekly"/"Monthly" each currently resolve to for this
     /// underlying - exposed so a picker can show the actual date instead of an ambiguous label, and
     /// so the two can be told apart even when they happen to be the SAME date (the final week before
