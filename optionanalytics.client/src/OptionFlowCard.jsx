@@ -5,6 +5,7 @@ import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime } from './shared.jsx'
 import { formatOiMillions, useFitContentAsDataGrows } from './oiShared.jsx'
 import { optionFlowSeries } from './optionFlow.js'
+import { sanitizeLine } from './chartLine.js'
 
 const { Text } = Typography
 
@@ -44,8 +45,8 @@ function FlowChart({ ce, pe, dayKey, height }) {
   }, [height])
 
   useEffect(() => {
-    ceRef.current?.setData(ce)
-    peRef.current?.setData(pe)
+    ceRef.current?.setData(sanitizeLine(ce))
+    peRef.current?.setData(sanitizeLine(pe))
   }, [ce, pe])
   useFitContentAsDataGrows(chartRef, Math.max(ce.length, pe.length), dayKey)
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { sanitizeLine } from './chartLine.js'
 
 // Today's option CDV and OBV exactly as the dashboard shows them - the server's own CDV engine (CdvUnderlyingState),
 // which classifies every live tick (up-tick buys, down-tick sells) instead of reading minute candles. Read from server
@@ -19,7 +20,9 @@ export function dashboardFlowFromSeries(cdvBars, obv) {
   const line = (points, key) => points.filter((p) => today(p.ms) && Number.isFinite(p[key])).map((p) => ({ time: p.ms, value: p[key] }))
   const obvLine = (points) => (points ?? []).map((p) => ({ ms: new Date(p.time).getTime(), v: Number(p.obv) }))
     .filter((p) => Number.isFinite(p.ms) && Number.isFinite(p.v) && today(p.ms)).map((p) => ({ time: p.ms, value: p.v }))
-  return { ceCdv: line(cdv, 'ce'), peCdv: line(cdv, 'pe'), ceObv: obvLine(obv?.ce), peObv: obvLine(obv?.pe) }
+  // The server's series can repeat a minute or hold one out of order (a backfill joined to live bars) - one point per
+  // minute, in time order, the later of a repeated one (sanitizeLine).
+  return { ceCdv: sanitizeLine(line(cdv, 'ce')), peCdv: sanitizeLine(line(cdv, 'pe')), ceObv: sanitizeLine(obvLine(obv?.ce)), peObv: sanitizeLine(obvLine(obv?.pe)) }
 }
 
 /** The forming minute (the snapshot's current bar) put in place of / after the series' last minute. */
