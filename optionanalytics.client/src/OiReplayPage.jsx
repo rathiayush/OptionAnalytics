@@ -34,7 +34,7 @@ import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
 import { DomDrawer } from './DomDrawer.jsx'
 import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, analyzeBars } from './orderFlowMath.js'
-import { withBackfill } from './cvdBackfill.js'
+import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -1859,8 +1859,10 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // entirely about ITS OWN change over time rather than a level.
 // profile: the previous session's volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
 // rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines (profileLabel on the POC).
-// deltaBars: [{ time (chart time), delta, cvd }] per candle - each candle's delta as a histogram and
-// the cumulative delta as a line, in a band under the candles (own scales).
+// deltaBars: [{ time (chart time), delta, cvd, estimated }] per candle - each candle's delta as a histogram and the
+// cumulative delta as a line, in their own pane under the candles (own scales, the same time axis).
+const DELTA_PANE_HEIGHT = 150
+const CVD_COLOR = '#f5c542'
 function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -1900,11 +1902,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
     profilePrimitiveRef.current = new VolumeProfilePrimitive()
     seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
     profileLinesRef.current = []
-    // Delta (histogram) and cumulative delta (line) share the bottom band of the pane.
-    deltaSeriesRef.current = chart.addSeries(HistogramSeries, { priceScaleId: 'delta', priceLineVisible: false, lastValueVisible: false, title: 'Δ' })
-    cvdSeriesRef.current = chart.addSeries(LineSeries, { priceScaleId: 'cvd', color: '#f5c542', lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'ΣΔ' })
-    chart.priceScale('delta').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 }, visible: false })
-    chart.priceScale('cvd').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 }, visible: false })
+    // Delta / cumulative delta get their own pane under the candles once there is any (see the deltaBars effect).
     // Own (left) price scale and a thin, semi-transparent line - OI's own numbers (lakhs/crores)
     // are a totally different scale than price, so sharing the right-hand axis with candles would
     // otherwise squash one or the other into a flat line.
@@ -1947,14 +1945,41 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
   // The futures' session VWAP, already on these candles' times (the caller aligns it).
   useEffect(() => { vwapSeriesRef.current?.setData(sanitizeLine(vwap)) }, [vwap])
 
+  // Delta (histogram, right axis) and cumulative delta (line, left axis) in their own pane under the candles - its own
+  // scales and separator, the candles' time axis. Estimated minutes (before the server started recording) are fainter.
+  const deltaShown = (deltaBars?.length ?? 0) > 0
   useEffect(() => {
-    if (!deltaSeriesRef.current || !cvdSeriesRef.current || !seriesRef.current) return
-    const rows = deltaBars ?? []
-    deltaSeriesRef.current.setData(rows.map((d) => ({ time: d.time, value: d.delta, color: d.delta >= 0 ? `${UP_COLOR}aa` : `${DOWN_COLOR}aa` })))
-    cvdSeriesRef.current.setData(rows.map((d) => ({ time: d.time, value: d.cvd })))
-    // Candles keep the top of the pane when there is a delta band under them.
-    seriesRef.current.priceScale().applyOptions({ scaleMargins: rows.length ? { top: 0.12, bottom: 0.28 } : CANDLE_SCALE_MARGINS })
-  }, [deltaBars, height])
+    const chart = chartRef.current
+    if (!chart) return
+    if (!deltaShown) {
+      if (deltaSeriesRef.current) {
+        chart.removePane(1)
+        deltaSeriesRef.current = null
+        cvdSeriesRef.current = null
+      }
+      chart.applyOptions({ height })
+      return
+    }
+    if (!deltaSeriesRef.current) {
+      const volumeFormat = { type: 'volume' }
+      deltaSeriesRef.current = chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false, title: 'Δ', priceFormat: volumeFormat }, 1)
+      cvdSeriesRef.current = chart.addSeries(LineSeries, {
+        priceScaleId: 'left', color: CVD_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'ΣΔ', priceFormat: volumeFormat,
+      }, 1)
+      chart.priceScale('left', 1).applyOptions({ visible: true, borderColor: BORDER_COLOR })
+      chart.priceScale('right', 1).applyOptions({ borderColor: BORDER_COLOR })
+    }
+    chart.applyOptions({ height: height + DELTA_PANE_HEIGHT })
+    // The candles keep their own height; the delta pane takes DELTA_PANE_HEIGHT of the taller chart.
+    const [candlePane, deltaPane] = chart.panes()
+    candlePane?.setStretchFactor(height)
+    deltaPane?.setStretchFactor(DELTA_PANE_HEIGHT)
+    const rows = deltaBars
+    deltaSeriesRef.current.setData(sanitizeLine(rows.map((d) => ({
+      time: d.time, value: d.delta, color: `${d.delta >= 0 ? UP_COLOR : DOWN_COLOR}${d.estimated ? '55' : 'cc'}`,
+    }))))
+    cvdSeriesRef.current.setData(sanitizeLine(rows.map((d) => ({ time: d.time, value: d.cvd }))))
+  }, [deltaBars, deltaShown, height])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -1978,7 +2003,7 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
 
   useFitContentAsDataGrows(chartRef, bars.length, dayKey)
 
-  return <div ref={containerRef} style={{ width: '100%', height }} />
+  return <div ref={containerRef} style={{ width: '100%', height: height + (deltaShown ? DELTA_PANE_HEIGHT : 0) }} />
 }
 
 // DraggableFloatingPanel itself now lives in oiShared.jsx only (was a byte-identical duplicate
@@ -3868,7 +3893,8 @@ export default function OiReplayPage() {
     let cancelled = false
     const load = () => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`)
       .then((r) => (r.ok ? r.json() : null))
-      .then((body) => { if (!cancelled) setFuturesFlow(body ? { source: body.source, bars: body.bars.map((b) => ({ ms: new Date(b.time).getTime(), delta: b.buy - b.sell })) } : null) })
+      // A live day the server started recording part way (a restart) comes with the minutes before as an estimate.
+      .then((body) => { if (!cancelled) setFuturesFlow(body ? { source: body.source, bars: deltaMinutes(body.bars, body.backfill) } : null) })
       .catch(() => { if (!cancelled) setFuturesFlow(null) })
     load()
     const id = isLive ? setInterval(load, 60_000) : null
@@ -3882,11 +3908,15 @@ export default function OiReplayPage() {
     for (const b of futuresFlow.bars) {
       if (b.ms > asOfMs) continue // minutes revealed so far (a minute shows once the replay reaches its start, like the candles)
       const t = Math.floor(toChartTime(b.ms) / bucketSeconds) * bucketSeconds
-      buckets.set(t, (buckets.get(t) ?? 0) + b.delta)
+      const bucket = buckets.get(t) ?? { delta: 0, estimated: true }
+      buckets.set(t, { delta: bucket.delta + b.delta, estimated: bucket.estimated && (b.estimated || futuresFlow.source === 'estimated') })
     }
     let cvd = 0
-    return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, delta]) => { cvd += delta; return { time, delta, cvd } })
+    return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, { delta, estimated }]) => { cvd += delta; return { time, delta, cvd, estimated } })
   }, [futuresDeltaOn, futuresFlow, asOfMs, futuresTimeframe])
+  // Where the live recording starts on a day whose earlier minutes are estimated (the server restarted part way).
+  const futuresFlowRecordedFrom = futuresFlow?.source !== 'estimated' ? futuresFlow?.bars?.find((b) => !b.estimated && b.ms <= (asOfMs ?? Infinity))?.ms ?? null : null
+  const futuresFlowHasEstimate = futuresDeltaBars?.some((b) => b.estimated) ?? false
   const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
   // The previous trading day's volume profile of the same futures contract (its bars from the server - Dhan, kept on
   // disk): fixed levels for the whole day, nothing of the day itself in them, so nothing shows early in a replay.
@@ -5553,7 +5583,7 @@ export default function OiReplayPage() {
                           <Button size="small" onClick={() => setDomOpen(true)}>DOM</Button>
                         </Tooltip>
                         <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
-                        <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta under the candles - exact for a day the order flow server saw live, else estimated from 1-minute candles">
+                        <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta, in their own pane under the candles - exact for the minutes the order flow server saw live, else estimated from 1-minute candles">
                           <Space size={4}><Switch size="small" checked={futuresDeltaOn} onChange={setFuturesDeltaOn} /><Text style={{ fontSize: 12 }}>Δ / ΣΔ</Text></Space>
                         </Tooltip>
                         <Tooltip title={`The previous trading day's volume profile of this futures contract (${futuresProfileRow}-pt rows) with its POC and 70% value area (VAH/VAL) - fixed levels for the day`}>
@@ -5630,8 +5660,12 @@ export default function OiReplayPage() {
                         </ChartErrorBoundary>
                         {futuresDeltaBars?.length > 0 && (
                           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                            Under the candles: delta per candle (green buying / red selling) and cumulative delta (yellow line, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
-                            {futuresFlow?.source === 'estimated' ? ' - estimated from 1-minute candles (the order flow server did not see this day live)' : ' - from the live tick feed'}.
+                            Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
+                            {futuresFlow?.source === 'estimated'
+                              ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
+                              : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
+                                ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
+                                : ' - from the live tick feed'}.
                           </Text>
                         )}
                         {futuresProfile?.poc != null && (
