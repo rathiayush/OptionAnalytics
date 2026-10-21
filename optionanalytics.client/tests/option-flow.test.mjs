@@ -95,3 +95,15 @@ test('smoothLine: EMA(9) as the Pine plots CDV - a prefix smooths the same as th
   }
   assert.ok(meanStep(whole.map((p) => p.value)) < meanStep(series.map((p) => p.value)) / 3)
 })
+
+test('bucketLine: one point per step, its last value, stamped at the step start (09:15 lines up)', async () => {
+  const { bucketLine } = await import('../src/optionFlow.js')
+  const open = Date.UTC(2026, 9, 21, 3, 45) // 09:15 IST
+  const series = Array.from({ length: 7 }, (_, i) => ({ time: open + i * 60_000, value: i * 10 }))
+  assert.deepEqual(bucketLine(series, 3), [
+    { time: open, value: 20 }, { time: open + 3 * 60_000, value: 50 }, { time: open + 6 * 60_000, value: 60 },
+  ])
+  assert.equal(bucketLine(series, 1), series)
+  // Cut at a replay clock first: the step in progress holds only the minutes up to it.
+  assert.deepEqual(bucketLine(series.slice(0, 5), 3).at(-1), { time: open + 3 * 60_000, value: 40 })
+})

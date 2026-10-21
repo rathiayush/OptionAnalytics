@@ -4,7 +4,7 @@ import { CrosshairMode, LineSeries } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime } from './shared.jsx'
 import { formatOiMillions, useFitContentAsDataGrows } from './oiShared.jsx'
-import { optionFlowSeries, smoothLine } from './optionFlow.js'
+import { bucketLine, optionFlowSeries, smoothLine } from './optionFlow.js'
 import { sanitizeLine } from './chartLine.js'
 
 const { Text } = Typography
@@ -59,15 +59,18 @@ function FlowChart({ ce, pe, dayKey, height }) {
  * (`endTime`, chart time; null - live - draws it all), so nothing later in the day shows early. Live, `dashboardFlow`
  * (the dashboard's own tick-by-tick series - dashboardFlow.js) is shown instead when the dashboard has it.
  */
-export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, dashboardFlow = null, sourceNote = null, height = 260 }) {
+export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, dashboardFlow = null, sourceNote = null, timeframe = 3, height = 260 }) {
   // Live, the dashboard's own tick-by-tick numbers when it has them (dashboardFlow.js); else worked out from the bars.
   const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars)), [dashboardFlow, cePoints, pePoints, spotBars])
   const flow = dashboardFlow ?? ownFlow
   const lines = useMemo(() => {
-    const cut = (series) => (endTime == null ? toLine(series) : toLine(series).filter((p) => p.time <= endTime))
-    // CDV EMA(9)-smoothed as the Pine indicator plots it (OBV already is); smoothed before the cut - no look-ahead.
-    return { ceCdv: cut(smoothLine(flow.ceCdv)), peCdv: cut(smoothLine(flow.peCdv)), ceObv: cut(flow.ceObv), peObv: cut(flow.peObv) }
-  }, [flow, endTime])
+    // Minutes up to the replay clock only, then one point per `timeframe` step (its last value); CDV is then
+    // EMA(9)-smoothed over those steps as the Pine indicator plots it on that chart timeframe (OBV already is smoothed).
+    const upToClock = (series) => (endTime == null ? series : series.filter((p) => toChartTime(p.time) <= endTime))
+    const cdv = (series) => toLine(smoothLine(bucketLine(upToClock(series), timeframe)))
+    const obv = (series) => toLine(bucketLine(upToClock(series), timeframe))
+    return { ceCdv: cdv(flow.ceCdv), peCdv: cdv(flow.peCdv), ceObv: obv(flow.ceObv), peObv: obv(flow.peObv) }
+  }, [flow, endTime, timeframe])
   const last = (series) => series.at(-1)?.value
   const hasVolume = flow.ceCdv.some((p) => p.value !== 0) || flow.peCdv.some((p) => p.value !== 0)
 
@@ -81,14 +84,14 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
         <Text style={{ fontSize: 12, color: CE_COLOR }}>CE {formatOiMillions(last(lines.ceCdv) ?? 0, { signed: true })}</Text>
         <Text style={{ fontSize: 12 }}> · </Text>
         <Text style={{ fontSize: 12, color: PE_COLOR }}>PE {formatOiMillions(last(lines.peCdv) ?? 0, { signed: true })}</Text>
-        <FlowChart ce={lines.ceCdv} pe={lines.peCdv} dayKey={`cdv-${dayKey}`} height={height} />
+        <FlowChart ce={lines.ceCdv} pe={lines.peCdv} dayKey={`cdv-${dayKey}-${timeframe}`} height={height} />
       </Col>
       <Col xs={24} lg={12}>
         <Text strong style={{ fontSize: 12 }}>OBV (delta-weighted, EMA 9) </Text>
         <Text style={{ fontSize: 12, color: CE_COLOR }}>CE {formatOiMillions(last(lines.ceObv) ?? 0, { signed: true })}</Text>
         <Text style={{ fontSize: 12 }}> · </Text>
         <Text style={{ fontSize: 12, color: PE_COLOR }}>PE {formatOiMillions(last(lines.peObv) ?? 0, { signed: true })}</Text>
-        <FlowChart ce={lines.ceObv} pe={lines.peObv} dayKey={`obv-${dayKey}`} height={height} />
+        <FlowChart ce={lines.ceObv} pe={lines.peObv} dayKey={`obv-${dayKey}-${timeframe}`} height={height} />
       </Col>
     </Row>
     </>
