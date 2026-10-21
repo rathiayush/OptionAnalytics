@@ -76,7 +76,21 @@ internal sealed class CdvStrikeRuntime
     /// SpotUnderlyingState.BarClosed already uses.</summary>
     public Candle? ApplyPriceTick(decimal price, long tickVolume, DateTimeOffset timestamp)
     {
+        // Only a trade moves the bars. A tick with no new volume is an OI / depth update or a re-subscribe's snapshot,
+        // stamped with the contract's LAST trade time - minutes, or a day, old - and it opened a bar back at that minute:
+        // bars out of order, a minute twice, a point before the open (OBV's timeline, the ATM premium chart). It still
+        // opens the very first bar (the price OBV's first change is measured from).
+        if (tickVolume <= 0 && (_currentBar is not null || _closedBars.Count > 0)) return null;
         var minute = new DateTimeOffset(timestamp.Year, timestamp.Month, timestamp.Day, timestamp.Hour, timestamp.Minute, 0, timestamp.Offset);
+        // Never back in time: a trade stamped before the forming minute (packets of different strikes interleave) is
+        // folded into it, and the backfill's last bar - fetched while it was still forming - is carried on, not replaced.
+        if (_currentBar is { } forming && minute < forming.Bar.Time) minute = forming.Bar.Time;
+        if (_currentBar is null && _closedBars.Count > 0 && minute <= _closedBars[^1].Bar.Time)
+        {
+            _currentBar = _closedBars[^1];
+            _closedBars.RemoveAt(_closedBars.Count - 1);
+            minute = _currentBar.Value.Bar.Time;
+        }
         Candle? justClosed = null;
 
         if (_currentBar is not { } cur || cur.Bar.Time != minute)
@@ -399,7 +413,10 @@ public sealed class CdvUnderlyingState
             }
 
             LastUpdateUtc = DateTimeOffset.UtcNow;
-            closedAggregateBar = _cdvBackfillPending ? null : UpdateBar_NoLock(tick.ExchangeTimestamp);
+            // Only a trade moves the total, so only a trade moves its bars (a tick without one carries an old trade time -
+            // see CdvStrikeRuntime.ApplyPriceTick) - bar the very first one.
+            var hasBars = _currentBar is not null || _closedBars.Count > 0;
+            closedAggregateBar = _cdvBackfillPending || (deltaVolume <= 0 && hasBars) ? null : UpdateBar_NoLock(tick.ExchangeTimestamp);
         }
 
         if (closedIsCall is { } isCall) AtmBarClosed?.Invoke(isCall, closedBar);
@@ -662,6 +679,8 @@ public sealed class CdvUnderlyingState
         // tick, firing AggregateBarClosed (a full multi-day recompute under this lock, which the Dhan
         // receive thread then queued behind) constantly and filling the history with out-of-order bars.
         if (_currentBar is { } forming && minute < forming.Time) minute = forming.Time;
+        // Nor before the bars already drawn (the rebuilt day's last minute, when no bar is forming yet).
+        if (_currentBar is null && _closedBars.Count > 0 && minute < _closedBars[^1].Time) minute = _closedBars[^1].Time;
         CdvBarPoint? justClosed = null;
 
         if (_currentBar is not { } bar || bar.Time != minute)
