@@ -71,3 +71,19 @@ test('no strike standing out is no wall; early in the day the writers are measur
   // Under 5 minutes of OI is too little to judge.
   assert.equal(pass(run(day, 3).ce, 'writers'), null)
 })
+
+test('before 09:15 there is nothing to judge: the pre-open prints and yesterday are not used', async () => {
+  const { entryChecklist, sessionOpenMs } = await import('../src/entryChecklist.js')
+  const preOpen = Date.parse('2026-10-22T03:38:00Z') // 09:08 IST
+  const open = Date.parse('2026-10-22T03:45:00Z')    // 09:15 IST
+  assert.equal(sessionOpenMs(preOpen), open)
+  assert.equal(sessionOpenMs(Date.parse('2026-10-22T10:00:00Z')), open)
+  const yesterday = Date.parse('2026-10-21T09:59:00Z') // 15:29 IST the day before
+  const spotBars = [{ time: yesterday, close: 22850 }, { time: preOpen - 60000, close: 22811.3 }]
+  const vwap = [{ time: yesterday, value: 22847.7 }]
+  assert.deepEqual(entryChecklist({ asOfMs: preOpen, spotBars, vwap, cePoints: [], pePoints: [], step: 50 }), { waiting: true, opensAt: open })
+  // From the first minute on it judges - on today's data only (yesterday's VWAP is not today's).
+  const r = entryChecklist({ asOfMs: open + 60000, spotBars: [...spotBars, { time: open, close: 22830 }], vwap, cePoints: [], pePoints: [], step: 50 })
+  assert.equal(r.spot, 22830)
+  assert.equal(r.ce.checks.find((c) => c.key === 'direction').pass, null)
+})
