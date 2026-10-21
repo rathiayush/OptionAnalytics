@@ -56,6 +56,20 @@ export function smoothLine(series, len = SMOOTH_LEN) {
   return (series ?? []).map((p, i) => ({ time: p.time, value: values[i] }))
 }
 
+/** `[{ time (ms), value }]` (in time order) as one point per `minutes`-minute step - the step's last value, stamped at
+ *  its start like a chart candle (steps line up with 09:15). 1 minute (or less) leaves it as it is. */
+export function bucketLine(series, minutes) {
+  if (!(minutes > 1)) return series ?? []
+  const size = minutes * 60_000
+  const out = []
+  for (const p of series ?? []) {
+    const time = Math.floor(p.time / size) * size
+    if (out.length && out[out.length - 1].time === time) out[out.length - 1] = { time, value: p.value }
+    else out.push({ time, value: p.value })
+  }
+  return out
+}
+
 // One bar per strike and minute. Live, the run's bars and the live minutes are passed together: a later point of the same
 // strike and minute is the newer reading of it and replaces the earlier one, keeping the larger volume (the run's bar of
 // the minute the page loaded in and that minute's live point each saw only part of it).
