@@ -2,8 +2,9 @@
 // spoken words and the server's Telegram chat.
 
 // A trade punched / placed (and a live trade's exit) to the server's Telegram chat - live view only.
-export function telegram(text) {
-  fetch('/api/alerts/telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).catch(() => {})
+// `key` (one trade event): the server sends a keyed message once a day, however many open pages report it.
+export function telegram(text, key = null) {
+  fetch('/api/alerts/telegram', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, key }) }).catch(() => {})
 }
 let audioCtx = null
 export function unlockAudio() {
