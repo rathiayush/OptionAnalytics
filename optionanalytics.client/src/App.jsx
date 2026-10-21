@@ -1106,7 +1106,7 @@ function DashboardPage() {
   // SpotSnapshot's own doc comment on why riding the existing per-tick spotUpdate push, rather than
   // a separate poll, is what lets this line grow live instead of only catching up periodically.
   const [vwapSeries, setVwapSeries] = useState([])
-  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
 
   // Confluence alerts are a combined feed across every underlying, not scoped to `selected` -
   // fetched once on load (so alerts that fired before this tab connected still show up) and then

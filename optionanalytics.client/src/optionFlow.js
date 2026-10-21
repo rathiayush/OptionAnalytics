@@ -13,7 +13,8 @@
 //    minute, then EMA(9)-smoothed (GetObvSeries).
 //
 // Every point uses only bars up to its own minute, so cutting the series at the replay clock never shows anything
-// that had not happened yet.
+// that had not happened yet. Live, the same works on today's bars plus each live minute (its volume from the rise of
+// Dhan's cumulative day volume within the minute), recomputed as the ticks arrive.
 
 const SMOOTH_LEN = 9
 
@@ -48,13 +49,22 @@ export function smoothEma(values, len = SMOOTH_LEN) {
   return out
 }
 
+// One bar per strike and minute. Live, the run's bars and the live minutes are passed together: a later point of the same
+// strike and minute is the newer reading of it and replaces the earlier one, keeping the larger volume (the run's bar of
+// the minute the page loaded in and that minute's live point each saw only part of it).
 function bars(points) {
-  return (points ?? [])
-    .filter((p) => p && Number.isFinite(p.strike) && Number.isFinite(p.price))
-    .map((p) => ({
+  const byKey = new Map()
+  for (const p of points ?? []) {
+    if (!p || !Number.isFinite(p.strike) || !Number.isFinite(p.price)) continue
+    const bar = {
       t: minuteOf(p.time), strike: p.strike, close: p.price,
       open: p.open ?? p.price, high: p.high ?? p.price, low: p.low ?? p.price, volume: p.volume ?? 0,
-    }))
+    }
+    const key = `${bar.strike}|${bar.t}`
+    const earlier = byKey.get(key)
+    byKey.set(key, earlier ? { ...bar, volume: Math.max(bar.volume, earlier.volume) } : bar)
+  }
+  return [...byKey.values()]
 }
 
 function spotLookup(spotBars) {

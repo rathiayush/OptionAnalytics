@@ -91,6 +91,29 @@ public sealed class SpotUnderlyingState
         }
     }
 
+    /// <summary>Puts Dhan's own candles - volume included - in place of the finished minutes they cover (SpotFeedHostedService
+    /// re-reads today's every minute: the live index feed carries no volume, so the bars built from ticks have none). Only
+    /// minutes before the one still forming from live ticks are touched; the result stays in time order.</summary>
+    public void MergeVolumeBars(IEnumerable<CandleWithVolume> bars)
+    {
+        lock (_lock)
+        {
+            var forming = _currentVolumeBar?.Time;
+            var byTime = new Dictionary<DateTimeOffset, CandleWithVolume>();
+            foreach (var b in _closedVolumeBars) byTime[b.Time] = b;
+            var changed = false;
+            foreach (var bar in bars)
+            {
+                if (forming is { } f && bar.Time >= f) continue;
+                byTime[bar.Time] = bar;
+                changed = true;
+            }
+            if (!changed) return;
+            _closedVolumeBars.Clear();
+            _closedVolumeBars.AddRange(byTime.Values.OrderBy(b => b.Time));
+        }
+    }
+
     /// <summary>Folds one tick into the currently-forming 1-minute bar, closing the previous bar
     /// when the tick lands in a new minute. Returns the (possibly just-started) current bar.</summary>
     public Candle ApplyTick(SpotTick tick)

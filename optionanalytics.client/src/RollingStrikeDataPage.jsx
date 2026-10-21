@@ -151,7 +151,7 @@ export default function RollingStrikeDataPage() {
   // own GetRollingChart doc comment). null means "use the offset below instead".
   const [strike, setStrike] = useState(null)
   const [side, setSide] = usePersistedState(STORED_SIDE, 'CE')
-  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
   const [lookbackDays, setLookbackDays] = useState(DEFAULT_LOOKBACK_DAYS.WEEK)
 
   const [result, setResult] = useState(null) // null = never loaded yet

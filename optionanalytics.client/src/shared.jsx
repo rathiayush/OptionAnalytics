@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
+import { reconcileCardOrder } from './cardOrder.js'
 
 // Provided once, at the app root (App.jsx), after GET /api/auth/me resolves - {email, role} or
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
@@ -419,7 +420,9 @@ export const STORED_UNDERLYING = 'optionanalytics.underlying'
 export const STORED_TIMEFRAME = 'optionanalytics.timeframe'
 // One shared toggle for every page's VWAP checkbox, same as underlying/timeframe above - checking
 // it on one page and finding it already checked on another is the expected behavior, not a bug.
-export const STORED_SHOW_VWAP = 'optionanalytics.showVwap'
+// v2: VWAP is on by default now (it used to start off, and the first page visited saved that) - a new key so every
+// viewer starts with it shown once; unticking it is still remembered.
+export const STORED_SHOW_VWAP = 'optionanalytics.showVwap.v2'
 // Same shape, for OI Replay's own previous-day volume profile (POC/VAH/VAL/HVN/LVN) overlay -
 // shown on by default (the user's own original ask), with this the one way to hide it once it's
 // in the way of something else on the chart.
@@ -458,20 +461,18 @@ export function usePersistedState(key, fallback) {
 // Deliberately reconciles against a stale persisted order rather than trusting it outright: a page
 // that later adds or removes a card must not end up silently dropping the new one (it would never
 // render at all) or keeping a ghost id around forever from before a card was removed. A newly added
-// card is appended at the end - the least surprising place for something that wasn't part of
-// whatever arrangement was saved.
+// card goes where the page puts it by default - after the card before it in `cardIds` - rather than at
+// the very end, where it was easy to miss on a long page (reconcileCardOrder).
 export function useCardOrder(storageKey, cardIds) {
   const [storedOrder, setStoredOrder] = usePersistedState(storageKey, cardIds)
   const dragIdRef = useRef(null)
   const [dragOverId, setDragOverId] = useState(null)
 
-  const order = useMemo(() => {
-    const known = new Set(cardIds)
-    const kept = storedOrder.filter((id) => known.has(id))
-    const missing = cardIds.filter((id) => !kept.includes(id))
-    return [...kept, ...missing]
+  const order = useMemo(
+    () => reconcileCardOrder(storedOrder, cardIds),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storedOrder, cardIds.join(',')])
+    [storedOrder, cardIds.join(',')],
+  )
 
   const dragHandleProps = (id) => ({
     draggable: true,

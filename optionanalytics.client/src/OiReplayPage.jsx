@@ -23,6 +23,8 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
+import { EntryChecklistCard } from './EntryChecklistCard.jsx'
+import { useDashboardFlow } from './dashboardFlow.js'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
@@ -281,15 +283,21 @@ function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_
     const tickLow = Number.isFinite(tick.low) ? tick.low : tick.price
     const idx = lastIndex.get(tick.strike)
     const last = idx != null ? next[idx] : null
+    // The minute's volume from Dhan's cumulative day volume, as the futures do (mergeLiveFuturesTicks): its rise since
+    // the minute began - dayVolumeOpen is the strike's previous live minute's last figure, else this minute's first.
+    const dayVolume = tick.dayVolume > 0 ? tick.dayVolume : null
     if (last && Math.floor(pointMs(last) / slotMs) === Math.floor(ms / slotMs)) {
       const high = Number.isFinite(last.high) ? Math.max(last.high, tickHigh) : tickHigh
       const low = Number.isFinite(last.low) ? Math.min(last.low, tickLow) : tickLow
-      next[idx] = { ...last, time: tick.time, ms, openInterest: tick.openInterest, price: tick.price, high, low }
+      const volume = dayVolume != null && last.dayVolumeOpen != null ? Math.max(0, dayVolume - last.dayVolumeOpen) : last.volume
+      next[idx] = { ...last, time: tick.time, ms, openInterest: tick.openInterest, price: tick.price, high, low, volume, dayVolume: dayVolume ?? last.dayVolume }
     } else if (!last || ms >= pointMs(last)) {
+      const dayVolumeOpen = dayVolume == null ? null : last?.dayVolume ?? dayVolume
       next.push({
         time: tick.time, ms, strike: tick.strike, openInterest: tick.openInterest,
         impliedVolatility: ivByStrike?.get(tick.strike) ?? last?.impliedVolatility ?? null,
         price: tick.price, open: Number.isFinite(tick.open) ? tick.open : tick.price, high: tickHigh, low: tickLow,
+        volume: dayVolume != null ? Math.max(0, dayVolume - dayVolumeOpen) : null, dayVolume, dayVolumeOpen,
       })
       lastIndex.set(tick.strike, next.length - 1)
     }
@@ -669,11 +677,12 @@ const FAST_TIMEFRAME_OPTIONS = TIMEFRAME_OPTIONS.filter((o) => o.value <= 5)
 const SECTION_OPTIONS = [
   { value: 'topStats', label: 'Top stats' },
   { value: 'marketRead', label: 'Market Read' },
+  { value: 'entryChecklist', label: 'Entry checklist' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
-  { value: 'optionFlow', label: 'Option CDV / OBV (past days)' },
+  { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -685,7 +694,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -3013,7 +3022,7 @@ export default function OiReplayPage() {
   // that day's index volume - empty for a day Dhan sent no index volume for), shown only up to the replay
   // clock (shownVwap). Reset on every load() like liveBars above.
   const [vwapSeries, setVwapSeries] = useState([])
-  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
 
   // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) ON BY
   // DEFAULT (the user's own original ask), with this checkbox the one way to hide it once it's
@@ -3526,6 +3535,13 @@ export default function OiReplayPage() {
     () => groupByStrike(isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
     [result, livePePoints, isLive],
   )
+  // The option CDV / OBV card's inputs: the run's option bars plus (live) each live minute - later points of the same
+  // strike and minute win - and the spot the page shows (the run's 1-minute bars plus the live tail).
+  const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
+  const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
+  const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
+  // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
+  const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
 
   // The strike drill-down popup - opened by clicking anywhere on the main chart (see ReplayChart's
   // own onStrikeClick), answering the "how can I see per-minute OI change AND total OI for one
@@ -4091,6 +4107,13 @@ export default function OiReplayPage() {
   // ---- Live mode (real Dhan orders) ----
   // The expiry the page is showing live (N1 = nearest listed, ...) as the date the order is for.
   const liveExpiryDate = resolvedExpiries.expiries[Number(liveExpiryFlag.slice(1)) - 1] ?? null
+  // Live: the dashboard's own option CDV / OBV for this chain (tick by tick, server memory) - the CDV / OBV card and the
+  // entry checklist show it in place of the minute-bar estimate; null / unavailable -> they keep their own.
+  const dashboardFlowState = useDashboardFlow(underlying, typeof liveExpiryDate === 'string' ? liveExpiryDate.slice(0, 10) : null, isLive)
+  const dashboardFlow = dashboardFlowState?.status === 'ok' ? dashboardFlowState.flow : null
+  const flowSourceNote = !isLive ? null
+    : dashboardFlow ? "Live: the dashboard's own numbers (every tick classified), updating every 2 s."
+      : dashboardFlowState?.status === 'unavailable' ? "Live: the dashboard has no CDV for this expiry - worked out from the minute bars instead." : null
   const liveUnavailableReason = !isAdmin ? 'Live orders are for admins only.'
     : !isLive ? "Live orders need today's live view - press Go Live." : null
 
@@ -5111,6 +5134,19 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
+            {/* Which of a good option-buying entry's usual conditions hold at the replay clock (or now, live) - CE and PE. */}
+            {visibleSections.includes('entryChecklist') && (
+              <LiveSection version={sectionVersion}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('entryChecklist')} />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>} {...orderedDropProps('entryChecklist')}>
+                <EntryChecklistCard
+                  asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
+                  spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
+                  step={step} profile={volumeProfile} dashboardFlow={dashboardFlow}
+                />
+              </Card>
+              </LiveSection>
+            )}
+
             {visibleSections.includes('dayOi') && dayOiSummary && (
               <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>} {...orderedDropProps('dayOi')}>
@@ -5444,16 +5480,17 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
-            {/* The dashboard's option CDV / OBV for a replayed day - worked out from the day's own option bars, up to the
-                replay clock. Not while live: the dashboard has today's from the live feed. */}
-            {visibleSections.includes('optionFlow') && !isLive && (
+            {/* The dashboard's option CDV / OBV - worked out from the day's own option bars: a replayed day up to the
+                replay clock, today live (the backfill plus every live tick's minute, ticking). */}
+            {visibleSections.includes('optionFlow') && (
               <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('optionFlow')}>
                 <Col span={24}>
-                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard)</Space>}>
+                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±10, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}>
                     <OptionFlowCard
-                      cePoints={result.cePoints} pePoints={result.pePoints} spotBars={result.spotCandlesOneMinute}
-                      endTime={replayEndTime} dayKey={`${underlying}-${result.date}`}
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
+                      endTime={isLive && dashboardFlow ? null : replayEndTime} dayKey={`${underlying}-${result.date}`}
+                      dashboardFlow={dashboardFlow} sourceNote={flowSourceNote}
                     />
                   </Card>
                 </Col>
