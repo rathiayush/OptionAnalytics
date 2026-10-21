@@ -18,6 +18,7 @@ import {
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive } from './futuresLive.js'
+import { usePaperPositionsSync } from './paperSync.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
@@ -3247,6 +3248,11 @@ export default function OiReplayPage() {
     if (!isLive || !date) return
     writePersistedPaperPositions(date.format('YYYY-MM-DD'), paperPositions)
   }, [paperPositions, isLive, date])
+  // ...and on the server, per account and day (paperSync.js), so every browser shows the same positions and P&L; a
+  // reload starts from the server's copy (serverPaperPositions), the localStorage one is only a fallback.
+  const serverPaperPositions = usePaperPositionsSync({
+    enabled: isLive, dateKey: isLive && date ? date.format('YYYY-MM-DD') : null, positions: paperPositions, setPositions: setPaperPositions,
+  })
 
   // Keeps today's own fetched run PLUS everything the live feed has appended since in storage, so a
   // reload can restore it instantly instead of re-fetching (see load()'s own preferCache branch, and
@@ -3342,7 +3348,7 @@ export default function OiReplayPage() {
         // cached NON-default expiry (N2+) would show that expiry's frozen snapshot while the live feed
         // silently rejoins N1's group instead, ticking an expiry the screen isn't even showing.
         if (cached.liveExpiryFlag) setLiveExpiryFlag(cached.liveExpiryFlag)
-        setPaperPositions(readPersistedPaperPositions(dateKey))
+        setPaperPositions(serverPaperPositions(dateKey) ?? readPersistedPaperPositions(dateKey))
         setVwapSeries(cached.vwapSeries ?? [])
       }
     }
@@ -3369,7 +3375,7 @@ export default function OiReplayPage() {
       // restored from storage rather than reset, every index's, so long as they were punched on the
       // SAME calendar day now loading. Any other day (or a stale/foreign entry)
       // still resets to empty exactly as before.
-      setPaperPositions(effectiveLive ? readPersistedPaperPositions(dateKey) : [])
+      setPaperPositions(effectiveLive ? (serverPaperPositions(dateKey) ?? readPersistedPaperPositions(dateKey)) : [])
       setVwapSeries([])
     }
     // Only for today - a replayed day's VWAP comes with the run itself (see vwapSeries' own doc comment)

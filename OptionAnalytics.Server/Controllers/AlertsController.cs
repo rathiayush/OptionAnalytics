@@ -43,9 +43,32 @@ public sealed class AlertsController : ControllerBase
         if (string.IsNullOrEmpty(text)) return BadRequest(new { error = "No text." });
         if (text.Length > 1500) text = text[..1500];
         if (!_telegram.IsConfigured) return Ok(new { sent = false, reason = "Telegram is not configured on the server." });
+        // A message with a key (one trade event - a paper exit, say) goes once a day, however many open pages report it.
+        if (!TelegramOnce.First(request!.Key)) return Ok(new { sent = false, reason = "Already sent." });
         await _telegram.SendAsync(WebUtility.HtmlEncode(text), cancellationToken);
         return Ok(new { sent = true });
     }
 }
 
-public sealed record TelegramMessageRequest(string? Text);
+/// <summary>Key: optional - the same key is sent only once per IST day (several browsers open on the same trades).</summary>
+public sealed record TelegramMessageRequest(string? Text, string? Key = null);
+
+/// <summary>Which keyed Telegram messages already went today (AlertsController.SendTelegram).</summary>
+public static class TelegramOnce
+{
+    private static readonly object Lock = new();
+    private static readonly HashSet<string> Sent = new();
+    private static DateOnly _day;
+
+    /// <summary>True the first time `key` is seen today (and always for no key).</summary>
+    public static bool First(string? key, DateOnly? today = null)
+    {
+        if (string.IsNullOrWhiteSpace(key)) return true;
+        var day = today ?? IstClock.Today();
+        lock (Lock)
+        {
+            if (day != _day) { _day = day; Sent.Clear(); }
+            return Sent.Add(key.Trim()[..Math.Min(key.Trim().Length, 200)]);
+        }
+    }
+}

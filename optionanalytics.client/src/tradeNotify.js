@@ -16,12 +16,12 @@ const KIND = {
 
 /** kind: entry / exit / target / stopLoss / rejected / failed. `good` overrides the chime's direction
  *  (an exit in profit is good). `telegramText` goes to Telegram when given. `key` makes a repeat of the
- *  same event replace its notification instead of stacking another. */
+ *  same event replace its notification instead of stacking another, and its Telegram message go only once. */
 export function notifyTrade({ kind = 'entry', title, text, good, sound = true, telegramText = null, key, duration = 10 }) {
   const meta = KIND[kind] ?? KIND.entry
   notification[meta.type]({ key, message: title, description: text, placement: 'topRight', duration })
   if (sound) chime(good ?? meta.good)
-  if (telegramText) telegram(telegramText)
+  if (telegramText) telegram(telegramText, key ?? null) // keyed: sent once a day, whichever open page reports it
 }
 
 // Live trade events come with every live positions snapshot (the OI Replay panel's push, the strategy
