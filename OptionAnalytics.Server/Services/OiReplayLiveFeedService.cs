@@ -128,6 +128,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// <summary>Each underlying's nearest futures contract. The previous contract is dropped (and,
     /// being expired, unsubscribed) when RecenterFuturesAsync resolves the next one.</summary>
     private readonly ConcurrentDictionary<uint, FuturesLeg> _futuresLegsBySecurityId = new();
+    /// <summary>For the tests: the futures contracts being tracked, by security id.</summary>
+    internal ConcurrentDictionary<uint, FuturesLeg> FuturesLegs => _futuresLegsBySecurityId;
 
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
@@ -500,10 +502,11 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         return monthly.Count > 0 ? monthly[0] : listedFromToday[0];
     }
 
-    private void OnTick(SpotTick tick)
+    internal void OnTick(SpotTick tick)
     {
-        if (!_legsBySecurityId.TryGetValue(tick.SecurityId, out var legsByFlag) || !(tick.LastPrice > 0 || tick.OpenInterest > 0))
-            return;
+        // The shared feed carries every subscriber's instruments - only this service's legs and futures go further.
+        _futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresLeg);
+        if (futuresLeg is null && !_legsBySecurityId.ContainsKey(tick.SecurityId)) return;
 
         // `time` is when this reading was OBSERVED, not Dhan's own ExchangeTimestamp - that field is
         // the contract's LAST TRADE time, which for a quiet strike can be minutes old while its OI,
@@ -515,6 +518,24 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         var lastTradeTime = tick.ExchangeTimestamp.ToOffset(IstClock.Offset);
 
         var minuteKey = observedAt.ToUnixTimeSeconds() / 60;
+
+        // The near futures first: they are not option legs, and the legs' early return below used to drop every
+        // futures tick - the page's futures chart never ticked and today's futures bars (LiveOptionLegStore) stayed
+        // empty, so a reload showed them frozen at the morning's backfill.
+        if (futuresLeg is not null && tick.LastPrice > 0)
+        {
+            var futuresUnderlying = futuresLeg.Underlying;
+            // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
+            // underlying group spotUpdate also uses. Same per-minute conflation as the option legs.
+            _batcher.Accumulate($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), new LiveFuturesTick(
+                futuresUnderlying,
+                Open: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice, Price: tick.LastPrice,
+                OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume));
+            _legStore?.RecordFutures(futuresUnderlying, tick.LastPrice, tick.OpenInterest, tick.Volume, observedAt);
+        }
+
+        if (!_legsBySecurityId.TryGetValue(tick.SecurityId, out var legsByFlag) || !(tick.LastPrice > 0 || tick.OpenInterest > 0))
+            return;
 
         foreach (var leg in legsByFlag.Values)
         {
@@ -560,18 +581,6 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 bestBidPrice = tick.BestBidPrice,
                 bestAskPrice = tick.BestAskPrice,
             });
-        }
-
-        if (_futuresLegsBySecurityId.TryGetValue(tick.SecurityId, out var futuresLeg) && tick.LastPrice > 0)
-        {
-            var futuresUnderlying = futuresLeg.Underlying;
-            // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
-            // underlying group spotUpdate also uses. Same per-minute conflation as above.
-            _batcher.Accumulate($"u:{futuresUnderlying}", "futuresTicks", minuteKey.ToString(), new LiveFuturesTick(
-                futuresUnderlying,
-                Open: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice, Price: tick.LastPrice,
-                OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume));
-            _legStore?.RecordFutures(futuresUnderlying, tick.LastPrice, tick.OpenInterest, tick.Volume, observedAt);
         }
     }
 

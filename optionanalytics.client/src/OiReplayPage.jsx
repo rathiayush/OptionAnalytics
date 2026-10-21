@@ -17,6 +17,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
+import { mergeFuturesLive } from './futuresLive.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
@@ -3838,16 +3839,10 @@ export default function OiReplayPage() {
   // Merged the same way oneMinBars merges liveBars: an exact same-minute match REPLACES the
   // existing point (the still-forming current bar keeps updating in place), a genuinely newer one
   // is appended.
-  const futuresPointsRaw = useMemo(() => {
-    const base = [...(result?.futuresBars ?? [])].sort((a, b) => new Date(a.time) - new Date(b.time))
-    if (!isLive || liveFuturesPoints.length === 0) return base
-    const merged = base.slice()
-    for (const point of liveFuturesPoints) {
-      if (merged.length > 0 && merged[merged.length - 1].time === point.time) merged[merged.length - 1] = point
-      else if (merged.length === 0 || new Date(point.time) > new Date(merged[merged.length - 1].time)) merged.push(point)
-    }
-    return merged
-  }, [result, liveFuturesPoints, isLive])
+  const futuresPointsRaw = useMemo(
+    () => mergeFuturesLive(result?.futuresBars ?? [], isLive ? liveFuturesPoints : []),
+    [result, liveFuturesPoints, isLive],
+  )
   const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
   // The futures' session VWAP from its 1-minute bars (they carry volume - toBar drops it), read at each
   // displayed candle - never past the replay clock (the last candle would otherwise take later VWAP).

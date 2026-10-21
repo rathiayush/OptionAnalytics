@@ -102,3 +102,62 @@ public sealed class OiReplayLiveFeedServiceTests
         Assert.Null(resolved);
     }
 }
+
+/// <summary>The near futures' live ticks (OiReplayLiveFeedService.OnTick): they are not option legs, and the legs'
+/// early return used to drop them - OI Replay's futures chart never ticked and today's futures bars stayed empty.</summary>
+public sealed class OiReplayLiveFuturesTickTests
+{
+    private const uint FuturesId = 48699;
+
+    private static (OiReplayLiveFeedService Service, LiveBroadcastBatcher Batcher, LiveOptionLegStore Store) Service()
+    {
+        var batcher = new LiveBroadcastBatcher(null, Microsoft.Extensions.Logging.Abstractions.NullLogger<LiveBroadcastBatcher>.Instance);
+        var store = new LiveOptionLegStore();
+        var service = new OiReplayLiveFeedService(null!, null!, null!, null!, null!, null!, batcher,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<OiReplayLiveFeedService>.Instance, legStore: store);
+        service.FuturesLegs[FuturesId] = new OiReplayLiveFeedService.FuturesLeg("NIFTY", IstClock.Today().AddDays(7));
+        return (service, batcher, store);
+    }
+
+    // Both ticks in one minute: not in the last half second of one.
+    private static void AwayFromMinuteEdge()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (now.Second == 59 && now.Millisecond > 500) Thread.Sleep(600);
+    }
+
+    private static OptionAnalytics.Server.Dhan.SpotTick Tick(uint id, decimal price, long volume) =>
+        new(id, price, price, price, price, price, volume, 0, 0, 1_000_000, DateTimeOffset.UtcNow);
+
+    [Fact]
+    public void A_futures_tick_is_sent_to_the_page_and_kept_as_todays_bar()
+    {
+        var (service, batcher, store) = Service();
+        batcher.Join("page", "u:NIFTY");
+        AwayFromMinuteEdge();
+        var started = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+
+        service.OnTick(Tick(FuturesId, 25_610.5m, 1_200));
+        service.OnTick(Tick(FuturesId, 25_612m, 1_500));
+
+        var items = batcher.Flush(DateTimeOffset.UtcNow).Single(b => b.ConnectionId == "page").Batch.Items;
+        var sent = Assert.IsType<LiveFuturesTick>(Assert.Single(items.Where(i => i.E == "futuresTicks").SelectMany(i => (IEnumerable<object>)i.D)));
+        Assert.Equal(("NIFTY", 25_612m, 25_610.5m, 1_500L), (sent.Underlying, sent.Price, sent.Open, sent.DayVolume));
+
+        var bar = Assert.Single(store.FuturesBarsFrom("NIFTY", started));
+        Assert.Equal((25_610.5m, 25_612m), (bar.Open, bar.Close));
+    }
+
+    [Fact]
+    public void Another_instruments_tick_is_ignored()
+    {
+        var (service, batcher, store) = Service();
+        batcher.Join("page", "u:NIFTY");
+        var started = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+
+        service.OnTick(Tick(FuturesId + 1, 25_610.5m, 1_200));
+
+        Assert.DoesNotContain(batcher.Flush(DateTimeOffset.UtcNow).SelectMany(b => b.Batch.Items), i => i.E == "futuresTicks");
+        Assert.Empty(store.FuturesBarsFrom("NIFTY", started));
+    }
+}
