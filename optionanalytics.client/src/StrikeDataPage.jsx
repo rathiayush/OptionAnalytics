@@ -130,7 +130,7 @@ export default function StrikeDataPage() {
   const { expiries, selectedExpiry, expiryParam, isManual: expiryIsManual, loading: expiryLoading, selectExpiry } = useExpirySelector(underlying)
   const [strike, setStrike] = useState(null)
   const [optionType, setOptionType] = usePersistedState(STORED_STRIKE_TYPE, 'CE')
-  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
   const [candles, setCandles] = useState(null) // null = never loaded yet, distinct from [] = loaded and empty
   const [trackedStrikes, setTrackedStrikes] = useState([])
   // null = not fetched (or not yet known whether it's available) - distinct from [] = fetched and

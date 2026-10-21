@@ -3022,7 +3022,7 @@ export default function OiReplayPage() {
   // that day's index volume - empty for a day Dhan sent no index volume for), shown only up to the replay
   // clock (shownVwap). Reset on every load() like liveBars above.
   const [vwapSeries, setVwapSeries] = useState([])
-  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, false)
+  const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
 
   // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) ON BY
   // DEFAULT (the user's own original ask), with this checkbox the one way to hide it once it's
