@@ -1201,6 +1201,16 @@ const HEATMAP_TIMEFRAME_OPTIONS = [
   { value: 3, label: '3 min' },
 ]
 
+// That bucket size's picker - on the heatmap card, by the totals table and in the totals charts popup (one setting).
+function HeatmapBucketSelect({ value, onChange }) {
+  return (
+    <Space size={4}>
+      <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
+      <Select value={value} onChange={onChange} size="small" style={{ width: 90 }} options={HEATMAP_TIMEFRAME_OPTIONS} />
+    </Space>
+  )
+}
+
 // Strike x minute OI-change grid for one side (CE or PE) - the all-strikes counterpart to the
 // single-strike drill-down popup's own "Per-minute change" tab. A native scrollable HTML table
 // rather than a lightweight-charts series: lightweight-charts has no heatmap/cell series type, and a
@@ -5407,13 +5417,7 @@ export default function OiReplayPage() {
                         </Text>
                       </Tooltip>
                     )}
-                    <Space size={4}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
-                      <Select
-                        value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} size="small" style={{ width: 90 }}
-                        options={HEATMAP_TIMEFRAME_OPTIONS}
-                      />
-                    </Space>
+                    <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
                   </Space>
                   <div>
                     <Text strong style={{ fontSize: 12 }}>CE</Text>
@@ -5429,16 +5433,12 @@ export default function OiReplayPage() {
                       <Tooltip title="CE, PE and Net as charts for the whole day so far - cumulative Δ lines with each bucket's Δ - in a popup, with automatic support / resistance">
                         <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
                       </Tooltip>
+                      <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
                     </Space>
                     <OiTotalsChartsPopup
                       open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
                       strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={`${underlying}-${result.date}`}
-                      extra={(
-                        <Space size={4}>
-                          <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
-                          <Select value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} size="small" style={{ width: 90 }} options={HEATMAP_TIMEFRAME_OPTIONS} />
-                        </Space>
-                      )}
+                      extra={<HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />}
                     />
                     <br />
                     <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
