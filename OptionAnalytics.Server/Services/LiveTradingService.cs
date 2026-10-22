@@ -940,6 +940,19 @@ public sealed class LiveTradingService : BackgroundService
         return (new ManualOrderPrices(reference, limit, target, stopLoss), null);
     }
 
+    /// <summary>The entry price alone, for an order with no stop-loss / target (ManualOrderRequest.NoStop): the live
+    /// ask plus the slippage for a buy, the bid minus it for a sell, on the tick. Target / StopLoss are 0.</summary>
+    internal static (ManualOrderPrices? Prices, string? Error) PriceEntryOnly(bool isSell, decimal bestBid, decimal bestAsk, decimal slippage, decimal tickSize)
+    {
+        var reference = isSell ? bestBid : bestAsk;
+        if (reference <= 0) return (null, $"no live {(isSell ? "bid" : "ask")} for this contract yet");
+        if (slippage < 0) return (null, "slippage cannot be negative");
+        var tick = tickSize > 0 ? tickSize : 0.05m;
+        var limit = StrategyTriggerHostedService.RoundToTick(isSell ? reference - slippage : reference + slippage, tick);
+        if (limit <= 0) return (null, "the limit price would be at or below zero for this premium");
+        return (new ManualOrderPrices(reference, limit, 0, 0), null);
+    }
+
     /// <summary>Why no new order may go out now - the daily loss limit's kill switch (KillSwitchService) -
     /// else null. Checked before every new order; exits are never blocked.</summary>
     public Func<string?>? NewOrderBlock { get; set; }
@@ -965,8 +978,10 @@ public sealed class LiveTradingService : BackgroundService
         try
         {
             var quote = await LiveQuoteAsync(contract.SecurityId, contract.DhanSegment, cancellationToken);
-            var (prices, error) = PriceOrder(isSell, quote?.BestBidPrice ?? 0, quote?.BestAskPrice ?? 0,
-                request.SlippagePoints, request.StopLossPoints, request.TargetPoints, contract.TickSize);
+            var (prices, error) = request.NoStop
+                ? PriceEntryOnly(isSell, quote?.BestBidPrice ?? 0, quote?.BestAskPrice ?? 0, request.SlippagePoints, contract.TickSize)
+                : PriceOrder(isSell, quote?.BestBidPrice ?? 0, quote?.BestAskPrice ?? 0,
+                    request.SlippagePoints, request.StopLossPoints, request.TargetPoints, contract.TickSize);
             if (prices is null) return ManualOrderResult.Fail(error!);
 
             var quantity = request.Lots * contract.LotSize;
@@ -977,10 +992,11 @@ public sealed class LiveTradingService : BackgroundService
             for (var i = 0; i < slices.Count; i++)
             {
                 if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
-                var (result, placeError) = await _superOrders.PlaceAsync(
-                    transactionType, contract.DhanSegment, ProductType, "LIMIT", contract.SecurityId.ToString(), slices[i],
-                    prices.Limit, prices.Target, prices.StopLoss, $"OIR-{stamp}-{i + 1}", 0, cancellationToken);
-                if (result is null)
+                // No SL: a plain LIMIT entry (intraday, day validity) - no legs. Otherwise a super order with both legs.
+                var (placedId, placeError) = request.NoStop
+                    ? await PlacePlainEntryAsync(transactionType, contract, slices[i], prices.Limit, $"OIR-{stamp}-{i + 1}", cancellationToken)
+                    : await PlaceSuperEntryAsync(transactionType, contract, slices[i], prices, $"OIR-{stamp}-{i + 1}", cancellationToken);
+                if (placedId is null)
                 {
                     RefreshUnlessStreaming();
                     if (request.ExitAtMs > 0) SetTimeExit(orderIds, DateTimeOffset.FromUnixTimeMilliseconds(request.ExitAtMs), request.SlippagePoints, request.ExitReason ?? "time stop");
@@ -988,16 +1004,20 @@ public sealed class LiveTradingService : BackgroundService
                         ? $"Dhan rejected the order: {placeError}"
                         : $"placed {orderIds.Count} of {slices.Count} slices, then Dhan rejected the next: {placeError}", orderIds, prices) with { LotSize = contract.LotSize };
                 }
-                orderIds.Add(result.OrderId);
+                orderIds.Add(placedId);
             }
 
-            if (request.TrailGapPoints > 0) SetTrail(orderIds, request.TrailStartPoints, request.TrailGapPoints);
+            if (request.TrailGapPoints > 0 && !request.NoStop) SetTrail(orderIds, request.TrailStartPoints, request.TrailGapPoints);
             var exitAt = request.ExitAtMs > 0 ? SetTimeExit(orderIds, DateTimeOffset.FromUnixTimeMilliseconds(request.ExitAtMs), request.SlippagePoints, request.ExitReason ?? "time stop") : null;
-            _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), target {Target}, SL {StopLoss} - orders {Orders}.",
-                transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference, prices.Target, prices.StopLoss, string.Join(",", orderIds));
+            _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), {Legs} - orders {Orders}.",
+                transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference,
+                request.NoStop ? "no stop-loss / target" : $"target {prices.Target}, SL {prices.StopLoss}", string.Join(",", orderIds));
             RefreshUnlessStreaming();
+            var legs = request.NoStop
+                ? " · no stop-loss / target - it stays open until you close it (Dhan squares intraday positions off at the end of the day)"
+                : $" · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}";
             return new ManualOrderResult(true,
-                $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}) · target {prices.Target:0.##} · SL {prices.StopLoss:0.##}"
+                $"{transactionType} {contract.TradingSymbol} x{quantity} at LIMIT {prices.Limit:0.##} ({(isSell ? "bid" : "ask")} {prices.Reference:0.##}){legs}"
                 + (exitAt is { } t ? $" · the server closes it at {t.ToOffset(IstClock.Offset):HH:mm} IST" : ""),
                 orderIds, prices) { LotSize = contract.LotSize };
         }
@@ -1005,6 +1025,23 @@ public sealed class LiveTradingService : BackgroundService
         {
             _actionLock.Release();
         }
+    }
+
+    private async Task<(string? OrderId, string? Error)> PlaceSuperEntryAsync(
+        string transactionType, DhanOptionInstrument contract, int quantity, ManualOrderPrices prices, string tag, CancellationToken cancellationToken)
+    {
+        var (result, error) = await _superOrders.PlaceAsync(
+            transactionType, contract.DhanSegment, ProductType, "LIMIT", contract.SecurityId.ToString(), quantity,
+            prices.Limit, prices.Target, prices.StopLoss, tag, 0, cancellationToken);
+        return (result?.OrderId, error);
+    }
+
+    private async Task<(string? OrderId, string? Error)> PlacePlainEntryAsync(
+        string transactionType, DhanOptionInstrument contract, int quantity, decimal limit, string tag, CancellationToken cancellationToken)
+    {
+        var (result, error) = await _orders.PlaceAsync(
+            transactionType, contract.DhanSegment, ProductType, "LIMIT", "DAY", contract.SecurityId.ToString(), quantity, limit, tag, cancellationToken);
+        return (result?.OrderId, error);
     }
 
     /// <summary>Squares off an open position at its live bid (closing a long) or ask (closing a short)
@@ -1779,10 +1816,13 @@ public sealed class LiveTradingService : BackgroundService
 /// once the trade is TrailStartPoints in profit (0 gap = no trailing) - LiveTradingService.TrailStop.
 /// ExitAtMs (epoch ms, 0 = none): the server closes the trade itself then (no later than 15:10 IST) -
 /// LiveTradingService.SetTimeExit; ExitReason names it (e.g. "time stop").</summary>
+/// <summary>NoStop: a plain LIMIT entry with no stop-loss / target legs (the panel's "No SL" box) - it stays open
+/// until it is closed (or Dhan squares intraday positions off at the end of the day); a stop can still be added
+/// later with Protect. StopLossPoints / TargetPoints / trailing are ignored then.</summary>
 public sealed record ManualOrderRequest(
     string Underlying, DateOnly Expiry, decimal Strike, string Side, string Direction, int Lots,
     decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints, decimal TrailStartPoints = 0, decimal TrailGapPoints = 0,
-    long ExitAtMs = 0, string? ExitReason = null);
+    long ExitAtMs = 0, string? ExitReason = null, bool NoStop = false);
 
 internal sealed class TrailState
 {
