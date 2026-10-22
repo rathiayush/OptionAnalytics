@@ -6,7 +6,7 @@
 //   - the day's option / futures / index OI context from a REST load plus "oiReplayTicks",
 //     "futuresTicks" and "spotUpdate".
 
-import { bucketBook, mergeLiveMinutes } from './orderFlowMath.js'
+import { bucketBook, mergeLiveMinutes, rebucketColumns } from './orderFlowMath.js'
 
 const MIN = 60_000
 export const HEATMAP_COLUMN_MS = 2000
@@ -33,6 +33,15 @@ export function orderFlowFromSnapshot(body) {
   }
 }
 
+// The view with its heatmap fetched in `fineRow` rows (the server's heatmapRowSize - the heatmap card's own rows,
+// heatmapFetchRow): that is kept as `heatFine` for the picture only, and `heatmap` - what the scanner, the liquidity
+// reads and the replayed book use - is it re-bucketed into the footprint's `rowSize` rows, the same rows the server
+// would have sent. Nothing changes when the rows are the same.
+export function withFineHeatmap(view, fineRow, rowSize) {
+  if (!view || !(fineRow > 0) || fineRow === rowSize) return view
+  return { ...view, heatFine: view.heatmap, heatFineRow: fineRow, heatmap: rebucketColumns(view.heatmap, rowSize) }
+}
+
 // One "orderFlowLive" push folded into the view: new prints, icebergs and sweeps, the forming minute
 // bars (in `rowSize` rows) and - every HEATMAP_COLUMN_MS - a new heatmap column of the whole book.
 export function applyOrderFlowPush(prev, payload, rowSize) {
@@ -49,11 +58,16 @@ export function applyOrderFlowPush(prev, payload, rowSize) {
   // "book" only the ladder's top levels.
   const heatBids = payload.heat?.bids ?? payload.book?.bids
   const heatAsks = payload.heat?.asks ?? payload.book?.asks
-  const heatmap = !lastColumn || now - lastColumn.t >= HEATMAP_COLUMN_MS
+  const newColumn = !lastColumn || now - lastColumn.t >= HEATMAP_COLUMN_MS
+  const heatmap = newColumn
     ? [...prev.heatmap, { t: now, bids: bucketBook(heatBids, rowSize), asks: bucketBook(heatAsks, rowSize) }].slice(-MAX_HEATMAP_COLUMNS)
     : prev.heatmap
+  // The heatmap card's own finer rows (withFineHeatmap) get the same column.
+  const heatFine = newColumn && prev.heatFine
+    ? [...prev.heatFine, { t: now, bids: bucketBook(heatBids, prev.heatFineRow), asks: bucketBook(heatAsks, prev.heatFineRow) }].slice(-MAX_HEATMAP_COLUMNS)
+    : prev.heatFine
   return {
-    ...prev, meta: payload.meta, book: payload.book, trades, heatmap,
+    ...prev, meta: payload.meta, book: payload.book, trades, heatmap, ...(heatFine ? { heatFine } : {}),
     icebergs: [...icebergs.values()].sort((a, b) => a.id - b.id),
     sweeps: [...sweeps.values()].sort((a, b) => a.id - b.id).slice(-500),
     minuteBars: mergeLiveMinutes(prev.minuteBars, payload.bars, rowSize),

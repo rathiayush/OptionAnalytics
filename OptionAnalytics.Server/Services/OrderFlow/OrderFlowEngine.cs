@@ -367,9 +367,11 @@ public sealed class OrderFlowEngine
 
     /// <summary>Everything the Order Flow page loads: the day's minute footprints bucketed into
     /// <paramref name="rowSize"/>-point rows, prints of at least <paramref name="minTradeQty"/>, icebergs,
-    /// the depth heatmap reduced to at most <paramref name="heatmapColumns"/> snapshots, and the book.</summary>
-    public OrderFlowSnapshot Snapshot(decimal rowSize, long minTradeQty, int heatmapColumns)
+    /// the depth heatmap reduced to at most <paramref name="heatmapColumns"/> snapshots - in
+    /// <paramref name="heatmapRowSize"/>-point rows when given (the page's own heatmap rows), else the footprint's - and the book.</summary>
+    public OrderFlowSnapshot Snapshot(decimal rowSize, long minTradeQty, int heatmapColumns, decimal? heatmapRowSize = null)
     {
+        var heatRow = heatmapRowSize ?? rowSize;
         lock (_lock)
         {
             var bars = _bars.Values.Select(b => ToDto(b, rowSize)).ToList();
@@ -381,7 +383,7 @@ public sealed class OrderFlowEngine
                 for (var i = step - 1; i < _snapshots.Count + step - 1; i += step)
                 {
                     var snapshot = _snapshots[Math.Min(i, _snapshots.Count - 1)];
-                    heatmap.Add(new HeatmapColumn(snapshot.Time, Bucket(snapshot.Bids, rowSize), Bucket(snapshot.Asks, rowSize)));
+                    heatmap.Add(new HeatmapColumn(snapshot.Time, Bucket(snapshot.Bids, heatRow), Bucket(snapshot.Asks, heatRow)));
                 }
             }
             return new OrderFlowSnapshot(Meta(), rowSize, bars, trades, Icebergs(), heatmap, BookDto())

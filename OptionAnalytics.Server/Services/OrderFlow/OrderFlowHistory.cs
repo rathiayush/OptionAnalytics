@@ -39,7 +39,7 @@ public sealed class OrderFlowHistory
 
     public sealed record Result(OrderFlowSnapshot? Snapshot, string? Error);
 
-    public async Task<Result> DayAsync(string underlying, DateOnly date, DateOnly? expiry, decimal rowSize, int minTradeLots, int heatmapColumns, CancellationToken cancellationToken)
+    public async Task<Result> DayAsync(string underlying, DateOnly date, DateOnly? expiry, decimal rowSize, int minTradeLots, int heatmapColumns, CancellationToken cancellationToken, decimal? heatmapRowSize = null)
     {
         var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, date, cancellationToken);
         if (contract is null)
@@ -55,7 +55,7 @@ public sealed class OrderFlowHistory
             ? live
             : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, date);
         if (exact is not null)
-            return new Result(await WithBackfillAsync(exact, exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns), cancellationToken), null);
+            return new Result(await WithBackfillAsync(exact, exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns, heatmapRowSize), cancellationToken), null);
 
         // Rebuilt from TrueData's tick history (TrueData:Enabled only, recent days only) - else the estimate.
         string? trueDataNote = null;
@@ -64,7 +64,7 @@ public sealed class OrderFlowHistory
             var rebuilt = await _trueData.DayAsync(contract, date, frontMonth: expiry is null, cancellationToken);
             if (rebuilt.Engine is { } engine)
             {
-                var snap = engine.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)engine.LotSize, heatmapColumns);
+                var snap = engine.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)engine.LotSize, heatmapColumns, heatmapRowSize);
                 return new Result(snap with
                 {
                     Meta = snap.Meta with { DepthLevels = 0, DepthFeed = null },
