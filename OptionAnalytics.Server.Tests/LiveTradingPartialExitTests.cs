@@ -45,6 +45,37 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task A_no_sl_order_is_one_plain_limit_entry_without_legs()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        var expiry = DateOnly.FromDateTime(DateTime.Today.AddDays(20));
+
+        var result = await service.PlaceAsync(new ManualOrderRequest("NIFTY", expiry, 26000, "CE", "BUY", 2, 1m, 0, 0, NoStop: true), CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        // At the ask (120.50) plus the slippage, intraday, day validity - and nothing else: no super order, no legs.
+        var entry = Assert.Single(dhan.Orders.Values);
+        Assert.Equal(("BUY", "LIMIT", 2 * Lot, 121.50m, "INTRADAY"), (entry.Side, entry.Type, entry.Quantity, entry.Price, entry.Product));
+        Assert.StartsWith("OIR-", entry.Tag);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("POST /super/orders"));
+        Assert.Contains("no stop-loss / target", result.Message);
+    }
+
+    [Fact]
+    public async Task Without_no_sl_a_live_order_still_needs_both_legs()
+    {
+        var (service, dhan, _) = await CreateAsync();
+        var expiry = DateOnly.FromDateTime(DateTime.Today.AddDays(20));
+
+        var result = await service.PlaceAsync(new ManualOrderRequest("NIFTY", expiry, 26000, "CE", "BUY", 1, 1m, 0, 0), CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.Contains("stop-loss and a target", result.Message);
+        Assert.Empty(dhan.Orders);
+        Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("POST"));
+    }
+
+    [Fact]
     public async Task Close_AfterAPartialExit_CancelsTheLegsFirst_AndExitsEverythingLeft()
     {
         var (service, dhan, _) = await CreateAsync();
