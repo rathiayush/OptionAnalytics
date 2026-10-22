@@ -308,6 +308,29 @@ public sealed class OrderFlowEngineTests
     }
 
     [Fact]
+    public void Snapshot_HeatmapCanHaveItsOwnRowSize()
+    {
+        var engine = NewEngine();
+        var levels = Enumerable.Range(0, 200).Select(i => new DepthLevel(22710m - i * 0.05m, 75, 1)).ToArray();
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, levels, 200), T0);
+        engine.OnTick(Tick(22710.05m, 1000, 22710m, 22710.05m), T0.AddSeconds(1));
+        engine.OnTick(Tick(22710.05m, 1100, 22710m, 22710.05m), T0.AddSeconds(3));
+
+        var same = engine.Snapshot(rowSize: 1, minTradeQty: 1, heatmapColumns: 100);
+        var coarse = engine.Snapshot(rowSize: 1, minTradeQty: 1, heatmapColumns: 100, heatmapRowSize: 5);
+        var fine = engine.Snapshot(rowSize: 1, minTradeQty: 1, heatmapColumns: 100, heatmapRowSize: 0.5m);
+
+        // 22700.05-22710: 1-point rows 22700..22710, 5-point rows 22700 / 22705 / 22710, 0.5-point rows 22700..22710.
+        Assert.Equal(11, same.Heatmap[^1].Bids.Count);
+        Assert.Equal(new[] { 22700m, 22705m, 22710m }, coarse.Heatmap[^1].Bids.Select(r => r[0]));
+        Assert.Equal(21, fine.Heatmap[^1].Bids.Count);
+        Assert.Equal(same.Heatmap[^1].Bids.Sum(r => r[1]), coarse.Heatmap[^1].Bids.Sum(r => r[1]));
+        // Only the heatmap changes: the footprint keeps its own rows.
+        Assert.Equal(same.Bars.Select(b => b.Levels.Count), coarse.Bars.Select(b => b.Levels.Count));
+        Assert.Equal(same.Heatmap.Select(c => c.Time), fine.Heatmap.Select(c => c.Time));
+    }
+
+    [Fact]
     public void HeatRows_BucketIntoHalfPointRows()
     {
         var rows = OrderFlowEngine.HeatRows(new[] { new DepthLevel(100.45m, 10, 1), new DepthLevel(100.05m, 5, 1), new DepthLevel(100.5m, 7, 1) });

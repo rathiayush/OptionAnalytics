@@ -6,7 +6,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap, heatmapFetchRow, rebucketColumns, rowsNest } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
@@ -21,7 +21,7 @@ import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './Pr
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
-import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn } from './liveFeeds.js'
+import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -174,6 +174,13 @@ export default function OrderFlowPage() {
   const [showVwap, setShowVwap] = usePersistedState('optionanalytics.orderFlow.showVwap', true)
   const [replaySpeed, setReplaySpeed] = usePersistedState('optionanalytics.orderFlow.replaySpeed', 60)
   const rowSize = rowSizes?.[underlying] ?? DEFAULT_ROW_SIZES[underlying] ?? 1
+  // The liquidity heatmap's own price rows per index (the dropdown on its card; null = the footprint's). Only its
+  // picture: the scanner, the liquidity reads and the book keep the footprint's rows (withFineHeatmap).
+  const [heatRowSizes, setHeatRowSizes] = usePersistedState('optionanalytics.orderFlow.heatRowSizes', {})
+  const heatRowPick = heatRowSizes?.[underlying] ?? null
+  const heatRow = heatRowPick ?? rowSize
+  const heatFetchRow = heatmapFetchRow(rowSize, heatRow)
+  const heatRowQuery = heatFetchRow !== rowSize ? `&heatmapRowSize=${heatFetchRow}` : ''
   const narrow = useNarrow()
   const [domOpen, setDomOpen] = useState(false)
 
@@ -236,15 +243,15 @@ export default function OrderFlowPage() {
     setError(null)
     // Only prints of the "large" size are needed - fetching every print would cap at the server's
     // newest 5000 and lose the morning's large ones on a busy day.
-    fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=900${expiryQuery}`)
+    fetchJson(`/api/order-flow/${underlying}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=900${heatRowQuery}${expiryQuery}`)
       .then((body) => {
         if (cancelled) return
-        setData(orderFlowFromSnapshot(body))
+        setData(withFineHeatmap(orderFlowFromSnapshot(body), heatFetchRow, rowSize))
       })
       .catch((err) => { if (!cancelled) { setError(err.message); setData(null) } })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [isReplay, underlying, expiryQuery, rowSize, fetchLots, reloadNonce])
+  }, [isReplay, underlying, expiryQuery, rowSize, heatFetchRow, heatRowQuery, fetchLots, reloadNonce])
 
   const handleLive = (payload) => {
     const { securityId, rowSize: rows } = contextRef.current
@@ -286,14 +293,14 @@ export default function OrderFlowPage() {
     setReplayLoading(true)
     setReplayError(null)
     setPlaying(false)
-    fetchJson(`/api/order-flow/${underlying}/day/${replayDate}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}${expiryQuery}`)
+    fetchJson(`/api/order-flow/${underlying}/day/${replayDate}?rowSize=${rowSize}&minTradeLots=${fetchLots}&heatmapColumns=${REPLAY_HEATMAP_COLUMNS}${heatRowQuery}${expiryQuery}`)
       .then((body) => {
         if (cancelled) return
-        const day = {
+        const day = withFineHeatmap({
           meta: body.meta, minuteBars: body.bars, trades: body.trades, icebergs: body.icebergs, heatmap: body.heatmap.map(toColumn),
           sweeps: body.sweeps ?? [], source: body.source, note: body.note, date: replayDate, underlying,
           backfill: body.backfill ?? [], recordedFrom: body.recordedFrom ?? null,
-        }
+        }, heatFetchRow, rowSize)
         setReplayDay(day)
         // Keep the clock where it was when only the rows / print size changed; a new day starts at its open.
         setReplayMs((ms) => {
@@ -305,7 +312,7 @@ export default function OrderFlowPage() {
       .catch((err) => { if (!cancelled) { setReplayError(err.message); setReplayDay(null) } })
       .finally(() => { if (!cancelled) setReplayLoading(false) })
     return () => { cancelled = true }
-  }, [isReplay, underlying, replayDate, expiryQuery, rowSize, fetchLots, reloadNonce])
+  }, [isReplay, underlying, replayDate, expiryQuery, rowSize, heatFetchRow, heatRowQuery, fetchLots, reloadNonce])
 
   useEffect(() => {
     if (!playing || !range) return undefined
@@ -517,6 +524,14 @@ export default function OrderFlowPage() {
     () => (estimated ? { signals: [], pressure: null } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
     [estimated, view?.heatmap, rowSize, lotSize],
   )
+  // The heatmap's picture in its own rows: the finer copy fetched for them, else the footprint-row heatmap -
+  // re-bucketed when the picked rows are a whole number of it (until a refetch lands, the rows it has).
+  const heatShown = useMemo(() => {
+    const fine = view?.heatFine && rowsNest(heatRow, view.heatFineRow) ? { columns: view.heatFine, row: view.heatFineRow } : null
+    const source = fine ?? { columns: view?.heatmap ?? [], row: rowSize }
+    if (source.row === heatRow || !rowsNest(heatRow, source.row)) return source
+    return { columns: rebucketColumns(source.columns, heatRow), row: heatRow }
+  }, [view?.heatFine, view?.heatFineRow, view?.heatmap, heatRow, rowSize])
   // The heatmap's STACK / PULL pills can be hidden (a box on the card, remembered) - the read, bias and signal list keep them.
   const [heatPullStack, setHeatPullStack] = usePersistedState('optionanalytics.orderFlow.heatPullStack', true)
   const heatSignals = useMemo(() => [...liquidity, ...(heatPullStack ? pullStack.signals : []), ...sweeps], [liquidity, heatPullStack, pullStack.signals, sweeps])
@@ -848,6 +863,13 @@ export default function OrderFlowPage() {
                     <Space size={12} wrap>
                       {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}
                       {!estimated && (
+                        <Tooltip title="Price points per heatmap row - only this picture changes: the footprint keeps its own rows, and the liquidity read, signals and scanner read the book in the footprint's rows as before.">
+                          <Select size="small" value={heatRowPick ?? 'same'} style={{ width: 150 }}
+                            onChange={(v) => setHeatRowSizes({ ...(heatRowSizes ?? {}), [underlying]: v === 'same' ? null : v })}
+                            options={[{ value: 'same', label: `Footprint (${rowSize} pt)` }, ...ROW_SIZE_OPTIONS.map((o) => ({ value: o.value, label: `${o.value} pt rows` }))]} />
+                        </Tooltip>
+                      )}
+                      {!estimated && (
                         <Tooltip title="Show the STACK (liquidity added) and PULL (liquidity pulled) pills on the heatmap. Hiding them only clears the picture - the read, the bias and the signals list still use them.">
                           <Checkbox checked={heatPullStack} onChange={(e) => setHeatPullStack(e.target.checked)}>Stack / pull</Checkbox>
                         </Tooltip>
@@ -857,7 +879,7 @@ export default function OrderFlowPage() {
                 >
                   {estimated
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
-                    : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} vwap={heatmapVwap} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
+                    : <DepthHeatmap columns={heatShown.columns} rowSize={heatShown.row} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} vwap={heatmapVwap} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
                   {!estimated && (
                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                       How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price

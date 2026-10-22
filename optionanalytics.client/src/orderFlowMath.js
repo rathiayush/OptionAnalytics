@@ -239,6 +239,44 @@ export function bucketBook(levels, rowSize) {
   return [...rows.entries()]
 }
 
+// True when a `row`-point row is a whole number of `base`-point rows - re-bucketing `base` rows into it is then
+// exact (the same floor rows as bucketing the book into `row` directly).
+export function rowsNest(row, base) {
+  const n = row / base
+  return base > 0 && n >= 1 - 1e-9 && Math.abs(n - Math.round(n)) < 1e-9
+}
+
+// The heatmap's own rows (the dropdown on its card) can differ from the footprint's. When they are a whole number of
+// footprint rows the page re-buckets the heatmap it already has; otherwise (finer, or 2 vs 5) the server is asked for
+// the heatmap in the largest row both are made of (every row size is a whole number of half points) - returned here,
+// and `rowSize` when nothing finer is needed.
+export function heatmapFetchRow(rowSize, heatRow) {
+  if (!(rowSize > 0) || !(heatRow > 0) || rowsNest(heatRow, rowSize)) return rowSize
+  const a = Math.round(rowSize * 2)
+  const b = Math.round(heatRow * 2)
+  if (Math.abs(a - rowSize * 2) > 1e-9 || Math.abs(b - heatRow * 2) > 1e-9) return rowSize
+  let x = a
+  let y = b
+  while (y) [x, y] = [y, x % y]
+  return x / 2
+}
+
+// Heatmap columns ({ t, bids, asks } of [price, quantity] rows) re-bucketed into `rowSize` rows. Each column is done
+// once per row size (kept beside it), so a live push or a replay step only buckets the new columns.
+const rebucketed = new WeakMap()
+export function rebucketColumns(columns, rowSize) {
+  return (columns ?? []).map((column) => {
+    let byRow = rebucketed.get(column)
+    if (!byRow) { byRow = new Map(); rebucketed.set(column, byRow) }
+    let out = byRow.get(rowSize)
+    if (!out) {
+      out = { t: column.t, bids: bucketBook(column.bids, rowSize), asks: bucketBook(column.asks, rowSize) }
+      byRow.set(rowSize, out)
+    }
+    return out
+  })
+}
+
 // Merges live minutes (native prices) into the loaded minute bars, replacing by time.
 export function mergeLiveMinutes(minuteBars, liveBars, rowSize) {
   if (!liveBars?.length) return minuteBars
@@ -356,6 +394,8 @@ export function replayView(day, clockMs) {
   const minuteBars = day.minuteBars.slice(0, countUpTo(day.minuteBars, clockMs - 60_000, (b) => msOf(b.time)))
   const trades = day.trades.slice(0, countUpTo(day.trades, clockMs, (t) => msOf(t.time)))
   const heatmap = day.heatmap.slice(0, countUpTo(day.heatmap, clockMs, (c) => c.t))
+  // The heatmap's picture in its own finer rows (withFineHeatmap), when there is one - up to the clock as well.
+  const heatFine = day.heatFine?.slice(0, countUpTo(day.heatFine, clockMs, (c) => c.t))
   const sweeps = (day.sweeps ?? []).filter((w) => msOf(w.endedAt) <= clockMs)
   const icebergs = day.icebergs
     .filter((i) => msOf(i.detectedAt) <= clockMs)
@@ -378,7 +418,7 @@ export function replayView(day, clockMs) {
   return {
     ...day,
     meta: { ...day.meta, lastPrice, lastTradeAt: lastTrade?.time ?? null },
-    minuteBars, trades, heatmap, icebergs, book, sweeps,
+    minuteBars, trades, heatmap, icebergs, book, sweeps, ...(heatFine ? { heatFine } : {}),
   }
 }
 

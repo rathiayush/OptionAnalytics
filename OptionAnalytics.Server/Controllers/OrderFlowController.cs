@@ -25,14 +25,16 @@ public sealed class OrderFlowController : ControllerBase
     /// <param name="rowSize">Price points per footprint/heatmap row (0 = the contract's own tick).</param>
     /// <param name="minTradeLots">Smallest print returned, in lots.</param>
     /// <param name="heatmapColumns">At most this many depth snapshots for the heatmap.</param>
+    /// <param name="heatmapRowSize">The heatmap's own price points per row (omitted = rowSize) - the page's heatmap
+    /// can be finer or coarser than its footprint.</param>
     [HttpGet("{underlying}")]
     public async Task<ActionResult<OrderFlowSnapshot>> Get(string underlying, [FromQuery] DateOnly? expiry = null, [FromQuery] decimal rowSize = 1,
-        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 900, CancellationToken cancellationToken = default)
+        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 900, [FromQuery] decimal? heatmapRowSize = null, CancellationToken cancellationToken = default)
     {
         var engine = await _orderFlow.EngineForAsync(underlying, expiry, cancellationToken);
         if (engine is null)
             return NotFound(new { error = $"No {underlying.ToUpperInvariant()} futures contract{(expiry is null ? "" : $" expiring {expiry:dd MMM yyyy}")} is being tracked - the futures list may still be loading, or order flow is turned off." });
-        var snapshot = engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000));
+        var snapshot = engine.Snapshot(Math.Clamp(rowSize, 0, 1000), Math.Max(1, minTradeLots) * (long)engine.LotSize, Math.Clamp(heatmapColumns, 50, 3000), HeatRow(heatmapRowSize));
         return await _history.WithBackfillAsync(engine, snapshot, cancellationToken);
     }
 
@@ -80,11 +82,15 @@ public sealed class OrderFlowController : ControllerBase
     /// more columns (up to 12000, i.e. every 2s snapshot) so a replay stays detailed.</summary>
     [HttpGet("{underlying}/day/{date}")]
     public async Task<ActionResult<OrderFlowSnapshot>> Day(string underlying, DateOnly date, [FromQuery] DateOnly? expiry = null, [FromQuery] decimal rowSize = 1,
-        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000, CancellationToken cancellationToken = default)
+        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000, [FromQuery] decimal? heatmapRowSize = null, CancellationToken cancellationToken = default)
     {
-        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 12000), cancellationToken);
+        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 12000), cancellationToken, HeatRow(heatmapRowSize));
         return result.Snapshot is null ? NotFound(new { error = result.Error }) : result.Snapshot;
     }
+
+    // The heatmap's rows: never finer than the book is kept in (HeatmapBaseRow), at most 1000 points.
+    private static decimal? HeatRow(decimal? heatmapRowSize) =>
+        heatmapRowSize is { } row ? Math.Clamp(row, OrderFlowEngine.HeatmapBaseRow, 1000) : null;
 }
 
 public sealed record OrderFlowContract(DateOnly Expiry, string TradingSymbol, uint SecurityId, bool Nearest);
