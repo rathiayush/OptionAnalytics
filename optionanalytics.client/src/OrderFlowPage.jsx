@@ -517,7 +517,9 @@ export default function OrderFlowPage() {
     () => (estimated ? { signals: [], pressure: null } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
     [estimated, view?.heatmap, rowSize, lotSize],
   )
-  const heatSignals = useMemo(() => [...liquidity, ...pullStack.signals, ...sweeps], [liquidity, pullStack.signals, sweeps])
+  // The heatmap's STACK / PULL pills can be hidden (a box on the card, remembered) - the read, bias and signal list keep them.
+  const [heatPullStack, setHeatPullStack] = usePersistedState('optionanalytics.orderFlow.heatPullStack', true)
+  const heatSignals = useMemo(() => [...liquidity, ...(heatPullStack ? pullStack.signals : []), ...sweeps], [liquidity, heatPullStack, pullStack.signals, sweeps])
   // The day's options + futures OI: part of the order flow read, and what the strategy scanner reads.
   const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
   const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
@@ -840,7 +842,19 @@ export default function OrderFlowPage() {
                 then the volume / market profiles - the column on the right (read, DOM, tape, signals) runs long. */}
             <Space direction="vertical" size={16} style={{ width: '100%', marginTop: 16 }}>
                 {/* What the heatmap shows - in one line under it. */}
-                <Card size="small" title="Liquidity heatmap" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}>
+                <Card
+                  size="small" title="Liquidity heatmap"
+                  extra={(
+                    <Space size={12} wrap>
+                      {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · big dots = big orders · magenta = icebergs</Text>}
+                      {!estimated && (
+                        <Tooltip title="Show the STACK (liquidity added) and PULL (liquidity pulled) pills on the heatmap. Hiding them only clears the picture - the read, the bias and the signals list still use them.">
+                          <Checkbox checked={heatPullStack} onChange={(e) => setHeatPullStack(e.target.checked)}>Stack / pull</Checkbox>
+                        </Tooltip>
+                      )}
+                    </Space>
+                  )}
+                >
                   {estimated
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
                     : <DepthHeatmap columns={view?.heatmap ?? []} rowSize={rowSize} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} vwap={heatmapVwap} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440} />}
