@@ -2176,7 +2176,7 @@ function clearLiveDayCache() {
 function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
   qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, targetPoints, onTargetPointsChange,
-  trailStart = 0, onTrailStartChange, trailGap = 0, onTrailGapChange, noStop = false, onNoStopChange = null,
+  trailStart = 0, onTrailStartChange, trailGap = 0, onTrailGapChange, noStop = false, onNoStopChange = null, noTrail = false, onNoTrailChange = null,
   onPunch, canPunch, positions, onExit, onExitAll, onClearAll,
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
@@ -2195,6 +2195,7 @@ function PaperTradePanel({
         <Space size={2} wrap>
           <Tag color={d === 'BUY' ? 'success' : 'error'}>{d} {r.side}</Tag>
           {r.noStop && <Tooltip title="No stop-loss / target - squared off at 15:15"><Tag color="warning" style={{ fontSize: 10, paddingInline: 3 }}>No SL</Tag></Tooltip>}
+          {r.noTrail && <Tooltip title="Its stop-loss stays where it started - no trailing"><Tag style={{ fontSize: 10, paddingInline: 3 }}>No trail</Tag></Tooltip>}
         </Space>
       ),
     },
@@ -2261,11 +2262,16 @@ function PaperTradePanel({
               <Checkbox checked={noStop} onChange={(e) => onNoStopChange(e.target.checked)}>No SL (hold for the day)</Checkbox>
             </Tooltip>
           )}
+          {onNoTrailChange && (
+            <Tooltip title={noStop ? 'No SL already means no trailing.' : 'No trailing: the order keeps its stop-loss and target, but the stop stays where it started (the Trail after / Follow boxes are not used).'}>
+              <Checkbox checked={noTrail || noStop} disabled={noStop} onChange={(e) => onNoTrailChange(e.target.checked)}>No trailing</Checkbox>
+            </Tooltip>
+          )}
           {onTrailGapChange && (
             <Tooltip title="Trailing stop on the premium: once the trade is 'Trail after' points in profit, the stop follows the best premium 'Follow' points behind and only tightens. Follow 0 = off. Paper here; live, the server moves the super order's stop-loss leg.">
               <Space size={8} wrap>
-                <InputNumber value={trailStart} onChange={(v) => onTrailStartChange?.(v ?? 0)} min={0} step={5} style={{ width: 165 }} addonBefore="Trail after" addonAfter="pts" aria-label="Trail after points" disabled={noStop} />
-                <InputNumber value={trailGap} onChange={(v) => onTrailGapChange(v ?? 0)} min={0} step={1} style={{ width: 145 }} addonBefore="Follow" addonAfter="pts" aria-label="Trail follow points" disabled={noStop} />
+                <InputNumber value={trailStart} onChange={(v) => onTrailStartChange?.(v ?? 0)} min={0} step={5} style={{ width: 165 }} addonBefore="Trail after" addonAfter="pts" aria-label="Trail after points" disabled={noStop || noTrail} />
+                <InputNumber value={trailGap} onChange={(v) => onTrailGapChange(v ?? 0)} min={0} step={1} style={{ width: 145 }} addonBefore="Follow" addonAfter="pts" aria-label="Trail follow points" disabled={noStop || noTrail} />
               </Space>
             </Tooltip>
           )}
@@ -2679,6 +2685,7 @@ function OrderTicket({ ticket, onClose, onPlace, underlying, atmStrike, step, li
   const [sl, setSl] = useState(initial.sl)
   const [target, setTarget] = useState(initial.target)
   const [noStop, setNoStop] = useState(Boolean(initial.noStop))
+  const [noTrail, setNoTrail] = useState(Boolean(initial.noTrail))
   const lotsRef = useRef(null)
   const slRef = useRef(null)
   const targetRef = useRef(null)
@@ -2704,7 +2711,7 @@ function OrderTicket({ ticket, onClose, onPlace, underlying, atmStrike, step, li
     el?.focus()
     el?.select?.()
   }
-  const place = () => { if (!problem) onPlace({ direction, side, offset, strike, lots, sl, target, noStop }) }
+  const place = () => { if (!problem) onPlace({ direction, side, offset, strike, lots, sl, target, noStop, noTrail }) }
   const sideKeys = (e) => {
     if (e.target?.tagName === 'INPUT') return
     if (e.key === 'c' || e.key === 'C') setSide('CE')
@@ -2728,9 +2735,12 @@ function OrderTicket({ ticket, onClose, onPlace, underlying, atmStrike, step, li
           <InputNumber ref={lotsRef} value={lots} onChange={(v) => setLots(v ?? 1)} min={1} step={1} style={{ width: '100%' }} addonBefore="Lots" onKeyDown={(e) => enterTo(e, 'sl')} aria-label="Ticket lots" />
           <InputNumber ref={slRef} value={sl} onChange={(v) => setSl(v ?? 0)} min={0} step={5} style={{ width: '100%' }} addonBefore="Stop-loss" addonAfter="pts" onKeyDown={(e) => enterTo(e, 'target')} aria-label="Ticket stop-loss" disabled={noStop} />
           <InputNumber ref={targetRef} value={target} onChange={(v) => setTarget(v ?? 0)} min={0} step={5} style={{ width: '100%' }} addonBefore="Target" addonAfter="pts" onKeyDown={(e) => enterTo(e, 'place')} aria-label="Ticket target" disabled={noStop} />
-          <Checkbox checked={noStop} onChange={(e) => setNoStop(e.target.checked)} aria-label="Ticket no stop-loss">
-            No SL (hold for the day{live ? ' - a plain order, no legs' : ' - squared off at 15:15'})
-          </Checkbox>
+          <Space wrap size={12}>
+            <Checkbox checked={noStop} onChange={(e) => setNoStop(e.target.checked)} aria-label="Ticket no stop-loss">
+              No SL (hold for the day{live ? ' - a plain order, no legs' : ' - squared off at 15:15'})
+            </Checkbox>
+            <Checkbox checked={noTrail || noStop} disabled={noStop} onChange={(e) => setNoTrail(e.target.checked)} aria-label="Ticket no trailing">No trailing</Checkbox>
+          </Space>
           {problem && <Text type="warning" style={{ fontSize: 12 }}>{problem}</Text>}
           <Button ref={placeRef} type="primary" danger={!buy} block disabled={Boolean(problem)} onClick={place} aria-label="Place order">
             {live ? 'Place LIVE order' : 'Place paper order'} · {direction} {lots} lot{lots === 1 ? '' : 's'} {strike ?? ''} {side}{premium != null ? ` @ ~${premium.toFixed(1)}` : ''}
@@ -2894,7 +2904,7 @@ function PreTradeReview({
             <Text style={{ fontSize: 12 }}>
               {order.noStop
                 ? <Text strong type="warning" style={{ fontSize: 12 }}>No stop-loss / target - held for the day ({order.mode === 'live' ? 'a plain order; Dhan squares intraday positions off near the close' : 'squared off at 15:15'})</Text>
-                : <>Stop-loss {order.sl > 0 ? `${order.sl} pts` : 'off'} · Target {order.target > 0 ? `${order.target} pts` : 'off'}{order.trailGap > 0 ? ` · trailing ${order.trailGap} pts after +${order.trailStart} pts` : ''}</>}
+                : <>Stop-loss {order.sl > 0 ? `${order.sl} pts` : 'off'} · Target {order.target > 0 ? `${order.target} pts` : 'off'}{order.noTrail ? ' · no trailing' : order.trailGap > 0 ? ` · trailing ${order.trailGap} pts after +${order.trailStart} pts` : ''}</>}
             </Text>
           </Space>
         )
@@ -3129,6 +3139,10 @@ export default function OiReplayPage() {
   // "No SL": the next order has no stop-loss / target - it stays open for the day (paper squares it off at 15:15; a live
   // one is a plain order, Dhan squares intraday positions off near the close). Never remembered: off on every load.
   const [paperNoStop, setPaperNoStop] = useState(false)
+  // "No trailing": the next order keeps its SL / target but its stop never trails (paper and live). Off on every load.
+  const [paperNoTrail, setPaperNoTrail] = useState(false)
+  // The trailing the next order would use: none with No SL or No trailing ticked.
+  const paperTrailOff = paperNoStop || paperNoTrail
   useEffect(() => {
     const levels = loadTradeLevels('oiReplay', underlying)
     setPaperTrailStartState(levels.trailStart)
@@ -4134,7 +4148,7 @@ export default function OiReplayPage() {
     const o = overrides && !overrides.nativeEvent ? overrides : {}
     return {
       direction: o.direction ?? paperDirection, side: o.side ?? paperSide, strike: o.strike ?? paperStrike, lots: o.lots ?? paperQtyLots,
-      sl: o.slPts ?? paperSlPoints, target: o.targetPts ?? paperTargetPoints, noStop: o.noStop ?? paperNoStop,
+      sl: o.slPts ?? paperSlPoints, target: o.targetPts ?? paperTargetPoints, noStop: o.noStop ?? paperNoStop, noTrail: o.noTrail ?? paperNoTrail,
     }
   }
   // Each position is priced from ITS OWN option chain: the one on screen (ceByStrike / peByStrike, as of
@@ -4155,14 +4169,14 @@ export default function OiReplayPage() {
     const entryPrice = premiumOf(t.side, t.strike)
     if (t.strike == null || entryPrice == null) return
     const text = paperTradeText({ direction: t.direction, strike: t.strike, side: t.side, qtyLots: t.lots }, entryPrice)
-    const levels = t.noStop ? ' · no SL / target - held until the 15:15 square-off' : `${t.sl > 0 ? ` · SL ${t.sl} pts` : ''}${t.target > 0 ? ` · target ${t.target} pts` : ''}`
+    const levels = t.noStop ? ' · no SL / target - held until the 15:15 square-off' : `${t.sl > 0 ? ` · SL ${t.sl} pts` : ''}${t.target > 0 ? ` · target ${t.target} pts` : ''}${t.noTrail ? ' · no trailing' : ''}`
     notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${levels}`,
       telegramText: isLive ? `Paper ${text}${t.noStop ? ' (no SL)' : ''}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
       side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots, underlying, expiryFlag: isLive ? liveExpiryFlag : null,
       lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
-      entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null, ...(t.noStop ? { noStop: true } : {}),
+      entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null, ...(t.noStop ? { noStop: true } : t.noTrail ? { noTrail: true } : {}),
     }])
   }
 
@@ -4255,7 +4269,7 @@ export default function OiReplayPage() {
     return runLiveAction(() => liveTradingApi.place({
       underlying, expiry: liveExpiryDate, strike: t.strike, side: t.side, direction: t.direction,
       lots: t.lots, slippagePoints: liveSlippage, stopLossPoints: t.noStop ? 0 : t.sl, targetPoints: t.noStop ? 0 : t.target,
-      trailStartPoints: !t.noStop && paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: t.noStop ? 0 : paperTrailGap ?? 0,
+      trailStartPoints: !t.noStop && !t.noTrail && paperTrailGap > 0 ? paperTrailStart ?? 0 : 0, trailGapPoints: t.noStop || t.noTrail ? 0 : paperTrailGap ?? 0,
       noStop: Boolean(t.noStop),
     }), { title: t.noStop ? 'LIVE order placed (no SL)' : 'LIVE order placed' })
   }
@@ -4294,7 +4308,7 @@ export default function OiReplayPage() {
     setPaperDirection(values.direction)
     setPaperSide(values.side)
     setPaperStrikeOffset(values.offset)
-    const overrides = { direction: values.direction, side: values.side, strike: values.strike, lots: values.lots, slPts: values.sl, targetPts: values.target, noStop: values.noStop }
+    const overrides = { direction: values.direction, side: values.side, strike: values.strike, lots: values.lots, slPts: values.sl, targetPts: values.target, noStop: values.noStop, noTrail: values.noTrail }
     if (liveTradeActive) handleLivePunch(overrides)
     else handlePaperPunch(overrides)
   }
@@ -4313,7 +4327,7 @@ export default function OiReplayPage() {
           : paperTargetPoints <= liveSlippage ? 'Target must be further than the slippage.' : null
   const liveOrderSummary = paperStrike == null ? '' : `${paperDirection} ${underlying} ${paperStrike} ${paperSide}${liveExpiryDate ? ` (${fmtDateOnly(liveExpiryDate)})` : ''} x ${paperQtyLots} lot${paperQtyLots === 1 ? '' : 's'} - LIMIT at the live ${paperDirection === 'SELL' ? 'bid' : 'ask'} ${paperDirection === 'SELL' ? '-' : '+'} ${liveSlippage} pts, ${paperNoStop
     ? 'NO stop-loss / target - a plain order that stays open until you close it (Dhan squares intraday positions off near the close).'
-    : `SL ${paperSlPoints} pts, target ${paperTargetPoints} pts${paperTrailGap > 0 ? `, trailing ${paperTrailGap} pts behind the best after +${paperTrailStart ?? 0} pts` : ''}.`}`
+    : `SL ${paperSlPoints} pts, target ${paperTargetPoints} pts${paperNoTrail ? ', no trailing' : paperTrailGap > 0 ? `, trailing ${paperTrailGap} pts behind the best after +${paperTrailStart ?? 0} pts` : ''}.`}`
 
   // Exits every currently OPEN position at its own live (as-of-replay) price, rather than deleting
   // them the way Clear all does - a real "flatten everything" action whose exit prices/PnL stay in
@@ -4364,7 +4378,9 @@ export default function OiReplayPage() {
         continue
       }
       if (!anyLevels) continue
-      const hit = computeStopTargetHit(seriesOf(p), p.entryTime, ownChainOf(p) ? asOfMs : null, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap)
+      // A "No trailing" position keeps its stop where it started.
+      const hit = computeStopTargetHit(seriesOf(p), p.entryTime, ownChainOf(p) ? asOfMs : null, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints,
+        p.noTrail ? 0 : paperTrailStart, p.noTrail ? 0 : paperTrailGap)
       if (hit) hits.set(p.id, hit)
     }
     if (hits.size === 0) return
@@ -5839,7 +5855,7 @@ export default function OiReplayPage() {
           ticket={ticket} onClose={() => setTicket(null)} onPlace={placeFromTicket} underlying={underlying} atmStrike={atmStrike} step={step}
           live={liveTradeActive} premiumOf={premiumOf} slippage={liveSlippage}
           blockReason={liveExpiryDate == null ? 'Waiting for the listed expiries.' : null}
-          initial={{ side: paperSide, offset: paperStrikeOffset, lots: paperQtyLots, sl: paperSlPoints, target: paperTargetPoints, noStop: paperNoStop }}
+          initial={{ side: paperSide, offset: paperStrikeOffset, lots: paperQtyLots, sl: paperSlPoints, target: paperTargetPoints, noStop: paperNoStop, noTrail: paperNoTrail }}
         />
       )}
       {reviewOpen && (
@@ -5847,7 +5863,7 @@ export default function OiReplayPage() {
           open={reviewOpen} onCancel={() => setReviewOpen(false)} onPlace={handleReviewPlace}
           order={{
             mode: liveTradeActive ? 'live' : 'paper', direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots,
-            sl: paperNoStop ? 0 : paperSlPoints, target: paperNoStop ? 0 : paperTargetPoints, trailStart: paperTrailStart, trailGap: paperNoStop ? 0 : paperTrailGap, noStop: paperNoStop,
+            sl: paperNoStop ? 0 : paperSlPoints, target: paperNoStop ? 0 : paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailOff ? 0 : paperTrailGap, noStop: paperNoStop, noTrail: paperNoTrail,
             summary: liveTradeActive ? liveOrderSummary : paperEntryPreview?.price != null
               ? paperTradeText({ direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price) : '',
           }}
@@ -5898,7 +5914,7 @@ export default function OiReplayPage() {
             slPoints={paperSlPoints} onSlPointsChange={setPaperSlPoints}
             targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
             trailStart={paperTrailStart} onTrailStartChange={setPaperTrailStart} trailGap={paperTrailGap} onTrailGapChange={setPaperTrailGap}
-            noStop={paperNoStop} onNoStopChange={setPaperNoStop}
+            noStop={paperNoStop} onNoStopChange={setPaperNoStop} noTrail={paperNoTrail} onNoTrailChange={setPaperNoTrail}
             onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
             onReview={() => setReviewOpen(true)}
             positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
