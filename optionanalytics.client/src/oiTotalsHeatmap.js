@@ -72,3 +72,18 @@ export function oiTotalsMeaning(rows, key, t) {
 export function oiTotalsFlowMeaning(rows, key, t) {
   return oiMeaning(DELTA_OF[key], rows[DELTA_OF[key]]?.get(t))
 }
+
+// The totals as chart series (the totals charts popup): for CE, PE and net, the running total (cum) and each
+// bucket's change (delta), { time, value, meaning } in bucket order - meaning as the table colours the figure
+// (oiMeaning: a cumulative = who is ahead, a delta = what that bucket did).
+export function oiTotalsSeries({ buckets, rows }) {
+  const series = (key) => buckets.map((time) => {
+    const value = rows[key].get(time) ?? 0
+    return { time, value, meaning: oiMeaning(key, value) }
+  })
+  return {
+    ce: { delta: series('ceDelta'), cum: series('ceCum') },
+    pe: { delta: series('peDelta'), cum: series('peCum') },
+    net: { delta: series('netDelta'), cum: series('netCum') },
+  }
+}

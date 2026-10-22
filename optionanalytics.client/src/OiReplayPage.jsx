@@ -4,7 +4,7 @@ import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicke
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak } from './alerts.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -27,6 +27,7 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
+import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
@@ -1522,6 +1523,22 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
   )
 }
 
+// The same totals as charts for the whole day so far, in a popup (OiTotalsCharts.jsx) - worked out only while it is open.
+function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra }) {
+  const totals = useMemo(() => {
+    if (!open) return null
+    const ce = buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    const pe = buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    return buildOiTotalsRows(ce, pe)
+  }, [open, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes])
+  return (
+    <OiTotalsChartsModal
+      open={open} onClose={onClose} totals={totals} dayKey={`${dayKey}-${timeframeMinutes}`} extra={extra}
+      format={fmtOiNum} bullish={OI_BULLISH_COLOR} bearish={OI_BEARISH_COLOR}
+    />
+  )
+}
+
 function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
@@ -2991,6 +3008,8 @@ export default function OiReplayPage() {
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
   // The totals (CE / PE / net) as numbers (default) or as a heatmap.
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
+  // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
+  const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
   // The futures DOM (full market depth ladder) drawer - see DomDrawer.jsx.
@@ -5405,7 +5424,22 @@ export default function OiReplayPage() {
                     <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
                   </div>
                   <div>
-                    <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} style={{ marginBottom: 6 }} aria-label="Totals as numbers or heatmap" />
+                    <Space size={8} wrap style={{ marginBottom: 6 }}>
+                      <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
+                      <Tooltip title="CE, PE and Net as charts for the whole day so far - cumulative Δ lines with each bucket's Δ - in a popup, with automatic support / resistance">
+                        <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
+                      </Tooltip>
+                    </Space>
+                    <OiTotalsChartsPopup
+                      open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
+                      strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={`${underlying}-${result.date}`}
+                      extra={(
+                        <Space size={4}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
+                          <Select value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} size="small" style={{ width: 90 }} options={HEATMAP_TIMEFRAME_OPTIONS} />
+                        </Space>
+                      )}
+                    />
                     <br />
                     <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
                       <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
