@@ -31,23 +31,6 @@ public class LiveOptionLegStoreTests
         Assert.Single(store.Latest("NIFTY", "N2", today));
         Assert.Empty(store.Latest("BANKNIFTY", "N1", today));
     }
-
-    [Fact]
-    public void A_new_day_lets_go_of_the_earlier_days_readings()
-    {
-        var store = new LiveOptionLegStore();
-        var monday = new DateTimeOffset(2026, 10, 19, 15, 29, 0, IstClock.Offset);
-        // Monday's legs, some of them strikes the index will have moved away from by Tuesday.
-        for (var strike = 23000m; strike <= 23500m; strike += 50)
-            store.Record(Tick("NIFTY", "WEEK", strike, "CE", 50m, monday));
-        Assert.Equal(11, store.LatestCount);
-
-        var tuesday = monday.AddDays(1).AddHours(-6);
-        store.Record(Tick("NIFTY", "WEEK", 23600m, "CE", 40m, tuesday));
-
-        Assert.Equal(1, store.LatestCount);
-        Assert.Single(store.Latest("NIFTY", "WEEK", DateOnly.FromDateTime(tuesday.DateTime)));
-    }
 }
 
 /// <summary>Today's minute bars the live feed keeps for every index (LiveOptionLegStore) and how today's run joins

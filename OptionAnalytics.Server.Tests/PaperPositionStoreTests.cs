@@ -17,7 +17,7 @@ public sealed class PaperPositionStoreTests : IDisposable
         if (Directory.Exists(_dir)) Directory.Delete(_dir, recursive: true);
     }
 
-    private PaperPositionStore Store() => new(_dir, NullLogger<PaperPositionStore>.Instance, () => Day);
+    private PaperPositionStore Store() => new(_dir, NullLogger<PaperPositionStore>.Instance);
 
     private static JsonObject Position(string id, string status = "OPEN", decimal? exit = null) => new()
     {
@@ -84,26 +84,6 @@ public sealed class PaperPositionStoreTests : IDisposable
         var huge = Position("2");
         huge["note"] = new string('x', PaperPositionStore.MaxPositionBytes);
         Assert.NotNull(store.Change("a", Day, new[] { huge }, null, false).Error);
-    }
-
-    [Fact]
-    public void A_page_with_a_wrong_date_cannot_remove_the_other_days()
-    {
-        var store = Store();
-        Assert.Null(store.Change("a", Day, new[] { Position("1") }, null, clear: false).Error);
-        Assert.Null(store.Change("b", Day.AddDays(-3), new[] { Position("2") }, null, clear: false).Error);
-
-        // A browser whose clock is two months ahead: refused, and nothing of today or the days before is removed.
-        var (result, error) = store.Change("a", Day.AddMonths(2), new[] { Position("3") }, null, clear: false);
-        Assert.Null(result);
-        Assert.NotNull(error);
-        Assert.True(Store().Get("a", Day).Exists);
-        Assert.True(Store().Get("b", Day.AddDays(-3)).Exists);
-
-        // Tomorrow (a page just past midnight on a slightly fast clock) and the last 30 days are fine; older is refused.
-        Assert.Null(store.Change("a", Day.AddDays(1), new[] { Position("4") }, null, clear: false).Error);
-        Assert.Null(store.Change("a", Day.AddDays(-30), new[] { Position("5") }, null, clear: false).Error);
-        Assert.NotNull(store.Change("a", Day.AddDays(-31), new[] { Position("6") }, null, clear: false).Error);
     }
 
     [Fact]

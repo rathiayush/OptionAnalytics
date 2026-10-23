@@ -67,62 +67,6 @@ public sealed class DhanApiClient
 
     public bool HasSession => _session.IsAuthenticated;
 
-    /// <summary>Dhan's Data APIs (charts, option chain, market quote): their documented bodies carry no dhanClientId - the
-    /// account is the client-id header - unlike the trading APIs (orders, super orders), whose bodies do.</summary>
-    internal static bool IsDataApi(string path) =>
-        path.StartsWith("/charts/", StringComparison.OrdinalIgnoreCase)
-        || path.StartsWith("/optionchain", StringComparison.OrdinalIgnoreCase)
-        || path.StartsWith("/marketfeed", StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>What Dhan's GET /v2/profile says about the account (the parts that explain a refused Data API call): the
-    /// Data API plan ("Active" / "Deactive") and until when, and until when the access token is valid.</summary>
-    public sealed record DhanProfile(string? DataPlan, string? DataValidity, string? TokenValidity, string? ActiveSegment, DateTimeOffset ReadAtUtc)
-    {
-        public bool DataPlanActive => string.Equals(DataPlan, "Active", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static readonly TimeSpan ProfileMaxAge = TimeSpan.FromMinutes(10);
-    private readonly SemaphoreSlim _profileLock = new(1, 1);
-    private DhanProfile? _profile;
-
-    /// <summary>The account's profile (GET /v2/profile), read at most once every 10 minutes - null when Dhan does not
-    /// answer it.</summary>
-    public async Task<DhanProfile?> GetProfileAsync(CancellationToken cancellationToken)
-    {
-        if (_profile is { } held && DateTimeOffset.UtcNow - held.ReadAtUtc < ProfileMaxAge) return held;
-        await _profileLock.WaitAsync(cancellationToken);
-        try
-        {
-            if (_profile is { } again && DateTimeOffset.UtcNow - again.ReadAtUtc < ProfileMaxAge) return again;
-            using var response = await SendOnceAsync(HttpMethod.Get, "/profile", null, "reading the Dhan profile", cancellationToken);
-            if (response.Success) _profile = ParseProfile(response.Root, DateTimeOffset.UtcNow);
-            return _profile;
-        }
-        finally
-        {
-            _profileLock.Release();
-        }
-    }
-
-    internal static DhanProfile ParseProfile(JsonElement root, DateTimeOffset readAtUtc)
-    {
-        string? Read(string name) => root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out var v) && v.ValueKind != JsonValueKind.Null ? v.ToString() : null;
-        return new DhanProfile(Read("dataPlan"), Read("dataValidity"), Read("tokenValidity"), Read("activeSegment"), readAtUtc);
-    }
-
-    /// <summary>Added to a refused Data API call's error: what the account's profile says - the usual reasons every chart
-    /// call is refused at once are a Data API plan that lapsed and a token past its validity.</summary>
-    internal static string ProfileHint(DhanProfile profile) =>
-        profile.DataPlanActive
-            ? $" (Dhan profile: Data API plan Active{(profile.DataValidity is { } until ? $" until {until}" : "")}; token valid until {profile.TokenValidity ?? "?"})"
-            : $" (Dhan profile: Data API plan is {profile.DataPlan ?? "not reported"}{(profile.DataValidity is { } validTo ? $" - valid until {validTo}" : "")} - Dhan's charts need an active Data API subscription; renew it in Dhan web -> DhanHQ APIs)";
-
-    // A refused call worth explaining with the profile: an input / account / auth refusal - not a rate limit, a timeout or
-    // a dropped connection, which say nothing about the account.
-    private static bool WorthProfileHint(DhanApiResponse response) =>
-        !response.Success && response.StatusCode is not HttpStatusCode.TooManyRequests and not HttpStatusCode.ServiceUnavailable and not HttpStatusCode.GatewayTimeout
-        && response.ErrorMessage is { } message && !message.Contains("Rate_Limit", StringComparison.OrdinalIgnoreCase) && !message.Contains("Too many", StringComparison.OrdinalIgnoreCase);
-
     /// <summary>Retries automatically when the failure itself looks like a stale/invalid token -
     /// see MaxAuthRetryAttempts' own doc comment for why. Every other kind of failure (a real
     /// rejection, a network error, an unrelated HTTP error) is returned on the first attempt
@@ -134,14 +78,7 @@ public sealed class DhanApiClient
         {
             var response = await SendOnceAsync(method, path, payload, context, cancellationToken);
             if (response.Success || attempt > MaxAuthRetryAttempts || !LooksLikeAuthFailure(response.StatusCode, response.ErrorMessage))
-            {
-                if (!IsDataApi(path) || !WorthProfileHint(response)) return response;
-                var profile = await GetProfileAsync(cancellationToken);
-                if (profile is null) return response;
-                var explained = new DhanApiResponse(false, response.StatusCode, null, response.ErrorMessage + ProfileHint(profile));
-                response.Dispose();
-                return explained;
-            }
+                return response;
 
             _logger.LogInformation(
                 "Dhan call ({Context}) hit a stale/invalid token - retrying in {Seconds}s to give a fresh one a chance to arrive (attempt {Attempt}/{Max}).",
@@ -158,7 +95,7 @@ public sealed class DhanApiClient
         request.Headers.TryAddWithoutValidation("Accept", "application/json");
 
         if (payload is not null)
-            request.Content = new StringContent(BodyFor(path, payload, _session.ClientId), Encoding.UTF8, "application/json");
+            request.Content = new StringContent(SerializeWithClientId(payload), Encoding.UTF8, "application/json");
 
         try
         {
@@ -173,13 +110,11 @@ public sealed class DhanApiClient
         }
     }
 
-    /// <summary>The request body: the payload as JSON, with dhanClientId first for a trading API (its documented bodies
-    /// carry it) - never for a Data API, whose documented bodies do not (IsDataApi): Dhan answers a body it does not
-    /// expect with Input_Exception (DH-905, "missing required fields, bad values for parameters").</summary>
-    internal static string BodyFor(string path, object payload, string? clientId)
+    private string SerializeWithClientId(object payload)
     {
         var json = JsonSerializer.Serialize(payload);
-        if (string.IsNullOrEmpty(clientId) || IsDataApi(path)) return json;
+        var clientId = _session.ClientId;
+        if (string.IsNullOrEmpty(clientId)) return json;
 
         using var document = JsonDocument.Parse(json);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return json;
