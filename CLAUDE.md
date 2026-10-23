@@ -89,7 +89,9 @@ When adding or changing a strategy:
   support flagged them): failures are NOT cached - every call goes to Dhan - but a background timer whose Dhan call failed
   slows down (`RetryBackoff` / `KeyedBackoff`: today warm-up and spot volume 10 min doubling to 1 h, CDV 30 s doubling to
   30 min) instead of asking again at its normal pace; any new timer that calls Dhan must do the same
-  (`DhanRepeatGuardTests.cs`). What reached Dhan in the last 15 min: `GET /api/system/dhan-calls` (admin). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
+  (`DhanRepeatGuardTests.cs`). A failed OI Replay load is never asked again on its own: no "ask the empty series again" rounds
+  (`OiReplayService`), the previous-day walks stop at a failed call (a holiday answers empty and is stepped over), and the
+  pages (`useDayOi.js`, OI Replay, Live strike data) neither retry a failed load on a timer nor reload it on a reconnect. What reached Dhan in the last 15 min: `GET /api/system/dhan-calls` (admin). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
   the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
   What NSE answers for a PAST day (the contract list - `NseFuturesContractArchive` - and an expired contract's 1-minute bars - `NseChartHistory`) is kept on
   disk too (`NseDayStore`, `{DhanCachePath}/nse`), and after NSE does not answer it is not asked again for 10 minutes (`NseBackoff`) - callers fall back at once
