@@ -29,6 +29,10 @@ public sealed class DhanApiResponse : IDisposable
     public HttpStatusCode StatusCode { get; }
     public string? ErrorMessage { get; }
 
+    /// <summary>A failed call's answer exactly as Dhan sent it (first 4,000 characters) - errorType / errorCode /
+    /// errorMessage and anything else - for the Dhan calls page.</summary>
+    public string? RawBody { get; init; }
+
     public JsonElement Root => _document?.RootElement
         ?? throw new InvalidOperationException("This Dhan response has no body to read - check Success first.");
 
@@ -253,8 +257,20 @@ public sealed class DhanApiClient
             return await Pipeline.ExecuteAsync(
                 static async (attempt, call) =>
                 {
-                    var answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
-                    call.Client._rateLimiter.Log(new DhanRestRateLimiter.DhanCall(DateTimeOffset.UtcNow, call.Category, call.Method.Method, call.Path, call.Context, answer.Success, answer.ErrorMessage));
+                    var sentAt = DateTimeOffset.UtcNow;
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    DhanApiResponse answer;
+                    try
+                    {
+                        answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The data call's timeout (or the caller leaving): logged too, so a hanging request shows.
+                        call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, false, "no answer (timed out or cancelled)", 0, clock.Elapsed, null);
+                        throw;
+                    }
+                    call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, answer.Success, answer.ErrorMessage, (int)answer.StatusCode, clock.Elapsed, answer.RawBody);
                     // Dhan said "too many requests": that category's next calls are held back (the shared limiter).
                     if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) call.Client._rateLimiter.NoteRateLimited(call.Category);
                     return answer;
@@ -276,6 +292,19 @@ public sealed class DhanApiClient
         {
             ResilienceContextPool.Shared.Return(resilience);
         }
+    }
+
+    // The call log (GET /api/system/dhan-calls, the Dhan calls page): the body as sent, the account's client id masked.
+    private void LogCall(DateTimeOffset at, DhanApiCategory category, HttpMethod method, string path, object? payload, string context, bool success, string? error, int status, TimeSpan took, string? response)
+    {
+        string? body = null;
+        if (payload is not null)
+        {
+            body = BodyFor(path, payload, _session.ClientId);
+            if (!string.IsNullOrEmpty(_session.ClientId)) body = body.Replace($"\"dhanClientId\":\"{_session.ClientId}\"", "\"dhanClientId\":\"***\"");
+            if (body.Length > 2000) body = body[..2000] + "...";
+        }
+        _rateLimiter.Log(new DhanRestRateLimiter.DhanCall(at, category, method.Method, path, context, success, error, status, body, took.TotalMilliseconds, response));
     }
 
     private async Task<DhanApiResponse> SendNowAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
@@ -352,7 +381,10 @@ public sealed class DhanApiClient
             _session.ClearAccessToken();
         }
 
-        return new DhanApiResponse(false, statusCode, null, message ?? (isSuccess ? "Dhan returned an empty or unparseable body." : $"Dhan returned HTTP {(int)statusCode}."));
+        return new DhanApiResponse(false, statusCode, null, message ?? (isSuccess ? "Dhan returned an empty or unparseable body." : $"Dhan returned HTTP {(int)statusCode}."))
+        {
+            RawBody = string.IsNullOrEmpty(body) ? null : body.Length > 4000 ? body[..4000] + "..." : body,
+        };
     }
 
     /// <summary>A real run confirmed Dhan does not always signal an invalid/expired token with an
