@@ -151,15 +151,17 @@ public sealed class SpotFeedHostedService : BackgroundService
         _ = RefreshTodayVolumeLoopAsync(stoppingToken);
     }
 
-    /// <summary>How often today's 1-minute index candles are re-read from Dhan in market hours for their volume.</summary>
-    private static readonly TimeSpan VolumeRefreshInterval = TimeSpan.FromSeconds(60);
+    /// <summary>How often today's 1-minute index candles are re-read from Dhan in market hours for their volume - every
+    /// 5 minutes, not every minute: it was the steadiest loop of Dhan calls (one per index per minute, all session), for a
+    /// VWAP that moves slowly. A failing read is held back longer still (DhanRestRateLimiter.HeldBack).</summary>
+    private static readonly TimeSpan VolumeRefreshInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>Dhan's live feed sends an index (IDX_I) as ticker packets only - last price and time, no volume - so the
     /// volume bars built from live ticks stay at zero all session and the live session VWAP (vwap-series, the spot
     /// snapshot's vwap, the OI Replay / dashboard VWAP line) had nothing to work with; only the history seeded at startup
     /// carried volume. Every VolumeRefreshInterval in market hours this re-reads today's 1-minute candles from Dhan's
     /// historical endpoint (which does carry index volume) for each underlying and puts their volume into the finished
-    /// minutes (SpotUnderlyingState.MergeVolumeBars) - one background-lane Data-API call per underlying per minute.</summary>
+    /// minutes (SpotUnderlyingState.MergeVolumeBars) - one background-lane Data-API call per underlying every 5 minutes.</summary>
     private async Task RefreshTodayVolumeLoopAsync(CancellationToken stoppingToken)
     {
         var warnedNoVolume = new HashSet<string>();
@@ -188,7 +190,7 @@ public sealed class SpotFeedHostedService : BackgroundService
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogDebug(ex, "Refreshing today's volume for {Underlying} failed - trying again next minute.", state.Underlying);
+                    _logger.LogDebug(ex, "Refreshing today's volume for {Underlying} failed - trying again in 5 minutes.", state.Underlying);
                 }
             }
         }

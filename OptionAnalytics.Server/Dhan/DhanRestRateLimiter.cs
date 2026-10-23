@@ -1,3 +1,6 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -31,7 +34,9 @@ internal sealed record DhanRateLimits(
     DhanRateWindow OrderPerSecond, DhanRateWindow[] OrderRefused, DhanRateWindow QuotePerSecond, DhanRateWindow NonTradingPerSecond, DhanRateWindow[] DataRefused)
 {
     public static readonly DhanRateLimits Dhan = new(
-        OrderPerSecond: new(8, TimeSpan.FromSeconds(1.1), 11, "10 a second"),
+        // A window slides in 100 ms segments and a call can be seen up to one segment early: 1.2 s keeps any 8 calls a full
+        // second apart, timer jitter included.
+        OrderPerSecond: new(8, TimeSpan.FromSeconds(1.2), 12, "10 a second"),
         // 240 + one 1 s segment (8) < 250; 900 + one 10 s segment (80) < 1000; 6000 + one 10 min segment (<= the hour's 900) < 7000.
         OrderRefused: new DhanRateWindow[]
         {
@@ -40,7 +45,7 @@ internal sealed record DhanRateLimits(
             new(6_000, TimeSpan.FromDays(1), 144, "7000 a day"),
         },
         QuotePerSecond: new(1, TimeSpan.FromSeconds(1.5), 15, "1 a second"),
-        NonTradingPerSecond: new(18, TimeSpan.FromSeconds(1.1), 11, "20 a second"),
+        NonTradingPerSecond: new(18, TimeSpan.FromSeconds(1.2), 12, "20 a second"),
         // 97,000 + one 10 min segment of data calls (under 5 a second: < 3,000) < 100,000.
         DataRefused: new DhanRateWindow[] { new(97_000, TimeSpan.FromDays(1), 144, "100,000 a day") });
 }
@@ -153,6 +158,70 @@ public sealed class DhanRestRateLimiter : IDisposable
         if (category == DhanApiCategory.Data) { _data.NoteRateLimited(); return; }
         lock (_lock) _pausedUntil[category] = DateTimeOffset.UtcNow + DhanDataApiRateLimiter.RateLimitPause;
     }
+
+    // ---- No loops of a failing request ----------------------------------------------------------------------------------
+    // Dhan support saw requests "running in a loop" hitting the rate limit: a data call that FAILS (Dhan refused it, or did
+    // not answer) was asked again, identically, by every timer that wanted it - the spot volume refresh every minute, the
+    // today warm-up every 5 minutes, the CDV strikes every 30 s, each page load. A data request that failed is now not sent
+    // again for a while - 1 minute, doubling to 30 - and every caller asking for it gets that failure back at once; a
+    // success clears it. Keyed on the request itself (method, path, body with times cut to the day - today's toDate moves
+    // every minute), shared by every DhanApiClient through this singleton.
+
+    internal sealed record FailedRequest(DateTimeOffset RetryAfter, int Failures, HttpStatusCode Status, string Error);
+
+    private readonly ConcurrentDictionary<string, FailedRequest> _failed = new();
+    internal static readonly TimeSpan FirstFailureBackoff = TimeSpan.FromMinutes(1);
+    internal static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(30);
+    internal Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
+
+    private static readonly Regex TimeOfDay = new(@"(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}(:\d{2})?", RegexOptions.Compiled);
+
+    /// <summary>The request a failure is remembered by: method, path and body, any date-time cut to its date.</summary>
+    internal static string RequestKey(HttpMethod method, string path, string? body) => $"{method} {path} {TimeOfDay.Replace(body ?? "", "$1")}";
+
+    /// <summary>The failure this request had, while it is still being held back - null when it may be sent.</summary>
+    internal FailedRequest? HeldBack(string key) =>
+        _failed.TryGetValue(key, out var failed) && Clock() < failed.RetryAfter ? failed : null;
+
+    /// <summary>How a sent request ended: a failure holds the identical request back (longer each time), a success clears it.</summary>
+    internal void NoteOutcome(string key, bool success, HttpStatusCode status, string? error)
+    {
+        if (success) { _failed.TryRemove(key, out _); return; }
+        var now = Clock();
+        _failed.AddOrUpdate(key,
+            _ => new FailedRequest(now + FirstFailureBackoff, 1, status, error ?? $"HTTP {(int)status}"),
+            (_, before) =>
+            {
+                var failures = before.Failures + 1;
+                var wait = TimeSpan.FromTicks(Math.Min(MaxFailureBackoff.Ticks, FirstFailureBackoff.Ticks << Math.Min(failures - 1, 10)));
+                return new FailedRequest(now + wait, failures, status, error ?? $"HTTP {(int)status}");
+            });
+        // Old entries go (a day's worth of keys at most).
+        if (_failed.Count > 2_000)
+            foreach (var (k, f) in _failed) if (now - f.RetryAfter > TimeSpan.FromHours(1)) _failed.TryRemove(k, out _);
+    }
+
+    // ---- The call log: what reached Dhan, to see a loop -----------------------------------------------------------------
+
+    internal sealed record DhanCall(DateTimeOffset At, DhanApiCategory Category, string Method, string Path, string Context, bool Success, string? Error);
+
+    private readonly ConcurrentQueue<DhanCall> _calls = new();
+    internal static readonly TimeSpan CallLogSpan = TimeSpan.FromMinutes(15);
+
+    /// <summary>A request that was sent to Dhan (every attempt).</summary>
+    internal void Log(DhanCall call)
+    {
+        _calls.Enqueue(call);
+        while (_calls.TryPeek(out var oldest) && call.At - oldest.At > CallLogSpan) _calls.TryDequeue(out _);
+    }
+
+    /// <summary>The calls sent to Dhan in the last CallLogSpan, oldest first.</summary>
+    internal IReadOnlyList<DhanCall> RecentCalls() => _calls.ToArray();
+
+    /// <summary>Calls held back without reaching Dhan (a repeat of a failed request).</summary>
+    internal int HeldBackCount => _heldBack;
+    private int _heldBack;
+    internal void NoteHeldBack() => Interlocked.Increment(ref _heldBack);
 
     /// <summary>For the tests: calls let go in a category.</summary>
     internal int Sent(DhanApiCategory category) { lock (_lock) return _sent.GetValueOrDefault(category); }
