@@ -24,7 +24,6 @@ import { withBackfill } from './cvdBackfill.js'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
-import { useDomFeed } from './domFeed.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
 const { Title, Text } = Typography
@@ -472,13 +471,11 @@ export default function OrderFlowPage() {
   }, [prevSession.data])
   const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
-  // The Market depth card's rows (20 / 50 / 100 / 200 a side, remembered). The live push carries the top 50 levels;
-  // more comes from the DOM feed - the WHOLE book (Dhan's 200 levels on NSE futures) - only while more is asked for,
-  // and only when it is this contract's (it follows the nearest contract). A replayed day's book is already whole.
+  // The Market depth card's rows (20 / 50 / 100 / 200 a side, remembered) - only how much of the book is SHOWN: the
+  // live push and a replayed day both carry the whole book (Dhan's 200 levels on NSE futures), and the walls, the bid
+  // shares and the strategies read all of it.
   const [depthRows, setDepthRows] = usePersistedState('optionanalytics.orderFlow.depthRows', 20)
-  const { dom: deepDom } = useDomFeed(underlying, !isReplay && depthRows > 50)
-  const ladderBook = !isReplay && depthRows > 50 && deepDom?.book && deepDom.meta?.securityId === view?.meta?.securityId ? deepDom.book : view?.book
-  const walls = useMemo(() => findWalls(ladderBook), [ladderBook])
+  const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
   // Each heavy iceberg is sent once, the moment its traded quantity reaches the threshold (kept per day, so
   // a refresh does not send it again).
@@ -918,7 +915,7 @@ export default function OrderFlowPage() {
               <Card
                 size="small" title={`Market depth${meta && !estimated ? ` (${meta.depthLevels} levels)` : ''}`}
                 extra={!estimated && (
-                  <Tooltip title="Rows a side. Above 50 the whole book (Dhan's 200 levels on NIFTY / BANKNIFTY futures) streams to this card - walls are then found in all of it.">
+                  <Tooltip title="Rows a side shown. The whole book (Dhan's 200 levels on NSE futures) is always read - walls, bid shares and the strategies use all of it.">
                     <Select size="small" value={depthRows} onChange={setDepthRows} style={{ width: 96 }}
                       options={[20, 50, 100, 200].map((n) => ({ value: n, label: `${n} rows` }))} />
                   </Tooltip>
@@ -926,7 +923,7 @@ export default function OrderFlowPage() {
               >
                 {estimated
                   ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No market depth for an estimated day - Dhan keeps no depth history." />
-                  : <BookLadder book={ladderBook} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} maxRows={depthRows} height={depthRows > 20 ? 440 : null} />}
+                  : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} maxRows={depthRows} height={depthRows > 20 ? 440 : null} />}
               </Card>
               <TapeCard
                 prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}

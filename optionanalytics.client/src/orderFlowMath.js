@@ -236,6 +236,24 @@ export function bidShare(book, levels = Infinity) {
   return bids + asks > 0 ? bids / (bids + asks) : null
 }
 
+// The prices the heatmap shows for its visible columns (each { bids, asks } of [price, quantity] rows): all of them, but
+// on a trending day - more than `minRows` rows of `step` - a window centred on `lastMid` that still holds the LATEST
+// column's whole book (all 200 levels a side on Dhan's full depth), however deep it runs. { hi, lo }, or null.
+export function heatmapPriceRange(visible, step, lastMid, minRows = 160) {
+  let hi = -Infinity
+  let lo = Infinity
+  for (const c of visible) for (const side of [c.bids, c.asks]) for (const [p] of side) { if (p < lo) lo = p; if (p > hi) hi = p }
+  if (!Number.isFinite(hi)) return null
+  let bookHi = -Infinity
+  let bookLo = Infinity
+  const last = visible.at(-1)
+  for (const side of [last?.bids ?? [], last?.asks ?? []]) for (const [p] of side) { if (p < bookLo) bookLo = p; if (p > bookHi) bookHi = p }
+  const mid = lastMid ?? (hi + lo) / 2
+  const half = Math.max(minRows / 2, Number.isFinite(bookHi) ? Math.max(bookHi - mid, mid - bookLo) / step : 0)
+  if ((hi - lo) / step <= 2 * half) return { hi, lo }
+  return { hi: Math.min(hi, mid + half * step), lo: Math.max(lo, mid - half * step) }
+}
+
 // A book (or heatmap column) as rowSize rows: [[price, quantity], ...].
 export function bucketBook(levels, rowSize) {
   const rows = new Map()

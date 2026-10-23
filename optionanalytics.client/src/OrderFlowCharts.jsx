@@ -6,7 +6,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
-import { bidShare } from './orderFlowMath.js'
+import { bidShare, heatmapPriceRange } from './orderFlowMath.js'
 
 const { Text } = Typography
 
@@ -658,17 +658,13 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       const bestAsk = c.asks.length ? Math.min(...c.asks.map((a) => a[0])) : null
       return bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : bestBid ?? bestAsk
     })
-    let hi = -Infinity
-    let lo = Infinity
+    // Keep the view readable on a trending day - about 160 rows centred on the latest mid - but never cut the latest
+    // book: all of its levels (200 a side on the full depth) stay in view.
+    const range = heatmapPriceRange(visible, step, mids.filter((m) => m != null).at(-1))
+    if (!range) return null
+    const { hi, lo } = range
     const quantities = []
-    for (const c of visible) {
-      for (const [p, q] of c.bids) { lo = Math.min(lo, p); hi = Math.max(hi, p); quantities.push(q) }
-      for (const [p, q] of c.asks) { lo = Math.min(lo, p); hi = Math.max(hi, p); quantities.push(q) }
-    }
-    if (!Number.isFinite(hi)) return null
-    // Keep the view readable on a trending day: at most 160 rows, centred on the latest mid.
-    const lastMid = mids.filter((m) => m != null).at(-1) ?? (hi + lo) / 2
-    if ((hi - lo) / step > 160) { hi = lastMid + 80 * step; lo = lastMid - 80 * step }
+    for (const c of visible) for (const side of [c.bids, c.asks]) for (const [, q] of side) quantities.push(q)
     quantities.sort((a, b) => a - b)
     // Linear against the 98th percentile: ordinary liquidity stays blue, walls stand out hot.
     const cap = quantities[Math.floor(quantities.length * 0.98)] || 1

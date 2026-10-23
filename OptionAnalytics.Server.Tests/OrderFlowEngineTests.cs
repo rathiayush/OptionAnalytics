@@ -301,7 +301,9 @@ public sealed class OrderFlowEngineTests
         engine.OnDepth(new DepthSidePacket(35001, 2, true, levels, 200), T0);
 
         Assert.Equal(200, engine.Live().Meta.DepthLevels);
-        Assert.Equal(OrderFlowEngine.LiveBookLevels, engine.Live().Book.Bids.Count);
+        // The live push carries the whole book - the strategies read all 200 levels, not a top slice.
+        Assert.Equal(200, engine.Live().Book.Bids.Count);
+        Assert.Equal(22700.05m, engine.Live().Book.Bids[^1].Price);
         Assert.Equal(200, engine.Dom().Book.Bids.Count);
         // The live heatmap column: 22700.05-22710 in 0.5-point rows is rows 22700 to 22710.
         Assert.Equal(21, engine.Live().Heat!.Bids.Count);

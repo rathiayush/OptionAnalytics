@@ -40,9 +40,6 @@ public sealed class OrderFlowEngine
     public static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(2);
     /// <summary>The heatmap's finest row - every row size the page offers is a multiple of it.</summary>
     public const decimal HeatmapBaseRow = 0.5m;
-    /// <summary>Levels per side in the live push's book (the ladder); the heatmap gets every level
-    /// bucketed into HeatmapBaseRow rows.</summary>
-    public const int LiveBookLevels = 50;
     private static readonly TimeSpan DeepBookFreshness = TimeSpan.FromSeconds(5);
     public const decimal IcebergFactor = 2m;
     public const int IcebergMinLots = 5;
@@ -448,14 +445,16 @@ public sealed class OrderFlowEngine
     }
 
     /// <summary>The live push: the forming and the previous minute (native price levels - the page
-    /// buckets them into its own rows), the book, the latest prints and recent icebergs.</summary>
+    /// buckets them into its own rows), the WHOLE book (all 200 levels a side while Dhan's full depth
+    /// streams - what the page's ladder and the strategies, on the page and the server's runner, read),
+    /// the latest prints and recent icebergs.</summary>
     public OrderFlowLive Live()
     {
         lock (_lock)
         {
             var recentBars = _bars.Values.TakeLast(2).Select(b => ToDto(b, 0)).ToList();
             return new OrderFlowLive(Meta(), _clock, recentBars, _trades.TakeLast(40).ToList(),
-                Icebergs().TakeLast(30).ToList(), BookDto(LiveBookLevels),
+                Icebergs().TakeLast(30).ToList(), BookDto(),
                 new HeatmapColumn(_clock, Bucket(HeatRows(_bids), HeatmapBaseRow), Bucket(HeatRows(_asks), HeatmapBaseRow)))
             {
                 Sweeps = DetectSweeps(_trades.Skip(Math.Max(0, _trades.Count - 400)).ToList(), SweepMinLots * (long)LotSize),
@@ -494,9 +493,9 @@ public sealed class OrderFlowEngine
         .Select(i => new OrderFlowIceberg(i.Id, i.IsBid, i.Price, i.StartedAt, i.DetectedAt, i.LastSeenAt, i.EndedAt, i.Traded, i.MaxDisplayed, i.Refills))
         .ToList();
 
-    private OrderFlowBook BookDto(int maxLevels = int.MaxValue) => new(
-        _bids.Take(maxLevels).Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList(),
-        _asks.Take(maxLevels).Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList());
+    private OrderFlowBook BookDto() => new(
+        _bids.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList(),
+        _asks.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList());
 
     private static OrderFlowBar ToDto(MinuteBar bar, decimal rowSize)
     {
@@ -727,8 +726,8 @@ public sealed record OrderFlowSnapshot(
 
 /// <summary>Time: the server's time of the latest event - what the page stamps its live heatmap
 /// columns with, so they line up with the loaded history whatever this device's clock says. Book: the
-/// top LiveBookLevels per side (the ladder). Heat: the WHOLE book in HeatmapBaseRow rows - the live
-/// heatmap column, much smaller than 200 levels per side as they are.</summary>
+/// whole book, every level as it is (200 a side on the full depth). Heat: the same whole book in
+/// HeatmapBaseRow rows - the live heatmap column.</summary>
 public sealed record OrderFlowLive(
     OrderFlowMeta Meta, DateTimeOffset Time, IReadOnlyList<OrderFlowBar> Bars, IReadOnlyList<OrderFlowTrade> Trades,
     IReadOnlyList<OrderFlowIceberg> Icebergs, OrderFlowBook Book, HeatmapColumn? Heat = null)
