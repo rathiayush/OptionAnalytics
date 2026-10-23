@@ -17,11 +17,30 @@ namespace OptionAnalytics.Server.Dhan;
 /// Each connection logs in through the URL, subscribes its instrument, and reconnects with backoff.
 /// Dhan pings every 10s and closes a socket that does not answer within 40s - ClientWebSocket answers
 /// pings by itself. DepthUpdated runs on the socket's receive loop - handlers must be quick.
+///
+/// A connection that stays open but sends no book for SilentReconnectAfter during market hours is closed
+/// and opened again (a new subscribe): Dhan can keep a socket open and silent for an account that was not
+/// entitled to the 200-level feed when it subscribed - a plan bought during the day is then picked up by
+/// the next subscribe, with no server restart.
 /// </summary>
 public sealed class DhanTwoHundredDepthClient : BackgroundService
 {
     private const int RequestCodeSubscribe = 23;
     private static readonly TimeSpan StreamingWindow = TimeSpan.FromSeconds(15);
+
+    /// <summary>How long an open connection may go without a book, in market hours, before it is opened again.</summary>
+    internal TimeSpan SilentReconnectAfter { get; init; } = TimeSpan.FromSeconds(60);
+
+    /// <summary>Whether Dhan should be streaming the book now (for the tests: always).</summary>
+    internal Func<DateTimeOffset, bool> MarketOpen { get; init; } = InMarketHours;
+
+    /// <summary>NSE's session, IST weekdays 09:15-15:30 - when a 200-level book is expected to keep arriving.</summary>
+    internal static bool InMarketHours(DateTimeOffset now)
+    {
+        var ist = now.ToOffset(IstClock.Offset);
+        if (ist.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
+        return ist.TimeOfDay >= new TimeSpan(9, 15, 0) && ist.TimeOfDay < new TimeSpan(15, 30, 0);
+    }
 
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
@@ -148,13 +167,24 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
 
         var buffer = new byte[16 * 1024];
         using var message = new MemoryStream();
+        // Cancels a receive that waited SilentReconnectAfter for a book in market hours (re-armed before each receive).
+        using var silence = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var booksSinceConnect = 0;
         while (socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
         {
             message.SetLength(0);
             WebSocketReceiveResult result;
             do
             {
-                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                silence.CancelAfter(MarketOpen(DateTimeOffset.UtcNow) ? SilentReconnectAfter : Timeout.InfiniteTimeSpan);
+                try
+                {
+                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), silence.Token);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"no book for {SilentReconnectAfter.TotalSeconds:0} s in market hours - subscribing again");
+                }
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     subscription.LastError = $"closed by Dhan ({result.CloseStatus}{(string.IsNullOrWhiteSpace(result.CloseStatusDescription) ? "" : $": {result.CloseStatusDescription}")})";
@@ -174,7 +204,14 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
                     subscription.SecurityId, disconnect, DhanSymbology.DescribeFeedErrorCode(disconnect.Value));
                 return;
             }
-            if (packets.Count > 0) { Interlocked.Exchange(ref subscription.LastMessageTicks, DateTimeOffset.UtcNow.UtcTicks); subscription.LastError = null; }
+            if (packets.Count > 0)
+            {
+                Interlocked.Exchange(ref subscription.LastMessageTicks, DateTimeOffset.UtcNow.UtcTicks);
+                subscription.LastError = null;
+                if (booksSinceConnect++ == 0)
+                    _logger.LogInformation("Dhan 200-level book streaming for {SecurityId}: {Rows} rows on the first {Side} side.",
+                        subscription.SecurityId, packets[0].Levels.Length, packets[0].IsBid ? "bid" : "ask");
+            }
             foreach (var packet in packets)
             {
                 try { DepthUpdated?.Invoke(packet); }
