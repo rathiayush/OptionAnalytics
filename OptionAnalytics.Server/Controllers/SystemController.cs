@@ -42,7 +42,7 @@ public sealed class SystemController : ControllerBase
 
     /// <summary>What this server sent to Dhan's REST API in the last 15 minutes (every attempt): per endpoint, the same
     /// request asked 3+ times (a loop shows here), and each call - newest first, with its body as sent, Dhan's answer and a
-    /// likely cause for a failure (DhanRestRateLimiter's call log). The Dhan calls page shows it.</summary>
+    /// likely cause for a failure (DhanRestRateLimiter's call log). The System page shows it.</summary>
     [HttpGet("dhan-calls")]
     [Authorize(Roles = AuthRoles.Admin)]
     public DhanCallsReport DhanCalls() => DhanCallsReportOf(_dhanLimiter.RecentCalls(), DateTimeOffset.UtcNow);
@@ -91,9 +91,37 @@ public sealed class SystemController : ControllerBase
             if (call.Path.Contains("rollingoption") && Field(call.Body, "strike") is { } strike
                 && int.TryParse(strike.Replace("ATM", "").Replace("+", ""), out var steps) && Math.Abs(steps) > 3 && Field(call.Body, "expiryCode") is { } code && code != "1")
                 return $"Strike {strike} with expiryCode {code}: Dhan allows ATM±10 only for the near expiry, ATM±3 otherwise.";
-            return "Dhan refused the request's inputs (DH-905) - check the body: dates (no future toDate, a trading day), securityId, segment, strike range.";
+            return "Dhan refused the request (DH-905). The body looks valid: a trading day, no future toDate. Dhan also answers DH-905 when it has no data "
+                + "for the range, and several accounts with active plans got it on every chart call until Dhan support fixed it on their side - "
+                + "send Dhan support this call's body and time (Try a request -> Copy for Dhan support).";
         }
         return null;
+    }
+
+    public sealed record DhanTestRequest(string Path, System.Text.Json.JsonElement Body);
+    public sealed record DhanTestResult(string Path, string Sent, bool Success, int Status, string? Error, string? Answer, double DurationMs, string? Diagnosis, DateTimeOffset At);
+
+    /// <summary>Data endpoints the System page may try - never an order or anything that changes the account.</summary>
+    internal static readonly string[] TestablePaths = { "/charts/intraday", "/charts/historical", "/charts/rollingoption" };
+
+    /// <summary>Sends ONE Dhan data request as given (through DhanApiClient - the shared rate limit applies) and answers
+    /// exactly what was sent and what Dhan said: the System page's "Try a request", to diagnose a refusal and hand Dhan
+    /// support the request. Data endpoints only.</summary>
+    [HttpPost("dhan-test")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public async Task<ActionResult<DhanTestResult>> DhanTest([FromBody] DhanTestRequest request, [FromServices] DhanApiClient api, CancellationToken cancellationToken)
+    {
+        if (!TestablePaths.Contains(request.Path)) return BadRequest($"Only {string.Join(", ", TestablePaths)} can be tried here.");
+        if (request.Body.ValueKind != System.Text.Json.JsonValueKind.Object) return BadRequest("The body must be a JSON object.");
+        var at = DateTimeOffset.UtcNow;
+        var clock = Stopwatch.StartNew();
+        using var response = await api.SendAsync(HttpMethod.Post, request.Path, request.Body, "System page: try a request", cancellationToken);
+        var answer = response.Success ? response.Root.GetRawText() : null;
+        if (answer is { Length: > 4000 }) answer = answer[..4000] + "...";
+        var sent = DhanApiClient.BodyFor(request.Path, request.Body, null);
+        var call = new DhanRestRateLimiter.DhanCall(at, DhanApiCategory.Data, "POST", request.Path, "try", response.Success, response.ErrorMessage, (int)response.StatusCode, sent);
+        return new DhanTestResult(request.Path, sent, response.Success, (int)response.StatusCode, response.ErrorMessage, answer,
+            Math.Round(clock.Elapsed.TotalMilliseconds), response.Success ? null : Diagnose(call, at), at);
     }
 
     private static string? Field(string? body, string name)

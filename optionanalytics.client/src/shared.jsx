@@ -17,7 +17,7 @@ export function useAuth() {
 // Path keys from NAV_ITEMS below that only an Admin account may see or use - Triggers arms real
 // money, Contracts exposes the raw scrip-master/subscription diagnostic. Kept as one list so
 // NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
-export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/dhan-calls']
+export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/system']
 
 // SignalR's own withAutomaticReconnect(), with no argument, only retries at [0, 2, 10, 30] seconds
 // (~42s total) before giving up PERMANENTLY - the connection then sits closed until the page is
@@ -1083,7 +1083,7 @@ const NAV_ITEMS = [
   { key: '/live-strike-data', label: 'Live Strike Data' },
   { key: '/triggers', label: 'Triggers' },
   { key: '/contracts', label: 'Contracts' },
-  { key: '/dhan-calls', label: 'Dhan calls' },
+  { key: '/system', label: 'System' },
   { key: '/trade-settings', label: 'Trade settings' },
   { key: '/strategy-tuning', label: 'Strategy tuning' },
 ]

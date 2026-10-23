@@ -290,7 +290,7 @@ public sealed class DhanApiClient
         }
     }
 
-    // The call log (GET /api/system/dhan-calls, the Dhan calls page): the body as sent, the account's client id masked.
+    // The call log (the System page): the body as sent, the account's client id masked.
     private void LogCall(DateTimeOffset at, DhanApiCategory category, HttpMethod method, string path, object? payload, string context, bool success, string? error, int status, TimeSpan took)
     {
         string? body = null;
@@ -329,21 +329,16 @@ public sealed class DhanApiClient
     /// <summary>The request body: the payload as JSON, with dhanClientId first for a trading API (its documented bodies
     /// carry it) - never for a Data API, whose documented bodies do not (IsDataApi): Dhan answers a body it does not
     /// expect with Input_Exception (DH-905, "missing required fields, bad values for parameters").</summary>
-    // Plain characters, not \uXXXX escapes: the default escapes '+' (and < > & '), so the strike "ATM+7" went to Dhan as
-    // "ATM\u002B7" - valid JSON, but Dhan refused every ATM+N strike with DH-905 Input_Exception while ATM and ATM-N worked.
-    // Dhan's own DhanHQ-py (Python's json) sends them plain.
-    private static readonly JsonSerializerOptions PlainJson = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-
     internal static string BodyFor(string path, object payload, string? clientId)
     {
-        var json = JsonSerializer.Serialize(payload, PlainJson);
+        var json = JsonSerializer.Serialize(payload);
         if (string.IsNullOrEmpty(clientId) || IsDataApi(path)) return json;
 
         using var document = JsonDocument.Parse(json);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return json;
 
         using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
+        using (var writer = new Utf8JsonWriter(buffer))
         {
             writer.WriteStartObject();
             writer.WriteString("dhanClientId", clientId);

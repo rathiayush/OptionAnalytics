@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Input, Row, Segmented, Space, Statistic, Switch, Table, Tag, Typography } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Col, DatePicker, Input, Row, Segmented, Select, Space, Statistic, Switch, Table, Tag, Typography, message } from 'antd'
+import { CopyOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
+import dayjs from 'dayjs'
 import { NavBar } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -8,10 +9,13 @@ const { Title, Text } = Typography
 const IST_TIME = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const CATEGORY_COLOR = { Order: 'red', Data: 'blue', Quote: 'purple', NonTrading: 'default' }
 
-// "What is this server sending to Dhan, and why is it failing?" - every Dhan REST call of the last 15 minutes (GET
-// /api/system/dhan-calls, DhanRestRateLimiter's call log): per endpoint, any request asked again and again (a loop), and
-// each call with its body exactly as sent, Dhan's answer and the likely cause of a failure. Admin only.
-export default function DhanCallsPage() {
+// The System page (admin): "what is this server sending to Dhan, and why is it failing?"
+//  - Dhan calls: every Dhan REST call of the last 15 minutes (GET /api/system/dhan-calls, DhanRestRateLimiter's call log) -
+//    per endpoint, any request asked again and again (a loop), and each call with its body exactly as sent, Dhan's answer
+//    and the likely cause of a failure;
+//  - Try a request: send ONE Dhan data request (index candles for a day, an expired-option strike) and see exactly what
+//    went and what Dhan said - to tell a bad request from a refusal on Dhan's side, and to hand Dhan support the request.
+export default function SystemPage() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -73,6 +77,8 @@ export default function DhanCallsPage() {
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
+        <TryDhanRequest />
+
         <Card
           title="Dhan calls - last 15 minutes"
           extra={(
@@ -153,6 +159,109 @@ export default function DhanCallsPage() {
         </Card>
       </Space>
     </div>
+  )
+}
+
+// Index securities on Dhan (IDX_I) - the spot the OI Replay reads, and the underlying of the expired-option chain.
+const INDICES = { NIFTY: { id: '13', fno: 'NSE_FNO' }, BANKNIFTY: { id: '25', fno: 'NSE_FNO' }, SENSEX: { id: '51', fno: 'BSE_FNO' } }
+
+function presetBody(kind, index, date, strike, side, flag) {
+  const d = date.format('YYYY-MM-DD')
+  if (kind === 'intraday') {
+    return { path: '/charts/intraday', body: { securityId: INDICES[index].id, exchangeSegment: 'IDX_I', instrument: 'INDEX', interval: '1', oi: false, fromDate: `${d} 09:15:00`, toDate: `${d} 15:30:00` } }
+  }
+  if (kind === 'historical') {
+    return { path: '/charts/historical', body: { securityId: INDICES[index].id, exchangeSegment: 'IDX_I', instrument: 'INDEX', expiryCode: 0, oi: false, fromDate: d, toDate: date.add(1, 'day').format('YYYY-MM-DD') } }
+  }
+  return {
+    path: '/charts/rollingoption',
+    body: {
+      exchangeSegment: INDICES[index].fno, interval: 1, securityId: INDICES[index].id, instrument: 'OPTIDX', expiryFlag: flag, expiryCode: 1, strike, drvOptionType: side,
+      requiredData: ['open', 'high', 'low', 'close', 'iv', 'volume', 'strike', 'oi', 'spot'], fromDate: d, toDate: date.add(1, 'day').format('YYYY-MM-DD'),
+    },
+  }
+}
+
+// Send one Dhan data request as written (data endpoints only - never an order) and show what went and what came back.
+function TryDhanRequest() {
+  const [kind, setKind] = useState('intraday')
+  const [index, setIndex] = useState('NIFTY')
+  const [date, setDate] = useState(() => { let d = dayjs().subtract(1, 'day'); while (d.day() === 0 || d.day() === 6) d = d.subtract(1, 'day'); return d })
+  const [strike, setStrike] = useState('ATM')
+  const [side, setSide] = useState('CALL')
+  const [flag, setFlag] = useState('WEEK')
+  const preset = useMemo(() => presetBody(kind, index, date, strike, side, flag), [kind, index, date, strike, side, flag])
+  const [text, setText] = useState(null)
+  const [result, setResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const bodyText = text ?? JSON.stringify(preset.body, null, 2)
+
+  const send = () => {
+    let body
+    try { body = JSON.parse(bodyText) } catch { message.error('The body is not valid JSON.'); return }
+    setBusy(true)
+    fetch('/api/system/dhan-test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: preset.path, body }) })
+      .then(async (r) => (r.ok ? r.json() : Promise.reject(new Error(r.status === 403 ? 'Admin only.' : (await r.text()) || `HTTP ${r.status}`))))
+      .then(setResult)
+      .catch((e) => setResult({ success: false, error: e.message, sent: JSON.stringify(body), at: new Date().toISOString() }))
+      .finally(() => setBusy(false))
+  }
+  // What to paste to Dhan support - built on the click, from the answer shown.
+  const copyForSupport = () => {
+    const at = new Date(result.at)
+    const text = [
+      `Time: ${at.toISOString()} (${IST_TIME.format(at)} IST)`,
+      `Request: POST https://api.dhan.co/v2${preset.path}`,
+      `Body: ${result.sent}`,
+      `Answer: HTTP ${result.status ?? '-'} ${result.success ? 'OK' : result.error}`,
+    ].join('\n')
+    navigator.clipboard?.writeText(text).then(() => message.success('Copied - paste it to Dhan support.'), () => message.error('Could not copy.'))
+  }
+
+  return (
+    <Card title="Try a request" extra={<Text type="secondary">one Dhan data call, as written</Text>}>
+      <Space wrap style={{ marginBottom: 12 }}>
+        <Segmented value={kind} onChange={(v) => { setKind(v); setText(null) }}
+          options={[{ value: 'intraday', label: 'Index 1-min' }, { value: 'historical', label: 'Index daily' }, { value: 'rolling', label: 'Expired option' }]} />
+        <Select value={index} onChange={(v) => { setIndex(v); setText(null) }} style={{ width: 120 }} options={Object.keys(INDICES).map((k) => ({ value: k, label: k }))} />
+        <DatePicker value={date} onChange={(v) => { if (v) { setDate(v); setText(null) } }} allowClear={false} />
+        {kind === 'rolling' && (
+          <>
+            <Select value={strike} onChange={(v) => { setStrike(v); setText(null) }} style={{ width: 100 }}
+              options={Array.from({ length: 21 }, (_, i) => i - 10).map((k) => ({ value: k === 0 ? 'ATM' : `ATM${k > 0 ? '+' : ''}${k}`, label: k === 0 ? 'ATM' : `ATM${k > 0 ? '+' : ''}${k}` }))} />
+            <Segmented value={side} onChange={(v) => { setSide(v); setText(null) }} options={['CALL', 'PUT']} />
+            <Segmented value={flag} onChange={(v) => { setFlag(v); setText(null) }} options={['WEEK', 'MONTH']} />
+          </>
+        )}
+      </Space>
+      <Text type="secondary" style={{ fontSize: 12 }}>POST {preset.path} - edit the body if you like:</Text>
+      <Input.TextArea value={bodyText} onChange={(e) => setText(e.target.value)} autoSize={{ minRows: 6, maxRows: 16 }} style={{ fontFamily: 'monospace', fontSize: 12, marginTop: 4 }} />
+      <Space style={{ marginTop: 8 }} wrap>
+        <Button type="primary" icon={<SendOutlined />} loading={busy} onClick={send}>Send to Dhan</Button>
+        {text !== null && <Button onClick={() => setText(null)}>Reset body</Button>}
+      </Space>
+      {result && (
+        <div style={{ marginTop: 12 }}>
+          <Alert
+            type={result.success ? 'success' : 'error'} showIcon
+            message={result.success ? `Dhan answered OK (HTTP ${result.status}, ${result.durationMs} ms)` : `Dhan refused it${result.status ? ` (HTTP ${result.status})` : ''}: ${result.error}`}
+            description={result.diagnosis}
+          />
+          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>Sent:</Text>
+          <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12 }}>{result.sent}</pre>
+          {result.answer && (
+            <>
+              <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>Answer (first 4,000 characters):</Text>
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-all', fontSize: 12, maxHeight: 240, overflow: 'auto' }}>{result.answer}</pre>
+            </>
+          )}
+          <Button size="small" icon={<CopyOutlined />} style={{ marginTop: 8 }}
+            onClick={copyForSupport}>
+            Copy for Dhan support
+          </Button>
+        </div>
+      )}
+    </Card>
   )
 }
 
