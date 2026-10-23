@@ -128,6 +128,10 @@ public sealed record OiReplayResult(
     /// (a day before Dhan sent index volume, or one read from the stored database).</summary>
     public IReadOnlyList<ObvPoint> SpotVwap { get; init; } = Array.Empty<ObvPoint>();
 
+    /// <summary>Set when today's spot is NOT the whole day from Dhan - Dhan refused or sent nothing, and the live
+    /// feed's own bars are shown instead (from when the server's feed started). Says why, for the page to show.</summary>
+    public string? SpotNote { get; init; }
+
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);

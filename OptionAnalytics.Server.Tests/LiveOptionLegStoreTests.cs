@@ -125,3 +125,45 @@ public class OptionChainPollTests
         Assert.False(OiReplayLiveFeedService.ShouldPollChain(Ist(18, 11, 0), watched: true)); // Sunday
     }
 }
+
+/// <summary>Today's spot for OI Replay from the spot feed's memory (OiReplayService.TodaySpotBars): the whole day so far
+/// needs no Dhan call; when Dhan refuses the day, whatever the feed holds is shown instead of failing the page.</summary>
+public class TodaySpotFromFeedTests
+{
+    private static readonly DateOnly Day = new(2026, 10, 23);
+    private static DateTimeOffset Ist(int h, int m) => new(2026, 10, 23, h, m, 0, IstClock.Offset);
+    private static List<CandleWithVolume> Bars(DateTimeOffset from, DateTimeOffset to)
+    {
+        var bars = new List<CandleWithVolume>();
+        for (var t = from; t <= to; t = t.AddMinutes(1)) bars.Add(new CandleWithVolume(t, 100, 101, 99, 100, 0));
+        return bars;
+    }
+
+    [Fact]
+    public void The_whole_day_so_far_is_used_without_asking_Dhan()
+    {
+        var now = Ist(11, 3);
+        var yesterday = Bars(Ist(9, 15).AddDays(-1), Ist(15, 29).AddDays(-1));
+        var bars = OiReplayService.TodaySpotBars(yesterday.Concat(Bars(Ist(9, 15), Ist(11, 2))).ToList(), Day, now, wholeDay: true);
+        Assert.NotNull(bars);
+        Assert.Equal(Ist(9, 15), bars![0].Time); // only today's
+    }
+
+    [Fact]
+    public void A_server_restarted_part_way_is_not_the_whole_day_but_is_shown_when_Dhan_refuses()
+    {
+        var now = Ist(11, 3);
+        var sinceRestart = Bars(Ist(10, 40), Ist(11, 2));
+        Assert.Null(OiReplayService.TodaySpotBars(sinceRestart, Day, now, wholeDay: true));
+        var shown = OiReplayService.TodaySpotBars(sinceRestart, Day, now, wholeDay: false);
+        Assert.Equal(23, shown!.Count);
+        Assert.Equal(Ist(10, 40), shown[0].Time);
+    }
+
+    [Fact]
+    public void A_stalled_feed_is_not_the_whole_day_and_nothing_of_today_is_null()
+    {
+        Assert.Null(OiReplayService.TodaySpotBars(Bars(Ist(9, 15), Ist(10, 30)), Day, Ist(11, 3), wholeDay: true));
+        Assert.Null(OiReplayService.TodaySpotBars(Bars(Ist(9, 15).AddDays(-1), Ist(15, 29).AddDays(-1)), Day, Ist(11, 3), wholeDay: false));
+    }
+}

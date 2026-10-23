@@ -5191,6 +5191,8 @@ export default function OiReplayPage() {
             )}
             {isLive && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
+            {/* Today's spot from the server's live feed because Dhan refused the day (OiReplayService) - says from when. */}
+            {!error && result?.spotNote && <Alert type="warning" showIcon closable message={result.spotNote} />}
             {!loading && loadProgress && (
               <details style={{ margin: '4px 0 8px' }}>
                 <summary style={{ cursor: 'pointer', fontSize: 12 }}>
