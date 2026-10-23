@@ -98,9 +98,9 @@ When adding or changing a strategy:
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.
 - The External account (`AuthRoles.External`, `Auth:ExternalEmail` / `Auth:ExternalPasswordHash` - a PBKDF2 hash, never the
-  plain password) sees only `ExternalPage.jsx` (the Order Flow heatmap with big-order dots; OI Replay's chain-wide CE / PE OI with
-  its Total / Since open switch, the OI change heatmap of every strike, the CE / PE / net totals as numbers, heatmap or charts,
-  and the net CE - PE cumulative - those pages' own exported components and code, not copies) and reaches only `/api/external/...`
+  plain password) sees only `ExternalPage.jsx` (tabs: OI Replay's CE / PE / Net OI totals, the Order Flow liquidity heatmap with
+  big-order dots, OI Replay's chain-wide CE / PE OI with its Total / Since open switch - those pages' own exported components
+  and code, not copies) and reaches only `/api/external/...`
   (`ExternalController`, NIFTY / BANKNIFTY, read-only, today), `/api/auth/...` and `/hubs/spot`, where it may join only
   "of:{U}", "of:{U}:{expiry}", "c:{U}:N1" and "u:{U}" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by

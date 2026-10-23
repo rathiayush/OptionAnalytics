@@ -1,23 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, InputNumber, Segmented, Select, Space, Spin, Tabs, Tag, Tooltip, Typography } from 'antd'
 import { DepthHeatmap } from './OrderFlowCharts.jsx'
-import { TotalsChart } from './OiTotalsCharts.jsx'
 import { useOrderFlowHub } from './OrderFlowPage.jsx'
 import {
-  OiChangeHeatmapSection, StrikeOiDrilldownChart, aggregateLinePoints, buildOiChangeMatrix, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
+  OiChangeHeatmapSection, StrikeOiDrilldownChart, aggregateLinePoints, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
   toSinceOpenSeries, useOiReplayLiveFeed,
 } from './OiReplayPage.jsx'
 import { applyOrderFlowPush, orderFlowFromSnapshot } from './liveFeeds.js'
 import { autoBigLots } from './orderFlowMath.js'
-import { buildOiTotalsRows, oiTotalsSeries } from './oiTotalsHeatmap.js'
 import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
 
 // The External account's whole app - the existing charts of the Order Flow page (the liquidity heatmap with its big-order
-// dots) and OI Replay (its OI change heatmap card's CE / PE / net totals as numbers or a heatmap with their charts, the
-// chain-wide CE / PE OI with its Total / Since open switch, and the net CE − PE cumulative), in tabs (totals, liquidity
-// heatmap, chain-wide, net), fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
+// dots) and OI Replay (its OI change heatmap card's CE / PE / net totals as numbers or a heatmap with their charts, and the
+// chain-wide CE / PE OI with its Total / Since open switch), in tabs (totals, liquidity heatmap, chain-wide), fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
 // refuses this account everything else. Everything is keyed by the index picked, so switching NIFTY / BANKNIFTY never
 // shows (or mixes in) the other index's data.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
@@ -25,8 +22,6 @@ const ROW_SIZES = [1, 2, 5, 10, 20, 50]
 const LIVE_EXPIRY_FLAG = 'N1'
 // Live option ticks are applied to the charts at most this often (each recompute covers the whole day).
 const OI_PUBLISH_MS = 2_000
-const BULLISH = '#3fcf6d'
-const BEARISH = '#ff5c5c'
 
 function fmtOi(v) {
   if (v == null || !Number.isFinite(v)) return '—'
@@ -145,7 +140,7 @@ export default function ExternalPage() {
   }, [oi.data, liveCe, livePe])
   const chain = useMemo(() => {
     if (!byStrike) return null
-    const { ceByStrike, peByStrike, strikes } = byStrike
+    const { ceByStrike, peByStrike } = byStrike
     // OI Replay's chain-wide history: one point per minute (its completed minutes), then the latest totals now.
     const minutes = [...new Set([...ceByStrike.values(), ...peByStrike.values()].flatMap((list) => list.map((p) => Math.floor(toChartTime(p.time) / 60) * 60)))].sort((a, b) => a - b)
     const history = chainOiTotalsHistory(ceByStrike, peByStrike, minutes.map((time) => ({ time })), minutes.length)
@@ -153,12 +148,7 @@ export default function ExternalPage() {
     if (minutes.length) history.push({ time: minutes.at(-1), ceTotal: latest(ceByStrike), peTotal: latest(peByStrike) })
     const ceTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.ceTotal })), 1)
     const peTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.peTotal })), 1)
-    // OI Replay's OI totals (CE / PE / net, each minute's change and its running sum) - the net CE − PE as a chart.
-    const totals = oiTotalsSeries(buildOiTotalsRows(
-      buildOiChangeMatrix(ceByStrike, strikes, null, 1).perStrikeChange,
-      buildOiChangeMatrix(peByStrike, strikes, null, 1).perStrikeChange,
-    ))
-    return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal), net: totals.net }
+    return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal) }
   }, [byStrike])
   const dayKey = `${u}-${oi.data?.date ?? ''}`
   const last = (series) => series?.at(-1)?.value
@@ -201,7 +191,7 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Tabs activeKey={['totals', 'liquidity', 'chain', 'net'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
+        <Tabs activeKey={['totals', 'liquidity', 'chain'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
           { key: 'totals', label: 'OI totals', children: (
             <Card size="small" title={<Space size={8}>OI totals: CE, PE and Net (CE − PE){connectionTag(oiConnection)}</Space>}>
               {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
@@ -243,17 +233,6 @@ export default function ExternalPage() {
                     mode={dayOiChartMode} dayKey={`day-oi-${dayOiChartMode}-${dayKey}`} height={260} />
                 </div>
               ))}
-            </Card>
-          ) },
-          { key: 'net', label: 'Net CE − PE', children: (
-            <Card size="small" title="Net CE − PE OI · cumulative"
-              extra={chain?.net.cum.length ? <Text style={{ fontSize: 12, color: last(chain.net.cum) < 0 ? BULLISH : last(chain.net.cum) > 0 ? BEARISH : undefined }}>Net {fmtOi(last(chain.net.cum))}</Text> : null}>
-              {oiBody(() => chain.net.cum.length > 0 && (
-                <TotalsChart cum={chain.net.cum} delta={chain.net.delta} levels={[]} dayKey={`ext-net-${dayKey}`} height={300} format={fmtOi} bullish={BULLISH} bearish={BEARISH} />
-              ))}
-              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-                <span style={{ color: BULLISH }}>Green</span> = put writers ahead (bullish), <span style={{ color: BEARISH }}>red</span> = call writers ahead (bearish); bars: each minute&apos;s net change.
-              </Text>
             </Card>
           ) },
         ]} />
