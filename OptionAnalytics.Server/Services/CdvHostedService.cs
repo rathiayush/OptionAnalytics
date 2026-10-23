@@ -691,13 +691,17 @@ public sealed class CdvHostedService : BackgroundService
         // the full 30-minute cadence is the difference between a gap and an outage: an underlying
         // that failed its recenter used to have no strikes, no CDV and no option candles for half an
         // hour, and every trigger on it went quiet for that whole time.
+        // Still incomplete pass after pass (Dhan failing the backfill): 30 s, then 1, 2, 4 minutes ... up to the normal
+        // 30-minute cadence - not the same calls every 30 s all day.
+        var incompleteInARow = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             var complete = await RecenterAllAsync(stoppingToken);
+            incompleteInARow = complete ? 0 : incompleteInARow + 1;
 
             try
             {
-                await Task.Delay(complete ? AtmRecenterInterval : IncompleteRetryInterval, stoppingToken);
+                await Task.Delay(complete ? AtmRecenterInterval : RetryBackoff.After(incompleteInARow, IncompleteRetryInterval, AtmRecenterInterval), stoppingToken);
             }
             catch (OperationCanceledException)
             {

@@ -4,98 +4,78 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server.Controllers;
 using OptionAnalytics.Server.Dhan;
+using OptionAnalytics.Server.Services;
 using Xunit;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>Dhan support: "requests running in a loop ... hitting the rate limit". A data request that FAILED is not sent
-/// again, identically, until its back-off (1 min, doubling to 30) has passed - every timer and page asking for it gets the
-/// failure at once; a success clears it. The call log shows what reached Dhan.</summary>
+/// <summary>Dhan support: "requests running in a loop ... hitting the rate limit". Failures are NOT cached - every call
+/// goes to Dhan - but a background timer whose call failed slows down (RetryBackoff / KeyedBackoff) instead of asking again
+/// at its normal pace. The call log shows what reached Dhan.</summary>
 public class DhanRepeatGuardTests
 {
     private static readonly IOptions<DhanOptions> Options =
         Microsoft.Extensions.Options.Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c", DataApiRequestsPerSecond = 200 });
 
-    private sealed class Dhan(Func<int, HttpStatusCode> status) : HttpMessageHandler
+    private sealed class FailingDhan : HttpMessageHandler
     {
-        // Calls to the endpoint under test - not the profile read a failed data call adds.
-        public int Calls;
+        public int ChartCalls, ProfileCalls;
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            if (request.RequestUri!.AbsolutePath.EndsWith("/profile"))
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{}", Encoding.UTF8, "application/json") });
-            var n = Interlocked.Increment(ref Calls);
-            var code = status(n);
-            var body = code == HttpStatusCode.OK ? "{\"open\":[],\"close\":[],\"timestamp\":[]}" : "{\"errorCode\":\"DH-905\",\"errorMessage\":\"Input_Exception: Missing required fields\"}";
-            return Task.FromResult(new HttpResponseMessage(code) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+            if (request.RequestUri!.AbsolutePath.EndsWith("/profile")) Interlocked.Increment(ref ProfileCalls);
+            else Interlocked.Increment(ref ChartCalls);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.BadRequest)
+            {
+                Content = new StringContent("{\"errorCode\":\"DH-905\",\"errorMessage\":\"Input_Exception: Missing required fields\"}", Encoding.UTF8, "application/json"),
+            });
         }
     }
 
-    private static (DhanApiClient Api, DhanRestRateLimiter Limiter, Func<DateTimeOffset> Set) Client(Dhan dhan, Func<DateTimeOffset> clock)
-    {
-        var limiter = new DhanRestRateLimiter(new DhanDataApiRateLimiter(Options, NullLogger<DhanDataApiRateLimiter>.Instance)) { Clock = clock };
-        return (new DhanApiClient(new HttpClient(dhan), Options, new DhanSession(Options), NullLogger<DhanApiClient>.Instance, limiter), limiter, clock);
-    }
-
-    // The volume refresh's request: today's candles, toDate moving with the clock.
-    private static object Today(int minute) => new { securityId = "13", exchangeSegment = "IDX_I", fromDate = "2026-10-23 09:15:00", toDate = $"2026-10-23 11:{minute:00}:00" };
-
     [Fact]
-    public async Task A_failed_data_request_is_held_back_and_its_wait_doubles()
+    public async Task A_failed_request_is_not_cached_but_the_profile_is_not_read_on_every_failure()
     {
-        var now = new DateTimeOffset(2026, 10, 23, 5, 30, 0, TimeSpan.Zero);
-        var dhan = new Dhan(_ => HttpStatusCode.BadRequest);
-        var (api, limiter, _) = Client(dhan, () => now);
-
-        using (var first = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(0), "spot", CancellationToken.None)) Assert.False(first.Success);
-        Assert.Equal(1, dhan.Calls);
-
-        // Asked again by every timer within the minute - the same request (toDate moved on): not sent.
-        for (var i = 1; i <= 5; i++)
-        {
-            now = now.AddSeconds(10);
-            using var again = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(i), "spot", CancellationToken.None);
-            Assert.False(again.Success);
-            Assert.Contains("Input_Exception", again.ErrorMessage);
-            Assert.Contains("not asked again before", again.ErrorMessage);
-        }
-        Assert.Equal(1, dhan.Calls);
-        Assert.Equal(5, limiter.HeldBackCount);
-
-        // After the minute it is asked once more; it fails again - now held back two minutes.
-        now = now.AddSeconds(15);
-        using (var second = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(7), "spot", CancellationToken.None)) Assert.False(second.Success);
-        Assert.Equal(2, dhan.Calls);
-        now = now.AddSeconds(90);
-        using (var held = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(9), "spot", CancellationToken.None)) Assert.False(held.Success);
-        Assert.Equal(2, dhan.Calls);
-        now = now.AddSeconds(40);
-        using (var third = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(10), "spot", CancellationToken.None)) Assert.False(third.Success);
-        Assert.Equal(3, dhan.Calls);
-
-        // A different request (another instrument) is not held back by it.
-        using (var other = await api.SendAsync(HttpMethod.Post, "/charts/intraday", new { securityId = "25", exchangeSegment = "IDX_I" }, "bank", CancellationToken.None)) Assert.False(other.Success);
-        Assert.Equal(4, dhan.Calls);
+        var dhan = new FailingDhan();
+        var api = new DhanApiClient(new HttpClient(dhan), Options, new DhanSession(Options), NullLogger<DhanApiClient>.Instance);
+        for (var i = 0; i < 4; i++)
+            using (var failed = await api.SendAsync(HttpMethod.Post, "/charts/intraday", new { securityId = "13" }, "spot", CancellationToken.None))
+            {
+                Assert.False(failed.Success);
+                Assert.Contains("Input_Exception", failed.ErrorMessage);
+            }
+        Assert.Equal(4, dhan.ChartCalls); // every call went to Dhan - no remembered failure
+        Assert.Equal(1, dhan.ProfileCalls); // the profile is asked once per 10 minutes, not once per failure
+        Assert.Equal(5, api.RateLimiter.RecentCalls().Count);
     }
 
     [Fact]
-    public async Task A_success_clears_it_and_orders_are_never_held_back()
+    public void A_failing_timer_slows_down_doubling_to_its_cap()
     {
-        var now = new DateTimeOffset(2026, 10, 23, 5, 30, 0, TimeSpan.Zero);
-        var dhan = new Dhan(n => n == 1 ? HttpStatusCode.BadRequest : HttpStatusCode.OK);
-        var (api, _, _) = Client(dhan, () => now);
-        using (var failed = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(0), "spot", CancellationToken.None)) Assert.False(failed.Success);
-        now = now.AddMinutes(2);
-        using (var ok = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(2), "spot", CancellationToken.None)) Assert.True(ok.Success);
-        using (var again = await api.SendAsync(HttpMethod.Post, "/charts/intraday", Today(2), "spot", CancellationToken.None)) Assert.True(again.Success);
-        Assert.Equal(3, dhan.Calls);
+        var first = TimeSpan.FromSeconds(30);
+        var cap = TimeSpan.FromMinutes(30);
+        Assert.Equal(TimeSpan.Zero, RetryBackoff.After(0, first, cap));
+        Assert.Equal(new[] { 30, 60, 120, 240, 480, 960, 1800, 1800 }.Select(s => TimeSpan.FromSeconds(s)),
+            Enumerable.Range(1, 8).Select(n => RetryBackoff.After(n, first, cap)));
+        Assert.Equal(cap, RetryBackoff.After(500, first, cap));
+    }
 
-        // An order the user sends again is always sent - never answered from a remembered failure.
-        var orderDhan = new Dhan(_ => HttpStatusCode.BadRequest);
-        var (orders, _, _) = Client(orderDhan, () => now);
-        for (var i = 0; i < 3; i++)
-            using (var order = await orders.SendAsync(HttpMethod.Post, "/orders", new { securityId = "1" }, "order", CancellationToken.None)) Assert.False(order.Success);
-        Assert.Equal(3, orderDhan.Calls);
+    [Fact]
+    public void Each_index_backs_off_on_its_own_and_a_success_resets_it()
+    {
+        var now = new DateTimeOffset(2026, 10, 23, 5, 0, 0, TimeSpan.Zero);
+        var backoff = new KeyedBackoff(TimeSpan.FromMinutes(10), TimeSpan.FromHours(1), () => now);
+        Assert.True(backoff.Due("NIFTY"));
+        Assert.Equal(TimeSpan.FromMinutes(10), backoff.Failed("NIFTY"));
+        Assert.False(backoff.Due("NIFTY"));
+        Assert.True(backoff.Due("BANKNIFTY")); // another index is not held by NIFTY's failure
+        now = now.AddMinutes(10);
+        Assert.True(backoff.Due("NIFTY"));
+        Assert.Equal(TimeSpan.FromMinutes(20), backoff.Failed("NIFTY"));
+        now = now.AddMinutes(19);
+        Assert.False(backoff.Due("NIFTY"));
+        now = now.AddMinutes(1);
+        backoff.Succeeded("NIFTY");
+        Assert.True(backoff.Due("NIFTY"));
+        Assert.Equal(TimeSpan.FromMinutes(10), backoff.Failed("NIFTY")); // a success starts it over
     }
 
     [Fact]
@@ -105,9 +85,8 @@ public class DhanRepeatGuardTests
         var calls = Enumerable.Range(0, 6).Select(i => new DhanRestRateLimiter.DhanCall(now.AddSeconds(-30 * i), DhanApiCategory.Data, "POST", "/charts/intraday", "spot candles (IDX_I:13)", false, "DH-905"))
             .Append(new DhanRestRateLimiter.DhanCall(now, DhanApiCategory.NonTrading, "GET", "/positions", "listing positions", true, null))
             .OrderBy(c => c.At).ToList();
-        var report = SystemController.DhanCallsReportOf(calls, heldBack: 4, now);
+        var report = SystemController.DhanCallsReportOf(calls, now);
         Assert.Equal(7, report.Last15Minutes);
-        Assert.Equal(4, report.HeldBack);
         Assert.Equal("/charts/intraday", report.Endpoints[0].Path);
         Assert.Equal(6, report.Endpoints[0].Failed);
         var loop = Assert.Single(report.Repeated);

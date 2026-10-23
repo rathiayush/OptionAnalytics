@@ -116,7 +116,7 @@ public sealed class DhanApiClient
     private static readonly TimeSpan ProfileMaxAge = TimeSpan.FromMinutes(10);
     private readonly SemaphoreSlim _profileLock = new(1, 1);
     private DhanProfile? _profile;
-    private DateTimeOffset? _profileFailedAt;
+    private DateTimeOffset? _profileAskedAt;
 
     /// <summary>The account's profile (GET /v2/profile), read at most once every 10 minutes - null when Dhan does not
     /// answer it.</summary>
@@ -127,12 +127,12 @@ public sealed class DhanApiClient
         try
         {
             if (_profile is { } again && DateTimeOffset.UtcNow - again.ReadAtUtc < ProfileMaxAge) return again;
-            // A failed read is remembered as long as a good one: every failed data call asks for the profile, and must not
-            // read it again each time.
-            if (_profileFailedAt is { } failedAt && DateTimeOffset.UtcNow - failedAt < ProfileMaxAge) return null;
+            // Asked at most once every ProfileMaxAge whatever the answer - every failed data call wants the profile, and a
+            // run of them must not read it each time (the last good one is used meanwhile).
+            if (_profileAskedAt is { } askedAt && DateTimeOffset.UtcNow - askedAt < ProfileMaxAge) return _profile;
+            _profileAskedAt = DateTimeOffset.UtcNow;
             using var response = await SendThroughPipelineAsync(HttpMethod.Get, "/profile", null, "reading the Dhan profile", true, cancellationToken, authRetry: false);
-            if (response.Success) { _profile = ParseProfile(response.Root, DateTimeOffset.UtcNow); _profileFailedAt = null; }
-            else _profileFailedAt = DateTimeOffset.UtcNow;
+            if (response.Success) _profile = ParseProfile(response.Root, DateTimeOffset.UtcNow);
             return _profile;
         }
         finally
@@ -167,24 +167,7 @@ public sealed class DhanApiClient
     /// background work, which goes after page loads (DhanDataApiRateLimiter).</summary>
     public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken, bool interactive = true)
     {
-        // A data request that just failed is not sent again until its back-off has passed (DhanRestRateLimiter.HeldBack) -
-        // the timers and pages asking for it get the failure at once instead of a loop of identical calls to Dhan.
-        var category = DhanRestRateLimiter.CategoryOf(method, path);
-        var key = category == DhanApiCategory.Data
-            ? DhanRestRateLimiter.RequestKey(method, path, payload is null ? null : BodyFor(path, payload, _session.ClientId))
-            : null;
-        if (key is not null && _rateLimiter.HeldBack(key) is { } failed)
-        {
-            _rateLimiter.NoteHeldBack();
-            _logger.LogDebug("Dhan call not sent ({Context}): the same request failed {Failures} time(s) - held back until {Until}.", context, failed.Failures, failed.RetryAfter);
-            return new DhanApiResponse(false, failed.Status, null,
-                $"{failed.Error} (the same request failed {failed.Failures} time{(failed.Failures == 1 ? "" : "s")} - not asked again before {failed.RetryAfter.ToOffset(IstClock.Offset):HH:mm:ss} IST)");
-        }
-
         var response = await SendThroughPipelineAsync(method, path, payload, context, interactive, cancellationToken);
-        // Our own refusals (the rate limit, 429) and a stale token (renewed by TOTP) are not the request's fault.
-        if (key is not null && (response.Success || (response.StatusCode != HttpStatusCode.TooManyRequests && !LooksLikeAuthFailure(response.StatusCode, response.ErrorMessage))))
-            _rateLimiter.NoteOutcome(key, response.Success, response.StatusCode, response.ErrorMessage);
         if (!IsDataApi(path) || !WorthProfileHint(response)) return response;
         var profile = await GetProfileAsync(cancellationToken);
         if (profile is null) return response;

@@ -23,6 +23,8 @@ public sealed class TodayWarmupService : BackgroundService
     private readonly OrderFlowHistory _orderFlowHistory;
     private readonly ILogger<TodayWarmupService> _logger;
     private readonly bool _enabled;
+    // An index whose warm-up failed is asked again after 10 minutes, doubling to an hour - not every Interval.
+    private readonly KeyedBackoff _backoff = new(TimeSpan.FromMinutes(10), TimeSpan.FromHours(1));
 
     public TodayWarmupService(OiReplayService oiReplay, OrderFlowService orderFlow, OrderFlowHistory orderFlowHistory,
         ILogger<TodayWarmupService> logger, IConfiguration? configuration = null, AppEnvironment? appEnvironment = null)
@@ -60,23 +62,31 @@ public sealed class TodayWarmupService : BackgroundService
         // One index after another - the first pass of the day is Dhan's rate-limited backfill.
         foreach (var (underlying, flag) in Chains)
         {
-            try
+            if (_backoff.Due($"oi|{underlying}"))
             {
-                var run = await _oiReplay.RunAsync(underlying, today, 1, flag, cancellationToken, forceLive: true);
-                if (!run.Success) _logger.LogInformation("Warming today's OI Replay for {Underlying}: {Error}", underlying, run.Error);
+                try
+                {
+                    var run = await _oiReplay.RunAsync(underlying, today, 1, flag, cancellationToken, forceLive: true);
+                    if (run.Success) _backoff.Succeeded($"oi|{underlying}");
+                    else _logger.LogInformation("Warming today's OI Replay for {Underlying}: {Error} - next try in {Wait}.", underlying, run.Error, _backoff.Failed($"oi|{underlying}"));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Warming today's OI Replay for {Underlying} failed - next try in {Wait}.", underlying, _backoff.Failed($"oi|{underlying}"));
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            if (_backoff.Due($"of|{underlying}"))
             {
-                _logger.LogWarning(ex, "Warming today's OI Replay for {Underlying} failed.", underlying);
-            }
-            try
-            {
-                if (_orderFlow.EngineFor(underlying) is { } engine)
-                    await _orderFlowHistory.WithBackfillAsync(engine, engine.Snapshot(1, long.MaxValue, 1), cancellationToken);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Warming today's Order Flow backfill for {Underlying} failed.", underlying);
+                try
+                {
+                    if (_orderFlow.EngineFor(underlying) is { } engine)
+                        await _orderFlowHistory.WithBackfillAsync(engine, engine.Snapshot(1, long.MaxValue, 1), cancellationToken);
+                    _backoff.Succeeded($"of|{underlying}");
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(ex, "Warming today's Order Flow backfill for {Underlying} failed - next try in {Wait}.", underlying, _backoff.Failed($"of|{underlying}"));
+                }
             }
         }
     }

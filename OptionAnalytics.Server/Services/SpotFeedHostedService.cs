@@ -153,7 +153,7 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     /// <summary>How often today's 1-minute index candles are re-read from Dhan in market hours for their volume - every
     /// 5 minutes, not every minute: it was the steadiest loop of Dhan calls (one per index per minute, all session), for a
-    /// VWAP that moves slowly. A failing read is held back longer still (DhanRestRateLimiter.HeldBack).</summary>
+    /// VWAP that moves slowly. After a failed read that index waits 10 minutes, doubling to an hour (KeyedBackoff).</summary>
     private static readonly TimeSpan VolumeRefreshInterval = TimeSpan.FromMinutes(5);
 
     /// <summary>Dhan's live feed sends an index (IDX_I) as ticker packets only - last price and time, no volume - so the
@@ -165,6 +165,8 @@ public sealed class SpotFeedHostedService : BackgroundService
     private async Task RefreshTodayVolumeLoopAsync(CancellationToken stoppingToken)
     {
         var warnedNoVolume = new HashSet<string>();
+        // An index whose read failed is asked again after 10 minutes, doubling to an hour - not every 5 minutes.
+        var backoff = new KeyedBackoff(TimeSpan.FromMinutes(10), TimeSpan.FromHours(1));
         while (!stoppingToken.IsCancellationRequested)
         {
             try { await Task.Delay(VolumeRefreshInterval, stoppingToken); }
@@ -174,10 +176,16 @@ public sealed class SpotFeedHostedService : BackgroundService
             var today = IstToday();
             foreach (var state in States.Values)
             {
-                if (state.Instrument is not { } instrument) continue;
+                if (state.Instrument is not { } instrument || !backoff.Due(state.Underlying)) continue;
                 try
                 {
-                    var (candles, _) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, today, 1, stoppingToken, interactive: false);
+                    var (candles, error) = await _historicalData.GetIntradayCandlesAsync(instrument.SecurityId, instrument.DhanSegment, today, today, 1, stoppingToken, interactive: false);
+                    if (error is not null)
+                    {
+                        _logger.LogDebug("Today's volume for {Underlying} not read ({Error}) - next try in {Wait}.", state.Underlying, error, backoff.Failed(state.Underlying));
+                        continue;
+                    }
+                    backoff.Succeeded(state.Underlying);
                     var withVolume = candles.Where(c => IstDate(c.Time) == today).ToList();
                     if (withVolume.Count == 0) continue;
                     if (withVolume.All(c => c.Volume == 0))
@@ -190,7 +198,7 @@ public sealed class SpotFeedHostedService : BackgroundService
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    _logger.LogDebug(ex, "Refreshing today's volume for {Underlying} failed - trying again in 5 minutes.", state.Underlying);
+                    _logger.LogDebug(ex, "Refreshing today's volume for {Underlying} failed - next try in {Wait}.", state.Underlying, backoff.Failed(state.Underlying));
                 }
             }
         }
