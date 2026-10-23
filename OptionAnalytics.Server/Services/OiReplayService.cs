@@ -118,6 +118,8 @@ public sealed class OiReplayService
     private readonly NseFuturesContractArchive? _futuresArchive;
     private readonly NseChartHistory? _nseChart;
     private readonly DhanHistoricalDataService _historicalData;
+    // Today's option contracts (strike -> security id): today's series come from each contract's own intraday candles.
+    private readonly DhanOptionChainMaster? _optionChain;
     private readonly DhanRollingOptionDataService _rollingOption;
     private readonly bool _allowLiveDataFallback;
 
@@ -162,8 +164,9 @@ public sealed class OiReplayService
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
-        LiveOptionLegStore? liveBars = null, SpotFeedHostedService? spotFeed = null)
+        LiveOptionLegStore? liveBars = null, SpotFeedHostedService? spotFeed = null, DhanOptionChainMaster? optionChain = null)
     {
+        _optionChain = optionChain;
         _liveBars = liveBars;
         _spotFeed = spotFeed;
         _futuresArchive = futuresArchive;
@@ -275,6 +278,9 @@ public sealed class OiReplayService
         // sequential loop. Each fetch returns its own point list rather than mutating a shared
         // cePoints/pePoints list directly - List<T> is not safe for concurrent writers, and
         // collecting via Task.WhenAll's own results sidesteps needing a lock entirely.
+        // Today: the strikes around the index NOW, each fetched as its own contract (see GetSeriesAsync).
+        decimal? todayAtm = date == IstClock.Today() && spotBars1m.Count > 0 ? Math.Round(spotBars1m[^1].Close / step, MidpointRounding.AwayFromZero) * step : null;
+        if (todayAtm is not null && _optionChain is not null) await _optionChain.EnsureLoadedAsync(cancellationToken);
         using var throttle = new SemaphoreSlim(MaxConcurrentStrikeFetches);
         var backfilledAt = new System.Collections.Concurrent.ConcurrentBag<DateTimeOffset>();
 
@@ -283,7 +289,7 @@ public sealed class OiReplayService
             await throttle.WaitAsync(cancellationToken);
             try
             {
-                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive, backfilledAt.Add);
+                var bars = await GetSeriesAsync(underlying, expiryFlag, strikeToken, drvOptionType, date, ResolveInstrumentAsync, cancellationToken, forceLive, backfilledAt.Add, todayAtm, step);
                 var points = new List<OiReplayPoint>(bars.Count);
                 foreach (var bar in bars)
                     if (bar.Strike is { } strike)
@@ -448,8 +454,21 @@ public sealed class OiReplayService
     /// all.</summary>
     private async Task<IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)>> GetSeriesAsync(
         string underlying, string expiryFlag, string strikeToken, string drvOptionType, DateOnly date,
-        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false, Action<DateTimeOffset>? backfilledAt = null)
+        Func<Task<DhanSpotInstrument?>> resolveInstrument, CancellationToken cancellationToken, bool forceLive = false, Action<DateTimeOffset>? backfilledAt = null,
+        decimal? todayAtm = null, decimal step = 0)
     {
+        // TODAY: the rolling (expired-options) endpoint would need toDate = tomorrow (its toDate is a whole, non-inclusive
+        // day) - a future date Dhan refuses with DH-905 Input_Exception. Today's series is the actual contract at that
+        // strike (ATM now + the token's steps, the nearest WEEK / MONTH expiry) from /charts/intraday with OI, capped at now.
+        if (todayAtm is { } atm && date == IstClock.Today() && TodayContract(underlying, expiryFlag, atm + TokenSteps(strikeToken) * step, drvOptionType == "CALL", date) is { } contract)
+        {
+            var ((todayBars, _, _), fetchedToday) = await _today.ReuseWithTimeAsync($"{underlying}|optc|{contract.SecurityId}", date, IstClock.Today(),
+                ct => _historicalData.GetIntradayOptionCandlesWithOiAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, ct),
+                r => r.Bars.Count > 0, cancellationToken, TodayWindow);
+            if (todayBars.Count > 0) backfilledAt?.Invoke(fetchedToday);
+            return todayBars.Select(b => (b.Bar, (decimal?)contract.Strike, (decimal?)null, b.OpenInterest, (decimal?)null)).ToList();
+        }
+
         var isAlwaysLive = forceLive || AlwaysLiveUnderlyings.Contains(underlying);
 
         var storedBars = !isAlwaysLive && _storedRollingOption.IsConfigured
@@ -469,6 +488,19 @@ public sealed class OiReplayService
             r => r.Bars.Count > 0, cancellationToken, TodayWindow);
         if (liveBars.Count > 0) backfilledAt?.Invoke(fetchedAt);
         return liveBars.Count > 0 ? liveBars : storedBars;
+    }
+
+    /// <summary>"ATM" 0, "ATM+3" 3, "ATM-2" -2.</summary>
+    internal static int TokenSteps(string strikeToken) =>
+        strikeToken.Length > 3 && int.TryParse(strikeToken.AsSpan(3), System.Globalization.NumberStyles.AllowLeadingSign, System.Globalization.CultureInfo.InvariantCulture, out var steps) ? steps : 0;
+
+    /// <summary>Today's listed contract at `strike` for the expiry the flag picks (WEEK: the nearest listed, MONTH: the
+    /// nearest month-end one) - null when the chain is not loaded or does not list it (the rolling endpoint is used then).</summary>
+    private DhanOptionInstrument? TodayContract(string underlying, string expiryFlag, decimal strike, bool isCall, DateOnly today)
+    {
+        if (_optionChain is null) return null;
+        var listed = _optionChain.GetExpiries(underlying).Where(e => e >= today).OrderBy(e => e).ToList();
+        return OiReplayLiveFeedService.ResolveNearestExpiryCore(listed, expiryFlag) is { } expiry ? _optionChain.Find(underlying, expiry, strike, isCall) : null;
     }
 
     /// <summary>`points` with a point at every spot minute for every strike within `bandSteps` strikes of that minute's

@@ -63,7 +63,9 @@ When adding or changing a strategy:
 - OI Replay's TODAY comes from the server's memory, not Dhan, after one backfill per series per day: the live feed
   (`OiReplayLiveFeedService`) keeps every tracked index's option legs and near futures as 1-minute bars
   (`LiveOptionLegStore`, all day, page open or not), spot is the spot feed's own day (`SpotFeedHostedService`), and
-  `OiReplayService` joins the one backfill (`TodayFetchShare`) to the feed's bars since (`MergeTodayLive`) - so
+  `OiReplayService` joins the one backfill (`TodayFetchShare`) to the feed's bars since (`MergeTodayLive`) - today's option
+  backfill is each CONTRACT's own `/charts/intraday` candles with OI (ATM now ± the band, nearest WEEK / MONTH expiry), never
+  the rolling endpoint, which would need toDate = tomorrow (Dhan answers DH-905) - so
   switching index on the live page asks Dhan nothing. The page's Clear cache drops it (`refresh=true`).
   `TodayWarmupService` keeps every index ready before anyone switches: in market hours, every 5 minutes, it asks each
   index's live run and Order Flow backfill (Dhan once a day, memory after; a restart is ready again within one pass).
