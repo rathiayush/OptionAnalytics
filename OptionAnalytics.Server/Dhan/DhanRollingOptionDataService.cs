@@ -182,11 +182,14 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 drvOptionType,
                 requiredData = RequiredData,
             };
+            // Dhan's documented types (https://dhanhq.co/docs/v2/expired-options-data/): securityId a STRING, interval an
+            // enum INTEGER (Dhan's own DhanHQ-py sends it as a number) - the other way round, Dhan answered DH-905
+            // Input_Exception. The day files on disk stay keyed by `key` above, so days already kept are still found.
             object PayloadFor(DateOnly from, DateOnly to) => new
             {
                 exchangeSegment = ResolveFnoSegment(underlying),
-                interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
-                securityId = underlyingSecurityId,
+                interval = intervalMinutes,
+                securityId = underlyingSecurityId.ToString(CultureInfo.InvariantCulture),
                 instrument = OptionInstrument,
                 expiryFlag,
                 expiryCode,
