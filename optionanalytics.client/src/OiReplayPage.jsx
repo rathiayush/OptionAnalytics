@@ -109,7 +109,7 @@ const RECONNECT_RETRY_POLICY = {
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
 const EMPTY_GROUPS = []
 
-function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS, onDivergence = null) {
+export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS, onDivergence = null) {
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTicks)
   const futuresRef = useRef(onFuturesTicks)
@@ -220,7 +220,7 @@ function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRe
 // built once per fetched run (see useMemo below), not recomputed on every replay tick. Grouping by
 // strike here is what lets the replay loop below look up "this strike's latest reading at or before
 // time T" as a simple per-strike scan instead of re-filtering the whole flat point list every tick.
-function groupByStrike(points) {
+export function groupByStrike(points) {
   const byStrike = new Map()
   for (const p of points) {
     let list = byStrike.get(p.strike)
@@ -241,7 +241,7 @@ function groupByStrike(points) {
 
 // Live points carry their own pre-parsed `ms`; REST points (and older cached live ones) get it
 // stamped once by groupByStrike, so a lookup never re-parses a date string.
-function pointMs(p) {
+export function pointMs(p) {
   return p.ms ?? new Date(p.time).getTime()
 }
 
@@ -271,7 +271,7 @@ function latestAtOrBefore(sortedPoints, asOfMs) {
 const LIVE_STATUS_INTERVAL_MS = 500
 const LIVE_POINT_SLOT_MS = 60_000
 
-function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_MS) {
+export function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_MS) {
   if (ticks.length === 0) return prev
   const next = prev.slice()
   const wanted = new Set(ticks.map((t) => t.strike))
@@ -429,7 +429,7 @@ function aggregateBars(oneMinBars, timeframeMinutes) {
 // "tick by tick instead of a real timeframe" report, where the heatmap showed the same time label
 // repeated across many columns and most of the grid blank. Also allows fractional minutes (0.5 = 30
 // seconds) for a finer bucket than the whole-minute options everywhere else on this page offer.
-function aggregateLinePoints(points, minutes) {
+export function aggregateLinePoints(points, minutes) {
   if (minutes <= 0 || points.length === 0) return points
   const bucketSeconds = minutes * 60
   const buckets = new Map()
@@ -479,7 +479,7 @@ function computeOiChangeSeries(totalSeries) {
 // number the ladder/Day OI Accumulation cards already show as a single "as of right now" figure,
 // just plotted continuously so its own trajectory through the day is visible instead of only its
 // current value.
-function toSinceOpenSeries(totalSeries) {
+export function toSinceOpenSeries(totalSeries) {
   // Every call site here is a plain useMemo, not wrapped in its own ChartErrorBoundary the way the
   // chart that eventually renders this IS - an exception thrown here would crash the whole page's
   // top-level render instead of just that one chart. Guarded defensively after a real report of
@@ -512,7 +512,7 @@ function toSinceOpenSeries(totalSeries) {
 // Drawn, it showed up as one huge fake column that set the color scale and left every genuine live
 // change after it nearly invisible - the heatmap looked frozen while it was in fact updating. Live
 // points are the ones carrying their own pre-parsed `ms` (see mergeLiveOptionTicks).
-function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
+export function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
@@ -1046,6 +1046,34 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
   )
 }
 
+// Chain-wide CE / PE OI as of each of the first `revealed` - 1 one-minute bars' times (the Day OI chart's and the Total OI
+// lookback table's history) - see completedOiHistory below. Also the External page's chain-wide chart.
+export function chainOiTotalsHistory(ceByStrike, peByStrike, oneMinBars, revealed) {
+  if (revealed < 2) return []
+  const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
+  // One forward sweep per series (bars and points are both time-ascending), each cursor only ever
+  // moving forward - linear in the day's data, where a lookup per bar per strike grew with the
+  // square of it and froze the page for over a second each minute by the afternoon.
+  const cursorsFor = (byStrike) => strikes.map((s) => ({ series: byStrike.get(s) ?? [], next: 0, oi: 0 }))
+  const ceCursors = cursorsFor(ceByStrike)
+  const peCursors = cursorsFor(peByStrike)
+  const totalAt = (cursors, barMs) => {
+    let total = 0
+    for (const c of cursors) {
+      while (c.next < c.series.length && pointMs(c.series[c.next]) <= barMs) c.oi = c.series[c.next++].openInterest ?? 0
+      total += c.oi
+    }
+    return total
+  }
+  const history = []
+  for (let i = 0; i < revealed - 1; i++) {
+    const bar = oneMinBars[i]
+    const barMs = fromChartTime(bar.time) * 1000
+    history.push({ time: bar.time, ceTotal: totalAt(ceCursors, barMs), peTotal: totalAt(peCursors, barMs) })
+  }
+  return history
+}
+
 // The strike drill-down popup's own chart - CE and PE as two series, either both LineSeries (mode
 // 'total': the plain OI level, one point per minute) or both HistogramSeries (mode 'change': the
 // per-minute delta from computeOiChangeSeries, positive bars above zero when OI is being added,
@@ -1053,7 +1081,7 @@ function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = tru
 // can't show). Rebuilds the whole chart on a mode switch rather than trying to swap a series' type
 // in place - lightweight-charts has no such API, and a mode change is a deliberate tab click, not a
 // live-tick-rate event, so the small recreation cost here is a non-issue.
-function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320 }) {
+export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceSeriesRef = useRef(null)
@@ -4587,33 +4615,11 @@ export default function OiReplayPage() {
   // "today" replay. underlying/result.date/expiryFlag are in the deps purely so switching to a
   // different day/instrument that happens to produce the exact same bar count still forces a
   // recompute instead of reusing stale totals from the day just left.
-  const completedOiHistory = useMemo(() => {
-    const revealed = Math.min(visibleCount, oneMinBars.length)
-    if (revealed < 2) return []
-    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
-    // One forward sweep per series (bars and points are both time-ascending), each cursor only ever
-    // moving forward - linear in the day's data, where a lookup per bar per strike grew with the
-    // square of it and froze the page for over a second each minute by the afternoon.
-    const cursorsFor = (byStrike) => strikes.map((s) => ({ series: byStrike.get(s) ?? [], next: 0, oi: 0 }))
-    const ceCursors = cursorsFor(ceByStrike)
-    const peCursors = cursorsFor(peByStrike)
-    const totalAt = (cursors, barMs) => {
-      let total = 0
-      for (const c of cursors) {
-        while (c.next < c.series.length && pointMs(c.series[c.next]) <= barMs) c.oi = c.series[c.next++].openInterest ?? 0
-        total += c.oi
-      }
-      return total
-    }
-    const history = []
-    for (let i = 0; i < revealed - 1; i++) {
-      const bar = oneMinBars[i]
-      const barMs = fromChartTime(bar.time) * 1000
-      history.push({ time: bar.time, ceTotal: totalAt(ceCursors, barMs), peTotal: totalAt(peCursors, barMs) })
-    }
-    return history
+  const completedOiHistory = useMemo(
+    () => chainOiTotalsHistory(ceByStrike, peByStrike, oneMinBars, Math.min(visibleCount, oneMinBars.length)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oneMinBars.length, visibleCount, underlying, result?.date, expiryFlag])
+    [oneMinBars.length, visibleCount, underlying, result?.date, expiryFlag],
+  )
 
   // The still-forming/current REVEALED bar appended live, using the page's own already-ticking
   // (and already asOfMs-gated, via ladderRows) totalCeOi/totalPeOi rather than recomputing the

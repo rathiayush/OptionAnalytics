@@ -91,7 +91,7 @@ public sealed class OiDivergenceMonitor : BackgroundService
 
     private async Task BroadcastAsync(PriceOiDivergence alert)
     {
-        try { await _hub.Clients.All.SendAsync("oiDivergenceAlert", alert); }
+        try { await _hub.Clients.Group(SpotHub.StaffGroup).SendAsync("oiDivergenceAlert", alert); }
         catch (Exception ex) { _logger.LogDebug(ex, "Failed to broadcast an OI divergence alert for {Underlying}.", alert.Underlying); }
     }
 }

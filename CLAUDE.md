@@ -98,8 +98,11 @@ When adding or changing a strategy:
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.
 - The External account (`AuthRoles.External`, `Auth:ExternalEmail` / `Auth:ExternalPasswordHash` - a PBKDF2 hash, never the
-  plain password) sees only `ExternalPage.jsx` and reaches only `/api/external/...` (`ExternalController`: NIFTY / BANKNIFTY
-  heatmap and net CE - PE OI, read-only, today) and `/api/auth/...`: `ExternalAccess` answers 403 to every other API, hub and
-  swagger for it, deny by default (`ExternalAccessTests.cs` checks every controller). Never widen it.
+  plain password) sees only `ExternalPage.jsx` (the Order Flow heatmap with big-order dots, OI Replay's chain-wide CE / PE OI,
+  since the open and net CE - PE cumulative - built from those pages' own exported code) and reaches only `/api/external/...`
+  (`ExternalController`, NIFTY / BANKNIFTY, read-only, today), `/api/auth/...` and `/hubs/spot`, where it may join only
+  "of:{U}", "of:{U}:{expiry}" and "c:{U}:N1" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
+  `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
+  default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode; alerts and the default auto trade are paper.

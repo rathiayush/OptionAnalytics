@@ -59,7 +59,7 @@ const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '
 
 // One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
 // selection.
-function useOrderFlowHub(group, onLive) {
+export function useOrderFlowHub(group, onLive) {
   const [state, setState] = useState('connecting')
   const connectionRef = useRef(null)
   const groupsRef = useRef([])

@@ -75,8 +75,10 @@ public sealed class ExternalAccessTests
     [InlineData("/apix", false)]
     [InlineData("/api/external/../trades", false)]
     [InlineData("/api/externalx/NIFTY", false)]
-    [InlineData("/hubs/spot", false)]
-    [InlineData("/hubs/spot/negotiate", false)]
+    [InlineData("/hubs/spot", true)]
+    [InlineData("/hubs/spot/negotiate", true)]
+    [InlineData("/hubs/spotx", false)]
+    [InlineData("/hubs/other", false)]
     [InlineData("/swagger/index.html", false)]
     public void Only_its_own_api_and_the_page_shell_are_open(string path, bool allowed) =>
         Assert.Equal(allowed, ExternalAccess.Allows(new PathString(path)));
@@ -101,7 +103,7 @@ public sealed class ExternalAccessTests
     [Theory]
     [InlineData("External", "/api/trades", HttpStatusCode.Forbidden)]
     [InlineData("External", "/api/admin-only", HttpStatusCode.Forbidden)]
-    [InlineData("External", "/hubs/spot/negotiate", HttpStatusCode.Forbidden)]
+    [InlineData("External", "/hubs/other/negotiate", HttpStatusCode.Forbidden)]
     [InlineData("External", "/api/external/ok", HttpStatusCode.OK)]
     [InlineData("User", "/api/trades", HttpStatusCode.OK)]
     [InlineData("User", "/api/external/ok", HttpStatusCode.Forbidden)]
@@ -126,7 +128,7 @@ public sealed class ExternalAccessTests
                     // An endpoint open to ANY signed-in account (a bare [Authorize]) - the fence still closes it to External.
                     e.MapGet("/api/trades", () => "trades").RequireAuthorization();
                     e.MapGet("/api/admin-only", () => "admin").RequireAuthorization(p => p.RequireRole(AuthRoles.Admin));
-                    e.MapGet("/hubs/spot/negotiate", () => "hub").RequireAuthorization();
+                    e.MapGet("/hubs/other/negotiate", () => "hub").RequireAuthorization();
                     e.MapGet("/api/external/ok", () => "ok").RequireAuthorization(p => p.RequireRole(AuthRoles.External, AuthRoles.Admin));
                 });
             })).StartAsync();
@@ -139,22 +141,46 @@ public sealed class ExternalAccessTests
         Assert.Equal(expected, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("of:NIFTY", true)]
+    [InlineData("of:BANKNIFTY:2026-10-28", true)]
+    [InlineData("c:NIFTY:N1", true)]
+    [InlineData("c:BANKNIFTY:N1", true)]
+    [InlineData("of:SENSEX", false)]
+    [InlineData("c:NIFTY:N2", false)]
+    [InlineData("of:NIFTY:tomorrow", false)]
+    [InlineData("u:NIFTY", false)]
+    [InlineData("dom:NIFTY", false)]
+    [InlineData("positions", false)]
+    [InlineData("staff", false)]
+    [InlineData("t:NIFTY", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void On_the_hub_it_may_join_only_its_pages_feeds(string? group, bool allowed) =>
+        Assert.Equal(allowed, ExternalAccess.MayJoin(group));
+
     [Fact]
-    public void Net_oi_is_the_band_summed_per_minute_and_run_up()
+    public void Nothing_is_broadcast_to_every_connection()
     {
-        var t0 = new DateTimeOffset(2026, 10, 23, 9, 15, 0, IstClock.Offset);
-        OiReplayPoint P(int minute, decimal strike, long oi) => new(t0.AddMinutes(minute), strike, oi, null, 0);
-        var ce = new[] { P(0, 100, 1000), P(1, 100, 1300), P(2, 100, 1200), P(0, 200, 500), P(1, 200, 600) };
-        var pe = new[] { P(0, 100, 2000), P(1, 100, 2500), P(2, 100, 2600) };
+        // What used to go to Clients.All goes to SpotHub.StaffGroup, which the External account never joins.
+        var server = Path.Combine(RepoRoot(), "OptionAnalytics.Server");
+        var offenders = Directory.EnumerateFiles(server, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            .SelectMany(f => File.ReadLines(f).Select(line => (f, line)))
+            .Where(x => !x.line.TrimStart().StartsWith("//") && (x.line.Contains("Clients.All") || x.line.Contains("Clients.AllExcept") || x.line.Contains("Clients.Others")))
+            .Select(x => $"{Path.GetFileName(x.f)}: {x.line.Trim()}")
+            .ToList();
+        Assert.Empty(offenders);
+    }
 
-        var minutes = ExternalController.NetMinutes(ce, pe);
+    [Fact]
+    public void Its_oi_answer_is_only_time_strike_and_oi()
+    {
+        var t = new DateTimeOffset(2026, 10, 23, 9, 15, 0, IstClock.Offset);
+        var cut = ExternalController.Cut(new[] { new OiReplayPoint(t, 25000, 1234, 12.5m, 101.5m, 100, 102, 99, 500) });
 
-        Assert.Equal(new[] { 0L, 400, -100 }, minutes.Select(m => m.CeDelta));
-        Assert.Equal(new[] { 0L, 500, 100 }, minutes.Select(m => m.PeDelta));
-        Assert.Equal(new[] { 0L, -100, -200 }, minutes.Select(m => m.NetDelta));
-        Assert.Equal(new[] { 0L, -100, -300 }, minutes.Select(m => m.NetCum));
-        Assert.Equal(300, minutes[^1].CeCum);
-        Assert.Equal(600, minutes[^1].PeCum);
+        Assert.Equal(new ExternalController.OiPoint(t, 25000, 1234), Assert.Single(cut));
+        Assert.Equal(new[] { "Time", "Strike", "OpenInterest" }, typeof(ExternalController.OiPoint).GetProperties().Select(p => p.Name));
     }
 
     private static string RepoRoot()
