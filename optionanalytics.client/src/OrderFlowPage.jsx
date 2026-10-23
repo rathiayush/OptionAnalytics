@@ -540,7 +540,7 @@ export default function OrderFlowPage() {
   const [heatPullStack, setHeatPullStack] = usePersistedState('optionanalytics.orderFlow.heatPullStack', true)
   const heatSignals = useMemo(() => [...liquidity, ...(heatPullStack ? pullStack.signals : []), ...sweeps], [liquidity, heatPullStack, pullStack.signals, sweeps])
   // The day's options + futures OI: part of the order flow read, and what the strategy scanner reads.
-  const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay, reloadNonce)
+  const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
   const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const oiParts = useMemo(() => (dayOi && nowMs ? oiBiasParts(dayOi, nowMs) : []), [dayOi, oiMinute])
