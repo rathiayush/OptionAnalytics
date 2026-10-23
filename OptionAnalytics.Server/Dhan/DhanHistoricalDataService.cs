@@ -129,24 +129,36 @@ public sealed class DhanHistoricalDataService
     /// genuine "this endpoint doesn't return OI for futures" can be told apart from "OI was 0/
     /// missing for these particular bars" - the first is a page-level "OI not available" message,
     /// the second is normal, unremarkable missing data.</summary>
-    public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
+    public Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true) =>
+        GetIntradayWithOiAsync(securityId, dhanSegment, FuturesInstrument, "futures", fromDay, toDay, intervalMinutes, cancellationToken, interactive);
+
+    /// <summary>One option CONTRACT's (an actual security id) 1-minute bars with open interest - /charts/intraday with
+    /// "oi": true, its toDate capped at now like every intraday call. TODAY's option series for the OI Replay come from here:
+    /// the rolling (expired-options) endpoint takes whole days with a non-inclusive toDate, so today needed toDate =
+    /// tomorrow - a future date Dhan refuses with DH-905 Input_Exception.</summary>
+    public Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayOptionCandlesWithOiAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true) =>
+        GetIntradayWithOiAsync(securityId, dhanSegment, OptionInstrument, "option", fromDay, toDay, intervalMinutes, cancellationToken, interactive);
+
+    private async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayWithOiAsync(
+        uint securityId, string dhanSegment, string instrumentType, string what, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive)
     {
         var id = securityId.ToString(CultureInfo.InvariantCulture);
         var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
-        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = FuturesInstrument, interval, oi = true };
+        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = instrumentType, interval, oi = true };
         object PayloadFor(DateOnly from, DateOnly to) => new
         {
             securityId = id,
             exchangeSegment = dhanSegment,
-            instrument = FuturesInstrument,
+            instrument = instrumentType,
             interval,
             fromDate = $"{from:yyyy-MM-dd} 09:15:00",
             toDate = IntradayToDate(to, DateTimeOffset.UtcNow),
             oi = true,
         };
 
-        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"futures intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
+        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"{what} intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
         var bars = new List<(CandleWithVolume Bar, long? OpenInterest)>();
         var oiFieldPresent = false;
         foreach (var part in parts)
