@@ -35,10 +35,14 @@ public sealed class SystemController : ControllerBase
 
     public sealed record DhanCallsByEndpoint(string Category, string Method, string Path, int LastMinute, int Last15Minutes, int Failed);
     public sealed record DhanRepeatedCall(string Context, int Times, int Failed, string? LastError, DateTimeOffset LastAt);
-    public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, IReadOnlyList<DhanCallsByEndpoint> Endpoints, IReadOnlyList<DhanRepeatedCall> Repeated);
+    public sealed record DhanCallEntry(DateTimeOffset At, string Category, string Method, string Path, string Context, bool Success, int Status,
+        string? Error, string? Body, double DurationMs, string? Diagnosis);
+    public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, int Failed, IReadOnlyList<DhanCallsByEndpoint> Endpoints,
+        IReadOnlyList<DhanRepeatedCall> Repeated, IReadOnlyList<DhanCallEntry> Recent);
 
-    /// <summary>What this server sent to Dhan's REST API in the last 15 minutes (every attempt): per endpoint, and the
-    /// same request asked 3+ times - a loop shows here (DhanRestRateLimiter's call log).</summary>
+    /// <summary>What this server sent to Dhan's REST API in the last 15 minutes (every attempt): per endpoint, the same
+    /// request asked 3+ times (a loop shows here), and each call - newest first, with its body as sent, Dhan's answer and a
+    /// likely cause for a failure (DhanRestRateLimiter's call log). The Dhan calls page shows it.</summary>
     [HttpGet("dhan-calls")]
     [Authorize(Roles = AuthRoles.Admin)]
     public DhanCallsReport DhanCalls() => DhanCallsReportOf(_dhanLimiter.RecentCalls(), DateTimeOffset.UtcNow);
@@ -52,8 +56,57 @@ public sealed class SystemController : ControllerBase
         var repeated = calls.GroupBy(c => c.Context).Where(g => g.Count() >= 3)
             .Select(g => new DhanRepeatedCall(g.Key, g.Count(), g.Count(c => !c.Success), g.LastOrDefault(c => !c.Success)?.Error, g.Max(c => c.At)))
             .OrderByDescending(r => r.Times).Take(50).ToList();
-        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count, endpoints, repeated);
+        var recent = calls.OrderByDescending(c => c.At).Take(500)
+            .Select(c => new DhanCallEntry(c.At, c.Category.ToString(), c.Method, c.Path, c.Context, c.Success, c.Status, c.Error, c.Body,
+                Math.Round(c.DurationMs), c.Success ? null : Diagnose(c, now)))
+            .ToList();
+        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count, calls.Count(c => !c.Success), endpoints, repeated, recent);
     }
+
+    /// <summary>The likely cause of a failed Dhan call, read from its answer and body - or null when nothing stands out.</summary>
+    internal static string? Diagnose(DhanRestRateLimiter.DhanCall call, DateTimeOffset now)
+    {
+        var error = call.Error ?? "";
+        bool Has(string s) => error.Contains(s, StringComparison.OrdinalIgnoreCase);
+        if (call.Status == 429 || Has("DH-904") || Has("too many") || Has("Not sent:"))
+            return "Rate limit - Dhan allows 5 data calls a second, 10 orders a second for the whole account (or this server held the call back).";
+        if (Has("806")) return "Data API plan not active on this Dhan account.";
+        if (Has("807") || Has("808") || Has("809") || Has("DH-901") || Has("Invalid Token") || call.Status is 401 or 403)
+            return "Access token expired or invalid - it lasts 24 hours; renew it (TOTP auto-renewal or a new token).";
+        if (Has("no answer")) return "Dhan did not answer in time (20 s for a data call) - slow or unreachable.";
+        if (Has("DH-905") || Has("Input_Exception"))
+        {
+            var ist = now.ToOffset(IstClock.Offset);
+            var toDate = Field(call.Body, "toDate");
+            if (toDate is not null && DateTime.TryParse(toDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var to))
+            {
+                var dateOnly = toDate.Length <= 10;
+                if (dateOnly ? DateOnly.FromDateTime(to) > DateOnly.FromDateTime(ist.DateTime) : to > ist.DateTime)
+                    return $"toDate {toDate} is in the future (now {ist:yyyy-MM-dd HH:mm} IST) - Dhan refuses a range that ends after now.";
+            }
+            var fromDate = Field(call.Body, "fromDate");
+            if (fromDate is not null && DateTime.TryParse(fromDate, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var from)
+                && (from.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) && (toDate is null || toDate[..Math.Min(10, toDate.Length)] == fromDate[..Math.Min(10, fromDate.Length)] || call.Path.Contains("rollingoption")))
+                return $"fromDate {fromDate} is a weekend - Dhan has no data for it and answers DH-905.";
+            if (call.Path.Contains("rollingoption") && Field(call.Body, "strike") is { } strike
+                && int.TryParse(strike.Replace("ATM", "").Replace("+", ""), out var steps) && Math.Abs(steps) > 3 && Field(call.Body, "expiryCode") is { } code && code != "1")
+                return $"Strike {strike} with expiryCode {code}: Dhan allows ATM±10 only for the near expiry, ATM±3 otherwise.";
+            return "Dhan refused the request's inputs (DH-905) - check the body: dates (no future toDate, a trading day), securityId, segment, strike range.";
+        }
+        return null;
+    }
+
+    private static string? Field(string? body, string name)
+    {
+        if (string.IsNullOrEmpty(body)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object && doc.RootElement.TryGetProperty(name, out var v) ? v.ToString() : null;
+        }
+        catch (System.Text.Json.JsonException) { return null; }
+    }
+
 
     /// <summary>Feed: how each live-tick consumer (Spot, CDV, OI Replay) is keeping up over roughly
     /// the last minute - see TickConsumerStats. The header turns this into a "Feed OK / behind" tag.</summary>
