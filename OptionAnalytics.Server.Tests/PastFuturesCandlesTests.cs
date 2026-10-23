@@ -50,7 +50,7 @@ public sealed class PastFuturesCandlesTests
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c" });
         var http = new HttpClient(new Handler(withCandles, requests));
         var api = new DhanApiClient(http, options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
-        return (new DhanHistoricalDataService(api, new DhanDataApiRateLimiter(options, NullLogger<DhanDataApiRateLimiter>.Instance), NullLogger<DhanHistoricalDataService>.Instance), requests);
+        return (new DhanHistoricalDataService(api, NullLogger<DhanHistoricalDataService>.Instance), requests);
     }
 
     private sealed class Handler(HashSet<string> withCandles, List<string> requests) : HttpMessageHandler

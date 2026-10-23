@@ -50,19 +50,26 @@ public sealed class DhanApiClient
     /// configured, or Dhan itself down) still fails within a few seconds rather than hanging every
     /// caller for the full ~130s rate-limit cooldown DhanTotpAutoRenewalHostedService's OWN retry
     /// loop uses for that separate, slower case.</summary>
-    private static readonly TimeSpan AuthRetryDelay = TimeSpan.FromSeconds(3);
+    internal TimeSpan AuthRetryDelay { get; init; } = TimeSpan.FromSeconds(3);
 
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly ILogger<DhanApiClient> _logger;
+    // Dhan's account-wide rate limits: every request - each attempt, an auth retry included - takes its category's slot
+    // here (DhanRestRateLimiter: orders, data, quotes, the rest), so no caller reaches Dhan around it.
+    private readonly DhanRestRateLimiter _rateLimiter;
+    internal DhanRestRateLimiter RateLimiter => _rateLimiter;
 
-    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger)
+    /// <summary><paramref name="rateLimiter"/>: the app's one shared limiter (a singleton - Dhan counts per account); a
+    /// client built without it (tests, tools) gets a limiter of its own.</summary>
+    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger, DhanRestRateLimiter? rateLimiter = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
         _logger = logger;
+        _rateLimiter = rateLimiter ?? DhanRestRateLimiter.Standalone(options);
     }
 
     public bool HasSession => _session.IsAuthenticated;
@@ -128,11 +135,13 @@ public sealed class DhanApiClient
     /// rejection, a network error, an unrelated HTTP error) is returned on the first attempt
     /// exactly as before - retrying those would just repeat the same failure while making the
     /// caller wait longer for no benefit.</summary>
-    public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
+    /// <paramref name="interactive"/>: a Data API call made for a waiting user (a page load) - false for a hosted service's
+    /// background work, which goes after page loads (DhanDataApiRateLimiter).
+    public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken, bool interactive = true)
     {
         for (var attempt = 1; ; attempt++)
         {
-            var response = await SendOnceAsync(method, path, payload, context, cancellationToken);
+            var response = await SendOnceAsync(method, path, payload, context, cancellationToken, interactive);
             if (response.Success || attempt > MaxAuthRetryAttempts || !LooksLikeAuthFailure(response.StatusCode, response.ErrorMessage))
             {
                 if (!IsDataApi(path) || !WorthProfileHint(response)) return response;
@@ -150,7 +159,20 @@ public sealed class DhanApiClient
         }
     }
 
-    private async Task<DhanApiResponse> SendOnceAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
+    private async Task<DhanApiResponse> SendOnceAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken, bool interactive = true)
+    {
+        var category = DhanRestRateLimiter.CategoryOf(method, path);
+        if (await _rateLimiter.WaitAsync(category, interactive, cancellationToken) is { } refused)
+        {
+            _logger.LogWarning("Dhan call not sent ({Context}): {Reason}", context, refused);
+            return new DhanApiResponse(false, HttpStatusCode.TooManyRequests, null, refused);
+        }
+        var answer = await SendNowAsync(method, path, payload, context, cancellationToken);
+        if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) _rateLimiter.NoteRateLimited(category);
+        return answer;
+    }
+
+    private async Task<DhanApiResponse> SendNowAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, $"{_options.RestBaseUrl}{path}");
         request.Headers.TryAddWithoutValidation("access-token", _session.AccessToken ?? "");

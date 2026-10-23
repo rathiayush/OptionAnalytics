@@ -6,24 +6,23 @@ namespace OptionAnalytics.Server.Dhan;
 /// Enforces Dhan API v2's own documented "Data APIs" rate limit - 5 requests/second, 100,000/day,
 /// confirmed ACCOUNT-WIDE rather than per-endpoint (Dhan's official v2 docs, cross-confirmed by
 /// its support article on API rate limits, and independently corroborated by
-/// DhanRollingOptionDataService's own pre-existing doc comment stating the same fact) - shared
-/// across every Data-API-category caller in this process: DhanHistoricalDataService's
-/// /charts/intraday and DhanRollingOptionDataService's /charts/rollingoption. Registered as a
+/// DhanRollingOptionDataService's own pre-existing doc comment stating the same fact) - the Data
+/// category of DhanRestRateLimiter, the one limiter every Dhan REST call goes through: DhanApiClient
+/// takes a slot here for every data request (/charts/intraday, /charts/rollingoption, /optionchain,
+/// each attempt and auth retry), in the caller's lane (DhanDataApiSharedLimitTests). Registered as a
 /// SINGLETON precisely because the limit is account-wide: a limiter scoped to one service
 /// instance, or one incoming page request, cannot see calls made by any other service/request at
 /// the same time, so only a single shared instance can actually gate the true combined call rate
 /// Dhan measures.
 ///
-/// Deliberately NOT used by DhanOrderClient/DhanSuperOrderClient/DhanPositionsClient (Order APIs -
-/// a different, higher documented limit: 10/sec - and these place live-money orders, so this
-/// change stays scoped away from them entirely) or by DhanOptionChainQuotes (which already
-/// self-throttles to that endpoint's own documented, stricter "one call every 3 seconds per
-/// underlying/expiry" via its own MinimumCallSpacing, a different category again). Mixing all of
-/// those into one limiter would either starve Order APIs of headroom they are documented to have,
-/// or under-use what Data APIs are actually allowed.
+/// Orders, quotes and the non-trading calls have their own limits in DhanRestRateLimiter, not this
+/// one: mixing them in would starve live orders of headroom Dhan documents for them, or under-use
+/// what the Data APIs are allowed. DhanOptionChainQuotes also keeps its own one call every 3 seconds
+/// per underlying/expiry (MinimumCallSpacing) on top.
 ///
 /// Calls are evenly spaced (see the class body), not counted in a sliding window: a window lets a
-/// burst through that Dhan, counting on arrival, can see as more than its limit. Dhan's Option Chain
+/// burst through that Dhan, counting on arrival, can see as more than its limit. The spacing is kept
+/// between the calls as they actually GO (DispatchAsync), not only between their booked slots. Dhan's Option Chain
 /// API (DhanOptionChainQuotes) also takes a slot here, on top of its own one-call-per-3-seconds rule.
 ///
 /// Two lanes - interactive and background - rather
@@ -60,6 +59,9 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     private readonly object _lock = new();
     private DateTimeOffset _nextSlot = DateTimeOffset.MinValue;
     private DateTimeOffset _nextBackgroundSlot = DateTimeOffset.MinValue;
+    // When the last call actually went, and until when Dhan's "too many requests" holds every call back (Dispatch).
+    private DateTimeOffset _lastSent = DateTimeOffset.MinValue;
+    private DateTimeOffset _pausedUntil = DateTimeOffset.MinValue;
     private int _interactiveWaiting;
     private readonly ILogger<DhanDataApiRateLimiter> _logger;
     private readonly Func<DateTimeOffset> _clock;
@@ -84,7 +86,11 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         if (interactive)
         {
             Interlocked.Increment(ref _interactiveWaiting);
-            try { await Task.Delay(Reserve(background: false), cancellationToken); }
+            try
+            {
+                await Task.Delay(Reserve(background: false), cancellationToken);
+                await DispatchAsync(cancellationToken);
+            }
             finally { Interlocked.Decrement(ref _interactiveWaiting); }
             return;
         }
@@ -97,8 +103,43 @@ public sealed class DhanDataApiRateLimiter : IDisposable
                 if (Volatile.Read(ref _interactiveWaiting) == 0 && now >= _nextBackgroundSlot && _nextSlot <= now + _spacing)
                     wait = Reserve(background: true);
             }
-            if (wait is { } w) { await Task.Delay(w, cancellationToken); return; }
+            if (wait is { } w)
+            {
+                await Task.Delay(w, cancellationToken);
+                await DispatchAsync(cancellationToken);
+                return;
+            }
             await Task.Delay(BackgroundPoll, cancellationToken);
+        }
+    }
+
+    /// <summary>For the tests: how many calls have been let go.</summary>
+    internal int PermitsGiven { get; private set; }
+
+    // The booked slot says when a call MAY go; this is when it DOES: never sooner than one spacing after the call before
+    // it actually went, nor inside a "too many requests" pause. A timer that fires late (a busy server) would otherwise
+    // let the calls booked after it go right behind it - 6 reaching Dhan within a second, though every slot was 220 ms
+    // apart (DhanDataApiSharedLimitTests, run under the whole suite's load).
+    private async Task DispatchAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            TimeSpan wait;
+            lock (_lock)
+            {
+                var now = _clock();
+                var earliest = _lastSent + _spacing;
+                if (_pausedUntil > earliest) earliest = _pausedUntil;
+                if (now >= earliest)
+                {
+                    _lastSent = now;
+                    if (_nextSlot < now + _spacing) _nextSlot = now + _spacing;
+                    PermitsGiven++;
+                    return;
+                }
+                wait = earliest - now;
+            }
+            await Task.Delay(wait, cancellationToken);
         }
     }
 
@@ -121,6 +162,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
         {
             var resume = _clock() + RateLimitPause;
             if (_nextSlot < resume) _nextSlot = resume;
+            if (_pausedUntil < resume) _pausedUntil = resume;
         }
         OptionAnalytics.Server.Services.LoadProgress.Warn($"⏸ Dhan said too many requests - every Dhan call pauses {RateLimitPause.TotalSeconds:0.0} s");
         _logger.LogWarning("Dhan answered \"too many requests\" - pausing every Data-API call for {Seconds} s.", RateLimitPause.TotalSeconds);

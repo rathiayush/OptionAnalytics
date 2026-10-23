@@ -153,7 +153,7 @@ public sealed class NseChartHistoryTests
         var requests = new List<string>();
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c" });
         var api = new DhanApiClient(new HttpClient(new FakeDhan(withCandles, requests)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
-        return (new DhanHistoricalDataService(api, new DhanDataApiRateLimiter(options, NullLogger<DhanDataApiRateLimiter>.Instance), NullLogger<DhanHistoricalDataService>.Instance), requests);
+        return (new DhanHistoricalDataService(api, NullLogger<DhanHistoricalDataService>.Instance), requests);
     }
 
     private sealed class FakeNse(HttpStatusCode status, string reply) : HttpMessageHandler

@@ -166,8 +166,8 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Equal(3, requests.Count);
         // A day Dhan sent only part of is asked again.
         requests.Clear();
-        var (api, limiter) = Api(requests, session: true, bars: 90);
-        var half = new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
+        var api = Api(requests, session: true, bars: 90);
+        var half = new DhanRollingOptionDataService(api, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
         await half.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM-2", "CALL", PastDay, PastDay, 1, CancellationToken.None);
         await half.GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM-2", "CALL", PastDay, PastDay, 1, CancellationToken.None);
         Assert.Equal(2, requests.Count);
@@ -197,8 +197,8 @@ public sealed class DhanDataCacheTests : IDisposable
 
         // A day Dhan sent only part of is still asked again - thin or not.
         requests.Clear();
-        var (api, limiter) = Api(requests, session: true, bars: 90, thin: true);
-        var half = new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
+        var api = Api(requests, session: true, bars: 90, thin: true);
+        var half = new DhanRollingOptionDataService(api, NullLogger<DhanRollingOptionDataService>.Instance, Cache());
         await half.GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+9", "CALL", PastDay, PastDay, 1, CancellationToken.None);
         await half.GetRollingOptionCandlesAsync("BANKNIFTY", 25, "MONTH", 1, "ATM+9", "CALL", PastDay, PastDay, 1, CancellationToken.None);
         Assert.Equal(2, requests.Count);
@@ -432,24 +432,23 @@ public sealed class DhanDataCacheTests : IDisposable
         ["open_interest"] = new JsonArray(bars.Select(b => (JsonNode)JsonValue.Create(b.OpenInterest ?? 0)!).ToArray()),
     }.ToJsonString();
 
-    private static (DhanApiClient Api, DhanDataApiRateLimiter Limiter) Api(List<string> requests, bool session, int bars, bool thin = false, Func<DateOnly, int>? barsOn = null)
+    private static DhanApiClient Api(List<string> requests, bool session, int bars, bool thin = false, Func<DateOnly, int>? barsOn = null)
     {
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = session ? "t" : "", ClientId = "c", DataApiRequestsPerSecond = 200 });
         var dhan = new FakeDhan(requests, barsOn ?? (d => d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday ? 0 : bars), thin);
-        var api = new DhanApiClient(new HttpClient(dhan), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
-        return (api, new DhanDataApiRateLimiter(options, NullLogger<DhanDataApiRateLimiter>.Instance));
+        return new DhanApiClient(new HttpClient(dhan), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
     }
 
     private static DhanHistoricalDataService Historical(List<string> requests, DhanDataCache cache, bool session, int bars = 375, bool thin = false, Func<DateOnly, int>? barsOn = null)
     {
-        var (api, limiter) = Api(requests, session, bars, thin, barsOn);
-        return new DhanHistoricalDataService(api, limiter, NullLogger<DhanHistoricalDataService>.Instance, cache);
+        var api = Api(requests, session, bars, thin, barsOn);
+        return new DhanHistoricalDataService(api, NullLogger<DhanHistoricalDataService>.Instance, cache);
     }
 
     private static DhanRollingOptionDataService Rolling(List<string> requests, DhanDataCache cache, bool session, bool thin = false)
     {
-        var (api, limiter) = Api(requests, session, 375, thin);
-        return new DhanRollingOptionDataService(api, limiter, NullLogger<DhanRollingOptionDataService>.Instance, cache);
+        var api = Api(requests, session, 375, thin);
+        return new DhanRollingOptionDataService(api, NullLogger<DhanRollingOptionDataService>.Instance, cache);
     }
 
     /// <summary>Dhan's answer for the request's window: each day's 1-minute bars from 09:15 IST (`barsOn` of them - none
