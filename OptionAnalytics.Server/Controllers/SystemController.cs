@@ -35,16 +35,15 @@ public sealed class SystemController : ControllerBase
 
     public sealed record DhanCallsByEndpoint(string Category, string Method, string Path, int LastMinute, int Last15Minutes, int Failed);
     public sealed record DhanRepeatedCall(string Context, int Times, int Failed, string? LastError, DateTimeOffset LastAt);
-    public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, int HeldBack, IReadOnlyList<DhanCallsByEndpoint> Endpoints, IReadOnlyList<DhanRepeatedCall> Repeated);
+    public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, IReadOnlyList<DhanCallsByEndpoint> Endpoints, IReadOnlyList<DhanRepeatedCall> Repeated);
 
     /// <summary>What this server sent to Dhan's REST API in the last 15 minutes (every attempt): per endpoint, and the
-    /// same request asked 3+ times - a loop shows here (DhanRestRateLimiter's call log). HeldBack: repeats of a failed
-    /// request that were not sent (since the server started).</summary>
+    /// same request asked 3+ times - a loop shows here (DhanRestRateLimiter's call log).</summary>
     [HttpGet("dhan-calls")]
     [Authorize(Roles = AuthRoles.Admin)]
-    public DhanCallsReport DhanCalls() => DhanCallsReportOf(_dhanLimiter.RecentCalls(), _dhanLimiter.HeldBackCount, DateTimeOffset.UtcNow);
+    public DhanCallsReport DhanCalls() => DhanCallsReportOf(_dhanLimiter.RecentCalls(), DateTimeOffset.UtcNow);
 
-    internal static DhanCallsReport DhanCallsReportOf(IReadOnlyList<DhanRestRateLimiter.DhanCall> calls, int heldBack, DateTimeOffset now)
+    internal static DhanCallsReport DhanCallsReportOf(IReadOnlyList<DhanRestRateLimiter.DhanCall> calls, DateTimeOffset now)
     {
         var minuteAgo = now - TimeSpan.FromMinutes(1);
         var endpoints = calls.GroupBy(c => (c.Category, c.Method, c.Path))
@@ -53,7 +52,7 @@ public sealed class SystemController : ControllerBase
         var repeated = calls.GroupBy(c => c.Context).Where(g => g.Count() >= 3)
             .Select(g => new DhanRepeatedCall(g.Key, g.Count(), g.Count(c => !c.Success), g.LastOrDefault(c => !c.Success)?.Error, g.Max(c => c.At)))
             .OrderByDescending(r => r.Times).Take(50).ToList();
-        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count, heldBack, endpoints, repeated);
+        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count, endpoints, repeated);
     }
 
     /// <summary>Feed: how each live-tick consumer (Spot, CDV, OI Replay) is keeping up over roughly

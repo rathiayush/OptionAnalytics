@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Net;
-using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -159,48 +157,6 @@ public sealed class DhanRestRateLimiter : IDisposable
         lock (_lock) _pausedUntil[category] = DateTimeOffset.UtcNow + DhanDataApiRateLimiter.RateLimitPause;
     }
 
-    // ---- No loops of a failing request ----------------------------------------------------------------------------------
-    // Dhan support saw requests "running in a loop" hitting the rate limit: a data call that FAILS (Dhan refused it, or did
-    // not answer) was asked again, identically, by every timer that wanted it - the spot volume refresh every minute, the
-    // today warm-up every 5 minutes, the CDV strikes every 30 s, each page load. A data request that failed is now not sent
-    // again for a while - 1 minute, doubling to 30 - and every caller asking for it gets that failure back at once; a
-    // success clears it. Keyed on the request itself (method, path, body with times cut to the day - today's toDate moves
-    // every minute), shared by every DhanApiClient through this singleton.
-
-    internal sealed record FailedRequest(DateTimeOffset RetryAfter, int Failures, HttpStatusCode Status, string Error);
-
-    private readonly ConcurrentDictionary<string, FailedRequest> _failed = new();
-    internal static readonly TimeSpan FirstFailureBackoff = TimeSpan.FromMinutes(1);
-    internal static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(30);
-    internal Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
-
-    private static readonly Regex TimeOfDay = new(@"(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}(:\d{2})?", RegexOptions.Compiled);
-
-    /// <summary>The request a failure is remembered by: method, path and body, any date-time cut to its date.</summary>
-    internal static string RequestKey(HttpMethod method, string path, string? body) => $"{method} {path} {TimeOfDay.Replace(body ?? "", "$1")}";
-
-    /// <summary>The failure this request had, while it is still being held back - null when it may be sent.</summary>
-    internal FailedRequest? HeldBack(string key) =>
-        _failed.TryGetValue(key, out var failed) && Clock() < failed.RetryAfter ? failed : null;
-
-    /// <summary>How a sent request ended: a failure holds the identical request back (longer each time), a success clears it.</summary>
-    internal void NoteOutcome(string key, bool success, HttpStatusCode status, string? error)
-    {
-        if (success) { _failed.TryRemove(key, out _); return; }
-        var now = Clock();
-        _failed.AddOrUpdate(key,
-            _ => new FailedRequest(now + FirstFailureBackoff, 1, status, error ?? $"HTTP {(int)status}"),
-            (_, before) =>
-            {
-                var failures = before.Failures + 1;
-                var wait = TimeSpan.FromTicks(Math.Min(MaxFailureBackoff.Ticks, FirstFailureBackoff.Ticks << Math.Min(failures - 1, 10)));
-                return new FailedRequest(now + wait, failures, status, error ?? $"HTTP {(int)status}");
-            });
-        // Old entries go (a day's worth of keys at most).
-        if (_failed.Count > 2_000)
-            foreach (var (k, f) in _failed) if (now - f.RetryAfter > TimeSpan.FromHours(1)) _failed.TryRemove(k, out _);
-    }
-
     // ---- The call log: what reached Dhan, to see a loop -----------------------------------------------------------------
 
     internal sealed record DhanCall(DateTimeOffset At, DhanApiCategory Category, string Method, string Path, string Context, bool Success, string? Error);
@@ -217,11 +173,6 @@ public sealed class DhanRestRateLimiter : IDisposable
 
     /// <summary>The calls sent to Dhan in the last CallLogSpan, oldest first.</summary>
     internal IReadOnlyList<DhanCall> RecentCalls() => _calls.ToArray();
-
-    /// <summary>Calls held back without reaching Dhan (a repeat of a failed request).</summary>
-    internal int HeldBackCount => _heldBack;
-    private int _heldBack;
-    internal void NoteHeldBack() => Interlocked.Increment(ref _heldBack);
 
     /// <summary>For the tests: calls let go in a category.</summary>
     internal int Sent(DhanApiCategory category) { lock (_lock) return _sent.GetValueOrDefault(category); }
