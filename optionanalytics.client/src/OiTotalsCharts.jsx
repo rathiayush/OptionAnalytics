@@ -23,7 +23,7 @@ const NEUTRAL_COLOR = '#d9d9d9'
 // One side's totals: the cumulative Δ as a line (each point coloured by who is ahead) and each bucket's Δ as bars
 // (coloured by what that bucket did) in a pane under it - the totals table's own colours. `levels` (lineLevels) are
 // drawn on the line: R / S, ×n = how many swings held there, an arrow where the line broke through one.
-function TotalsChart({ cum, delta, levels, dayKey, height, format, bullish, bearish }) {
+export function TotalsChart({ cum, delta, levels, dayKey, height, format, bullish, bearish }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const lineRef = useRef(null)
