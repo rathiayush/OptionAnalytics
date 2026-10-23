@@ -1188,8 +1188,8 @@ export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, heigh
 // different hue family from the wall convention, so "which encoding am I looking at" is never
 // ambiguous. Validated as a CVD-safe pair against this app's real dark chart surface (#0d0e12):
 // worst-pair ΔE 26.8 protan / 31.8 normal-vision, both clear of the dataviz method's 8/15 targets.
-const OI_ADDED_COLOR = '#3987e5'
-const OI_REMOVED_COLOR = '#d95926'
+export const OI_ADDED_COLOR = '#3987e5'
+export const OI_REMOVED_COLOR = '#d95926'
 // The OI totals (CE / PE / net, delta and cumulative) by what each figure MEANS (oiTotalsMeaning): green
 // bullish - PE added, CE removed, net (CE - PE) negative - and red bearish - CE added, PE removed, net positive.
 const OI_BULLISH_COLOR = '#3fcf6d'
@@ -1230,7 +1230,7 @@ const HEATMAP_TIMEFRAME_OPTIONS = [
 ]
 
 // That bucket size's picker - on the heatmap card, by the totals table and in the totals charts popup (one setting).
-function HeatmapBucketSelect({ value, onChange }) {
+export function HeatmapBucketSelect({ value, onChange }) {
   return (
     <Space size={4}>
       <Text type="secondary" style={{ fontSize: 12 }}>Bucket</Text>
@@ -1265,7 +1265,7 @@ const HEATMAP_AXIS_HEIGHT = 20
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
@@ -1510,7 +1510,7 @@ function fmtOiNum(v) {
 // The totals as NUMBERS: the same six rows as the heatmap below it (CE, PE and net CE − PE; each bucket's
 // change and the running total), one column per time bucket, newest on the left - read off the figures
 // instead of a colour.
-function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const { buckets, rows } = useMemo(() => {
     const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
     const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
@@ -1562,7 +1562,7 @@ function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMin
 }
 
 // The same totals as charts for the whole day so far, in a popup (OiTotalsCharts.jsx) - worked out only while it is open.
-function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra }) {
+export function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra }) {
   const totals = useMemo(() => {
     if (!open) return null
     const ce = buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
@@ -1577,7 +1577,7 @@ function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, a
   )
 }
 
-function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
