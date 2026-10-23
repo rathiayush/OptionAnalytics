@@ -130,6 +130,22 @@ public sealed class DhanHistoricalDataService
     /// index volume too (see this class's own doc comment). A caller that only ever wanted OHLC can
     /// still get that via CandleWithVolume.ToCandle(); one computing VWAP (VwapCalculator) needs the
     /// Volume this shape carries.</summary>
+    /// <summary>The end of an intraday request ending on `to`: the session's close (15:30) - except a request ending TODAY
+    /// while the session is still on, which ends at the minute after `now` (never before 09:16): no minute after now
+    /// exists yet, and a range running into the future is not asked of Dhan at all (Dhan answered such a request,
+    /// for the spot and the futures alike, with Input_Exception DH-905 on 23 Oct 2026).</summary>
+    internal static string IntradayToDate(DateOnly to, DateTimeOffset now)
+    {
+        var ist = now.ToOffset(IstClock.Offset);
+        var close = new TimeOnly(15, 30);
+        var time = TimeOnly.FromDateTime(ist.DateTime);
+        if (DateOnly.FromDateTime(ist.DateTime) != to || time >= close)
+            return $"{to:yyyy-MM-dd} 15:30:00";
+        var end = new TimeOnly(time.Hour, time.Minute).AddMinutes(1);
+        if (end < new TimeOnly(9, 16)) end = new TimeOnly(9, 16);
+        return $"{to:yyyy-MM-dd} {end:HH:mm}:00";
+    }
+
     public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error)> GetIntradayCandlesAsync(
         uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
     {
@@ -145,7 +161,7 @@ public sealed class DhanHistoricalDataService
             instrument = Instrument,
             interval,
             fromDate = $"{from:yyyy-MM-dd} 09:15:00",
-            toDate = $"{to:yyyy-MM-dd} 15:30:00",
+            toDate = IntradayToDate(to, DateTimeOffset.UtcNow),
         };
 
         var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
@@ -189,7 +205,7 @@ public sealed class DhanHistoricalDataService
             instrument = FuturesInstrument,
             interval,
             fromDate = $"{from:yyyy-MM-dd} 09:15:00",
-            toDate = $"{to:yyyy-MM-dd} 15:30:00",
+            toDate = IntradayToDate(to, DateTimeOffset.UtcNow),
             oi = true,
         };
 
@@ -265,7 +281,7 @@ public sealed class DhanHistoricalDataService
             instrument = instrumentType,
             interval,
             fromDate = $"{from:yyyy-MM-dd} 09:15:00",
-            toDate = $"{to:yyyy-MM-dd} 15:30:00",
+            toDate = IntradayToDate(to, DateTimeOffset.UtcNow),
         };
 
         // A failure at Debug, not Warning - routine for a strike that simply didn't trade/exist for part of the lookback
