@@ -15,9 +15,9 @@ import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from '.
 const { Title, Text } = Typography
 
 // The External account's whole app - the existing charts of the Order Flow page (the liquidity heatmap with its big-order
-// dots) and OI Replay (its OI change heatmap card's two parts - the CE / PE / net totals as numbers or a heatmap with their
-// charts, and the heatmaps of every strike - the chain-wide CE / PE OI with its Total / Since open switch, and the net
-// CE − PE cumulative), in tabs (totals, liquidity heatmap, all strikes, chain-wide, net), fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
+// dots) and OI Replay (its OI change heatmap card's CE / PE / net totals as numbers or a heatmap with their charts, the
+// chain-wide CE / PE OI with its Total / Since open switch, and the net CE − PE cumulative), in tabs (totals, liquidity
+// heatmap, chain-wide, net), fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
 // refuses this account everything else. Everything is keyed by the index picked, so switching NIFTY / BANKNIFTY never
 // shows (or mixes in) the other index's data.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
@@ -65,19 +65,6 @@ function LoadError({ error, onRetry }) {
   return <Alert type="warning" showIcon message={error} action={<Button size="small" onClick={onRetry}>Load again</Button>} style={{ marginBottom: 8 }} />
 }
 
-// OI Replay's whole OI change heatmap card body, live, with its own 1-second clock for "OI last changed … s ago" (so
-// the rest of the page does not re-render every second).
-function OiHeatmapLive({ byStrike, atmStrike, lastOiChangeMs, dayKey, show }) {
-  const [nowMs, setNowMs] = useState(() => Date.now())
-  useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), 1000)
-    return () => clearInterval(id)
-  }, [])
-  return (
-    <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike}
-      asOfMs={null} live lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show={show} />
-  )
-}
 
 const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
 
@@ -117,23 +104,11 @@ export default function ExternalPage() {
   const [live, setLive] = useState({ u: null, ce: [], pe: [] })
   const pendingRef = useRef({ ce: [], pe: [] })
   const uRef = useRef(u)
-  // "OI last changed", as OI Replay: when a leg's live OI differed from its previous live reading - per index.
-  const lastOiByLegRef = useRef(new Map())
-  const [oiChanged, setOiChanged] = useState({ u: null, ms: null })
-  useEffect(() => { uRef.current = u; pendingRef.current = { ce: [], pe: [] }; lastOiByLegRef.current = new Map() }, [u])
+  useEffect(() => { uRef.current = u; pendingRef.current = { ce: [], pe: [] } }, [u])
   const handleOiTicks = (batch) => {
-    let changedAt = 0
     for (const tick of batch) {
       if (tick?.underlying !== uRef.current || tick?.expiryFlag !== LIVE_EXPIRY_FLAG) continue
       ;(tick.side === 'CE' ? pendingRef.current.ce : pendingRef.current.pe).push(tick)
-      const key = `${tick.side}:${tick.strike}`
-      const previous = lastOiByLegRef.current.get(key)
-      if (previous != null && previous !== tick.openInterest) changedAt = Math.max(changedAt, new Date(tick.time).getTime() || 0)
-      lastOiByLegRef.current.set(key, tick.openInterest)
-    }
-    if (changedAt) {
-      const owner = uRef.current
-      setOiChanged((prev) => ({ u: owner, ms: prev.u === owner ? Math.max(prev.ms ?? 0, changedAt) : changedAt }))
     }
   }
   useEffect(() => {
@@ -152,20 +127,7 @@ export default function ExternalPage() {
   // A reconnect may have missed ticks: load the day again once - only after a load that worked.
   const oiReloadRef = useRef(null)
   useEffect(() => { oiReloadRef.current = oi.error ? null : oi.reload })
-  // ATM: the index's live spot ("spotUpdate" on "u:{index}"), else its last 1-minute close from the load - one string
-  // per index and strike, so a tick that leaves the ATM where it was re-renders nothing.
-  const [spotAtm, setSpotAtm] = useState('')
-  const stepRef = useRef(50)
-  useEffect(() => { stepRef.current = oi.data?.step || 50 })
-  const handleSpotUpdate = (snapshot) => {
-    const close = snapshot?.currentBar?.close
-    if (snapshot?.underlying !== uRef.current || !Number.isFinite(close)) return
-    setSpotAtm(`${uRef.current}|${Math.round(close / stepRef.current) * stepRef.current}`)
-  }
-  const oiConnection = useOiReplayLiveFeed(handleSpotUpdate, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
-  const step = oi.data?.step || 50
-  const liveAtm = spotAtm.startsWith(`${u}|`) ? Number(spotAtm.slice(u.length + 1)) : null
-  const atmStrike = liveAtm ?? (Number.isFinite(oi.data?.spotClose) ? Math.round(oi.data.spotClose / step) * step : null)
+  const oiConnection = useOiReplayLiveFeed(() => {}, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
 
   // OI Replay's own settings for these cards (the same stored choices).
   const [dayOiChartMode, setDayOiChartMode] = useState('total')
@@ -199,7 +161,6 @@ export default function ExternalPage() {
     return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal), net: totals.net }
   }, [byStrike])
   const dayKey = `${u}-${oi.data?.date ?? ''}`
-  const lastOiChangeMs = oiChanged.u === u ? oiChanged.ms : null
   const last = (series) => series?.at(-1)?.value
   // `render` runs only once the day's OI is here.
   const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">No OI data yet today.</Text> : render())
@@ -240,12 +201,13 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Tabs activeKey={['totals', 'liquidity', 'strikes', 'chain', 'net'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
+        <Tabs activeKey={['totals', 'liquidity', 'chain', 'net'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
           { key: 'totals', label: 'OI totals', children: (
             <Card size="small" title={<Space size={8}>OI totals: CE, PE and Net (CE − PE){connectionTag(oiConnection)}</Space>}>
               {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
               {oiBody(() => (
-                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="totals" />
+                <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes}
+                  asOfMs={null} live dayKey={dayKey} show="totals" />
               ))}
             </Card>
           ) },
@@ -261,14 +223,6 @@ export default function ExternalPage() {
               <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                 Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
               </Text>
-            </Card>
-          ) },
-          { key: 'strikes', label: 'OI heatmap (all strikes)', children: (
-            <Card size="small" title={<Space size={8}>OI change heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
-              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-              {oiBody(() => (
-                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="strikes" />
-              ))}
             </Card>
           ) },
           { key: 'chain', label: 'Chain-wide OI', children: (
