@@ -96,6 +96,10 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("login", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
         context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 10, Window = TimeSpan.FromMinutes(5), QueueLimit = 0 }));
+    // The External page's API (ExternalController), per signed-in account: 60 a minute - the page asks every 10-30 s.
+    options.AddPolicy("external", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
 // Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
@@ -378,6 +382,8 @@ app.UseDefaultFiles();
 app.UseStaticFiles();
 
 app.UseAuthentication();
+// The External account reaches its own read-only page and API only - everything else is 403 for it (ExternalAccess).
+app.UseExternalAccessFence();
 app.UseAuthorization();
 app.UseRateLimiter();
 

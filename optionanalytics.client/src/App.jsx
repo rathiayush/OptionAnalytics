@@ -16,6 +16,7 @@ import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
 import TradeSettingsPage from './TradeSettingsPage.jsx'
 import StrategyTuningPage from './StrategyTuningPage.jsx'
+import ExternalPage from './ExternalPage.jsx'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
@@ -1709,7 +1710,7 @@ export default function App() {
   // The trade settings per index (lots, SL / target / trail, slippage - trade-settings.csv on the server)
   // into this browser once signed in, and again whenever the tab comes back.
   useEffect(() => {
-    if (!user) return undefined
+    if (!user || user.role === 'External') return undefined
     refreshTradeSettings()
     const onVisible = () => { if (document.visibilityState === 'visible') refreshTradeSettings() }
     document.addEventListener('visibilitychange', onVisible)
@@ -1778,6 +1779,15 @@ export default function App() {
 
   if (!user) {
     return <LoginPage onLogin={login} />
+  }
+
+  // The External account sees its one page, whatever the URL (the server refuses it every other API anyway).
+  if (user.role === 'External') {
+    return (
+      <AuthContext.Provider value={{ user, logout }}>
+        <ExternalPage />
+      </AuthContext.Provider>
+    )
   }
 
   return (

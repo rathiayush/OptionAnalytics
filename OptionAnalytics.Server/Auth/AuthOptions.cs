@@ -20,4 +20,12 @@ public sealed class AuthOptions
 
     public string UserEmail { get; set; } = "user@backtest.com";
     public string UserPassword { get; set; } = "";
+
+    /// <summary>The outside viewer (AuthRoles.External): only the External page - the liquidity heatmap and the net
+    /// CE - PE OI - and no other API, hub or page (ExternalAccess). Its password is kept as a salted PBKDF2 hash
+    /// ("pbkdf2-sha256$iterations$salt$hash", base64 - ExternalPasswordHash), never in plain text; ExternalPassword
+    /// (Auth__ExternalPassword, plain) is used instead when set. Both blank = the account cannot log in.</summary>
+    public string ExternalEmail { get; set; } = "External@live.com";
+    public string ExternalPassword { get; set; } = "";
+    public string ExternalPasswordHash { get; set; } = "";
 }
