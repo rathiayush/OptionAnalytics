@@ -64,6 +64,11 @@ public sealed class OrderFlowEngine
     private DepthLevel[] _asks = Array.Empty<DepthLevel>();
     private DateTimeOffset? _deepBidAt, _deepAskAt;
     private int _deepDepth = 20;
+    // What the book held now actually is, side by side: the feed it came from (200 / 20 levels, 5 = the market
+    // feed's Full packet) and when it arrived; and the depth packets of the last minute (how often Dhan sends).
+    private int _bidFeed, _askFeed;
+    private DateTimeOffset? _bidAt, _askAt;
+    private readonly Queue<DateTimeOffset> _depthPackets = new();
     // A restored day's depth, reported until live data arrives (a replayed day keeps saying what it had).
     private int? _importedDepth;
     // The deepest book seen today - what a saved day says it had.
@@ -190,8 +195,8 @@ public sealed class OrderFlowEngine
 
             // The book only moves AFTER the trade is classified and attributed - the trade happened
             // against the previous book. A fresh 20-level side is not overwritten by 5 levels.
-            if (tick.Bids is { Length: > 0 } bids && !Fresh(_deepBidAt, now)) _bids = bids;
-            if (tick.Asks is { Length: > 0 } asks && !Fresh(_deepAskAt, now)) _asks = asks;
+            if (tick.Bids is { Length: > 0 } bids && !Fresh(_deepBidAt, now)) { _bids = bids; _bidFeed = 5; _bidAt = now; }
+            if (tick.Asks is { Length: > 0 } asks && !Fresh(_deepAskAt, now)) { _asks = asks; _askFeed = 5; _askAt = now; }
 
             // The first tick only sets the volume baseline - nothing before it is in the day's bars.
             _recordedFrom ??= now;
@@ -212,8 +217,10 @@ public sealed class OrderFlowEngine
         {
             _importedDepth = null;
             RollDay(now);
-            if (packet.IsBid) { _bids = packet.Levels; _deepBidAt = now; _prevBid = packet.Levels[0].Price; }
-            else { _asks = packet.Levels; _deepAskAt = now; _prevAsk = packet.Levels[0].Price; }
+            if (packet.IsBid) { _bids = packet.Levels; _deepBidAt = _bidAt = now; _bidFeed = packet.Depth; _prevBid = packet.Levels[0].Price; }
+            else { _asks = packet.Levels; _deepAskAt = _askAt = now; _askFeed = packet.Depth; _prevAsk = packet.Levels[0].Price; }
+            _depthPackets.Enqueue(now);
+            while (_depthPackets.Count > 0 && now - _depthPackets.Peek() > TimeSpan.FromMinutes(1)) _depthPackets.Dequeue();
             RecordQuote(now);
             _deepDepth = packet.Depth;
             _dayDepth = Math.Max(_dayDepth, packet.Depth);
@@ -487,7 +494,22 @@ public sealed class OrderFlowEngine
 
     private OrderFlowMeta Meta() => new(
         Underlying, ContractSymbol, SecurityId, ExchangeSegment, LotSize, TickSize, _prevLtp, _lastTradeAt,
-        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry, DepthFeed);
+        Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry, DepthFeed)
+    {
+        Received = Received(),
+    };
+
+    /// <summary>The book as it actually arrived from Dhan (null before any book): see OrderFlowDepthReceived.</summary>
+    private OrderFlowDepthReceived? Received()
+    {
+        if (_bidAt is null && _askAt is null) return null;
+        return new OrderFlowDepthReceived(
+            _bids.Length, _asks.Length, _bidFeed, _askFeed, _bidAt, _askAt,
+            _bids.Length > 0 ? _bids[0].Price : null, _bids.Length > 0 ? _bids[^1].Price : null,
+            _asks.Length > 0 ? _asks[0].Price : null, _asks.Length > 0 ? _asks[^1].Price : null,
+            _bids.Sum(l => l.Quantity), _asks.Sum(l => l.Quantity),
+            _depthPackets.Count(t => _clock - t <= TimeSpan.FromMinutes(1)));
+    }
 
     private IReadOnlyList<OrderFlowIceberg> Icebergs() => _icebergs
         .Select(i => new OrderFlowIceberg(i.Id, i.IsBid, i.Price, i.StartedAt, i.DetectedAt, i.LastSeenAt, i.EndedAt, i.Traded, i.MaxDisplayed, i.Refills))
@@ -701,7 +723,19 @@ public sealed record OrderFlowDom(
 /// Expiry: the futures contract's expiry.</summary>
 public sealed record OrderFlowMeta(
     string Underlying, string ContractSymbol, uint SecurityId, string ExchangeSegment, int LotSize, decimal TickSize,
-    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null, DateOnly? Expiry = null, OrderFlowDepthFeed? DepthFeed = null);
+    decimal LastPrice, DateTimeOffset? LastTradeAt, int DepthLevels, DateOnly? Day = null, DateOnly? Expiry = null, OrderFlowDepthFeed? DepthFeed = null)
+{
+    /// <summary>What Dhan has actually sent - the live book's rows; null for a day without one.</summary>
+    public OrderFlowDepthReceived? Received { get; init; }
+}
+
+/// <summary>The book a live contract holds, as Dhan actually sent it: rows per side (the 200-level feed sends up to 200 -
+/// fewer when the book is thinner; levels at a 0 price are dropped), the feed each side came from (200 / 20, or 5 = the
+/// market feed's Full packet), when each side last arrived, the best and deepest price of each side (the book's span),
+/// the total quantity resting on each side, and how many depth packets (one side each) arrived in the last minute.</summary>
+public sealed record OrderFlowDepthReceived(
+    int BidRows, int AskRows, int BidFeed, int AskFeed, DateTimeOffset? BidAt, DateTimeOffset? AskAt,
+    decimal? BestBid, decimal? DeepestBid, decimal? BestAsk, decimal? DeepestAsk, long BidQuantity, long AskQuantity, int PacketsPerMinute);
 
 /// <summary>The depth connection a live contract is on: Levels 200 / 20 / 5 (5 = the market feed's Full
 /// packet only), whether it is connected, when its book last arrived, and why it is not deeper / not
