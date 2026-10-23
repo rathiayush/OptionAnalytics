@@ -159,10 +159,7 @@ public sealed class DhanRestRateLimiter : IDisposable
 
     // ---- The call log: what reached Dhan, to see a loop -----------------------------------------------------------------
 
-    /// <summary>One request sent to Dhan: when, what (method, path, the JSON body as sent - the client id masked), how it
-    /// ended (HTTP status, Dhan's error) and how long Dhan took.</summary>
-    internal sealed record DhanCall(DateTimeOffset At, DhanApiCategory Category, string Method, string Path, string Context, bool Success, string? Error,
-        int Status = 0, string? Body = null, double DurationMs = 0);
+    internal sealed record DhanCall(DateTimeOffset At, DhanApiCategory Category, string Method, string Path, string Context, bool Success, string? Error);
 
     private readonly ConcurrentQueue<DhanCall> _calls = new();
     internal static readonly TimeSpan CallLogSpan = TimeSpan.FromMinutes(15);

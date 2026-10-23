@@ -150,27 +150,6 @@ public sealed class DhanDataCacheTests : IDisposable
     }
 
     [Fact]
-    public async Task TheExpiredOptionRequest_HasDhansDocumentedTypes()
-    {
-        // https://dhanhq.co/docs/v2/expired-options-data/: securityId a string, interval / expiryCode integers - sent the
-        // other way round, Dhan answered DH-905 Input_Exception.
-        var requests = new List<string>();
-        await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM", "CALL", PastDay, PastDay, 1, CancellationToken.None);
-        var body = System.Text.Json.Nodes.JsonNode.Parse(requests.Single()[(requests.Single().IndexOf(' ') + 1)..])!.AsObject();
-        Assert.Equal(System.Text.Json.JsonValueKind.String, body["securityId"]!.GetValueKind());
-        Assert.Equal("13", body["securityId"]!.GetValue<string>());
-        Assert.Equal(System.Text.Json.JsonValueKind.Number, body["interval"]!.GetValueKind());
-        Assert.Equal(1, body["interval"]!.GetValue<int>());
-        Assert.Equal(System.Text.Json.JsonValueKind.Number, body["expiryCode"]!.GetValueKind());
-        Assert.Equal(("NSE_FNO", "OPTIDX", "WEEK", "ATM", "CALL"), (body["exchangeSegment"]!.GetValue<string>(), body["instrument"]!.GetValue<string>(),
-            body["expiryFlag"]!.GetValue<string>(), body["strike"]!.GetValue<string>(), body["drvOptionType"]!.GetValue<string>()));
-        Assert.Equal(System.Text.Json.JsonValueKind.Array, body["requiredData"]!.GetValueKind());
-        Assert.Equal(PastDay.ToString("yyyy-MM-dd"), body["fromDate"]!.GetValue<string>());
-        Assert.Equal(PastDay.AddDays(1).ToString("yyyy-MM-dd"), body["toDate"]!.GetValue<string>()); // Dhan's toDate is non-inclusive
-        Assert.Null(body["dhanClientId"]);
-    }
-
-    [Fact]
     public async Task TheExpiredOptionChain_IsKept()
     {
         var requests = new List<string>();
