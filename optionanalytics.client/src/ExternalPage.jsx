@@ -15,9 +15,9 @@ import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from '.
 const { Title, Text } = Typography
 
 // The External account's whole app - the existing charts of the Order Flow page (the liquidity heatmap with its big-order
-// dots) and OI Replay (its whole OI change heatmap card - every strike, the CE / PE / net totals as numbers or a heatmap
-// with their charts - the chain-wide CE / PE OI with its Total / Since open switch, and the net CE − PE cumulative), in
-// tabs, fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
+// dots) and OI Replay (its OI change heatmap card's two parts - the CE / PE / net totals as numbers or a heatmap with their
+// charts, and the heatmaps of every strike - the chain-wide CE / PE OI with its Total / Since open switch, and the net
+// CE − PE cumulative), in tabs (totals, liquidity heatmap, all strikes, chain-wide, net), fed and kept live exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
 // refuses this account everything else. Everything is keyed by the index picked, so switching NIFTY / BANKNIFTY never
 // shows (or mixes in) the other index's data.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
@@ -67,7 +67,7 @@ function LoadError({ error, onRetry }) {
 
 // OI Replay's whole OI change heatmap card body, live, with its own 1-second clock for "OI last changed … s ago" (so
 // the rest of the page does not re-render every second).
-function OiHeatmapLive({ byStrike, atmStrike, lastOiChangeMs, dayKey }) {
+function OiHeatmapLive({ byStrike, atmStrike, lastOiChangeMs, dayKey, show }) {
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1000)
@@ -75,7 +75,7 @@ function OiHeatmapLive({ byStrike, atmStrike, lastOiChangeMs, dayKey }) {
   }, [])
   return (
     <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike}
-      asOfMs={null} live lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} />
+      asOfMs={null} live lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show={show} />
   )
 }
 
@@ -88,7 +88,7 @@ export default function ExternalPage() {
   // Big order: 'auto' - the top 2.5% of the day's prints (autoBigLots), as the Order Flow page - or the fixed lots.
   const [bigMode, setBigMode] = usePersistedState('optionanalytics.external.bigMode', 'auto')
   const [largeLots, setLargeLots] = usePersistedState('optionanalytics.external.largeLots', 10)
-  const [tab, setTab] = usePersistedState('optionanalytics.external.tab', 'oi')
+  const [tab, setTab] = usePersistedState('optionanalytics.external.tab', 'totals')
   const u = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = ROW_SIZES.includes(rowSize) ? rowSize : 5
   const fetchLots = bigMode === 'auto' ? 5 : Math.max(1, largeLots)
@@ -240,12 +240,12 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Tabs activeKey={tab} onChange={setTab} destroyOnHidden items={[
-          { key: 'oi', label: 'OI change heatmap', children: (
-            <Card size="small" title={<Space size={8}>OI change heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
+        <Tabs activeKey={['totals', 'liquidity', 'strikes', 'chain', 'net'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
+          { key: 'totals', label: 'OI totals', children: (
+            <Card size="small" title={<Space size={8}>OI totals: CE, PE and Net (CE − PE){connectionTag(oiConnection)}</Space>}>
               {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
               {oiBody(() => (
-                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} />
+                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="totals" />
               ))}
             </Card>
           ) },
@@ -261,6 +261,14 @@ export default function ExternalPage() {
               <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                 Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
               </Text>
+            </Card>
+          ) },
+          { key: 'strikes', label: 'OI heatmap (all strikes)', children: (
+            <Card size="small" title={<Space size={8}>OI change heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
+              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+              {oiBody(() => (
+                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="strikes" />
+              ))}
             </Card>
           ) },
           { key: 'chain', label: 'Chain-wide OI', children: (
