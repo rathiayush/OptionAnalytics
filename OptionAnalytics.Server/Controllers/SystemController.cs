@@ -36,33 +36,64 @@ public sealed class SystemController : ControllerBase
     public sealed record DhanCallsByEndpoint(string Category, string Method, string Path, int LastMinute, int Last15Minutes, int LastHour, int Failed);
     public sealed record DhanRepeatedCall(string Context, int Times, int Failed, string? LastError, DateTimeOffset LastAt);
     public sealed record DhanCallEntry(DateTimeOffset At, string Category, string Method, string Path, string Context, bool Success, int Status,
-        string? Error, string? ErrorCode, string? Body, string? Response, double DurationMs, string? Diagnosis);
+        string? Error, string? ErrorCode, string? Body, string? Response, double DurationMs, string? Diagnosis, string? DataDate = null);
+    /// <summary>A day of data the calls asked for (their payload's fromDate): how many calls, how many failed.</summary>
+    public sealed record DhanDataDate(string Date, int Calls, int Failed);
     public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, int LastHour, int Failed, IReadOnlyList<DhanCallsByEndpoint> Endpoints,
-        IReadOnlyList<DhanRepeatedCall> Repeated, IReadOnlyList<DhanCallEntry> Recent);
+        IReadOnlyList<DhanRepeatedCall> Repeated, IReadOnlyList<DhanCallEntry> Recent)
+    {
+        /// <summary>Calls in the window asked for (after the data-date filter) and how many of them Recent holds.</summary>
+        public int Matching { get; init; }
+        /// <summary>Every data date the window's calls asked for, newest first - the page's date filter.</summary>
+        public IReadOnlyList<DhanDataDate> DataDates { get; init; } = Array.Empty<DhanDataDate>();
+    }
 
-    /// <summary>What this server sent to Dhan's REST API in the last hour (every attempt, up to 5,000): per endpoint, the
+    /// <summary>What this server sent to Dhan's REST API (every attempt; kept for 24 hours, up to 10,000): per endpoint, the
     /// same request asked 3+ times (a loop shows here), and each call - newest first, with its payload as sent, a failed
     /// call's answer exactly as Dhan sent it (errorCode, errorMessage ...) and a likely cause (DhanRestRateLimiter's call
-    /// log). The Dhan calls page shows it and filters it.</summary>
+    /// log). `minutes`: how far back (default 60, up to 1440); `dataDate` (yyyy-MM-dd): only calls asking for that day's data
+    /// (their fromDate); `result`: failed / ok / all; at most `take` calls (default 1000, up to 3000), newest first. The Dhan
+    /// calls page shows it and filters it further.</summary>
     [HttpGet("dhan-calls")]
     [Authorize(Roles = AuthRoles.Admin)]
-    public DhanCallsReport DhanCalls() => DhanCallsReportOf(_dhanLimiter.RecentCalls(), DateTimeOffset.UtcNow);
+    public DhanCallsReport DhanCalls([FromQuery] int minutes = 60, [FromQuery] string? dataDate = null, [FromQuery] string? result = null, [FromQuery] int take = 1000) =>
+        DhanCallsReportOf(_dhanLimiter.RecentCalls(), DateTimeOffset.UtcNow, minutes, dataDate, result, take);
 
-    internal static DhanCallsReport DhanCallsReportOf(IReadOnlyList<DhanRestRateLimiter.DhanCall> calls, DateTimeOffset now)
+    /// <summary>The day of data a call asked for - its payload's fromDate (yyyy-MM-dd), or null (no body / no date).</summary>
+    internal static string? DataDateOf(string? body) => Field(body, "fromDate") is { Length: >= 10 } from ? from[..10] : null;
+
+    internal static DhanCallsReport DhanCallsReportOf(IReadOnlyList<DhanRestRateLimiter.DhanCall> all, DateTimeOffset now,
+        int minutes = 60, string? dataDate = null, string? result = null, int take = 1000)
     {
+        var since = now - TimeSpan.FromMinutes(Math.Clamp(minutes, 1, 1440));
+        var inWindow = all.Where(c => c.At >= since).ToList();
+        var dataDates = inWindow.GroupBy(c => DataDateOf(c.Body)).Where(g => g.Key is not null)
+            .Select(g => new DhanDataDate(g.Key!, g.Count(), g.Count(c => !c.Success))).OrderByDescending(d => d.Date).ToList();
+        var calls = string.IsNullOrWhiteSpace(dataDate) ? inWindow : inWindow.Where(c => DataDateOf(c.Body) == dataDate).ToList();
         var minuteAgo = now - TimeSpan.FromMinutes(1);
+        var hourAgo = now - TimeSpan.FromHours(1);
         var quarterAgo = now - TimeSpan.FromMinutes(15);
         var endpoints = calls.GroupBy(c => (c.Category, c.Method, c.Path))
-            .Select(g => new DhanCallsByEndpoint(g.Key.Category.ToString(), g.Key.Method, g.Key.Path, g.Count(c => c.At >= minuteAgo), g.Count(c => c.At >= quarterAgo), g.Count(), g.Count(c => !c.Success)))
+            .Select(g => new DhanCallsByEndpoint(g.Key.Category.ToString(), g.Key.Method, g.Key.Path, g.Count(c => c.At >= minuteAgo), g.Count(c => c.At >= quarterAgo), g.Count(c => c.At >= hourAgo), g.Count(c => !c.Success)))
             .OrderByDescending(e => e.LastHour).ToList();
         var repeated = calls.GroupBy(c => c.Context).Where(g => g.Count() >= 3)
             .Select(g => new DhanRepeatedCall(g.Key, g.Count(), g.Count(c => !c.Success), g.LastOrDefault(c => !c.Success)?.Error, g.Max(c => c.At)))
             .OrderByDescending(r => r.Times).Take(50).ToList();
-        var recent = calls.OrderByDescending(c => c.At)
+        var matching = result?.ToLowerInvariant() switch
+        {
+            "failed" => calls.Where(c => !c.Success).ToList(),
+            "ok" => calls.Where(c => c.Success).ToList(),
+            _ => calls,
+        };
+        var recent = matching.OrderByDescending(c => c.At).Take(Math.Clamp(take, 1, 3000))
             .Select(c => new DhanCallEntry(c.At, c.Category.ToString(), c.Method, c.Path, c.Context, c.Success, c.Status, c.Error,
-                Field(c.Response, "errorCode"), c.Body, c.Response, Math.Round(c.DurationMs), c.Success ? null : Diagnose(c, now)))
+                Field(c.Response, "errorCode"), c.Body, c.Response, Math.Round(c.DurationMs), c.Success ? null : Diagnose(c, now), DataDateOf(c.Body)))
             .ToList();
-        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count(c => c.At >= quarterAgo), calls.Count, calls.Count(c => !c.Success), endpoints, repeated, recent);
+        return new DhanCallsReport(calls.Count(c => c.At >= minuteAgo), calls.Count(c => c.At >= quarterAgo), calls.Count(c => c.At >= hourAgo), calls.Count(c => !c.Success), endpoints, repeated, recent)
+        {
+            Matching = matching.Count,
+            DataDates = dataDates,
+        };
     }
 
     /// <summary>The likely cause of a failed Dhan call, read from its answer and body - or null when nothing stands out.</summary>

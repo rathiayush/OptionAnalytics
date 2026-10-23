@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Descriptions, Input, Row, Segmented, Select, Space, Statistic, Switch, Table, Tag, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, Descriptions, Input, Row, Segmented, Select, Space, Statistic, Switch, Table, Tag, Typography, message } from 'antd'
+import dayjs from 'dayjs'
 import { CopyOutlined, ReloadOutlined } from '@ant-design/icons'
 import { NavBar } from './shared.jsx'
 
@@ -7,12 +8,13 @@ const { Title, Text } = Typography
 
 const IST_TIME = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const CATEGORY_COLOR = { Order: 'red', Data: 'blue', Quote: 'purple', NonTrading: 'default' }
-const WINDOWS = [{ value: 5, label: '5 min' }, { value: 15, label: '15 min' }, { value: 60, label: '1 hour' }]
+const WINDOWS = [{ value: 5, label: '5 min' }, { value: 15, label: '15 min' }, { value: 60, label: '1 hour' }, { value: 1440, label: '24 hours' }]
+const DATA_DATE = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric', weekday: 'short', timeZone: 'UTC' })
 
-// "What is this server sending to Dhan, and why is it failing?" - every Dhan REST call of the last hour (GET
-// /api/system/dhan-calls, DhanRestRateLimiter's call log). Filter by result, kind, endpoint, HTTP status, Dhan error code,
-// time and free text; each call opens to the payload exactly as sent, Dhan's answer exactly as it came, the error and a
-// likely cause - and copies as one block for Dhan support. Admin only.
+// "What is this server sending to Dhan, and why is it failing?" - every Dhan REST call of the last 24 hours (GET
+// /api/system/dhan-calls, DhanRestRateLimiter's call log). Filter by the day of data a call asked for (its fromDate), result,
+// time, kind, endpoint, HTTP status, Dhan error code and free text; each call opens to the payload exactly as sent, Dhan's
+// answer exactly as it came, the error and a likely cause - and copies as one block for Dhan support. Admin only.
 export default function DhanCallsPage() {
   const [report, setReport] = useState(null)
   const [error, setError] = useState(null)
@@ -24,15 +26,19 @@ export default function DhanCallsPage() {
   const [statuses, setStatuses] = useState([])
   const [codes, setCodes] = useState([])
   const [windowMin, setWindowMin] = useState(60)
+  const [dataDate, setDataDate] = useState(null)
   const [search, setSearch] = useState('')
 
+  // The window, the day of data and the result are filtered on the server (the log holds a day); the rest here.
   const load = useCallback(() => {
-    fetch('/api/system/dhan-calls')
+    const q = new URLSearchParams({ minutes: String(windowMin), result: result.toLowerCase(), take: '2000' })
+    if (dataDate) q.set('dataDate', dataDate)
+    fetch(`/api/system/dhan-calls?${q}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.status === 403 ? 'Admin only.' : `HTTP ${r.status}`))))
       .then((d) => { setReport(d); setError(null) })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false))
-  }, [])
+  }, [windowMin, dataDate, result])
 
   useEffect(() => {
     load()
@@ -55,15 +61,12 @@ export default function DhanCallsPage() {
 
   const calls = useMemo(() => {
     const q = search.trim().toLowerCase()
-    const since = report ? Math.max(...all.map((c) => new Date(c.at).getTime()), 0) - windowMin * 60_000 : 0
-    return all.filter((c) => (result === 'All' || (result === 'Failed' ? !c.success : c.success))
-      && new Date(c.at).getTime() >= since
-      && (!kinds.length || kinds.includes(c.category))
+    return all.filter((c) => (!kinds.length || kinds.includes(c.category))
       && (!paths.length || paths.includes(`${c.method} ${c.path}`))
       && (!statuses.length || statuses.includes(String(c.status || 'no answer')))
       && (!codes.length || codes.includes(c.errorCode))
       && (!q || `${c.path} ${c.context} ${c.error ?? ''} ${c.body ?? ''} ${c.response ?? ''}`.toLowerCase().includes(q)))
-  }, [all, report, result, kinds, paths, statuses, codes, windowMin, search])
+  }, [all, kinds, paths, statuses, codes, search])
 
   // The causes behind the failures shown, most frequent first - the quickest way to see what to fix.
   const causes = useMemo(() => {
@@ -72,13 +75,15 @@ export default function DhanCallsPage() {
     return [...counts.entries()].sort((a, b) => b[1] - a[1])
   }, [calls])
 
-  const filtered = kinds.length || paths.length || statuses.length || codes.length || search || result !== 'Failed' || windowMin !== 60
-  const clear = () => { setKinds([]); setPaths([]); setStatuses([]); setCodes([]); setSearch(''); setResult('Failed'); setWindowMin(60) }
+  const filtered = kinds.length || paths.length || statuses.length || codes.length || search || dataDate || result !== 'Failed' || windowMin !== 60
+  const clear = () => { setKinds([]); setPaths([]); setStatuses([]); setCodes([]); setSearch(''); setDataDate(null); setResult('Failed'); setWindowMin(60) }
+  // A day of data picked: look through the whole day's log for it.
+  const pickDate = (d) => { setDataDate(d); if (d && windowMin < 1440) setWindowMin(1440) }
 
   const columns = [
     { title: 'Time (IST)', dataIndex: 'at', width: 90, render: (t) => IST_TIME.format(new Date(t)) },
     { title: 'Kind', dataIndex: 'category', width: 100, render: (c) => <Tag color={CATEGORY_COLOR[c]}>{c}</Tag> },
-    { title: 'Request', key: 'req', render: (_, c) => <span><Text code>{c.method} {c.path}</Text><br /><Text type="secondary" style={{ fontSize: 12 }}>{c.context}</Text></span> },
+    { title: 'Request', key: 'req', render: (_, c) => <span><Text code>{c.method} {c.path}</Text>{c.dataDate && <Tag style={{ marginLeft: 6 }}>{c.dataDate}</Tag>}<br /><Text type="secondary" style={{ fontSize: 12 }}>{c.context}</Text></span> },
     {
       title: 'Answer', key: 'ans', width: 130,
       render: (_, c) => (
@@ -100,7 +105,7 @@ export default function DhanCallsPage() {
           <NavBar />
         </Space>
         <Card
-          title="Dhan calls - last hour"
+          title="Dhan calls"
           extra={(
             <Space wrap>
               <Space size={4}><Switch size="small" checked={auto} onChange={setAuto} /><Text type="secondary">every 5 s</Text></Space>
@@ -116,12 +121,29 @@ export default function DhanCallsPage() {
           <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
             <Col xs={12} md={6}><Statistic title="Last minute" value={report?.lastMinute ?? '-'} /></Col>
             <Col xs={12} md={6}><Statistic title="Last 15 minutes" value={report?.last15Minutes ?? '-'} /></Col>
-            <Col xs={12} md={6}><Statistic title="Failed (hour)" value={report?.failed ?? '-'} valueStyle={report?.failed ? { color: '#ff4d4f' } : undefined} /></Col>
+            <Col xs={12} md={6}><Statistic title="Failed (window)" value={report?.failed ?? '-'} valueStyle={report?.failed ? { color: '#ff4d4f' } : undefined} /></Col>
             <Col xs={12} md={6}><Statistic title="Repeated 3+ times" value={report?.repeated?.length ?? '-'} valueStyle={report?.repeated?.length ? { color: '#faad14' } : undefined} /></Col>
           </Row>
         </Card>
 
         <Card size="small" title="Filter" extra={filtered && <Button size="small" onClick={clear}>Clear filters</Button>}>
+          <Space wrap style={{ marginBottom: 8 }}>
+            <Text type="secondary">Data date:</Text>
+            <DatePicker
+              allowClear placeholder="any day" value={dataDate ? dayjs(dataDate) : null}
+              onChange={(d) => pickDate(d ? d.format('YYYY-MM-DD') : null)}
+              cellRender={(current, info) => {
+                if (info.type !== 'date') return info.originNode
+                const hit = report?.dataDates?.find((x) => x.date === current.format('YYYY-MM-DD'))
+                return <div className="ant-picker-cell-inner" style={hit ? { fontWeight: 700, color: hit.failed ? '#ff4d4f' : '#52c41a' } : undefined}>{current.date()}</div>
+              }}
+            />
+            {(report?.dataDates ?? []).slice(0, 8).map((d) => (
+              <Tag.CheckableTag key={d.date} checked={dataDate === d.date} onChange={(on) => pickDate(on ? d.date : null)}>
+                {DATA_DATE.format(new Date(`${d.date}T00:00:00Z`))} · {d.calls}{d.failed ? <Text type="danger"> · {d.failed} failed</Text> : ''}
+              </Tag.CheckableTag>
+            ))}
+          </Space>
           <Space wrap>
             <Segmented value={result} onChange={setResult} options={['Failed', 'OK', 'All']} />
             <Segmented value={windowMin} onChange={setWindowMin} options={WINDOWS} />
@@ -141,12 +163,12 @@ export default function DhanCallsPage() {
           </Card>
         )}
 
-        <Card size="small" title={`Calls (${calls.length})`}>
+        <Card size="small" title={`Calls (${calls.length}${report?.matching > all.length ? ` of the newest ${all.length} - ${report.matching} match` : ''})`}>
           <Table
             size="small" rowKey={(c, i) => `${c.at}-${i}`} dataSource={calls} columns={columns} scroll={{ x: 900 }}
             pagination={{ pageSize: 50, showSizeChanger: false }}
             expandable={{ expandedRowRender: (c) => <CallDetail call={c} /> }}
-            locale={{ emptyText: result === 'Failed' && !filtered ? 'No failed calls in the last hour.' : 'No calls match the filters.' }}
+            locale={{ emptyText: result === 'Failed' && !filtered ? 'No failed calls in the last hour.' : 'No calls match the filters - try 24 hours.' }}
           />
         </Card>
 
@@ -206,6 +228,8 @@ function CallDetail({ call }) {
         <Descriptions.Item label="Took">{call.durationMs} ms</Descriptions.Item>
         <Descriptions.Item label="Request" span={2}><Text code>{call.method} https://api.dhan.co/v2{call.path}</Text></Descriptions.Item>
         <Descriptions.Item label="For" span={2}>{call.context}</Descriptions.Item>
+        <Descriptions.Item label="Data date">{call.dataDate ?? '-'}</Descriptions.Item>
+        <Descriptions.Item label="Kind">{call.category}</Descriptions.Item>
         <Descriptions.Item label="HTTP status">{call.status || 'no answer'}</Descriptions.Item>
         <Descriptions.Item label="Dhan error code">{call.errorCode ?? '-'}</Descriptions.Item>
         {!call.success && <Descriptions.Item label="Error" span={2}><Text type="danger">{call.error}</Text></Descriptions.Item>}
