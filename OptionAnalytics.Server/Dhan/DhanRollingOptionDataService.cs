@@ -71,7 +71,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     /// their one worked example, which is exactly why ExpiredOptionBacktestService's own
     /// StrikeStepByUnderlying deliberately left SENSEX out rather than guess. If Dhan rejects
     /// BSE_FNO here, the failure surfaces as a plain Dhan error string on the page (see
-    /// SendWithRateLimitRetryAsync), not a crash - worth confirming with a real run.</summary>
+    /// GetRollingOptionCandlesAsync), not a crash - worth confirming with a real run.</summary>
     private static string ResolveFnoSegment(string underlying) =>
         string.Equals(underlying, "SENSEX", StringComparison.OrdinalIgnoreCase) ? "BSE_FNO" : "NSE_FNO";
     // "strike" asks Dhan to report the ACTUAL absolute strike it resolved "ATM+-K" to for every
@@ -93,22 +93,11 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     // can still ask for a range wider than one call supports, rather than needing to paginate it.
     private const int MaxChunkDays = 30;
 
-    // Spacing between successive chunk calls, and between a rate-limited chunk's own retries - a
-    // multi-month lookback can need several chunks per side, and CallerService (see
-    // ExpiredOptionBacktestService) fetches CE and PE back to back. DhanDataApiRateLimiter (see
-    // SendWithRateLimitRetryAsync below) is now what actually enforces Dhan's documented Data-API
-    // ceiling app-wide, so this is just extra, harmless pacing on top of that, kept mainly so a
-    // multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
+    // Spacing between successive chunk calls - a multi-month lookback can need several chunks per side, and CallerService
+    // (see ExpiredOptionBacktestService) fetches CE and PE back to back. DhanApiClient's pipeline (the shared
+    // DhanRestRateLimiter) is what enforces Dhan's Data API limit app-wide, so this is just extra, harmless pacing on top,
+    // kept so a multi-chunk backtest doesn't queue every one of its own chunks on the shared limiter at once.
     private static readonly TimeSpan ChunkDelay = TimeSpan.FromMilliseconds(350);
-    private const int MaxRateLimitRetries = 3;
-    // 0.5 / 1 / 2 s: Dhan's Data-API limit is per second, so half a second already clears most of the window.
-    private static TimeSpan RateLimitRetryDelay(int attempt) => TimeSpan.FromMilliseconds(500 << Math.Clamp(attempt, 0, 3));
-
-    // Bounds how long a single chunk call may hang waiting for Dhan before giving up - see
-    // DhanHistoricalDataService.CallTimeout's own doc comment for the full reasoning (same value,
-    // same rationale, kept as its own constant here rather than shared since these are two
-    // otherwise-independent classes).
-    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
 
     private readonly DhanApiClient _api;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
@@ -249,9 +238,13 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
                 LoadProgress.DhanCall();
                 LoadProgress.Info($"→ Dhan: {label}, {span.From:dd MMM}{(span.To != span.From ? $"..{span.To:dd MMM}" : "")}");
                 var clock = System.Diagnostics.Stopwatch.StartNew();
-                var (response, error) = await SendWithRateLimitRetryAsync(PayloadFor(span.From, span.To), context, cancellationToken, interactive);
-                if (response is null)
+                // DhanApiClient's pipeline takes the slot on Dhan's shared limit (in this call's lane), asks again after Dhan's
+                // "too many requests" and gives up after its DataCallTimeout from when the call went.
+                var response = await _api.SendAsync(HttpMethod.Post, RollingPath, PayloadFor(span.From, span.To), context, cancellationToken, interactive);
+                if (!response.Success)
                 {
+                    var error = response.ErrorMessage;
+                    response.Dispose();
                     LoadProgress.Error($"✗ Dhan: {label} - {error}");
                     _logger.LogWarning("Rolling option candle request failed for {Id} ({ExpiryFlag}+{ExpiryCode}, {Strike} {Side}, {From}..{To}) - {Error}",
                         underlyingSecurityId, expiryFlag, expiryCode, strike, drvOptionType, span.From, span.To, error);
@@ -318,61 +311,6 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
         }
 
         return bars.Where(InRange).ToList();
-    }
-
-    /// <summary>Sends one chunk, retrying with a backoff ONLY on Dhan's own rate-limit error - it
-    /// explicitly says "Try throttling API calls" (a condition DhanDataApiRateLimiter's own
-    /// per-second gate below now actively prevents rather than merely reduces, since Dhan's limit
-    /// is account-wide, not per-endpoint - this retry is the fallback for whatever narrow race
-    /// still slips past it, e.g. another process/instance sharing the same Dhan account), so
-    /// retrying that one specific failure is honoring Dhan's own instruction rather than giving up
-    /// on a request that would very likely succeed a couple of seconds later. Any other failure -
-    /// auth, a bad parameter, a genuine server error - returns immediately, unretried.
-    ///
-    /// Returns the live DhanApiResponse (caller disposes) on success rather than an already-read
-    /// JsonElement, since a JsonElement stops being valid the instant its own JsonDocument is
-    /// disposed - handing one back across this method's own return, after disposing here, would be
-    /// use-after-dispose.</summary>
-    private async Task<(DhanApiResponse? Response, string? Error)> SendWithRateLimitRetryAsync(
-        object payload, string context, CancellationToken cancellationToken, bool interactive)
-    {
-        for (var attempt = 0; ; attempt++)
-        {
-            // DhanApiClient takes this call's slot on Dhan's shared Data API limit (DhanRestRateLimiter) - in its lane.
-            // CallTimeout bounds a single call, separately from the caller's own cancellationToken -
-            // see DhanHistoricalDataService.CallTimeout's own doc comment for why this can't just be
-            // DhanApiClient's shared HttpClient.Timeout (that HttpClient is also used by live order
-            // placement) and why the catch below specifically checks the CALLER's own token rather
-            // than trusting "OperationCanceledException" alone to mean a real cancellation - a timeout
-            // firing here throws exactly the same exception type HttpClient uses for that too.
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(CallTimeout);
-            DhanApiResponse response;
-            try
-            {
-                response = await _api.SendAsync(HttpMethod.Post, RollingPath, payload, context, timeoutCts.Token, interactive);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
-                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
-            }
-            if (response.Success) return (response, null);
-
-            // Dhan's "too many requests" has already paused every Data API call (DhanApiClient noted it).
-            var isRateLimited = DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage);
-            var error = response.ErrorMessage;
-            response.Dispose();
-
-            if (!isRateLimited || attempt >= MaxRateLimitRetries) return (null, error);
-            LoadProgress.RateLimited();
-            LoadProgress.Retry();
-            LoadProgress.Warn($"⚠ Dhan rate limit - {error} - retry {attempt + 1}/{MaxRateLimitRetries} in {RateLimitRetryDelay(attempt).TotalSeconds:0.0} s");
-
-            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - waiting {Delay} before retrying.",
-                context, attempt + 1, MaxRateLimitRetries, RateLimitRetryDelay(attempt));
-            await Task.Delay(RateLimitRetryDelay(attempt), cancellationToken);
-        }
     }
 
     private static string SideKey(string drvOptionType) => string.Equals(drvOptionType, "PUT", StringComparison.OrdinalIgnoreCase) ? "pe" : "ce";

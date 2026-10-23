@@ -37,23 +37,7 @@ public sealed class DhanHistoricalDataService
     private const string OptionInstrument = "OPTIDX";
     private const string FuturesInstrument = "FUTIDX";
 
-    /// <summary>Bounds how long ANY single call to this endpoint may hang waiting for Dhan before
-    /// giving up - deliberately much shorter than HttpClient's own default ~100s request timeout,
-    /// which DhanApiClient's shared HttpClient does NOT override (that HttpClient is also used by
-    /// live order placement - DhanOrderClient/DhanSuperOrderClient/DhanPositionsClient - so this
-    /// stays scoped to a per-call CancellationTokenSource here instead of touching that shared
-    /// Timeout, which would affect those too).
-    ///
-    /// Added after a real deployment showed a page that "never loads": a genuinely slow/unresponsive
-    /// Dhan connection (network issue, or Dhan itself briefly unresponsive) let a single call hang
-    /// the full ~100s default before failing - and OiReplayService's own bounded concurrency (10 in
-    /// flight at once, across up to 44 calls for one day) meant a run of bad luck could stretch a
-    /// single page load past EIGHT MINUTES before ever producing an error. A much shorter, explicit
-    /// timeout per call turns that into "fails within about a minute with a clear message" instead.</summary>
-    private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
-
     private readonly DhanApiClient _api;
-    private const int MaxRateLimitRetries = 3;
     private readonly ILogger<DhanHistoricalDataService> _logger;
     private readonly DhanDataCache? _cache;
 
@@ -70,49 +54,6 @@ public sealed class DhanHistoricalDataService
 
     /// <summary>A cached response read back as Dhan's own (the parsing below cannot tell them apart).</summary>
     private static DhanApiResponse FromCache(JsonDocument doc) => new(true, HttpStatusCode.OK, doc, null);
-
-    /// <summary>Waits for a rate-limit permit, then sends the call under its own CallTimeout -
-    /// returning a (null Response, timeout Error) pair rather than letting the timeout escape as an
-    /// exception. This matters: DhanApiClient.SendOnceAsync's own catch clause deliberately excludes
-    /// OperationCanceledException (so a CALLER's real cancellation propagates rather than being
-    /// swallowed as a graceful "failed" result) - but HttpClient's OWN internal timeout ALSO throws
-    /// a TaskCanceledException (a kind of OperationCanceledException), which is indistinguishable at
-    /// that layer from a genuine cancellation. Left uncaught, that used to propagate all the way up
-    /// through OiReplayService's Task.WhenAll and out of the ASP.NET Core action with no exception
-    /// handler configured to catch it - exactly the silent, no-error hang this class exists to
-    /// prevent now. Checking cancellationToken.IsCancellationRequested (the CALLER's own token, not
-    /// the linked one this method creates) is what tells a genuine cancellation apart from this
-    /// method's own timeout firing.</summary>
-    private async Task<(DhanApiResponse? Response, string? Error)> SendDataApiCallAsync(
-        string path, object payload, string context, bool interactive, CancellationToken cancellationToken)
-    {
-        for (var attempt = 0; ; attempt++)
-        {
-            // DhanApiClient takes this call's slot on Dhan's shared Data API limit (DhanRestRateLimiter) - in its lane.
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(CallTimeout);
-            DhanApiResponse response;
-            try
-            {
-                response = await _api.SendAsync(HttpMethod.Post, path, payload, context, timeoutCts.Token, interactive);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            {
-                _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", CallTimeout.TotalSeconds, context);
-                return (null, $"Dhan did not respond within {CallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
-            }
-            // Dhan's rate limit: every Data-API call pauses (DhanApiClient noted it), then this one is asked again - up to
-            // MaxRateLimitRetries times, after 0.5 / 1 / 2 s - instead of failing the spot / futures of a day load.
-            if (response.Success || attempt >= MaxRateLimitRetries || !DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage))
-                return (response, null);
-            LoadProgress.RateLimited();
-            LoadProgress.Retry();
-            LoadProgress.Warn($"⚠ Dhan rate limit on {context} - {response.ErrorMessage} - retry {attempt + 1}/{MaxRateLimitRetries} in {0.5 * (1 << attempt):0.0} s");
-            response.Dispose();
-            _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - retrying.", context, attempt + 1, MaxRateLimitRetries);
-            await Task.Delay(TimeSpan.FromMilliseconds(500 << attempt), cancellationToken);
-        }
-    }
 
     /// <summary>Every candle Dhan has for [fromDay, toDay] inclusive (both IST calendar dates) -
     /// spans weekends/holidays fine, since Dhan simply has no data for those and they contribute
@@ -330,12 +271,9 @@ public sealed class DhanHistoricalDataService
         LoadProgress.DhanCall();
         LoadProgress.Info($"→ Dhan: {what}, {span.From:dd MMM}{(span.To != span.From ? $"..{span.To:dd MMM}" : "")}");
         var clock = System.Diagnostics.Stopwatch.StartNew();
-        var (response, timeoutError) = await SendDataApiCallAsync(IntradayPath, payloadFor(span.From, span.To), $"{what}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd}", interactive, cancellationToken);
-        if (response is null)
-        {
-            LoadProgress.Error($"✗ Dhan: {what} - {timeoutError}");
-            return (parts, timeoutError);
-        }
+        // DhanApiClient's pipeline takes the slot on Dhan's shared limit (in this call's lane), asks again after Dhan's "too
+        // many requests" and gives up after its DataCallTimeout from when the call went - a failure comes back as one.
+        var response = await _api.SendAsync(HttpMethod.Post, IntradayPath, payloadFor(span.From, span.To), $"{what}, {span.From:yyyy-MM-dd}..{span.To:yyyy-MM-dd}", cancellationToken, interactive);
         if (!response.Success)
         {
             LoadProgress.Error($"✗ Dhan: {what} - {response.ErrorMessage ?? $"HTTP {(int)response.StatusCode}"}");

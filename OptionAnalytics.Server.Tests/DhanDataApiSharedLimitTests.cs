@@ -19,7 +19,7 @@ public class DhanDataApiSharedLimitTests
     private static DhanDataApiRateLimiter DataLimiter() => new(Options5, NullLogger<DhanDataApiRateLimiter>.Instance);
 
     /// <summary>Records when each call reaches "Dhan"; answers success (or, `failFirst` times, `failStatus`).</summary>
-    private sealed class RecordingDhan(int failFirst = 0, HttpStatusCode failStatus = HttpStatusCode.Unauthorized) : HttpMessageHandler
+    private sealed class RecordingDhan(int failFirst = 0, HttpStatusCode failStatus = HttpStatusCode.Unauthorized, TimeSpan? answerAfter = null) : HttpMessageHandler
     {
         private readonly Stopwatch _clock = Stopwatch.StartNew();
         private int _failures = failFirst;
@@ -27,22 +27,23 @@ public class DhanDataApiSharedLimitTests
 
         public List<TimeSpan> TimesOf(string pathEnd) { lock (Calls) return Calls.Where(c => c.Path.EndsWith(pathEnd)).Select(c => c.At).OrderBy(t => t).ToList(); }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             lock (Calls) Calls.Add((_clock.Elapsed, request.RequestUri!.AbsolutePath));
+            if (answerAfter is { } wait) await Task.Delay(wait, cancellationToken);
             if (Interlocked.Decrement(ref _failures) >= 0)
-                return Task.FromResult(new HttpResponseMessage(failStatus)
+                return new HttpResponseMessage(failStatus)
                 {
                     Content = new StringContent(failStatus == HttpStatusCode.TooManyRequests
                         ? "{\"errorCode\":\"DH-904\",\"errorMessage\":\"Too many requests on server from single user breaching rate limits.\"}"
                         : "{\"errorCode\":\"DH-901\",\"errorMessage\":\"Invalid Token\"}", Encoding.UTF8, "application/json"),
-                });
+                };
             var path = request.RequestUri.AbsolutePath;
             var body = path.EndsWith("rollingoption") ? "{\"data\":{\"ce\":null,\"pe\":null}}"
                 : path.Contains("/charts/") ? "{\"open\":[],\"high\":[],\"low\":[],\"close\":[],\"volume\":[],\"timestamp\":[]}"
                 : path.EndsWith("/orders") && request.Method == HttpMethod.Post ? "{\"orderId\":\"1\",\"orderStatus\":\"PENDING\"}"
                 : "[]";
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         }
     }
 
@@ -138,43 +139,113 @@ public class DhanDataApiSharedLimitTests
     {
         var limiter = new DhanRestRateLimiter(DataLimiter());
         // Twenty data calls queued (about 4.4 s of them at 5 a second)...
-        var data = Enumerable.Range(0, 20).Select(_ => limiter.WaitAsync(DhanApiCategory.Data, true, CancellationToken.None)).ToList();
+        var data = Enumerable.Range(0, 20).Select(_ => limiter.AcquireAsync(DhanApiCategory.Data, true, CancellationToken.None).AsTask()).ToList();
         await Task.Delay(50);
         // ...an order and a positions read go straight away.
         var clock = Stopwatch.StartNew();
-        Assert.Null(await limiter.WaitAsync(DhanApiCategory.Order, true, CancellationToken.None));
-        Assert.Null(await limiter.WaitAsync(DhanApiCategory.NonTrading, true, CancellationToken.None));
+        Assert.True((await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)).IsAcquired);
+        Assert.True((await limiter.AcquireAsync(DhanApiCategory.NonTrading, true, CancellationToken.None)).IsAcquired);
         Assert.True(clock.Elapsed < TimeSpan.FromMilliseconds(100), $"waited {clock.Elapsed.TotalMilliseconds:0} ms");
         Assert.True(data.Count(t => t.IsCompleted) < 20);
     }
 
+    // .NET's sliding windows run on the real clock: the minute / hour / day windows are scaled down to milliseconds.
+    private static DhanRestRateLimiter Scaled(DhanRateWindow[]? orderRefused = null, DhanRateWindow[]? dataRefused = null) =>
+        new(DataLimiter(), DhanRateLimits.Dhan with { OrderRefused = orderRefused ?? DhanRateLimits.Dhan.OrderRefused, DataRefused = dataRefused ?? DhanRateLimits.Dhan.DataRefused });
+
+    private static string? ReasonOf(System.Threading.RateLimiting.RateLimitLease lease) =>
+        lease.TryGetMetadata(System.Threading.RateLimiting.MetadataName.ReasonPhrase, out var reason) ? reason : null;
+
     [Fact]
-    public async Task An_order_past_Dhan_s_minute_limit_is_refused_not_held()
+    public async Task An_order_past_Dhan_s_minute_limit_is_refused_at_once_not_held()
     {
-        var now = new DateTimeOffset(2026, 10, 23, 4, 0, 0, TimeSpan.Zero);
-        var limiter = new DhanRestRateLimiter(DataLimiter(), () => now);
-        // 240 orders over 48 s (5 a second - inside the per-second limit).
-        for (var i = 0; i < 240; i++)
-        {
-            Assert.Null(await limiter.WaitAsync(DhanApiCategory.Order, true, CancellationToken.None));
-            now = now.AddSeconds(0.2);
-        }
-        var refused = await limiter.WaitAsync(DhanApiCategory.Order, true, CancellationToken.None);
-        Assert.NotNull(refused);
-        Assert.Contains("250 a minute", refused);
-        // A minute after the first, there is room again.
-        now = now.AddSeconds(12.5);
-        Assert.Null(await limiter.WaitAsync(DhanApiCategory.Order, true, CancellationToken.None));
+        using var limiter = Scaled(orderRefused: new DhanRateWindow[] { new(3, TimeSpan.FromMilliseconds(800), 8, "250 a minute") });
+        for (var i = 0; i < 3; i++) Assert.True((await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)).IsAcquired);
+
+        var clock = Stopwatch.StartNew();
+        var refused = await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None);
+        Assert.False(refused.IsAcquired);
+        Assert.True(clock.Elapsed < TimeSpan.FromMilliseconds(100), "refused at once, not held");
+        Assert.Contains("250 a minute", ReasonOf(refused));
+        // Once the window has passed, orders go again.
+        await Task.Delay(1000);
+        Assert.True((await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)).IsAcquired);
     }
 
     [Fact]
-    public async Task The_data_day_cap_refuses_and_a_new_day_starts_afresh()
+    public async Task A_refused_order_uses_up_none_of_the_other_limits()
     {
-        var now = new DateTimeOffset(2026, 10, 23, 4, 0, 0, TimeSpan.Zero);
-        var limiter = new DhanRestRateLimiter(DataLimiter(), () => now) { DataToday = DhanRestRateLimiter.DataDayLimit };
-        Assert.Contains("100,000 a day", await limiter.WaitAsync(DhanApiCategory.Data, true, CancellationToken.None));
-        now = now.AddDays(1);
-        Assert.Null(await limiter.WaitAsync(DhanApiCategory.Data, true, CancellationToken.None));
+        using var limiter = Scaled(orderRefused: new DhanRateWindow[]
+        {
+            new(3, TimeSpan.FromMilliseconds(800), 8, "250 a minute"),
+            new(5, TimeSpan.FromSeconds(30), 30, "1000 an hour"),
+        });
+        for (var i = 0; i < 3; i++) Assert.True((await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)).IsAcquired);
+        // Ten refusals by the "minute" window...
+        for (var i = 0; i < 10; i++) Assert.Contains("250 a minute", ReasonOf(await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)));
+        await Task.Delay(1000);
+        // ...took nothing from the "hour": it still has its 2 left, then refuses.
+        for (var i = 0; i < 2; i++) Assert.True((await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)).IsAcquired);
+        Assert.Contains("1000 an hour", ReasonOf(await limiter.AcquireAsync(DhanApiCategory.Order, true, CancellationToken.None)));
+        Assert.Equal(5, limiter.Sent(DhanApiCategory.Order));
+    }
+
+    [Fact]
+    public async Task The_data_day_cap_refuses_through_the_client()
+    {
+        var dhan = new RecordingDhan();
+        using var limiter = Scaled(dataRefused: new DhanRateWindow[] { new(2, TimeSpan.FromSeconds(30), 30, "100,000 a day") });
+        var api = new DhanApiClient(new HttpClient(dhan), Options5, new DhanSession(Options5), NullLogger<DhanApiClient>.Instance, limiter);
+        for (var i = 0; i < 2; i++)
+            using (var ok = await api.SendAsync(HttpMethod.Post, "/charts/intraday", new { i }, "candles", CancellationToken.None)) Assert.True(ok.Success);
+
+        using var refused = await api.SendAsync(HttpMethod.Post, "/charts/intraday", new { i = 3 }, "candles", CancellationToken.None);
+        Assert.False(refused.Success);
+        Assert.Equal(HttpStatusCode.TooManyRequests, refused.StatusCode);
+        Assert.Contains("100,000 a day", refused.ErrorMessage);
+        Assert.Equal(2, dhan.Calls.Count); // never sent - and not retried as if Dhan had said "too many requests"
+    }
+
+    [Fact]
+    public async Task A_data_call_s_timeout_counts_from_when_it_is_sent_not_its_wait_for_a_slot()
+    {
+        // Eight chart calls at once: the last waits about 1.5 s for its slot (5 a second) - far past a 400 ms timeout.
+        var dhan = new RecordingDhan(answerAfter: TimeSpan.FromMilliseconds(50));
+        var api = new DhanApiClient(new HttpClient(dhan), Options5, new DhanSession(Options5), NullLogger<DhanApiClient>.Instance, new DhanRestRateLimiter(DataLimiter()))
+        {
+            DataCallTimeout = TimeSpan.FromMilliseconds(400),
+        };
+        var answers = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => api.SendAsync(HttpMethod.Post, "/charts/intraday", new { i }, "candles", CancellationToken.None)));
+        Assert.All(answers, a => Assert.True(a.Success, a.ErrorMessage));
+        foreach (var a in answers) a.Dispose();
+
+        // A Dhan that does not answer: the call fails once it has waited the timeout - a failed answer, not an exception.
+        var silent = new RecordingDhan(answerAfter: TimeSpan.FromSeconds(10));
+        var slowApi = new DhanApiClient(new HttpClient(silent), Options5, new DhanSession(Options5), NullLogger<DhanApiClient>.Instance, new DhanRestRateLimiter(DataLimiter()))
+        {
+            DataCallTimeout = TimeSpan.FromMilliseconds(400),
+        };
+        var clock = Stopwatch.StartNew();
+        using var timedOut = await slowApi.SendAsync(HttpMethod.Post, "/charts/intraday", new { i = 0 }, "candles", CancellationToken.None);
+        Assert.False(timedOut.Success);
+        Assert.Contains("did not respond within", timedOut.ErrorMessage);
+        Assert.InRange(clock.Elapsed, TimeSpan.FromMilliseconds(350), TimeSpan.FromSeconds(3));
+    }
+
+    [Fact]
+    public async Task A_chart_call_Dhan_rate_limits_is_sent_again_an_order_never_is()
+    {
+        var chartDhan = new RecordingDhan(failFirst: 1, failStatus: HttpStatusCode.TooManyRequests);
+        var charts = new DhanApiClient(new HttpClient(chartDhan), Options5, new DhanSession(Options5), NullLogger<DhanApiClient>.Instance, new DhanRestRateLimiter(DataLimiter()));
+        using (var candles = await charts.SendAsync(HttpMethod.Post, "/charts/intraday", new { i = 0 }, "candles", CancellationToken.None))
+            Assert.True(candles.Success);
+        Assert.Equal(2, chartDhan.Calls.Count);
+
+        var orderDhan = new RecordingDhan(failFirst: 1, failStatus: HttpStatusCode.TooManyRequests);
+        var orders = new DhanApiClient(new HttpClient(orderDhan), Options5, new DhanSession(Options5), NullLogger<DhanApiClient>.Instance, new DhanRestRateLimiter(DataLimiter()));
+        using (var order = await orders.SendAsync(HttpMethod.Post, "/orders", new { i = 0 }, "placing an order", CancellationToken.None))
+            Assert.False(order.Success);
+        Assert.Single(orderDhan.Calls); // sending an order twice could place it twice
     }
 
     [Fact]
