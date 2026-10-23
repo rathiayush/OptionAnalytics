@@ -78,7 +78,8 @@ When adding or changing a strategy:
   Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
-  (`DhanDataCacheTests.cs`). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
+  (`DhanDataCacheTests.cs`). Every Dhan Data API call (charts, rolling options, option chain, a retry) waits on the ONE
+  shared `DhanDataApiRateLimiter` - Dhan allows 5 a second for the whole account (`DhanDataApiSharedLimitTests.cs`). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
   the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
   What NSE answers for a PAST day (the contract list - `NseFuturesContractArchive` - and an expired contract's 1-minute bars - `NseChartHistory`) is kept on
   disk too (`NseDayStore`, `{DhanCachePath}/nse`), and after NSE does not answer it is not asked again for 10 minutes (`NseBackoff`) - callers fall back at once

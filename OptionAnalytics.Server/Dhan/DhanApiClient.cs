@@ -50,19 +50,25 @@ public sealed class DhanApiClient
     /// configured, or Dhan itself down) still fails within a few seconds rather than hanging every
     /// caller for the full ~130s rate-limit cooldown DhanTotpAutoRenewalHostedService's OWN retry
     /// loop uses for that separate, slower case.</summary>
-    private static readonly TimeSpan AuthRetryDelay = TimeSpan.FromSeconds(3);
+    internal TimeSpan AuthRetryDelay { get; init; } = TimeSpan.FromSeconds(3);
 
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly ILogger<DhanApiClient> _logger;
+    // Dhan's account-wide Data API limit (5 calls a second) - the ONE limiter every data call waits on. The callers take
+    // the first attempt's slot themselves (in their own interactive / background lane); a data call sent again here, after
+    // a stale token, takes another - so no call reaches Dhan's data endpoints without one.
+    private readonly DhanDataApiRateLimiter? _dataApiLimiter;
+    internal DhanDataApiRateLimiter? DataApiLimiter => _dataApiLimiter;
 
-    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger)
+    public DhanApiClient(HttpClient httpClient, IOptions<DhanOptions> options, DhanSession session, ILogger<DhanApiClient> logger, DhanDataApiRateLimiter? dataApiLimiter = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _session = session;
         _logger = logger;
+        _dataApiLimiter = dataApiLimiter;
     }
 
     public bool HasSession => _session.IsAuthenticated;
@@ -147,6 +153,8 @@ public sealed class DhanApiClient
                 "Dhan call ({Context}) hit a stale/invalid token - retrying in {Seconds}s to give a fresh one a chance to arrive (attempt {Attempt}/{Max}).",
                 context, AuthRetryDelay.TotalSeconds, attempt, MaxAuthRetryAttempts);
             await Task.Delay(AuthRetryDelay, cancellationToken);
+            // The retry is another call on Dhan's Data API limit: it waits for its own slot like every other.
+            if (IsDataApi(path) && _dataApiLimiter is not null) await _dataApiLimiter.WaitForPermitAsync(interactive: true, cancellationToken);
         }
     }
 
