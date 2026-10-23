@@ -3811,7 +3811,9 @@ export default function OiReplayPage() {
       description: <span style={{ fontSize: 12 }}>{alert.message}</span>,
     })
   }
-  const handleLiveReconnected = () => { if (isLive) load() }
+  // Ticks may have been missed while disconnected - reload today once. Not when the last load FAILED (the error on
+  // screen): a failed load is never asked again on its own (no loop of a failing Dhan call) - Load day / Clear cache does.
+  const handleLiveReconnected = () => { if (isLive && !error && !loading) load() }
   // Today's live view follows the index / expiry picked - switching either loads it live at once, no
   // Go Live / Load day click needed (the page's first load is the mount effect's; a replayed day is
   // never reloaded by this).

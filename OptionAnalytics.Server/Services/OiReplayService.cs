@@ -52,11 +52,8 @@ public sealed class OiReplayService
     /// default CollectorOptions.StrikesEachSide, so a band this wide is exactly what a normal local
     /// collector setup has actually backfilled.</summary>
     private const int StrikeBandSteps = 10;
-    /// <summary>How many more times a strike series that came back empty is asked for, and the pause before each round.</summary>
-    private const int MissingSeriesRetryRounds = 2;
     /// <summary>How long a day's load waits for its futures (started with the options) before showing the day without them.</summary>
     internal static readonly TimeSpan FuturesBudget = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan MissingSeriesRetryDelay = TimeSpan.FromSeconds(2);
 
     /// <summary>The only expiry cycle this page ever reads - see this class's own doc comment.</summary>
     private const int NearestExpiryCode = 1;
@@ -322,27 +319,10 @@ public sealed class OiReplayService
         }
         await Task.WhenAll(ceTasks.Concat(peTasks));
 
-        // A strike series that came back empty (a Dhan error - usually its rate limit - after its own retries) is asked
-        // again, one at a time after a pause, rather than leaving that strike blank for the whole day.
+        // A strike series that came back empty (a Dhan error, or no data) is NOT asked again: a failed call is not repeated
+        // in a loop (Dhan support flagged loops) - the strike stays blank and the next load asks once more.
         var ceResults = ceTasks.Select(t => t.Result).ToList();
         var peResults = peTasks.Select(t => t.Result).ToList();
-        for (var round = 0; round < MissingSeriesRetryRounds; round++)
-        {
-            var missing = Enumerable.Range(0, ceResults.Count).Where(i => ceResults[i].Count == 0).Select(i => (i, Ce: true))
-                .Concat(Enumerable.Range(0, peResults.Count).Where(i => peResults[i].Count == 0).Select(i => (i, Ce: false))).ToList();
-            if (missing.Count == 0) break;
-            LoadProgress.Stage($"asking again for {missing.Count} empty series (round {round + 1} of {MissingSeriesRetryRounds})");
-            LoadProgress.Warn($"{missing.Count} series came back empty - asking again, one at a time (round {round + 1} of {MissingSeriesRetryRounds}).");
-            await Task.Delay(MissingSeriesRetryDelay, cancellationToken);
-            foreach (var (i, ce) in missing)
-            {
-                var token = ExpiredOptionBacktestService.StrikeToken(i - StrikeBandSteps);
-                LoadProgress.Retry();
-                var points = await FetchPointsAsync(token, ce ? "CALL" : "PUT");
-                if (points.Count > 0) LoadProgress.Recovered();
-                if (ce) ceResults[i] = points; else peResults[i] = points;
-            }
-        }
 
         var cePoints = ceResults.SelectMany(p => p).ToList();
         var pePoints = peResults.SelectMany(p => p).ToList();
@@ -629,15 +609,17 @@ public sealed class OiReplayService
         Task<DhanSpotInstrument?> ResolveInstrumentAsync() => Task.FromResult(instrument);
 
         IReadOnlyList<CandleWithVolume> foundBars = Array.Empty<CandleWithVolume>();
+        string? dhanError = null;
         var resolvedDate = await ResolvePreviousTradingDayAsync(onOrBeforeDate, async candidate =>
         {
-            var (bars, _) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            var (bars, error) = await FetchSpotBarsWithVolumeAsync(underlying, candidate, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+            dhanError = bars.Count == 0 ? error : null;
             if (bars.Count == 0) return false;
             foundBars = bars;
             return true;
-        });
+        }, () => dhanError is not null);
         if (resolvedDate is null)
-            return VolumeProfileResult.Failed(underlying, $"No previous trading day data found for {underlying} in the last week.");
+            return VolumeProfileResult.Failed(underlying, dhanError ?? $"No previous trading day data found for {underlying} in the last week.");
         return ComputeVolumeProfile(underlying, resolvedDate.Value, foundBars);
     }
 
@@ -692,14 +674,16 @@ public sealed class OiReplayService
         Func<DateOnly, Task<IReadOnlyList<DhanFuturesInstrument>>> listedOnAsync, NseChartHistory? nse, CancellationToken cancellationToken)
     {
         PastFuturesCandles.Result? found = null;
+        var failed = false;
         var day = await ResolvePreviousTradingDayAsync(date, async candidate =>
         {
             var listed = contract.Expiry < IstClock.Today() ? await listedOnAsync(candidate) : Array.Empty<DhanFuturesInstrument>();
             var fetched = await PastFuturesCandles.FetchAsync(historical, contract, listed, candidate, cancellationToken, nse);
+            failed = fetched.Bars.Count == 0 && fetched.Error is not null;
             if (fetched.Bars.Count == 0) return false;
             found = fetched;
             return true;
-        });
+        }, () => failed);
         return day is { } d && found is not null ? (d, found) : null;
     }
 
@@ -717,14 +701,17 @@ public sealed class OiReplayService
     /// hasDataAsync is the caller's own "does this specific date have anything" check - production
     /// code fetches for real; a test fakes specific dates as holidays with no network/DB at all.
     /// Starts at onOrBeforeDate - 1 (the day BEFORE whatever is currently loaded), returns the first
-    /// date hasDataAsync confirms, or null once attempts are exhausted with nothing found.</summary>
-    internal static async Task<DateOnly?> ResolvePreviousTradingDayAsync(DateOnly onOrBeforeDate, Func<DateOnly, Task<bool>> hasDataAsync)
+    /// date hasDataAsync confirms, or null once attempts are exhausted with nothing found.
+    /// <paramref name="failed"/>: the candidate just asked FAILED (a Dhan error, not an empty day) - the walk stops there
+    /// rather than asking Dhan day after day in a loop of failing calls (a holiday answers empty and is stepped over).</summary>
+    internal static async Task<DateOnly?> ResolvePreviousTradingDayAsync(DateOnly onOrBeforeDate, Func<DateOnly, Task<bool>> hasDataAsync, Func<bool>? failed = null)
     {
         var candidate = onOrBeforeDate.AddDays(-1);
         for (var attempts = 0; attempts < PreviousTradingDayMaxAttempts; attempts++, candidate = candidate.AddDays(-1))
         {
             if (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
             if (await hasDataAsync(candidate)) return candidate;
+            if (failed?.Invoke() == true) return null;
         }
         return null;
     }

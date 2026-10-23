@@ -81,4 +81,18 @@ public sealed class PreviousTradingDayResolutionTests
         Assert.True(checkedDates.Count <= 7);
         Assert.DoesNotContain(checkedDates, d => d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
     }
+
+    [Fact]
+    public async Task ResolvePreviousTradingDayAsync_AFailedCall_StopsTheWalkInsteadOfAskingDayAfterDay()
+    {
+        var checkedDates = new List<DateOnly>();
+        var result = await OiReplayService.ResolvePreviousTradingDayAsync(Monday, date =>
+        {
+            checkedDates.Add(date);
+            return Task.FromResult(false);
+        }, () => true); // every call failed (a Dhan error, not an empty holiday)
+
+        Assert.Null(result);
+        Assert.Equal(new[] { Friday }, checkedDates);
+    }
 }

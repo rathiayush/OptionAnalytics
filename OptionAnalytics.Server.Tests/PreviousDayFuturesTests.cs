@@ -43,6 +43,16 @@ public sealed class PreviousDayFuturesTests
     }
 
     [Fact]
+    public async Task A_failed_Dhan_call_is_not_followed_by_the_days_before()
+    {
+        // Monday 19 Oct fails (Dhan DH-905): no walk back to Friday - a failing call is not repeated day after day.
+        var (historical, asked) = Dhan(new[] { new DateOnly(2026, 10, 16) }, failing: new[] { new DateOnly(2026, 10, 19) });
+
+        Assert.Null(await OiReplayService.PreviousDayFuturesBarsAsync(historical, Live, new DateOnly(2026, 10, 20), NoneListed, null, CancellationToken.None));
+        Assert.Equal(new[] { "2026-10-19" }, asked);
+    }
+
+    [Fact]
     public async Task Nothing_in_the_last_week_is_null()
     {
         var (historical, _) = Dhan();
@@ -51,21 +61,28 @@ public sealed class PreviousDayFuturesTests
     }
 
     // A fake Dhan with two 1-minute bars on each of `traded` (asked dates recorded) and none on any other day.
-    private static (DhanHistoricalDataService Historical, List<string> Asked) Dhan(params DateOnly[] traded)
+    private static (DhanHistoricalDataService Historical, List<string> Asked) Dhan(params DateOnly[] traded) => Dhan(traded, failing: Array.Empty<DateOnly>());
+
+    private static (DhanHistoricalDataService Historical, List<string> Asked) Dhan(DateOnly[] traded, DateOnly[] failing)
     {
         var asked = new List<string>();
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c" });
-        var api = new DhanApiClient(new HttpClient(new Handler(traded.ToHashSet(), asked)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
+        var api = new DhanApiClient(new HttpClient(new Handler(traded.ToHashSet(), failing.ToHashSet(), asked)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
         return (new DhanHistoricalDataService(api, NullLogger<DhanHistoricalDataService>.Instance), asked);
     }
 
-    private sealed class Handler(HashSet<DateOnly> traded, List<string> asked) : HttpMessageHandler
+    private sealed class Handler(HashSet<DateOnly> traded, HashSet<DateOnly> failing, List<string> asked) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(cancellationToken))!;
             var day = DateOnly.ParseExact(body["fromDate"]!.ToString()[..10], "yyyy-MM-dd", CultureInfo.InvariantCulture);
             lock (asked) asked.Add($"{day:yyyy-MM-dd}");
+            if (failing.Contains(day))
+                return new HttpResponseMessage(HttpStatusCode.BadRequest)
+                {
+                    Content = new StringContent("{\"errorType\":\"Input_Exception\",\"errorCode\":\"DH-905\",\"errorMessage\":\"Missing required fields, bad values for parameters etc.\"}", Encoding.UTF8, "application/json"),
+                };
             var ts = new DateTimeOffset(day.ToDateTime(new TimeOnly(9, 15)), IstClock.Offset).ToUnixTimeSeconds();
             JsonNode json = traded.Contains(day)
                 ? new JsonObject { ["open"] = new JsonArray(100, 101), ["high"] = new JsonArray(102, 103), ["low"] = new JsonArray(99, 100), ["close"] = new JsonArray(101, 102), ["volume"] = new JsonArray(10, 20), ["timestamp"] = new JsonArray(ts, ts + 60) }

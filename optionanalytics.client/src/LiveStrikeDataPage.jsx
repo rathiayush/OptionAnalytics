@@ -150,7 +150,8 @@ export default function LiveStrikeDataPage() {
   // A dropped-then-restored connection can miss ticks entirely - re-seed IV to resync rather than
   // trusting whatever the tape already accumulated (the tape itself is a pure log, so it just keeps
   // whatever it already showed - only the IV seed and strike list need refreshing).
-  const connectionState = useOiLiveHub(null, handleTick, loadSeed, null, null, null, underlying, expiryFlag)
+  // On a reconnect the seed is asked again - not after it failed (a failed load is never repeated on its own).
+  const connectionState = useOiLiveHub(null, handleTick, () => { if (!seedError) loadSeed() }, null, null, null, underlying, expiryFlag)
 
   const displayedTicks = ticks.filter(
     (t) => (strikeFilter === 'ALL' || t.strike === strikeFilter) && (sideFilter === 'ALL' || t.side === sideFilter),
