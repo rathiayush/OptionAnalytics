@@ -6,6 +6,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
+import { bidShare, heatmapPriceRange } from './orderFlowMath.js'
 
 const { Text } = Typography
 
@@ -657,17 +658,13 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       const bestAsk = c.asks.length ? Math.min(...c.asks.map((a) => a[0])) : null
       return bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : bestBid ?? bestAsk
     })
-    let hi = -Infinity
-    let lo = Infinity
+    // Keep the view readable on a trending day - about 160 rows centred on the latest mid - but never cut the latest
+    // book: all of its levels (200 a side on the full depth) stay in view.
+    const range = heatmapPriceRange(visible, step, mids.filter((m) => m != null).at(-1))
+    if (!range) return null
+    const { hi, lo } = range
     const quantities = []
-    for (const c of visible) {
-      for (const [p, q] of c.bids) { lo = Math.min(lo, p); hi = Math.max(hi, p); quantities.push(q) }
-      for (const [p, q] of c.asks) { lo = Math.min(lo, p); hi = Math.max(hi, p); quantities.push(q) }
-    }
-    if (!Number.isFinite(hi)) return null
-    // Keep the view readable on a trending day: at most 160 rows, centred on the latest mid.
-    const lastMid = mids.filter((m) => m != null).at(-1) ?? (hi + lo) / 2
-    if ((hi - lo) / step > 160) { hi = lastMid + 80 * step; lo = lastMid - 80 * step }
+    for (const c of visible) for (const side of [c.bids, c.asks]) for (const [, q] of side) quantities.push(q)
     quantities.sort((a, b) => a - b)
     // Linear against the 98th percentile: ordinary liquidity stays blue, walls stand out hot.
     const cap = quantities[Math.floor(quantities.length * 0.98)] || 1
@@ -990,10 +987,38 @@ export function CumulativeDeltaChart({ bars, dayKey, lotSize, showLots, height =
 
 // The live book: offers above, bids below, each row's quantity as a bar; walls (far larger than the
 // rest of the book) highlighted, and prices with a live iceberg tagged.
-export function BookLadder({ book, walls, icebergPrices, lotSize, showLots, maxRows = 20 }) {
+// The bid share of the book at each depth (top 20, top 50, all of it) - the lean near the price against through the book.
+function DepthShares({ book }) {
+  const deepest = Math.max(book?.bids?.length ?? 0, book?.asks?.length ?? 0)
+  const depths = [20, 50, deepest].filter((d, i, all) => d > 0 && d <= deepest && all.indexOf(d) === i)
+  const parts = depths.map((d) => ({ d, share: bidShare(book, d) })).filter((p) => p.share != null)
+  if (parts.length < 2) return null
+  return (
+    <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 2 }}>
+      Bids share by depth -{' '}
+      {parts.map((p, i) => (
+        <span key={p.d}>
+          {i > 0 ? ' · ' : ''}{p.d === deepest && p.d > 50 ? `all ${p.d}` : `top ${p.d}`}{' '}
+          <span style={{ color: p.share >= 0.55 ? UP_COLOR : p.share <= 0.45 ? DOWN_COLOR : AXIS_COLOR, fontWeight: 600 }}>{Math.round(p.share * 100)}%</span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
+export function BookLadder({ book, walls, icebergPrices, lotSize, showLots, maxRows = 20, height = null }) {
   const asks = (book?.asks ?? []).slice(0, maxRows)
   const bids = (book?.bids ?? []).slice(0, maxRows)
   const max = Math.max(1, ...asks.map((l) => l.quantity), ...bids.map((l) => l.quantity))
+  // Scrollable (`height`): opened on the spread, and back on it when the number of rows changes.
+  const scrollRef = useRef(null)
+  const spreadRef = useRef(null)
+  const hasBook = asks.length > 0 || bids.length > 0
+  useEffect(() => {
+    const box = scrollRef.current
+    const spread = spreadRef.current
+    if (box && spread) box.scrollTop = spread.offsetTop - box.offsetTop - box.clientHeight / 2
+  }, [maxRows, height, hasBook])
   if (!asks.length && !bids.length) return <Text type="secondary">No market depth yet.</Text>
   const totalBid = bids.reduce((s, l) => s + l.quantity, 0)
   const totalAsk = asks.reduce((s, l) => s + l.quantity, 0)
@@ -1019,13 +1044,16 @@ export function BookLadder({ book, walls, icebergPrices, lotSize, showLots, maxR
 
   return (
     <div>
-      {[...asks].reverse().map((l) => row(l, 'ask'))}
-      <div style={{ borderTop: `1px solid ${BORDER_COLOR}`, margin: '3px 0' }} />
-      {bids.map((l) => row(l, 'bid'))}
+      <div ref={scrollRef} style={height ? { maxHeight: height, overflowY: 'auto', position: 'relative' } : undefined}>
+        {[...asks].reverse().map((l) => row(l, 'ask'))}
+        <div ref={spreadRef} style={{ borderTop: `1px solid ${BORDER_COLOR}`, margin: '3px 0' }} />
+        {bids.map((l) => row(l, 'bid'))}
+      </div>
       <div style={{ fontSize: 11, color: AXIS_COLOR, marginTop: 6 }}>
-        Shown depth - bids {formatVolume(totalBid, lotSize, showLots)} vs offers {formatVolume(totalAsk, lotSize, showLots)}
+        Shown depth ({Math.max(asks.length, bids.length)} rows) - bids {formatVolume(totalBid, lotSize, showLots)} vs offers {formatVolume(totalAsk, lotSize, showLots)}
         {totalBid + totalAsk > 0 ? ` (${Math.round((totalBid / (totalBid + totalAsk)) * 100)}% bids)` : ''} · right column = orders
       </div>
+      <DepthShares book={book} />
     </div>
   )
 }

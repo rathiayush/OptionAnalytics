@@ -50,7 +50,7 @@ function scenario(dir, o = {}) {
   const bars = mkBars(120, (m) => ({ c: level, ...(m >= 118 ? flow : {}), absorption: m === 119 && o.absorbed ? [{ side: dir > 0 ? 'sell' : 'buy', price: level }] : [] }))
   const bids = o.bids ?? (dir > 0 ? 650 : 350)
   const setups = evaluateStrategies({ includeRetired: true,  nowMs: now, price: level, bars, minuteBars: bars, prints: o.estimated ? null : tapeWith(now, dir > 0 ? 60 : 40),
-    book: { bids: [{ quantity: bids }], asks: [{ quantity: 1000 - bids }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi: ctx, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null })
+    book: o.book ?? { bids: [{ quantity: bids }], asks: [{ quantity: 1000 - bids }] }, liquidity: [], pullStack: [], sweeps: [], icebergs: [], oi: ctx, estimated: !!o.estimated, lotSize: 75, bigLots: 10, profile: null })
   return { s: setups.find((x) => x.id === 'suddenWall'), all: setups }
 }
 const show = ({ s, all }) => JSON.stringify(s ? { side: s.side, entry: s.entry, stop: +s.stop.toFixed(1), target: +s.target.toFixed(1), conf: s.confidence, checks: s.checks } : all.map((x) => `${x.id}:${x.side}`))
@@ -65,6 +65,15 @@ check('not a steady build (same add, at the same pace for the last hour)', !scen
 check('not a small add (1% in 5 min)', !scenario(1, { wall: (m) => (m <= 115 ? 3e6 : 3e6 + (m - 115) * 6000) }).s)
 check('not without the book leaning (bids 52%)', !scenario(1, { bids: 520 }).s)
 check('not with the book leaning against (bids 35%)', !scenario(1, { bids: 350 }).s)
+// The DOM read is the WHOLE book (200 levels a side on Dhan's full depth), not its top 20 levels.
+const deepBook = (top, deep) => ({
+  bids: Array.from({ length: 200 }, (_, i) => ({ price: 22759.9 - i * 0.1, quantity: i < 20 ? top[0] : deep[0] })),
+  asks: Array.from({ length: 200 }, (_, i) => ({ price: 22760 + i * 0.1, quantity: i < 20 ? top[1] : deep[1] })),
+})
+const deepWith = scenario(1, { book: deepBook([100, 100], [150, 50]) })
+check('fires on a book leaning up through its depth though the top 20 levels are even (bids 72.5% of 200 levels)',
+  deepWith.s?.side === 'LONG' && /bids 73% of the whole book/.test(deepWith.s.checks.DOM), show(deepWith))
+check('not when the top 20 levels lean up (65%) but the whole book leans down (bids 29%)', !scenario(1, { book: deepBook([130, 70], [50, 150]) }).s)
 check('not when calls are written as hard at the money (a straddle)', !scenario(1, { straddle: true }).s)
 check('not when it is not the wall (a much bigger put strike next to it)', !scenario(1, { biggerWall: true }).s)
 check('not when price is far above the wall (index 100 pts over it)', !scenario(1, { level: 22860 }).s)

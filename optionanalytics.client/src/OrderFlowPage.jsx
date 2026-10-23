@@ -471,6 +471,10 @@ export default function OrderFlowPage() {
   }, [prevSession.data])
   const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
+  // The Market depth card's rows (20 / 50 / 100 / 200 a side, remembered) - only how much of the book is SHOWN: the
+  // live push and a replayed day both carry the whole book (Dhan's 200 levels on NSE futures), and the walls, the bid
+  // shares and the strategies read all of it.
+  const [depthRows, setDepthRows] = usePersistedState('optionanalytics.orderFlow.depthRows', 20)
   const walls = useMemo(() => findWalls(view?.book), [view?.book])
   const activeIcebergs = useMemo(() => new Set((view?.icebergs ?? []).filter((i) => !i.endedAt).map((i) => i.price)), [view?.icebergs])
   // Each heavy iceberg is sent once, the moment its traded quantity reaches the threshold (kept per day, so
@@ -908,10 +912,19 @@ export default function OrderFlowPage() {
           <Col xs={24} xl={7}>
             <Space direction="vertical" size={16} style={{ width: '100%' }}>
               <OrderFlowRead bias={bias} />
-              <Card size="small" title={`Market depth${meta && !estimated ? ` (${meta.depthLevels} levels)` : ''}`}>
+              <Card
+                size="small" title={`Market depth${meta && !estimated ? ` (${meta.depthLevels} levels)` : ''}`}
+                extra={!estimated && (
+                  <Tooltip title="Rows a side shown. The whole book (Dhan's 200 levels on NSE futures) is always read - walls, bid shares and the strategies use all of it.">
+                    <Select size="small" value={depthRows} onChange={setDepthRows} style={{ width: 96 }}
+                      options={[20, 50, 100, 200].map((n) => ({ value: n, label: `${n} rows` }))} />
+                  </Tooltip>
+                )}
+              >
+                {!estimated && !isReplay && meta && <DhanDepthReceived meta={meta} />}
                 {estimated
                   ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No market depth for an estimated day - Dhan keeps no depth history." />
-                  : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} />}
+                  : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} maxRows={depthRows} height={depthRows > 20 ? 440 : null} />}
               </Card>
               <TapeCard
                 prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}
@@ -980,12 +993,71 @@ const HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-di
 /** Which market depth the page has: the book that has ARRIVED (meta.depthLevels) and, live, the
  *  connection the contract is on (meta.depthFeed) - so a 200-level connection that is open but has no
  *  book yet (market closed) or that Dhan refused is told apart from a contract with no deeper depth. */
+// What Dhan is actually sending for this contract's book, side by side: the feed (200 / 20 levels, or the market
+// feed's 5), the rows that arrived (the 200-level feed sends up to 200 - fewer when that side of the book is thinner),
+// the prices they span, how often a side arrives, and how long ago - with the connection's note when it is not deeper.
+function DhanDepthReceived({ meta }) {
+  const rx = meta.received
+  const feed = meta.depthFeed
+  // Re-drawn every second, so "ago" keeps counting when no book arrives.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const fmt = (p) => (p == null ? '–' : p.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }))
+  const ago = (at) => {
+    if (!at) return 'never'
+    const s = Math.max(0, (now - new Date(at).getTime()) / 1000)
+    return s < 60 ? `${s.toFixed(s < 10 ? 1 : 0)} s ago` : `${Math.round(s / 60)} min ago`
+  }
+  const feedName = (n) => (n >= 200 ? '200-level' : n >= 20 ? '20-level' : 'market feed (5)')
+  const side = (label, rows, feedLevels, best, deepest, quantity, at, color) => (
+    <div style={{ lineHeight: 1.5 }}>
+      <Text strong style={{ color, fontSize: 12 }}>{label}</Text>{' '}
+      <Text strong style={{ fontSize: 12 }}>{rows} rows</Text>{' '}
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        {feedName(feedLevels)} · {fmt(best)} → {fmt(deepest)}
+        {best != null && deepest != null ? ` (${Math.abs(best - deepest).toFixed(2)} pts)` : ''}
+        {' · '}{quantity.toLocaleString('en-IN')} qty · {ago(at)}
+      </Text>
+    </div>
+  )
+  const stale = feed && rx && Math.max(rx.bidFeed, rx.askFeed) < feed.levels
+  return (
+    <div aria-label="Depth Dhan is sending" style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', borderRadius: 6, background: 'rgba(127,127,127,0.08)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+        <Text strong style={{ fontSize: 12 }}>Dhan is sending</Text>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {feed ? `${feed.levels}-level feed ${feed.connected ? 'connected' : 'not connected'}` : 'feed state unknown'}
+          {rx ? ` · ${rx.packetsPerMinute} book updates/min` : ''}
+        </Text>
+      </div>
+      {rx
+        ? (
+            <>
+              {side('Bids', rx.bidRows, rx.bidFeed, rx.bestBid, rx.deepestBid, rx.bidQuantity, rx.bidAt, UP_COLOR)}
+              {side('Asks', rx.askRows, rx.askFeed, rx.bestAsk, rx.deepestAsk, rx.askQuantity, rx.askAt, DOWN_COLOR)}
+            </>
+          )
+        : <Text type="secondary">No book has arrived yet - Dhan streams it while the market trades (09:15-15:30 IST).</Text>}
+      {(stale || feed?.note) && (
+        <Text type={stale || !feed.connected ? 'warning' : 'secondary'} style={{ display: 'block', marginTop: 2 }}>
+          {stale ? `The ${feed.levels}-level book is not arriving - showing the ${feedName(Math.max(rx.bidFeed, rx.askFeed))} meanwhile. ` : ''}
+          {feed?.note ?? ''}
+        </Text>
+      )}
+    </div>
+  )
+}
+
 function DepthBadge({ meta, live }) {
   const feed = live ? meta.depthFeed : null
   const got = meta.depthLevels
   const last = feed?.lastBookAt ? ` Last book ${HHMMSS.format(new Date(feed.lastBookAt))} IST.` : ''
+  const rx = live ? meta.received : null
   let color = got >= 200 ? 'green' : got >= 20 ? 'blue' : 'orange'
-  let label = `${got}-level depth`
+  let label = `${got}-level depth${rx ? ` · ${rx.bidRows} × ${rx.askRows} rows` : ''}`
   let tip = got >= 200 ? "Dhan's full market depth: 200 levels a side." : got >= 20 ? "Dhan's 20-level depth." : 'The 5 levels in each market feed packet.'
   if (feed && feed.levels > got) {
     if (feed.connected) {

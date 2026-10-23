@@ -67,7 +67,7 @@ public sealed class OrderFlowHistory
                 var snap = engine.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)engine.LotSize, heatmapColumns, heatmapRowSize);
                 return new Result(snap with
                 {
-                    Meta = snap.Meta with { DepthLevels = 0, DepthFeed = null },
+                    Meta = snap.Meta with { DepthLevels = 0, DepthFeed = null, Received = null },
                     Source = "truedata",
                     Note = $"Rebuilt from TrueData's tick history ({rebuilt.Symbol}): every tick's trade classified against the best bid / ask before it - footprint, delta and tape; TrueData has no NSE market depth, so no heatmap or DOM.",
                 }, null);

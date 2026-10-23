@@ -301,10 +301,46 @@ public sealed class OrderFlowEngineTests
         engine.OnDepth(new DepthSidePacket(35001, 2, true, levels, 200), T0);
 
         Assert.Equal(200, engine.Live().Meta.DepthLevels);
-        Assert.Equal(OrderFlowEngine.LiveBookLevels, engine.Live().Book.Bids.Count);
+        // The live push carries the whole book - the strategies read all 200 levels, not a top slice.
+        Assert.Equal(200, engine.Live().Book.Bids.Count);
+        Assert.Equal(22700.05m, engine.Live().Book.Bids[^1].Price);
         Assert.Equal(200, engine.Dom().Book.Bids.Count);
         // The live heatmap column: 22700.05-22710 in 0.5-point rows is rows 22700 to 22710.
         Assert.Equal(21, engine.Live().Heat!.Bids.Count);
+    }
+
+    [Fact]
+    public void Meta_SaysWhatDepthDhanActuallySent()
+    {
+        var engine = NewEngine();
+        Assert.Null(engine.Live().Meta.Received);
+
+        // The market feed's 5 levels first, then the 200-level feed: 200 bid rows, a thinner ask side of 143 rows.
+        var five = Enumerable.Range(0, 5).Select(i => new DepthLevel(22709.95m - i * 0.05m, 75, 1)).ToArray();
+        engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m) with { Bids = five, Asks = five.Select(l => l with { Price = l.Price + 0.1m }).ToArray() }, T0);
+        var received = engine.Live().Meta.Received!;
+        Assert.Equal((5, 5, 5, 5, 0), (received.BidRows, received.AskRows, received.BidFeed, received.AskFeed, received.PacketsPerMinute));
+
+        var bids = Enumerable.Range(0, 200).Select(i => new DepthLevel(22710m - i * 0.05m, 75, 1)).ToArray();
+        var asks = Enumerable.Range(0, 143).Select(i => new DepthLevel(22710.05m + i * 0.05m, 150, 2)).ToArray();
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, bids, 200), T0.AddSeconds(1));
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, asks, 200), T0.AddSeconds(2));
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, bids, 200), T0.AddSeconds(3));
+        received = engine.Live().Meta.Received!;
+        Assert.Equal((200, 143, 200, 200), (received.BidRows, received.AskRows, received.BidFeed, received.AskFeed));
+        Assert.Equal((22710m, 22700.05m, 22710.05m, 22717.15m), (received.BestBid, received.DeepestBid, received.BestAsk, received.DeepestAsk));
+        Assert.Equal((200L * 75, 143L * 150), (received.BidQuantity, received.AskQuantity));
+        Assert.Equal(T0.AddSeconds(3), received.BidAt);
+        Assert.Equal(T0.AddSeconds(2), received.AskAt);
+        Assert.Equal(3, received.PacketsPerMinute);
+        // A fresh 200-level side is not replaced by the market feed's 5 levels.
+        engine.OnTick(Tick(22710m, 1000, 22709.95m, 22710m) with { Bids = five }, T0.AddSeconds(4));
+        Assert.Equal((200, 200), (engine.Live().Meta.Received!.BidRows, engine.Live().Meta.Received!.BidFeed));
+
+        // Packets older than a minute drop out of the rate: at 70 s only that packet is within the minute.
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, bids, 200), T0.AddSeconds(62));
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, bids, 200), T0.AddSeconds(70));
+        Assert.Equal(2, engine.Live().Meta.Received!.PacketsPerMinute); // 62 s and 70 s; 1-3 s are over a minute old
     }
 
     [Fact]

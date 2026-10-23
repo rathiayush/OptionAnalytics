@@ -54,8 +54,8 @@ export function applyOrderFlowPush(prev, payload, rowSize) {
   const sweeps = new Map((prev.sweeps ?? []).map((w) => [w.id, w]))
   for (const w of payload.sweeps ?? []) sweeps.set(w.id, w)
   const lastColumn = prev.heatmap.at(-1)
-  // The whole book for the heatmap: "heat" is every level (200 a side) in 0.5-point rows, the
-  // "book" only the ladder's top levels.
+  // The whole book for the heatmap: "heat" is every level (200 a side) in 0.5-point rows; the
+  // "book" is the same whole book, level by level (the ladder and the strategies' DOM read).
   const heatBids = payload.heat?.bids ?? payload.book?.bids
   const heatAsks = payload.heat?.asks ?? payload.book?.asks
   const newColumn = !lastColumn || now - lastColumn.t >= HEATMAP_COLUMN_MS

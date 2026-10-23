@@ -7,7 +7,8 @@
 //   Footprint - 1-minute analyzed bars: delta, cumulative delta, stacked imbalances, absorption,
 //               exhaustion.
 //   Tape      - Time & Sales prints: aggression over 30s / 1m, big prints, speed, sweeps.
-//   DOM       - the book: bid share of the top levels, walls.
+//   DOM       - the book: bid share of the WHOLE book (all 200 levels a side when Dhan's full depth streams -
+//               live and in replay alike, a replayed book is the heatmap column of the whole book).
 //   Heatmap   - liquidity signals (wall absorption, spoofing, magnet), pulled / stacked liquidity, icebergs.
 //
 // Rule: OI + Footprint + Tape required, DOM or Heatmap confirming. On a day ESTIMATED from 1-minute
@@ -24,7 +25,7 @@
 // P&L (premium, decay) is not modelled.
 
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
-import { liquidityMap } from './orderFlowMath.js'
+import { bidShare, liquidityMap } from './orderFlowMath.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { adaptiveDecision, combineRegime, cvdDayVote, dayRegime, oiDayVote, sessionOpenMs } from './dayRegime.js'
 
@@ -650,12 +651,6 @@ function tapeRead(prints, ms, lot, bigLots, lastBar) {
   return { agg30: pct(b30, s30), agg60: pct(b60, s60), bigBuy, bigSell, speedRatio: n300 > 0 ? n60 / (n300 / 5) : 1, proxy: false }
 }
 
-function bookShare(book) {
-  const bids = (book?.bids ?? []).slice(0, 20).reduce((s, l) => s + (l.quantity ?? l[1] ?? 0), 0)
-  const asks = (book?.asks ?? []).slice(0, 20).reduce((s, l) => s + (l.quantity ?? l[1] ?? 0), 0)
-  return bids + asks > 0 ? bids / (bids + asks) : null
-}
-
 const recent = (items, ms, within, timeOf) => items.filter((x) => { const t = timeOf(x); return t <= ms && t >= ms - within })
 
 // ---- evaluation -------------------------------------------------------------------------------------
@@ -689,7 +684,9 @@ export function evaluateStrategies(input) {
   const prev = bars.at(-2)
   const last3 = bars.slice(-3)
   const tape = tapeRead(input.prints, nowMs, lot, input.bigLots ?? 10, last)
-  const share = estimated ? null : bookShare(input.book)
+  // The bid share of every level of the book - live (the push carries the whole book) and replayed (the heatmap
+  // column's whole book) read the same thing.
+  const share = estimated ? null : bidShare(input.book)
   const liq = recent(input.liquidity ?? [], nowMs, 3 * MIN, (s) => s.t)
   const ps = recent(input.pullStack ?? [], nowMs, 2 * MIN, (s) => s.t)
   const sweeps = recent(input.sweeps ?? [], nowMs, 2 * MIN, (w) => msOf(w.endedAt))
@@ -1639,7 +1636,7 @@ export function evaluateStrategies(input) {
   //     SHORT) adds 3%+ of its OI in the last 5 minutes, at 3x+ its pace of the 30 minutes before (sudden,
   //     not a steady build), the biggest add on that side near the money, and it is now a real wall (60%+
   //     of the biggest OI of its kind within 8 strikes). Not a straddle: the other side is not written as
-  //     hard at the money. The BOOK must lean the same way - bids 60%+ of the top 20 levels for a long
+  //     hard at the money. The BOOK must lean the same way - bids 60%+ of the whole book for a long
   //     (asks 60%+ for a short) - and the flow must not fight it (delta or the 30s tape with it, nothing
   //     absorbing / exhausting / stacking against). Needs the book: not on an estimated day.
   //     Stop just beyond the wall; target toward the opposite wall (1.5-3R).
@@ -1678,7 +1675,7 @@ export function evaluateStrategies(input) {
       push('suddenWall', dir, stopPts, targetPts, 30,
         62 + (lean >= 0.65 ? 4 : 0) + ((best.paceX ?? Infinity) >= 5 ? 4 : 0) + (dir * last.delta > 0 && aggWith(dir, 55, 'agg30') ? 4 : 0) + (stackWith(dir, 3) ? 3 : 0), {
           OI: `${suddenWallText(best)}, a ${dir > 0 ? 'support' : 'resistance'} wall ${Math.abs(spotNow - best.strike).toFixed(0)} pts ${dir > 0 ? 'under' : 'over'} the index; ${dir > 0 ? 'calls' : 'puts'} at the money ${lakh(otherAdd)}`,
-          DOM: `${dir > 0 ? 'bids' : 'asks'} ${Math.round(lean * 100)}% of the top 20 levels - the book leans ${dir > 0 ? 'up' : 'down'}`,
+          DOM: `${dir > 0 ? 'bids' : 'asks'} ${Math.round(lean * 100)}% of the whole book - the book leans ${dir > 0 ? 'up' : 'down'}`,
           Footprint: `Δ ${last.delta > 0 ? '+' : ''}${last.delta}${stackWith(dir, 3) ? ' · stacked imbalance with it' : ''}, nothing absorbing or stacking against it`,
           Tape: tapeText, Heatmap: c.heat,
         })

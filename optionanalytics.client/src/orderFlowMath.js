@@ -227,6 +227,33 @@ export function findWalls(book, factor = 4) {
   return { bids: pick(book.bids), asks: pick(book.asks), median }
 }
 
+// The bids' share of the resting quantity in the top `levels` levels of each side (null when there is none) - the
+// book's lean near the price (top 20) against its lean through the whole of it (200 levels on Dhan's full depth).
+export function bidShare(book, levels = Infinity) {
+  const sum = (side) => (side ?? []).slice(0, levels).reduce((s, l) => s + (Array.isArray(l) ? l[1] : l.quantity ?? 0), 0)
+  const bids = sum(book?.bids)
+  const asks = sum(book?.asks)
+  return bids + asks > 0 ? bids / (bids + asks) : null
+}
+
+// The prices the heatmap shows for its visible columns (each { bids, asks } of [price, quantity] rows): all of them, but
+// on a trending day - more than `minRows` rows of `step` - a window centred on `lastMid` that still holds the LATEST
+// column's whole book (all 200 levels a side on Dhan's full depth), however deep it runs. { hi, lo }, or null.
+export function heatmapPriceRange(visible, step, lastMid, minRows = 160) {
+  let hi = -Infinity
+  let lo = Infinity
+  for (const c of visible) for (const side of [c.bids, c.asks]) for (const [p] of side) { if (p < lo) lo = p; if (p > hi) hi = p }
+  if (!Number.isFinite(hi)) return null
+  let bookHi = -Infinity
+  let bookLo = Infinity
+  const last = visible.at(-1)
+  for (const side of [last?.bids ?? [], last?.asks ?? []]) for (const [p] of side) { if (p < bookLo) bookLo = p; if (p > bookHi) bookHi = p }
+  const mid = lastMid ?? (hi + lo) / 2
+  const half = Math.max(minRows / 2, Number.isFinite(bookHi) ? Math.max(bookHi - mid, mid - bookLo) / step : 0)
+  if ((hi - lo) / step <= 2 * half) return { hi, lo }
+  return { hi: Math.min(hi, mid + half * step), lo: Math.max(lo, mid - half * step) }
+}
+
 // A book (or heatmap column) as rowSize rows: [[price, quantity], ...].
 export function bucketBook(levels, rowSize) {
   const rows = new Map()
