@@ -168,6 +168,11 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Equal(PastDay.ToString("yyyy-MM-dd"), body["fromDate"]!.GetValue<string>());
         Assert.Equal(PastDay.AddDays(1).ToString("yyyy-MM-dd"), body["toDate"]!.GetValue<string>()); // Dhan's toDate is non-inclusive
         Assert.Null(body["dhanClientId"]);
+        // A plus sign goes as itself, not as the \u002B escape Dhan refused (DH-905 on every ATM+N strike).
+        requests.Clear();
+        await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+7", "CALL", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Contains("\"strike\":\"ATM+7\"", requests.Single());
+        Assert.DoesNotContain("\\u002B", requests.Single());
     }
 
     [Fact]
@@ -480,8 +485,9 @@ public sealed class DhanDataCacheTests : IDisposable
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
-            var body = JsonNode.Parse(await request.Content!.ReadAsStringAsync(cancellationToken))!;
-            lock (requests) requests.Add($"{request.RequestUri!.AbsolutePath} {body.ToJsonString()}");
+            var raw = await request.Content!.ReadAsStringAsync(cancellationToken);
+            var body = JsonNode.Parse(raw)!;
+            lock (requests) requests.Add($"{request.RequestUri!.AbsolutePath} {raw}"); // the body exactly as sent
             var rolling = request.RequestUri.AbsolutePath.EndsWith("rollingoption");
             var from = DateOnly.Parse(body["fromDate"]!.ToString()[..10]);
             var to = DateOnly.Parse(body["toDate"]!.ToString()[..10]).AddDays(rolling ? -1 : 0);

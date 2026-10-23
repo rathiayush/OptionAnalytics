@@ -253,8 +253,20 @@ public sealed class DhanApiClient
             return await Pipeline.ExecuteAsync(
                 static async (attempt, call) =>
                 {
-                    var answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
-                    call.Client._rateLimiter.Log(new DhanRestRateLimiter.DhanCall(DateTimeOffset.UtcNow, call.Category, call.Method.Method, call.Path, call.Context, answer.Success, answer.ErrorMessage));
+                    var sentAt = DateTimeOffset.UtcNow;
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    DhanApiResponse answer;
+                    try
+                    {
+                        answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // The data call's timeout (or the caller leaving): logged too, so a hanging request shows.
+                        call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, false, "no answer (timed out or cancelled)", 0, clock.Elapsed);
+                        throw;
+                    }
+                    call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, answer.Success, answer.ErrorMessage, (int)answer.StatusCode, clock.Elapsed);
                     // Dhan said "too many requests": that category's next calls are held back (the shared limiter).
                     if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) call.Client._rateLimiter.NoteRateLimited(call.Category);
                     return answer;
@@ -276,6 +288,19 @@ public sealed class DhanApiClient
         {
             ResilienceContextPool.Shared.Return(resilience);
         }
+    }
+
+    // The call log (GET /api/system/dhan-calls, the Dhan calls page): the body as sent, the account's client id masked.
+    private void LogCall(DateTimeOffset at, DhanApiCategory category, HttpMethod method, string path, object? payload, string context, bool success, string? error, int status, TimeSpan took)
+    {
+        string? body = null;
+        if (payload is not null)
+        {
+            body = BodyFor(path, payload, _session.ClientId);
+            if (!string.IsNullOrEmpty(_session.ClientId)) body = body.Replace($"\"dhanClientId\":\"{_session.ClientId}\"", "\"dhanClientId\":\"***\"");
+            if (body.Length > 2000) body = body[..2000] + "...";
+        }
+        _rateLimiter.Log(new DhanRestRateLimiter.DhanCall(at, category, method.Method, path, context, success, error, status, body, took.TotalMilliseconds));
     }
 
     private async Task<DhanApiResponse> SendNowAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
@@ -304,16 +329,21 @@ public sealed class DhanApiClient
     /// <summary>The request body: the payload as JSON, with dhanClientId first for a trading API (its documented bodies
     /// carry it) - never for a Data API, whose documented bodies do not (IsDataApi): Dhan answers a body it does not
     /// expect with Input_Exception (DH-905, "missing required fields, bad values for parameters").</summary>
+    // Plain characters, not \uXXXX escapes: the default escapes '+' (and < > & '), so the strike "ATM+7" went to Dhan as
+    // "ATM\u002B7" - valid JSON, but Dhan refused every ATM+N strike with DH-905 Input_Exception while ATM and ATM-N worked.
+    // Dhan's own DhanHQ-py (Python's json) sends them plain.
+    private static readonly JsonSerializerOptions PlainJson = new() { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     internal static string BodyFor(string path, object payload, string? clientId)
     {
-        var json = JsonSerializer.Serialize(payload);
+        var json = JsonSerializer.Serialize(payload, PlainJson);
         if (string.IsNullOrEmpty(clientId) || IsDataApi(path)) return json;
 
         using var document = JsonDocument.Parse(json);
         if (document.RootElement.ValueKind != JsonValueKind.Object) return json;
 
         using var buffer = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }))
         {
             writer.WriteStartObject();
             writer.WriteString("dhanClientId", clientId);
