@@ -111,17 +111,15 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     private static readonly TimeSpan CallTimeout = TimeSpan.FromSeconds(20);
 
     private readonly DhanApiClient _api;
-    private readonly DhanDataApiRateLimiter _rateLimiter;
     private readonly ILogger<DhanRollingOptionDataService> _logger;
     private readonly DhanDataCache? _cache;
     private const string RollingPath = "/charts/rollingoption";
 
     /// <summary><paramref name="cache"/>: each chunk of a closed window is kept on disk and answered from there next
     /// time (DhanDataCache) - null = every call goes to Dhan.</summary>
-    public DhanRollingOptionDataService(DhanApiClient api, DhanDataApiRateLimiter rateLimiter, ILogger<DhanRollingOptionDataService> logger, DhanDataCache? cache = null)
+    public DhanRollingOptionDataService(DhanApiClient api, ILogger<DhanRollingOptionDataService> logger, DhanDataCache? cache = null)
     {
         _api = api;
-        _rateLimiter = rateLimiter;
         _logger = logger;
         _cache = cache;
     }
@@ -340,8 +338,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
     {
         for (var attempt = 0; ; attempt++)
         {
-            await _rateLimiter.WaitForPermitAsync(interactive, cancellationToken);
-
+            // DhanApiClient takes this call's slot on Dhan's shared Data API limit (DhanRestRateLimiter) - in its lane.
             // CallTimeout bounds a single call, separately from the caller's own cancellationToken -
             // see DhanHistoricalDataService.CallTimeout's own doc comment for why this can't just be
             // DhanApiClient's shared HttpClient.Timeout (that HttpClient is also used by live order
@@ -353,7 +350,7 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             DhanApiResponse response;
             try
             {
-                response = await _api.SendAsync(HttpMethod.Post, RollingPath, payload, context, timeoutCts.Token);
+                response = await _api.SendAsync(HttpMethod.Post, RollingPath, payload, context, timeoutCts.Token, interactive);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -362,8 +359,8 @@ public sealed class DhanRollingOptionDataService : IRollingOptionDataSource
             }
             if (response.Success) return (response, null);
 
+            // Dhan's "too many requests" has already paused every Data API call (DhanApiClient noted it).
             var isRateLimited = DhanDataApiRateLimiter.IsRateLimited(response.StatusCode, response.ErrorMessage);
-            if (isRateLimited) _rateLimiter.NoteRateLimited();
             var error = response.ErrorMessage;
             response.Dispose();
 

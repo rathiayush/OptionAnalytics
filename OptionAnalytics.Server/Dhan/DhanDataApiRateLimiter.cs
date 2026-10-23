@@ -6,23 +6,19 @@ namespace OptionAnalytics.Server.Dhan;
 /// Enforces Dhan API v2's own documented "Data APIs" rate limit - 5 requests/second, 100,000/day,
 /// confirmed ACCOUNT-WIDE rather than per-endpoint (Dhan's official v2 docs, cross-confirmed by
 /// its support article on API rate limits, and independently corroborated by
-/// DhanRollingOptionDataService's own pre-existing doc comment stating the same fact) - shared
-/// across every Data-API-category caller in this process: DhanHistoricalDataService's
-/// /charts/intraday, DhanRollingOptionDataService's /charts/rollingoption, DhanOptionChainQuotes'
-/// /optionchain, and DhanApiClient's own retry of a data call after a stale token
-/// (DhanDataApiSharedLimitTests). Registered as a
+/// DhanRollingOptionDataService's own pre-existing doc comment stating the same fact) - the Data
+/// category of DhanRestRateLimiter, the one limiter every Dhan REST call goes through: DhanApiClient
+/// takes a slot here for every data request (/charts/intraday, /charts/rollingoption, /optionchain,
+/// each attempt and auth retry), in the caller's lane (DhanDataApiSharedLimitTests). Registered as a
 /// SINGLETON precisely because the limit is account-wide: a limiter scoped to one service
 /// instance, or one incoming page request, cannot see calls made by any other service/request at
 /// the same time, so only a single shared instance can actually gate the true combined call rate
 /// Dhan measures.
 ///
-/// Deliberately NOT used by DhanOrderClient/DhanSuperOrderClient/DhanPositionsClient (Order APIs -
-/// a different, higher documented limit: 10/sec - and these place live-money orders, so this
-/// change stays scoped away from them entirely) or by DhanOptionChainQuotes (which already
-/// self-throttles to that endpoint's own documented, stricter "one call every 3 seconds per
-/// underlying/expiry" via its own MinimumCallSpacing, a different category again). Mixing all of
-/// those into one limiter would either starve Order APIs of headroom they are documented to have,
-/// or under-use what Data APIs are actually allowed.
+/// Orders, quotes and the non-trading calls have their own limits in DhanRestRateLimiter, not this
+/// one: mixing them in would starve live orders of headroom Dhan documents for them, or under-use
+/// what the Data APIs are allowed. DhanOptionChainQuotes also keeps its own one call every 3 seconds
+/// per underlying/expiry (MinimumCallSpacing) on top.
 ///
 /// Calls are evenly spaced (see the class body), not counted in a sliding window: a window lets a
 /// burst through that Dhan, counting on arrival, can see as more than its limit. The spacing is kept

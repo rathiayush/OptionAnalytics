@@ -127,10 +127,11 @@ builder.Services.AddSingleton<DhanSpotInstrumentMaster>(sp => new DhanSpotInstru
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<DhanOptions>>(),
     sp.GetRequiredService<ILogger<DhanSpotInstrumentMaster>>()));
 builder.Services.AddHttpClient<DhanTotpAuthService>();
-// Shared across DhanHistoricalDataService and DhanRollingOptionDataService below - see its own
-// doc comment for why this must be one singleton rather than one per service (Dhan's Data API
-// limit is account-wide, not per-endpoint).
+// Dhan's rate limits are per ACCOUNT: ONE limiter for every Dhan REST call (DhanApiClient takes a slot before each
+// request) - orders, data (DhanDataApiRateLimiter: charts, rolling options, option chain), quotes and the rest each
+// on their own limits. Singletons, so every DhanApiClient (a transient typed client) shares them.
 builder.Services.AddSingleton<DhanDataApiRateLimiter>();
+builder.Services.AddSingleton<DhanRestRateLimiter>();
 // Every past-day Dhan Data API response kept on disk (Storage:DhanCachePath) and answered from there next time.
 builder.Services.AddSingleton<DhanDataCache>();
 builder.Services.AddSingleton<DhanHistoricalDataService>();

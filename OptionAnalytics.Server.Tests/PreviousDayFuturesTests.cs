@@ -56,7 +56,7 @@ public sealed class PreviousDayFuturesTests
         var asked = new List<string>();
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c" });
         var api = new DhanApiClient(new HttpClient(new Handler(traded.ToHashSet(), asked)), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance);
-        return (new DhanHistoricalDataService(api, new DhanDataApiRateLimiter(options, NullLogger<DhanDataApiRateLimiter>.Instance), NullLogger<DhanHistoricalDataService>.Instance), asked);
+        return (new DhanHistoricalDataService(api, NullLogger<DhanHistoricalDataService>.Instance), asked);
     }
 
     private sealed class Handler(HashSet<DateOnly> traded, List<string> asked) : HttpMessageHandler
