@@ -1499,8 +1499,10 @@ const OI_TOTALS_LABEL_WIDTH = 190
 
 // OI Replay's whole "OI change heatmap (all strikes)" card body: every strike's CE and PE OI change heatmap with its bucket
 // picker, the CE / PE / Net totals as Numbers or Heatmap and their Charts popup. Its own settings (bucket, Numbers /
-// Heatmap, popup) live here. Also the External page's.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = Date.now(), dayKey }) {
+// Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
+// explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
+// = both, as one card.
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = Date.now(), dayKey, show = 'all' }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
@@ -1510,6 +1512,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
   return (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      {show !== 'totals' && <>
       <Text type="secondary" style={{ fontSize: 12 }}>
         Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
         (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
@@ -1539,6 +1542,8 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
         <Text strong style={{ fontSize: 12 }}>PE</Text>
         <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
       </div>
+      </>}
+      {show !== 'strikes' && (
       <div>
         <Space size={8} wrap style={{ marginBottom: 6 }}>
           <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
@@ -1560,6 +1565,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
           : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />}
       </div>
+      )}
     </Space>
   )
 }
