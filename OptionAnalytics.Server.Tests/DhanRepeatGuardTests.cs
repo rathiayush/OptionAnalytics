@@ -92,4 +92,53 @@ public class DhanRepeatGuardTests
         var loop = Assert.Single(report.Repeated);
         Assert.Equal(("spot candles (IDX_I:13)", 6, "DH-905"), (loop.Context, loop.Times, loop.LastError));
     }
+
+    [Fact]
+    public async Task The_call_log_keeps_the_body_as_sent_with_the_client_id_masked()
+    {
+        var dhan = new FailingDhan();
+        var api = new DhanApiClient(new HttpClient(dhan), Options, new DhanSession(Options), NullLogger<DhanApiClient>.Instance);
+        using (await api.SendAsync(HttpMethod.Post, "/charts/rollingoption", new { securityId = "13", strike = "ATM+7", fromDate = "2026-10-23", toDate = "2026-10-24" }, "CE ATM+7", CancellationToken.None)) { }
+        using (await api.SendAsync(HttpMethod.Post, "/orders", new { securityId = "1" }, "order", CancellationToken.None)) { }
+        var calls = api.RateLimiter.RecentCalls();
+        var rolling = calls.First(c => c.Path == "/charts/rollingoption");
+        Assert.Equal((400, false), (rolling.Status, rolling.Success));
+        Assert.Contains("\"fromDate\":\"2026-10-23\"", rolling.Body);
+        Assert.Contains("Input_Exception", rolling.Error);
+        var order = calls.First(c => c.Path == "/orders");
+        Assert.Contains("\"dhanClientId\":\"***\"", order.Body); // the account id is not shown
+    }
+
+    [Theory]
+    [InlineData("{\"toDate\":\"2026-10-24\",\"fromDate\":\"2026-10-23\"}", "is in the future")]
+    [InlineData("{\"toDate\":\"2026-10-23 16:00:00\",\"fromDate\":\"2026-10-23 09:15:00\"}", "is in the future")]
+    [InlineData("{\"toDate\":\"2026-10-18\",\"fromDate\":\"2026-10-17\"}", "is a weekend")]
+    [InlineData("{\"toDate\":\"2026-10-23\",\"fromDate\":\"2026-10-22\"}", "send Dhan support this call")]
+    public void A_DH905_failure_is_explained_from_its_body(string body, string expected)
+    {
+        var now = new DateTimeOffset(2026, 10, 23, 15, 0, 0, TimeSpan.FromHours(5.5)); // Friday 15:00 IST
+        var call = new DhanRestRateLimiter.DhanCall(now, DhanApiCategory.Data, "POST", "/charts/rollingoption", "CE ATM", false,
+            "Input_Exception: Missing required fields, bad values for parameters etc.", 400, body);
+        Assert.Contains(expected, SystemController.Diagnose(call, now));
+    }
+
+    [Fact]
+    public async Task Try_a_request_sends_only_data_calls_and_answers_what_was_sent()
+    {
+        var dhan = new FailingDhan();
+        var api = new DhanApiClient(new HttpClient(dhan), Options, new DhanSession(Options), NullLogger<DhanApiClient>.Instance);
+        var controller = new SystemController(null!, null!, api.RateLimiter);
+        var body = System.Text.Json.JsonDocument.Parse("{\"securityId\":\"13\",\"exchangeSegment\":\"IDX_I\",\"instrument\":\"INDEX\",\"interval\":\"1\",\"fromDate\":\"2026-10-21 09:15:00\",\"toDate\":\"2026-10-21 15:30:00\"}").RootElement;
+
+        var order = await controller.DhanTest(new SystemController.DhanTestRequest("/orders", body), api, CancellationToken.None);
+        Assert.IsType<Microsoft.AspNetCore.Mvc.BadRequestObjectResult>(order.Result);
+        Assert.Equal(0, dhan.ChartCalls);
+
+        var tried = (await controller.DhanTest(new SystemController.DhanTestRequest("/charts/intraday", body), api, CancellationToken.None)).Value!;
+        Assert.Equal(1, dhan.ChartCalls);
+        Assert.False(tried.Success);
+        Assert.Contains("\"exchangeSegment\":\"IDX_I\"", tried.Sent);
+        Assert.Contains("Input_Exception", tried.Error);
+        Assert.Contains("send Dhan support", tried.Diagnosis); // a valid body for a trading day
+    }
 }
