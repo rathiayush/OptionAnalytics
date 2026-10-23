@@ -13,7 +13,6 @@ import OrderFlowPage from './OrderFlowPage.jsx'
 import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
 import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
-import DhanCallsPage from './DhanCallsPage.jsx'
 import LoginPage from './LoginPage.jsx'
 import TradeSettingsPage from './TradeSettingsPage.jsx'
 import StrategyTuningPage from './StrategyTuningPage.jsx'
@@ -1794,7 +1793,6 @@ export default function App() {
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
-        <Route path="/dhan-calls" element={<RequireAdmin><DhanCallsPage /></RequireAdmin>} />
         <Route path="/trade-settings" element={<TradeSettingsPage />} />
         <Route path="/strategy-tuning" element={<StrategyTuningPage />} />
       </Routes>
