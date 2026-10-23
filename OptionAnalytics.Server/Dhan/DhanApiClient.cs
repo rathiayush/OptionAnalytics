@@ -1,7 +1,13 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using Microsoft.Extensions.Options;
+using OptionAnalytics.Server.Services;
+using Polly;
+using Polly.RateLimiting;
+using Polly.Retry;
+using Polly.Timeout;
 
 namespace OptionAnalytics.Server.Dhan;
 
@@ -52,12 +58,31 @@ public sealed class DhanApiClient
     /// loop uses for that separate, slower case.</summary>
     internal TimeSpan AuthRetryDelay { get; init; } = TimeSpan.FromSeconds(3);
 
+    /// <summary>How long a Data API call may wait for Dhan's answer once it is SENT - its wait for a slot on the rate
+    /// limit is not counted (a long queue of chart downloads must not time out calls never sent). Much shorter than
+    /// HttpClient's ~100 s default, which this client's HttpClient keeps for live orders: a slow / unresponsive Dhan
+    /// once let one chart call hang ~100 s, and a day load of 44 of them past eight minutes.</summary>
+    internal TimeSpan DataCallTimeout { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>Times a chart download Dhan answered "too many requests" is sent again - after 0.5 / 1 / 2 s.</summary>
+    private const int MaxChartRateLimitRetries = 3;
+
+    // What each step of the pipeline reads about the call (Polly's ResilienceContext properties).
+    private static readonly ResiliencePropertyKey<DhanApiCategory> CategoryKey = new("dhan.category");
+    private static readonly ResiliencePropertyKey<bool> InteractiveKey = new("dhan.interactive");
+    private static readonly ResiliencePropertyKey<string> PathKey = new("dhan.path");
+    private static readonly ResiliencePropertyKey<string> ContextKey = new("dhan.context");
+    private static readonly ResiliencePropertyKey<bool> AuthRetryKey = new("dhan.authRetry");
+    private static readonly ResiliencePropertyKey<string> RefusedKey = new("dhan.refused");
+    private ResiliencePipeline<DhanApiResponse>? _pipeline;
+
     private readonly HttpClient _httpClient;
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly ILogger<DhanApiClient> _logger;
-    // Dhan's account-wide rate limits: every request - each attempt, an auth retry included - takes its category's slot
-    // here (DhanRestRateLimiter: orders, data, quotes, the rest), so no caller reaches Dhan around it.
+    // Dhan's account-wide rate limits: every request - each attempt, retries included - takes its category's slot here
+    // (DhanRestRateLimiter: orders, data, quotes, the rest; the pipeline's rate-limiter step), so no caller reaches Dhan
+    // around it.
     private readonly DhanRestRateLimiter _rateLimiter;
     internal DhanRestRateLimiter RateLimiter => _rateLimiter;
 
@@ -91,6 +116,7 @@ public sealed class DhanApiClient
     private static readonly TimeSpan ProfileMaxAge = TimeSpan.FromMinutes(10);
     private readonly SemaphoreSlim _profileLock = new(1, 1);
     private DhanProfile? _profile;
+    private DateTimeOffset? _profileFailedAt;
 
     /// <summary>The account's profile (GET /v2/profile), read at most once every 10 minutes - null when Dhan does not
     /// answer it.</summary>
@@ -101,8 +127,12 @@ public sealed class DhanApiClient
         try
         {
             if (_profile is { } again && DateTimeOffset.UtcNow - again.ReadAtUtc < ProfileMaxAge) return again;
-            using var response = await SendOnceAsync(HttpMethod.Get, "/profile", null, "reading the Dhan profile", cancellationToken);
-            if (response.Success) _profile = ParseProfile(response.Root, DateTimeOffset.UtcNow);
+            // A failed read is remembered as long as a good one: every failed data call asks for the profile, and must not
+            // read it again each time.
+            if (_profileFailedAt is { } failedAt && DateTimeOffset.UtcNow - failedAt < ProfileMaxAge) return null;
+            using var response = await SendThroughPipelineAsync(HttpMethod.Get, "/profile", null, "reading the Dhan profile", true, cancellationToken, authRetry: false);
+            if (response.Success) { _profile = ParseProfile(response.Root, DateTimeOffset.UtcNow); _profileFailedAt = null; }
+            else _profileFailedAt = DateTimeOffset.UtcNow;
             return _profile;
         }
         finally
@@ -130,46 +160,139 @@ public sealed class DhanApiClient
         !response.Success && response.StatusCode is not HttpStatusCode.TooManyRequests and not HttpStatusCode.ServiceUnavailable and not HttpStatusCode.GatewayTimeout
         && response.ErrorMessage is { } message && !message.Contains("Rate_Limit", StringComparison.OrdinalIgnoreCase) && !message.Contains("Too many", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Retries automatically when the failure itself looks like a stale/invalid token -
-    /// see MaxAuthRetryAttempts' own doc comment for why. Every other kind of failure (a real
-    /// rejection, a network error, an unrelated HTTP error) is returned on the first attempt
-    /// exactly as before - retrying those would just repeat the same failure while making the
-    /// caller wait longer for no benefit.</summary>
+    /// <summary>Sends one Dhan REST call through the pipeline (see Pipeline). A failed answer comes back as a failed
+    /// response, never an exception: a call the rate limit refuses (Not sent: ...), a data call Dhan did not answer in
+    /// DataCallTimeout, a refused data call explained with the account's profile. Only the caller's own cancellation throws.
     /// <paramref name="interactive"/>: a Data API call made for a waiting user (a page load) - false for a hosted service's
-    /// background work, which goes after page loads (DhanDataApiRateLimiter).
+    /// background work, which goes after page loads (DhanDataApiRateLimiter).</summary>
     public async Task<DhanApiResponse> SendAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken, bool interactive = true)
     {
-        for (var attempt = 1; ; attempt++)
+        // A data request that just failed is not sent again until its back-off has passed (DhanRestRateLimiter.HeldBack) -
+        // the timers and pages asking for it get the failure at once instead of a loop of identical calls to Dhan.
+        var category = DhanRestRateLimiter.CategoryOf(method, path);
+        var key = category == DhanApiCategory.Data
+            ? DhanRestRateLimiter.RequestKey(method, path, payload is null ? null : BodyFor(path, payload, _session.ClientId))
+            : null;
+        if (key is not null && _rateLimiter.HeldBack(key) is { } failed)
         {
-            var response = await SendOnceAsync(method, path, payload, context, cancellationToken, interactive);
-            if (response.Success || attempt > MaxAuthRetryAttempts || !LooksLikeAuthFailure(response.StatusCode, response.ErrorMessage))
-            {
-                if (!IsDataApi(path) || !WorthProfileHint(response)) return response;
-                var profile = await GetProfileAsync(cancellationToken);
-                if (profile is null) return response;
-                var explained = new DhanApiResponse(false, response.StatusCode, null, response.ErrorMessage + ProfileHint(profile));
-                response.Dispose();
-                return explained;
-            }
-
-            _logger.LogInformation(
-                "Dhan call ({Context}) hit a stale/invalid token - retrying in {Seconds}s to give a fresh one a chance to arrive (attempt {Attempt}/{Max}).",
-                context, AuthRetryDelay.TotalSeconds, attempt, MaxAuthRetryAttempts);
-            await Task.Delay(AuthRetryDelay, cancellationToken);
+            _rateLimiter.NoteHeldBack();
+            _logger.LogDebug("Dhan call not sent ({Context}): the same request failed {Failures} time(s) - held back until {Until}.", context, failed.Failures, failed.RetryAfter);
+            return new DhanApiResponse(false, failed.Status, null,
+                $"{failed.Error} (the same request failed {failed.Failures} time{(failed.Failures == 1 ? "" : "s")} - not asked again before {failed.RetryAfter.ToOffset(IstClock.Offset):HH:mm:ss} IST)");
         }
+
+        var response = await SendThroughPipelineAsync(method, path, payload, context, interactive, cancellationToken);
+        // Our own refusals (the rate limit, 429) and a stale token (renewed by TOTP) are not the request's fault.
+        if (key is not null && (response.Success || (response.StatusCode != HttpStatusCode.TooManyRequests && !LooksLikeAuthFailure(response.StatusCode, response.ErrorMessage))))
+            _rateLimiter.NoteOutcome(key, response.Success, response.StatusCode, response.ErrorMessage);
+        if (!IsDataApi(path) || !WorthProfileHint(response)) return response;
+        var profile = await GetProfileAsync(cancellationToken);
+        if (profile is null) return response;
+        var explained = new DhanApiResponse(false, response.StatusCode, null, response.ErrorMessage + ProfileHint(profile));
+        response.Dispose();
+        return explained;
     }
 
-    private async Task<DhanApiResponse> SendOnceAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken, bool interactive = true)
+    /// <summary>
+    /// Every Dhan REST call's way out - a Polly pipeline, outermost first:
+    ///  1. a stale / invalid token: sent again after AuthRetryDelay, up to MaxAuthRetryAttempts times (DhanTotpAutoRenewal
+    ///     renews the token meanwhile) - every other failure comes back at once, retrying it would only repeat it;
+    ///  2. a chart download (/charts/...) Dhan answered "too many requests": sent again after 0.5 / 1 / 2 s - never an
+    ///     order (sending one twice could place it twice), nor the option chain (its own one call per 3 s);
+    ///  3. the rate limit: the attempt takes its category's slot on the ONE shared DhanRestRateLimiter - or is refused;
+    ///  4. a data call gets DataCallTimeout from when it is sent.
+    /// Retries go round 3 and 4 again, so each attempt takes its own slot.
+    /// </summary>
+    private ResiliencePipeline<DhanApiResponse> Pipeline => _pipeline ??= new ResiliencePipelineBuilder<DhanApiResponse>()
+        .AddRetry(new RetryStrategyOptions<DhanApiResponse>
+        {
+            ShouldHandle = args => ValueTask.FromResult(args.Context.Properties.GetValue(AuthRetryKey, true)
+                && args.Outcome.Result is { Success: false } r && LooksLikeAuthFailure(r.StatusCode, r.ErrorMessage)),
+            MaxRetryAttempts = MaxAuthRetryAttempts,
+            Delay = AuthRetryDelay,
+            BackoffType = DelayBackoffType.Constant,
+            UseJitter = false,
+            OnRetry = args =>
+            {
+                _logger.LogInformation(
+                    "Dhan call ({Context}) hit a stale/invalid token - retrying in {Seconds}s to give a fresh one a chance to arrive (attempt {Attempt}/{Max}).",
+                    args.Context.Properties.GetValue(ContextKey, ""), args.RetryDelay.TotalSeconds, args.AttemptNumber + 1, MaxAuthRetryAttempts);
+                return default;
+            },
+        })
+        .AddRetry(new RetryStrategyOptions<DhanApiResponse>
+        {
+            ShouldHandle = args => ValueTask.FromResult(args.Context.Properties.GetValue(PathKey, "").StartsWith("/charts/", StringComparison.OrdinalIgnoreCase)
+                && args.Outcome.Result is { Success: false } r && DhanDataApiRateLimiter.IsRateLimited(r.StatusCode, r.ErrorMessage)),
+            MaxRetryAttempts = MaxChartRateLimitRetries,
+            Delay = TimeSpan.FromMilliseconds(500),
+            BackoffType = DelayBackoffType.Exponential,
+            UseJitter = false,
+            OnRetry = args =>
+            {
+                var context = args.Context.Properties.GetValue(ContextKey, "");
+                LoadProgress.RateLimited();
+                LoadProgress.Retry();
+                LoadProgress.Warn($"⚠ Dhan rate limit on {context} - {args.Outcome.Result?.ErrorMessage} - retry {args.AttemptNumber + 1}/{MaxChartRateLimitRetries} in {args.RetryDelay.TotalSeconds:0.0} s");
+                _logger.LogInformation("Rate-limited on {Context} (attempt {Attempt}/{Max}) - retrying in {Delay}.", context, args.AttemptNumber + 1, MaxChartRateLimitRetries, args.RetryDelay);
+                return default;
+            },
+        })
+        .AddRateLimiter(new RateLimiterStrategyOptions
+        {
+            RateLimiter = args => _rateLimiter.AcquireAsync(args.Context.Properties.GetValue(CategoryKey, DhanApiCategory.NonTrading),
+                args.Context.Properties.GetValue(InteractiveKey, true), args.Context.CancellationToken),
+            OnRejected = args =>
+            {
+                if (args.Lease.TryGetMetadata(MetadataName.ReasonPhrase, out var reason) && reason is not null) args.Context.Properties.Set(RefusedKey, reason);
+                return default;
+            },
+        })
+        .AddTimeout(new TimeoutStrategyOptions
+        {
+            TimeoutGenerator = args => ValueTask.FromResult(args.Context.Properties.GetValue(CategoryKey, DhanApiCategory.NonTrading) == DhanApiCategory.Data
+                ? DataCallTimeout : Timeout.InfiniteTimeSpan),
+        })
+        .Build();
+
+    private async Task<DhanApiResponse> SendThroughPipelineAsync(HttpMethod method, string path, object? payload, string context, bool interactive,
+        CancellationToken cancellationToken, bool authRetry = true)
     {
         var category = DhanRestRateLimiter.CategoryOf(method, path);
-        if (await _rateLimiter.WaitAsync(category, interactive, cancellationToken) is { } refused)
+        var resilience = ResilienceContextPool.Shared.Get(cancellationToken);
+        try
         {
-            _logger.LogWarning("Dhan call not sent ({Context}): {Reason}", context, refused);
-            return new DhanApiResponse(false, HttpStatusCode.TooManyRequests, null, refused);
+            resilience.Properties.Set(CategoryKey, category);
+            resilience.Properties.Set(InteractiveKey, interactive);
+            resilience.Properties.Set(PathKey, path);
+            resilience.Properties.Set(ContextKey, context);
+            resilience.Properties.Set(AuthRetryKey, authRetry);
+            return await Pipeline.ExecuteAsync(
+                static async (attempt, call) =>
+                {
+                    var answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
+                    call.Client._rateLimiter.Log(new DhanRestRateLimiter.DhanCall(DateTimeOffset.UtcNow, call.Category, call.Method.Method, call.Path, call.Context, answer.Success, answer.ErrorMessage));
+                    // Dhan said "too many requests": that category's next calls are held back (the shared limiter).
+                    if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) call.Client._rateLimiter.NoteRateLimited(call.Category);
+                    return answer;
+                },
+                resilience, (Client: this, Method: method, Path: path, Payload: payload, Context: context, Category: category));
         }
-        var answer = await SendNowAsync(method, path, payload, context, cancellationToken);
-        if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) _rateLimiter.NoteRateLimited(category);
-        return answer;
+        catch (RateLimiterRejectedException)
+        {
+            var reason = resilience.Properties.GetValue(RefusedKey, "Not sent: over Dhan's rate limit.");
+            _logger.LogWarning("Dhan call not sent ({Context}): {Reason}", context, reason);
+            return new DhanApiResponse(false, HttpStatusCode.TooManyRequests, null, reason);
+        }
+        catch (TimeoutRejectedException)
+        {
+            _logger.LogWarning("Dhan call timed out after {Seconds}s with no response ({Context}).", DataCallTimeout.TotalSeconds, context);
+            return new DhanApiResponse(false, HttpStatusCode.GatewayTimeout, null, $"Dhan did not respond within {DataCallTimeout.TotalSeconds:0}s - it may be slow or unreachable right now.");
+        }
+        finally
+        {
+            ResilienceContextPool.Shared.Return(resilience);
+        }
     }
 
     private async Task<DhanApiResponse> SendNowAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)

@@ -1,3 +1,7 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Text.RegularExpressions;
+using System.Threading.RateLimiting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
@@ -18,50 +22,84 @@ public enum DhanApiCategory
     NonTrading,
 }
 
+/// <summary>One sliding window: at most Permits calls within any Span, counted in Segments (the window slides a segment
+/// at a time); Dhan: Dhan's own limit, for messages.</summary>
+internal sealed record DhanRateWindow(int Permits, TimeSpan Span, int Segments, string Dhan);
+
+/// <summary>The windows each category is held to. Waited for: the per-second limits (well under a second). Refused, not
+/// waited for: the order minute / hour / day limits and the data day cap - a call past one fails at once with the reason
+/// rather than holding a live order for minutes. Kept under Dhan's own numbers with room for the segment the window
+/// slides by (a window can see one segment beyond its span) and for network jitter (Dhan counts calls as they arrive).</summary>
+internal sealed record DhanRateLimits(
+    DhanRateWindow OrderPerSecond, DhanRateWindow[] OrderRefused, DhanRateWindow QuotePerSecond, DhanRateWindow NonTradingPerSecond, DhanRateWindow[] DataRefused)
+{
+    public static readonly DhanRateLimits Dhan = new(
+        // A window slides in 100 ms segments and a call can be seen up to one segment early: 1.2 s keeps any 8 calls a full
+        // second apart, timer jitter included.
+        OrderPerSecond: new(8, TimeSpan.FromSeconds(1.2), 12, "10 a second"),
+        // 240 + one 1 s segment (8) < 250; 900 + one 10 s segment (80) < 1000; 6000 + one 10 min segment (<= the hour's 900) < 7000.
+        OrderRefused: new DhanRateWindow[]
+        {
+            new(240, TimeSpan.FromMinutes(1), 60, "250 a minute"),
+            new(900, TimeSpan.FromHours(1), 360, "1000 an hour"),
+            new(6_000, TimeSpan.FromDays(1), 144, "7000 a day"),
+        },
+        QuotePerSecond: new(1, TimeSpan.FromSeconds(1.5), 15, "1 a second"),
+        NonTradingPerSecond: new(18, TimeSpan.FromSeconds(1.2), 12, "20 a second"),
+        // 97,000 + one 10 min segment of data calls (under 5 a second: < 3,000) < 100,000.
+        DataRefused: new DhanRateWindow[] { new(97_000, TimeSpan.FromDays(1), 144, "100,000 a day") });
+}
+
 /// <summary>
-/// The ONE gate every Dhan REST call in this server goes through - DhanApiClient takes a slot here before each request
-/// (an auth retry included), so no caller can reach Dhan around it. A singleton: Dhan counts per ACCOUNT, so only one
-/// shared instance sees the combined rate.
+/// The ONE limiter every Dhan REST call in this server goes through - DhanApiClient's Polly pipeline takes a slot here
+/// (its rate-limiter step) for every attempt, retries included, so no caller reaches Dhan around it. A singleton: Dhan
+/// counts per ACCOUNT, so only one shared instance sees the combined rate.
 ///
 /// Each category is limited on its own - a burst of chart downloads never makes a live order wait, and orders never eat
-/// the data budget:
-///  - Data: DhanDataApiRateLimiter (evenly spaced, as calls actually go, page loads ahead of background work) and a day
-///    cap under Dhan's 100,000;
-///  - Order: under 10 in any 1.1 s, 250 a minute, 1000 an hour and 7000 a day. A call waits for the per-second room (well
-///    under a second); one that would have to wait out the minute / hour / day limit is NOT sent - it fails at once with
-///    the reason, rather than holding a live order for minutes;
-///  - Quote: one every 1.1 s; NonTrading: under 20 in any 1.1 s.
-/// Limits are kept a little under Dhan's own (a margin for network jitter - Dhan counts calls as they arrive). After Dhan
-/// answers "too many requests", that category pauses (NoteRateLimited).
+/// the data budget (DhanRateLimits):
+///  - Order, Quote, NonTrading: .NET's own sliding-window limiters (System.Threading.RateLimiting - what Polly's rate
+///    limiter runs on);
+///  - Data: DhanDataApiRateLimiter - evenly spaced calls as they actually go, page loads ahead of background work (no
+///    built-in limiter does either: a token bucket can let 6 through within a second, a sliding window lets 5 go at
+///    once), plus a sliding day cap.
+/// After Dhan answers "too many requests", that category pauses (NoteRateLimited).
 /// </summary>
-public sealed class DhanRestRateLimiter
+public sealed class DhanRestRateLimiter : IDisposable
 {
-    internal const int DataDayLimit = 99_000;
     private readonly DhanDataApiRateLimiter _data;
-    private readonly WindowLimiter _orders;
-    private readonly WindowLimiter _quotes;
-    private readonly WindowLimiter _nonTrading;
-    private readonly Func<DateTimeOffset> _clock;
-    private readonly object _dayLock = new();
-    private DateOnly _dataDay;
-    private int _dataToday;
+    private readonly Dictionary<DhanApiCategory, RateLimiter> _waited;
+    private readonly Dictionary<DhanApiCategory, (RateLimiter Limiter, string Dhan)[]> _refused;
+    private readonly Dictionary<DhanApiCategory, DateTimeOffset> _pausedUntil = new();
+    private readonly Dictionary<DhanApiCategory, int> _sent = new();
+    private readonly object _lock = new();
 
-    /// <summary>For the tests: Data API calls counted today (IST).</summary>
-    internal int DataToday { get => _dataToday; init => _dataToday = value; }
+    public DhanRestRateLimiter(DhanDataApiRateLimiter data) : this(data, DhanRateLimits.Dhan) { }
 
-    public DhanRestRateLimiter(DhanDataApiRateLimiter data) : this(data, () => DateTimeOffset.UtcNow) { }
-
-    internal DhanRestRateLimiter(DhanDataApiRateLimiter data, Func<DateTimeOffset> clock)
+    internal DhanRestRateLimiter(DhanDataApiRateLimiter data, DhanRateLimits limits)
     {
         _data = data;
-        _clock = clock;
-        _dataDay = IstClock.IstDate(clock());
-        _orders = new WindowLimiter("order", clock, maxWait: TimeSpan.FromSeconds(2),
-            (8, TimeSpan.FromSeconds(1.1), "10 a second"), (240, TimeSpan.FromMinutes(1), "250 a minute"),
-            (960, TimeSpan.FromHours(1), "1000 an hour"), (6_900, TimeSpan.FromDays(1), "7000 a day"));
-        _quotes = new WindowLimiter("quote", clock, maxWait: null, (1, TimeSpan.FromSeconds(1.1), "1 a second"));
-        _nonTrading = new WindowLimiter("non-trading", clock, maxWait: null, (18, TimeSpan.FromSeconds(1.1), "20 a second"));
+        _waited = new()
+        {
+            [DhanApiCategory.Order] = Sliding(limits.OrderPerSecond, queue: true),
+            [DhanApiCategory.Quote] = Sliding(limits.QuotePerSecond, queue: true),
+            [DhanApiCategory.NonTrading] = Sliding(limits.NonTradingPerSecond, queue: true),
+        };
+        _refused = new()
+        {
+            [DhanApiCategory.Order] = limits.OrderRefused.Select(w => ((RateLimiter)Sliding(w, queue: false), w.Dhan)).ToArray(),
+            [DhanApiCategory.Data] = limits.DataRefused.Select(w => ((RateLimiter)Sliding(w, queue: false), w.Dhan)).ToArray(),
+        };
     }
+
+    private static SlidingWindowRateLimiter Sliding(DhanRateWindow w, bool queue) => new(new SlidingWindowRateLimiterOptions
+    {
+        PermitLimit = w.Permits,
+        Window = w.Span,
+        SegmentsPerWindow = w.Segments,
+        QueueLimit = queue ? 10_000 : 0,
+        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+        AutoReplenishment = true,
+    });
 
     /// <summary>A limiter of its own - for a DhanApiClient built without the app's (tests, tools).</summary>
     internal static DhanRestRateLimiter Standalone(IOptions<DhanOptions> options) =>
@@ -72,8 +110,8 @@ public sealed class DhanRestRateLimiter
     /// <summary>Which of Dhan's categories a REST call is.</summary>
     public static DhanApiCategory CategoryOf(HttpMethod method, string path)
     {
-        if (DhanApiClient.IsDataApi(path) && !path.StartsWith("/marketfeed", StringComparison.OrdinalIgnoreCase)) return DhanApiCategory.Data;
         if (path.StartsWith("/marketfeed", StringComparison.OrdinalIgnoreCase)) return DhanApiCategory.Quote;
+        if (DhanApiClient.IsDataApi(path)) return DhanApiCategory.Data;
         var changes = method != HttpMethod.Get;
         var orders = path.StartsWith("/orders", StringComparison.OrdinalIgnoreCase)
                      || path.StartsWith("/super/orders", StringComparison.OrdinalIgnoreCase)
@@ -83,114 +121,141 @@ public sealed class DhanRestRateLimiter
         return (changes && orders) || exitAll ? DhanApiCategory.Order : DhanApiCategory.NonTrading;
     }
 
-    /// <summary>Waits for this call's slot in its category - null when it may go now, else why it must not be sent (an
-    /// order past the minute / hour / day limit, the data day cap). <paramref name="interactive"/> only matters for Data:
-    /// a page load goes ahead of background work.</summary>
-    public async Task<string?> WaitAsync(DhanApiCategory category, bool interactive, CancellationToken cancellationToken)
+    /// <summary>This call's slot in its category - an acquired lease when it may go now, or a refused one (its reason in
+    /// MetadataName.ReasonPhrase) when it must not be sent: an order past the minute / hour / day limit, the data day
+    /// cap. <paramref name="interactive"/> only matters for Data: a page load goes ahead of background work.</summary>
+    public async ValueTask<RateLimitLease> AcquireAsync(DhanApiCategory category, bool interactive, CancellationToken cancellationToken)
     {
-        switch (category)
+        TimeSpan pause;
+        lock (_lock) pause = _pausedUntil.TryGetValue(category, out var until) ? until - DateTimeOffset.UtcNow : TimeSpan.Zero;
+        if (pause > TimeSpan.Zero) await Task.Delay(pause, cancellationToken);
+
+        // The limits a call is refused at: checked before any is taken, so a refused call uses none of them up.
+        if (_refused.TryGetValue(category, out var refused))
         {
-            case DhanApiCategory.Data:
-                lock (_dayLock)
-                {
-                    var today = IstClock.IstDate(_clock());
-                    if (today != _dataDay) { _dataDay = today; _dataToday = 0; }
-                    if (_dataToday >= DataDayLimit)
-                        return $"Not sent: {_dataToday:N0} Dhan data calls today - Dhan allows 100,000 a day.";
-                    _dataToday++;
-                }
-                await _data.WaitForPermitAsync(interactive, cancellationToken);
-                return null;
-            case DhanApiCategory.Order: return await _orders.WaitAsync(cancellationToken);
-            case DhanApiCategory.Quote: return await _quotes.WaitAsync(cancellationToken);
-            default: return await _nonTrading.WaitAsync(cancellationToken);
+            lock (_lock)
+            {
+                foreach (var (limiter, dhan) in refused)
+                    if (limiter.GetStatistics()?.CurrentAvailablePermits < 1)
+                        return new Refused($"Not sent: Dhan allows {dhan} {Name(category)} requests and this account has used them - try again shortly.");
+                foreach (var (limiter, _) in refused) limiter.AttemptAcquire(1).Dispose();
+            }
         }
+
+        if (category == DhanApiCategory.Data) await _data.WaitForPermitAsync(interactive, cancellationToken);
+        else
+        {
+            using var lease = await _waited[category].AcquireAsync(1, cancellationToken);
+            if (!lease.IsAcquired) return new Refused($"Not sent: too many {Name(category)} requests waiting for Dhan's limit.");
+        }
+        lock (_lock) _sent[category] = _sent.GetValueOrDefault(category) + 1;
+        return Acquired.Instance;
     }
 
     /// <summary>Dhan answered "too many requests" for a call of this category: hold its next calls back.</summary>
     public void NoteRateLimited(DhanApiCategory category)
     {
-        switch (category)
-        {
-            case DhanApiCategory.Data: _data.NoteRateLimited(); break;
-            case DhanApiCategory.Order: _orders.Pause(DhanDataApiRateLimiter.RateLimitPause); break;
-            case DhanApiCategory.Quote: _quotes.Pause(DhanDataApiRateLimiter.RateLimitPause); break;
-            default: _nonTrading.Pause(DhanDataApiRateLimiter.RateLimitPause); break;
-        }
+        if (category == DhanApiCategory.Data) { _data.NoteRateLimited(); return; }
+        lock (_lock) _pausedUntil[category] = DateTimeOffset.UtcNow + DhanDataApiRateLimiter.RateLimitPause;
     }
 
-    /// <summary>For the tests: calls let go in a category (Data: the data limiter's own count).</summary>
-    internal int Sent(DhanApiCategory category) => category switch
+    // ---- No loops of a failing request ----------------------------------------------------------------------------------
+    // Dhan support saw requests "running in a loop" hitting the rate limit: a data call that FAILS (Dhan refused it, or did
+    // not answer) was asked again, identically, by every timer that wanted it - the spot volume refresh every minute, the
+    // today warm-up every 5 minutes, the CDV strikes every 30 s, each page load. A data request that failed is now not sent
+    // again for a while - 1 minute, doubling to 30 - and every caller asking for it gets that failure back at once; a
+    // success clears it. Keyed on the request itself (method, path, body with times cut to the day - today's toDate moves
+    // every minute), shared by every DhanApiClient through this singleton.
+
+    internal sealed record FailedRequest(DateTimeOffset RetryAfter, int Failures, HttpStatusCode Status, string Error);
+
+    private readonly ConcurrentDictionary<string, FailedRequest> _failed = new();
+    internal static readonly TimeSpan FirstFailureBackoff = TimeSpan.FromMinutes(1);
+    internal static readonly TimeSpan MaxFailureBackoff = TimeSpan.FromMinutes(30);
+    internal Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
+
+    private static readonly Regex TimeOfDay = new(@"(\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}(:\d{2})?", RegexOptions.Compiled);
+
+    /// <summary>The request a failure is remembered by: method, path and body, any date-time cut to its date.</summary>
+    internal static string RequestKey(HttpMethod method, string path, string? body) => $"{method} {path} {TimeOfDay.Replace(body ?? "", "$1")}";
+
+    /// <summary>The failure this request had, while it is still being held back - null when it may be sent.</summary>
+    internal FailedRequest? HeldBack(string key) =>
+        _failed.TryGetValue(key, out var failed) && Clock() < failed.RetryAfter ? failed : null;
+
+    /// <summary>How a sent request ended: a failure holds the identical request back (longer each time), a success clears it.</summary>
+    internal void NoteOutcome(string key, bool success, HttpStatusCode status, string? error)
     {
-        DhanApiCategory.Data => _data.PermitsGiven,
-        DhanApiCategory.Order => _orders.Sent,
-        DhanApiCategory.Quote => _quotes.Sent,
-        _ => _nonTrading.Sent,
+        if (success) { _failed.TryRemove(key, out _); return; }
+        var now = Clock();
+        _failed.AddOrUpdate(key,
+            _ => new FailedRequest(now + FirstFailureBackoff, 1, status, error ?? $"HTTP {(int)status}"),
+            (_, before) =>
+            {
+                var failures = before.Failures + 1;
+                var wait = TimeSpan.FromTicks(Math.Min(MaxFailureBackoff.Ticks, FirstFailureBackoff.Ticks << Math.Min(failures - 1, 10)));
+                return new FailedRequest(now + wait, failures, status, error ?? $"HTTP {(int)status}");
+            });
+        // Old entries go (a day's worth of keys at most).
+        if (_failed.Count > 2_000)
+            foreach (var (k, f) in _failed) if (now - f.RetryAfter > TimeSpan.FromHours(1)) _failed.TryRemove(k, out _);
+    }
+
+    // ---- The call log: what reached Dhan, to see a loop -----------------------------------------------------------------
+
+    internal sealed record DhanCall(DateTimeOffset At, DhanApiCategory Category, string Method, string Path, string Context, bool Success, string? Error);
+
+    private readonly ConcurrentQueue<DhanCall> _calls = new();
+    internal static readonly TimeSpan CallLogSpan = TimeSpan.FromMinutes(15);
+
+    /// <summary>A request that was sent to Dhan (every attempt).</summary>
+    internal void Log(DhanCall call)
+    {
+        _calls.Enqueue(call);
+        while (_calls.TryPeek(out var oldest) && call.At - oldest.At > CallLogSpan) _calls.TryDequeue(out _);
+    }
+
+    /// <summary>The calls sent to Dhan in the last CallLogSpan, oldest first.</summary>
+    internal IReadOnlyList<DhanCall> RecentCalls() => _calls.ToArray();
+
+    /// <summary>Calls held back without reaching Dhan (a repeat of a failed request).</summary>
+    internal int HeldBackCount => _heldBack;
+    private int _heldBack;
+    internal void NoteHeldBack() => Interlocked.Increment(ref _heldBack);
+
+    /// <summary>For the tests: calls let go in a category.</summary>
+    internal int Sent(DhanApiCategory category) { lock (_lock) return _sent.GetValueOrDefault(category); }
+
+    private static string Name(DhanApiCategory category) => category switch
+    {
+        DhanApiCategory.Order => "order",
+        DhanApiCategory.Data => "data",
+        DhanApiCategory.Quote => "quote",
+        _ => "non-trading",
     };
 
-    /// <summary>At most Count calls within any Span, for every window - judged on the times calls actually went. A call
-    /// waits for room; one that would wait longer than maxWait is refused (the window's reason).</summary>
-    private sealed class WindowLimiter
+    public void Dispose()
     {
-        private readonly string _name;
-        private readonly Func<DateTimeOffset> _clock;
-        private readonly TimeSpan? _maxWait;
-        private readonly (int Count, TimeSpan Span, string Dhan)[] _windows;
-        private readonly TimeSpan _longest;
-        private readonly List<DateTimeOffset> _sent = new();
-        private readonly object _lock = new();
-        private DateTimeOffset _pausedUntil = DateTimeOffset.MinValue;
+        foreach (var limiter in _waited.Values) limiter.Dispose();
+        foreach (var limiter in _refused.Values.SelectMany(r => r)) limiter.Limiter.Dispose();
+    }
 
-        public WindowLimiter(string name, Func<DateTimeOffset> clock, TimeSpan? maxWait, params (int Count, TimeSpan Span, string Dhan)[] windows)
+    private sealed class Acquired : RateLimitLease
+    {
+        public static readonly Acquired Instance = new();
+        public override bool IsAcquired => true;
+        public override IEnumerable<string> MetadataNames => Array.Empty<string>();
+        public override bool TryGetMetadata(string metadataName, out object? metadata) { metadata = null; return false; }
+    }
+
+    private sealed class Refused(string reason) : RateLimitLease
+    {
+        public override bool IsAcquired => false;
+        public override IEnumerable<string> MetadataNames => new[] { MetadataName.ReasonPhrase.Name };
+        public override bool TryGetMetadata(string metadataName, out object? metadata)
         {
-            _name = name;
-            _clock = clock;
-            _maxWait = maxWait;
-            _windows = windows;
-            _longest = windows.Max(w => w.Span);
-        }
-
-        public int Sent { get; private set; }
-
-        public void Pause(TimeSpan pause)
-        {
-            lock (_lock)
-            {
-                var until = _clock() + pause;
-                if (_pausedUntil < until) _pausedUntil = until;
-            }
-        }
-
-        public async Task<string?> WaitAsync(CancellationToken cancellationToken)
-        {
-            while (true)
-            {
-                TimeSpan wait;
-                lock (_lock)
-                {
-                    var now = _clock();
-                    var expired = _sent.FindIndex(t => now - t < _longest);
-                    if (expired < 0) _sent.Clear(); else if (expired > 0) _sent.RemoveRange(0, expired);
-                    wait = _pausedUntil > now ? _pausedUntil - now : TimeSpan.Zero;
-                    string? limit = null;
-                    foreach (var (count, span, dhan) in _windows)
-                    {
-                        // The count-th most recent call must have left the window before another may go.
-                        if (_sent.Count < count) continue;
-                        var free = _sent[^count] + span - now;
-                        if (free > wait) { wait = free; limit = dhan; }
-                    }
-                    if (wait <= TimeSpan.Zero)
-                    {
-                        _sent.Add(now);
-                        Sent++;
-                        return null;
-                    }
-                    if (_maxWait is { } max && wait > max)
-                        return $"Not sent: Dhan allows {limit ?? "fewer"} {_name} requests and this account is at it - retry in {Math.Ceiling(wait.TotalSeconds):0} s.";
-                }
-                await Task.Delay(wait, cancellationToken);
-            }
+            metadata = metadataName == MetadataName.ReasonPhrase.Name ? reason : null;
+            return metadata is not null;
         }
     }
 }
