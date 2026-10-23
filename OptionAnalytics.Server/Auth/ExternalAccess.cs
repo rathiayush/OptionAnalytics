@@ -5,14 +5,15 @@ namespace OptionAnalytics.Server.Auth;
 /// <summary>
 /// The fence around the External account (AuthRoles.External): a request signed in as it may reach ONLY its own
 /// read-only API (ExternalController, /api/external/...), sign in / out / "who am I" (/api/auth/...), the build stamp
-/// (/api/version) and the page shell - every other API, every SignalR hub and swagger answer 403, whatever attribute
-/// (or none) the endpoint carries. A deny-by-default allow list, checked after authentication, so a new controller added
-/// later is closed to it too.
+/// (/api/version), the live hub (/hubs/spot - where it may join only its page's own feeds: MayJoin, and never gets the
+/// staff-only broadcasts: SpotHub.StaffGroup) and the page shell - every other API, hub and swagger answer 403, whatever
+/// attribute (or none) the endpoint carries. A deny-by-default allow list, checked after authentication, so a new
+/// controller added later is closed to it too.
 /// </summary>
 public static class ExternalAccess
 {
-    private static readonly string[] AllowedPrefixes = { "/api/external/", "/api/auth/" };
-    private static readonly string[] AllowedExact = { "/api/version" };
+    private static readonly string[] AllowedPrefixes = { "/api/external/", "/api/auth/", "/hubs/spot/" };
+    private static readonly string[] AllowedExact = { "/api/version", "/hubs/spot" };
     // The page shell and its assets are served from paths outside these; anything under them is an API.
     private static readonly string[] ClosedPrefixes = { "/api", "/hubs", "/swagger" };
 
@@ -27,6 +28,22 @@ public static class ExternalAccess
         if (AllowedExact.Contains(p.TrimEnd('/'))) return true;
         if (AllowedPrefixes.Any(a => p.StartsWith(a, StringComparison.Ordinal))) return true;
         return !ClosedPrefixes.Any(c => p.StartsWith(c, StringComparison.Ordinal));
+    }
+
+    /// <summary>The SignalR groups the External page may join: the near futures' order flow ("of:{U}" and
+    /// "of:{U}:yyyy-MM-dd" - the heatmap, prints) and the nearest expiry's option legs ("c:{U}:N1" - OI), for NIFTY and
+    /// BANKNIFTY. Never positions, the DOM, spot / CDV ("u:"), the tick tape or anything else.</summary>
+    public static bool MayJoin(string? group)
+    {
+        if (string.IsNullOrEmpty(group) || group.Length > 40) return false;
+        foreach (var u in Controllers.ExternalController.Underlyings)
+        {
+            if (group == $"of:{u}" || group == $"c:{u}:N1") return true;
+            if (group.StartsWith($"of:{u}:", StringComparison.Ordinal)
+                && DateOnly.TryParseExact(group[($"of:{u}:".Length)..], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
+                return true;
+        }
+        return false;
     }
 
     public static bool IsExternal(ClaimsPrincipal user) =>

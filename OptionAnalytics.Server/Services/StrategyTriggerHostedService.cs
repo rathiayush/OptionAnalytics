@@ -981,10 +981,9 @@ public sealed class StrategyTriggerHostedService : BackgroundService
         try
         {
             var alert = new ConfluenceAlert(trade.Underlying, DateTimeOffset.UtcNow, "Confluence", trade.Direction, 0, null, message);
-            // Deliberately Clients.All - see ConfluenceAlertService's own identical broadcast for why
-            // this event specifically stays unscoped (the Dashboard's Alerts panel shows every
-            // underlying at once, not just whichever one is currently charted).
-            await _hub.Clients.All.SendAsync("confluenceAlert", alert, cancellationToken);
+            // Every staff connection (SpotHub.StaffGroup - all but the External account) - see ConfluenceAlertService's
+            // own identical broadcast for why this event stays unscoped by underlying.
+            await _hub.Clients.Group(SpotHub.StaffGroup).SendAsync("confluenceAlert", alert, cancellationToken);
         }
         catch (Exception ex)
         {

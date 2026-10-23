@@ -39,8 +39,21 @@ public sealed class SpotHub : Hub
 
     public SpotHub(LiveBroadcastBatcher batcher) => _batcher = batcher;
 
+    /// <summary>Every connection but the External account's joins this on connect: what used to go to Clients.All (the
+    /// confluence / divergence alerts) goes here, so the External page never receives it.</summary>
+    public const string StaffGroup = "staff";
+
+    public override async Task OnConnectedAsync()
+    {
+        if (!ExternalAccess.IsExternal(Context.User!)) await Groups.AddToGroupAsync(Context.ConnectionId, StaffGroup);
+        await base.OnConnectedAsync();
+    }
+
     public Task JoinGroup(string groupName)
     {
+        // The External account: only its page's own live feeds (ExternalAccess.MayJoin) - nothing else.
+        if (ExternalAccess.IsExternal(Context.User!) && !ExternalAccess.MayJoin(groupName))
+            return Task.CompletedTask;
         // Live positions and P&L are the account's real money - admins only.
         if (groupName == LiveTradingService.PositionsGroup && Context.User?.IsInRole(AuthRoles.Admin) != true)
             return Task.CompletedTask;

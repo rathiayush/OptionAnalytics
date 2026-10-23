@@ -1,19 +1,28 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Select, Space, Spin, Typography } from 'antd'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, Card, InputNumber, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd'
 import { DepthHeatmap } from './OrderFlowCharts.jsx'
 import { TotalsChart } from './OiTotalsCharts.jsx'
-import { toColumn } from './liveFeeds.js'
-import { oiMeaning } from './oiTotalsHeatmap.js'
-import { toChartTime, useAuth, usePersistedState } from './shared.jsx'
+import { useOrderFlowHub } from './OrderFlowPage.jsx'
+import {
+  StrikeOiDrilldownChart, aggregateLinePoints, buildOiChangeMatrix, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
+  toSinceOpenSeries, useOiReplayLiveFeed,
+} from './OiReplayPage.jsx'
+import { applyOrderFlowPush, orderFlowFromSnapshot } from './liveFeeds.js'
+import { autoBigLots } from './orderFlowMath.js'
+import { buildOiTotalsRows, oiTotalsSeries } from './oiTotalsHeatmap.js'
+import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
 
-// The External account's whole app: the near futures' liquidity heatmap and today's net CE − PE OI (OI Replay's
-// totals), NIFTY or BANKNIFTY. It reads /api/external/... only - the server refuses this account everything else.
+// The External account's whole app - the existing charts of the Order Flow page (the liquidity heatmap with its big-order
+// dots) and OI Replay (chain-wide CE / PE OI, since the open, and the net CE − PE cumulative), fed and kept live exactly as
+// those pages do. It reads /api/external/... and the hub's "of:" / "c:...:N1" feeds only - the server refuses this account
+// everything else.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 const ROW_SIZES = [1, 2, 5, 10, 20, 50]
-const HEATMAP_REFRESH_MS = 10_000
-const OI_REFRESH_MS = 60_000
+const LIVE_EXPIRY_FLAG = 'N1'
+// Live option ticks are applied to the charts at most this often (each recompute covers the whole day).
+const OI_PUBLISH_MS = 2_000
 const BULLISH = '#3fcf6d'
 const BEARISH = '#ff5c5c'
 
@@ -25,6 +34,9 @@ function fmtOi(v) {
   return `${v > 0 ? '+' : '−'}${text}`
 }
 
+// A total (a level, not a change): no sign.
+const fmtOiLevel = (v) => (v == null || !Number.isFinite(v) ? '—' : `${(v / 1e5).toFixed(2)}L`)
+
 async function getJson(url) {
   const r = await fetch(url)
   const body = await r.json().catch(() => null)
@@ -32,48 +44,116 @@ async function getJson(url) {
   return body
 }
 
-// Asks `url` now and every `everyMs` while it answers; a failed answer is shown and NOT asked again on its own -
-// "Load again" (or another index / row size) asks once more.
-function useExternalData(url, everyMs) {
+// One REST load per selection (and "Load again"); a failed load is shown and NOT asked again on its own.
+function useLoad(url) {
   const [state, setState] = useState({ url: null, data: null, error: null })
   const [nonce, setNonce] = useState(0)
   useEffect(() => {
     let cancelled = false
-    let timer = null
-    const load = () => getJson(url)
-      .then((data) => {
-        if (cancelled) return
-        setState({ url, data, error: null })
-        timer = setTimeout(load, everyMs)
-      })
-      .catch((err) => { if (!cancelled) setState((prev) => ({ url, data: prev.url === url ? prev.data : null, error: err.message })) })
-    load()
-    return () => { cancelled = true; clearTimeout(timer) }
-  }, [url, everyMs, nonce])
+    getJson(url)
+      .then((data) => { if (!cancelled) setState({ url, data, error: null }) })
+      .catch((err) => { if (!cancelled) setState({ url, data: null, error: err.message }) })
+    return () => { cancelled = true }
+  }, [url, nonce])
   const current = state.url === url ? state : { data: null, error: null }
   return { ...current, loading: state.url !== url, reload: () => setNonce((n) => n + 1) }
 }
+
+function LoadError({ error, onRetry }) {
+  return <Alert type="warning" showIcon message={error} action={<Button size="small" onClick={onRetry}>Load again</Button>} style={{ marginBottom: 8 }} />
+}
+
+const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
 
 export default function ExternalPage() {
   const auth = useAuth()
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.external.underlying', 'NIFTY')
   const [rowSize, setRowSize] = usePersistedState('optionanalytics.external.rowSize', 5)
+  // Big order: 'auto' - the top 2.5% of the day's prints (autoBigLots), as the Order Flow page - or the fixed lots.
+  const [bigMode, setBigMode] = usePersistedState('optionanalytics.external.bigMode', 'auto')
+  const [largeLots, setLargeLots] = usePersistedState('optionanalytics.external.largeLots', 10)
   const u = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = ROW_SIZES.includes(rowSize) ? rowSize : 5
+  const fetchLots = bigMode === 'auto' ? 5 : Math.max(1, largeLots)
 
-  const heat = useExternalData(`/api/external/${u}/heatmap?rowSize=${row}`, HEATMAP_REFRESH_MS)
-  const oi = useExternalData(`/api/external/${u}/oi-net`, OI_REFRESH_MS)
+  // ---- Liquidity heatmap: the Order Flow page's snapshot, then its live "orderFlowLive" pushes ----
+  const flow = useLoad(`/api/external/${u}/order-flow?rowSize=${row}&minTradeLots=${fetchLots}`)
+  const [view, setView] = useState({ key: null, data: null })
+  const flowKey = `${u}|${row}|${fetchLots}`
+  if (flow.data && view.source !== flow.data) setView({ key: flowKey, source: flow.data, data: orderFlowFromSnapshot(flow.data) })
+  const data = view.key === flowKey ? view.data : null
+  const contextRef = useRef({ securityId: null, row })
+  useEffect(() => { contextRef.current = { securityId: data?.meta?.securityId ?? null, row } })
+  const onLive = (payload) => {
+    if (payload?.meta?.securityId == null || payload.meta.securityId !== contextRef.current.securityId) return
+    setView((prev) => (prev.data ? { ...prev, data: applyOrderFlowPush(prev.data, payload, contextRef.current.row) } : prev))
+  }
+  const liveGroup = data?.meta?.expiry ? `of:${u}:${data.meta.expiry}` : data ? `of:${u}` : null
+  const flowConnection = useOrderFlowHub(liveGroup, onLive)
+  const lotSize = data?.meta?.lotSize ?? 1
+  const autoLots = useMemo(() => autoBigLots(data?.trades ?? [], lotSize), [data?.trades, lotSize])
+  const bigLots = bigMode === 'auto' ? autoLots ?? 10 : Math.max(1, largeLots)
+  const largeTrades = useMemo(() => (data?.trades ?? []).filter((t) => t.quantity >= bigLots * lotSize), [data?.trades, bigLots, lotSize])
 
-  const columns = useMemo(() => (heat.data?.heatmap ?? []).map(toColumn), [heat.data])
-  const net = useMemo(() => {
-    const minutes = oi.data?.minutes ?? []
-    const point = (m, key, value) => ({ time: toChartTime(m.time), value, meaning: oiMeaning(key, value) })
-    return {
-      cum: minutes.map((m) => point(m, 'netCum', m.netCum)),
-      delta: minutes.map((m) => point(m, 'netDelta', m.netDelta)),
-      last: minutes.at(-1) ?? null,
+  // ---- OI: OI Replay's today run, then its live "oiReplayTicks" ----
+  const oi = useLoad(`/api/external/${u}/oi`)
+  const [live, setLive] = useState({ u: null, ce: [], pe: [] })
+  const pendingRef = useRef({ ce: [], pe: [] })
+  const uRef = useRef(u)
+  useEffect(() => { uRef.current = u; pendingRef.current = { ce: [], pe: [] } }, [u])
+  const handleOiTicks = (batch) => {
+    for (const tick of batch) {
+      if (tick?.underlying !== uRef.current || tick?.expiryFlag !== LIVE_EXPIRY_FLAG) continue
+      ;(tick.side === 'CE' ? pendingRef.current.ce : pendingRef.current.pe).push(tick)
     }
-  }, [oi.data])
+  }
+  useEffect(() => {
+    const id = setInterval(() => {
+      const { ce, pe } = pendingRef.current
+      if (!ce.length && !pe.length) return
+      pendingRef.current = { ce: [], pe: [] }
+      const owner = uRef.current
+      setLive((prev) => {
+        const base = prev.u === owner ? prev : { u: owner, ce: [], pe: [] }
+        return { u: owner, ce: mergeLiveOptionTicks(base.ce, ce, null), pe: mergeLiveOptionTicks(base.pe, pe, null) }
+      })
+    }, OI_PUBLISH_MS)
+    return () => clearInterval(id)
+  }, [])
+  // A reconnect may have missed ticks: load the day again once - only after a load that worked.
+  const oiReloadRef = useRef(null)
+  useEffect(() => { oiReloadRef.current = oi.error ? null : oi.reload })
+  const oiConnection = useOiReplayLiveFeed(() => {}, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
+
+  const liveCe = live.u === u ? live.ce : null
+  const livePe = live.u === u ? live.pe : null
+  const chain = useMemo(() => {
+    if (!oi.data) return null
+    const ceByStrike = groupByStrike([...(oi.data.cePoints ?? []), ...(liveCe ?? [])])
+    const peByStrike = groupByStrike([...(oi.data.pePoints ?? []), ...(livePe ?? [])])
+    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])].sort((a, b) => a - b)
+    // OI Replay's chain-wide history: one point per minute (its completed minutes), then the latest totals now.
+    const minutes = [...new Set([...ceByStrike.values(), ...peByStrike.values()].flatMap((list) => list.map((p) => Math.floor(toChartTime(p.time) / 60) * 60)))].sort((a, b) => a - b)
+    const history = chainOiTotalsHistory(ceByStrike, peByStrike, minutes.map((time) => ({ time })), minutes.length)
+    const latest = (byStrike) => [...byStrike.values()].reduce((sum, list) => sum + (list.at(-1)?.openInterest ?? 0), 0)
+    if (minutes.length) history.push({ time: minutes.at(-1), ceTotal: latest(ceByStrike), peTotal: latest(peByStrike) })
+    const ceTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.ceTotal })), 1)
+    const peTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.peTotal })), 1)
+    // OI Replay's OI totals (CE / PE / net, each minute's change and its running sum) - the net CE − PE as a chart.
+    const totals = oiTotalsSeries(buildOiTotalsRows(
+      buildOiChangeMatrix(ceByStrike, strikes, null, 1).perStrikeChange,
+      buildOiChangeMatrix(peByStrike, strikes, null, 1).perStrikeChange,
+    ))
+    return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal), net: totals.net }
+  }, [oi.data, liveCe, livePe])
+  const dayKey = `${u}-${oi.data?.date ?? ''}`
+  const last = (series) => series?.at(-1)?.value
+
+  const connectionTag = (state) => (
+    <Tag color={state === 'connected' ? 'green' : state === 'reconnecting' || state === 'connecting' ? 'gold' : 'red'} style={{ margin: 0 }}>
+      {state === 'connected' ? 'Live' : state}
+    </Tag>
+  )
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
@@ -88,6 +168,16 @@ export default function ExternalPage() {
               <Select value={row} onChange={setRowSize} style={{ width: 90 }} aria-label="Points per row"
                 options={ROW_SIZES.map((x) => ({ value: x, label: `${x}` }))} />
             </Space>
+            <Tooltip title={bigMode === 'auto'
+              ? `Auto: a big order is a print only the top 2.5% of today's prints reach${autoLots ? ` - ${autoLots} lots now` : ' (10 lots until there are enough prints)'}.`
+              : 'Fixed: every print of at least this many lots is a big order (a dot on the heatmap).'}>
+              <Space.Compact>
+                <Select value={bigMode} onChange={setBigMode} style={{ width: 150 }} aria-label="Big order mode"
+                  options={[{ value: 'auto', label: 'Big order: Auto' }, { value: 'fixed', label: 'Big order: Fixed' }]} />
+                <InputNumber value={bigMode === 'auto' ? bigLots : largeLots} onChange={(v) => setLargeLots(v ?? 10)} min={1}
+                  disabled={bigMode === 'auto'} style={{ width: 110 }} addonAfter="lots" aria-label="Big order lots" />
+              </Space.Compact>
+            </Tooltip>
           </Space>
           <Space>
             <Text type="secondary">{auth?.user?.email}</Text>
@@ -95,30 +185,41 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Card size="small" title={`Liquidity heatmap · ${heat.data?.contract ?? `${u} futures`}`}
-          extra={heat.data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {heat.data.lastPrice?.toLocaleString('en-IN')} · {row} pt rows</Text> : null}>
-          {heat.error && <Alert type="warning" showIcon message={heat.error} action={<Button size="small" onClick={heat.reload}>Load again</Button>} style={{ marginBottom: 8 }} />}
-          {heat.loading && !heat.data
-            ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
-            : columns.length === 0
+        <Card size="small" title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
+          extra={data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
+          {flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
+          {flow.loading && !data
+            ? loadingBox
+            : !data?.heatmap?.length
               ? <Text type="secondary">No market depth recorded yet today.</Text>
-              : <DepthHeatmap columns={columns} rowSize={row} trades={[]} icebergs={[]} lotSize={heat.data?.lotSize ?? 1} showLots height={460} />}
+              : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={460} />}
           <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-            Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price.
+            Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
           </Text>
         </Card>
 
-        <Card size="small" title="Net CE − PE OI · cumulative (today)"
-          extra={net.last ? <Text style={{ fontSize: 12, color: net.last.netCum < 0 ? BULLISH : net.last.netCum > 0 ? BEARISH : undefined }}>Net {fmtOi(net.last.netCum)} · CE {fmtOi(net.last.ceCum)} · PE {fmtOi(net.last.peCum)}</Text> : null}>
-          {oi.error && <Alert type="warning" showIcon message={oi.error} action={<Button size="small" onClick={oi.reload}>Load again</Button>} style={{ marginBottom: 8 }} />}
-          {oi.loading && !oi.data
-            ? <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
-            : net.cum.length === 0
-              ? <Text type="secondary">No OI data yet today.</Text>
-              : <TotalsChart cum={net.cum} delta={net.delta} levels={[]} dayKey={`${u}-${oi.data?.date}`} height={320} format={fmtOi} bullish={BULLISH} bearish={BEARISH} />}
+        <Card size="small" title={<Space size={8}>Chain-wide CE / PE OI{connectionTag(oiConnection)}</Space>}
+          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))}</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))}</Text></Space> : null}>
+          {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+          {oi.loading && !oi.data ? loadingBox : !chain?.ceTotal.length ? <Text type="secondary">No OI data yet today.</Text> : (
+            <StrikeOiDrilldownChart ceSeries={chain.ceTotal} peSeries={chain.peTotal} mode="total" dayKey={`ext-total-${dayKey}`} height={240} />
+          )}
+        </Card>
+
+        <Card size="small" title="CE / PE OI since the open"
+          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOi(last(chain.ceSince))}</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOi(last(chain.peSince))}</Text></Space> : null}>
+          {oi.loading && !oi.data ? loadingBox : !chain?.ceSince.length ? <Text type="secondary">No OI data yet today.</Text> : (
+            <StrikeOiDrilldownChart ceSeries={chain.ceSince} peSeries={chain.peSince} mode="sinceOpen" dayKey={`ext-since-${dayKey}`} height={240} />
+          )}
+        </Card>
+
+        <Card size="small" title="Net CE − PE OI · cumulative"
+          extra={chain?.net.cum.length ? <Text style={{ fontSize: 12, color: last(chain.net.cum) < 0 ? BULLISH : last(chain.net.cum) > 0 ? BEARISH : undefined }}>Net {fmtOi(last(chain.net.cum))}</Text> : null}>
+          {oi.loading && !oi.data ? loadingBox : !chain?.net.cum.length ? <Text type="secondary">No OI data yet today.</Text> : (
+            <TotalsChart cum={chain.net.cum} delta={chain.net.delta} levels={[]} dayKey={`ext-net-${dayKey}`} height={300} format={fmtOi} bullish={BULLISH} bearish={BEARISH} />
+          )}
           <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-            Line: CE OI change minus PE OI change since the open, over the ATM ± 10 strike band; bars: each minute&apos;s net change.
-            <span style={{ color: BULLISH }}> Green</span> = put writers ahead (bullish), <span style={{ color: BEARISH }}>red</span> = call writers ahead (bearish).
+            <span style={{ color: BULLISH }}>Green</span> = put writers ahead (bullish), <span style={{ color: BEARISH }}>red</span> = call writers ahead (bearish); bars: each minute&apos;s net change.
           </Text>
         </Card>
       </Space>
