@@ -20,7 +20,7 @@ const BEFORE_OPEN_RETRY_MS = 120_000
  * over SignalR; they are folded into the day's minute series here. The REST load repeats only after
  * the SignalR connection drops and comes back (ticks may have been missed meanwhile) - never after a failed load.
  */
-export function useDayOi(underlying, date, isReplay) {
+export function useDayOi(underlying, date, isReplay, loadNonce = 0) {
   const [state, setState] = useState({ key: null, oi: null, error: null })
   const requestKey = `${underlying}:${date}:${isReplay ? 'replay' : 'live'}`
   const ctxRef = useRef(null)
@@ -35,9 +35,10 @@ export function useDayOi(underlying, date, isReplay) {
   }, [underlying, isReplay, requestKey])
 
   // The day so far (REST). A FAILED load (the server or a Dhan call said no) is NOT asked again on its own - no loop of
-  // a failing request (Dhan support flagged them): the error stays on screen until the index / day changes, the page
-  // reloads, or the connection comes back after a load that had worked. Only an empty day before the open (the server
-  // answered fine, the session has not started) is looked at again, every 2 minutes. The last good OI stays on screen.
+  // a failing request (Dhan support flagged them): the error stays on screen until Go Live / Load day is clicked
+  // (loadNonce), the index / day changes, the page reloads, or the connection comes back after a load that had worked.
+  // Only an empty day before the open (the server answered fine, the session has not started) is looked at again,
+  // every 2 minutes. The last good OI stays on screen.
   useEffect(() => {
     if (!date) return undefined
     let cancelled = false
@@ -72,7 +73,7 @@ export function useDayOi(underlying, date, isReplay) {
     failedRef.current = false
     load()
     return () => { cancelled = true; if (retryTimer) clearTimeout(retryTimer) }
-  }, [underlying, date, isReplay, requestKey, reloadNonce])
+  }, [underlying, date, isReplay, requestKey, reloadNonce, loadNonce])
 
   // Live: Dhan websocket ticks via SignalR, folded into the context's minute series.
   const connectionRef = useRef(null)
