@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, InputNumber, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, InputNumber, Segmented, Select, Space, Spin, Tag, Tooltip, Typography } from 'antd'
+import { LineChartOutlined } from '@ant-design/icons'
 import { DepthHeatmap } from './OrderFlowCharts.jsx'
 import { TotalsChart } from './OiTotalsCharts.jsx'
 import { useOrderFlowHub } from './OrderFlowPage.jsx'
 import {
+  HeatmapBucketSelect, OI_ADDED_COLOR, OI_REMOVED_COLOR, OiChangeHeatmapPlot, OiTotalsChartsPopup, OiTotalsHeatmap, OiTotalsNumbers,
   StrikeOiDrilldownChart, aggregateLinePoints, buildOiChangeMatrix, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
   toSinceOpenSeries, useOiReplayLiveFeed,
 } from './OiReplayPage.jsx'
@@ -15,9 +17,11 @@ import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from '.
 const { Title, Text } = Typography
 
 // The External account's whole app - the existing charts of the Order Flow page (the liquidity heatmap with its big-order
-// dots) and OI Replay (chain-wide CE / PE OI, since the open, and the net CE − PE cumulative), fed and kept live exactly as
-// those pages do. It reads /api/external/... and the hub's "of:" / "c:...:N1" feeds only - the server refuses this account
-// everything else.
+// dots) and OI Replay (the chain-wide CE / PE OI with its Total / Since open switch, the OI change heatmap of every strike,
+// the CE / PE / net totals as numbers or a heatmap with their charts, and the net CE − PE cumulative), fed and kept live
+// exactly as those pages do. It reads /api/external/... and the hub's "of:", "c:...:N1" and "u:" feeds only - the server
+// refuses this account everything else. Everything is keyed by the index picked, so switching NIFTY / BANKNIFTY never
+// shows (or mixes in) the other index's data.
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY']
 const ROW_SIZES = [1, 2, 5, 10, 20, 50]
 const LIVE_EXPIRY_FLAG = 'N1'
@@ -123,19 +127,45 @@ export default function ExternalPage() {
   // A reconnect may have missed ticks: load the day again once - only after a load that worked.
   const oiReloadRef = useRef(null)
   useEffect(() => { oiReloadRef.current = oi.error ? null : oi.reload })
-  const oiConnection = useOiReplayLiveFeed(() => {}, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
+  // ATM: the index's live spot ("spotUpdate" on "u:{index}"), else its last 1-minute close from the load - one string
+  // per index and strike, so a tick that leaves the ATM where it was re-renders nothing.
+  const [spotAtm, setSpotAtm] = useState('')
+  const stepRef = useRef(50)
+  useEffect(() => { stepRef.current = oi.data?.step || 50 })
+  const handleSpotUpdate = (snapshot) => {
+    const close = snapshot?.currentBar?.close
+    if (snapshot?.underlying !== uRef.current || !Number.isFinite(close)) return
+    setSpotAtm(`${uRef.current}|${Math.round(close / stepRef.current) * stepRef.current}`)
+  }
+  const oiConnection = useOiReplayLiveFeed(handleSpotUpdate, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
+  const step = oi.data?.step || 50
+  const liveAtm = spotAtm.startsWith(`${u}|`) ? Number(spotAtm.slice(u.length + 1)) : null
+  const atmStrike = liveAtm ?? (Number.isFinite(oi.data?.spotClose) ? Math.round(oi.data.spotClose / step) * step : null)
+
+  // OI Replay's own settings for these cards (the same stored choices).
+  const [dayOiChartMode, setDayOiChartMode] = useState('total')
+  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
+  const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
 
   const liveCe = live.u === u ? live.ce : null
   const livePe = live.u === u ? live.pe : null
-  const chain = useMemo(() => {
+  // Each side's strikes, as OI Replay groups them: today's load plus this index's live points since.
+  const byStrike = useMemo(() => {
     if (!oi.data) return null
     const ceByStrike = groupByStrike([...(oi.data.cePoints ?? []), ...(liveCe ?? [])])
     const peByStrike = groupByStrike([...(oi.data.pePoints ?? []), ...(livePe ?? [])])
-    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])].sort((a, b) => a - b)
+    // Highest strike first, as OI Replay's heatmap.
+    const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])].sort((a, b) => b - a)
+    return { ceByStrike, peByStrike, strikes }
+  }, [oi.data, liveCe, livePe])
+  const chain = useMemo(() => {
+    if (!byStrike) return null
+    const { ceByStrike, peByStrike, strikes } = byStrike
     // OI Replay's chain-wide history: one point per minute (its completed minutes), then the latest totals now.
     const minutes = [...new Set([...ceByStrike.values(), ...peByStrike.values()].flatMap((list) => list.map((p) => Math.floor(toChartTime(p.time) / 60) * 60)))].sort((a, b) => a - b)
     const history = chainOiTotalsHistory(ceByStrike, peByStrike, minutes.map((time) => ({ time })), minutes.length)
-    const latest = (byStrike) => [...byStrike.values()].reduce((sum, list) => sum + (list.at(-1)?.openInterest ?? 0), 0)
+    const latest = (byS) => [...byS.values()].reduce((sum, list) => sum + (list.at(-1)?.openInterest ?? 0), 0)
     if (minutes.length) history.push({ time: minutes.at(-1), ceTotal: latest(ceByStrike), peTotal: latest(peByStrike) })
     const ceTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.ceTotal })), 1)
     const peTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.peTotal })), 1)
@@ -145,9 +175,11 @@ export default function ExternalPage() {
       buildOiChangeMatrix(peByStrike, strikes, null, 1).perStrikeChange,
     ))
     return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal), net: totals.net }
-  }, [oi.data, liveCe, livePe])
+  }, [byStrike])
   const dayKey = `${u}-${oi.data?.date ?? ''}`
   const last = (series) => series?.at(-1)?.value
+  // `render` runs only once the day's OI is here.
+  const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">No OI data yet today.</Text> : render())
 
   const connectionTag = (state) => (
     <Tag color={state === 'connected' ? 'green' : state === 'reconnecting' || state === 'connecting' ? 'gold' : 'red'} style={{ margin: 0 }}>
@@ -198,26 +230,71 @@ export default function ExternalPage() {
           </Text>
         </Card>
 
-        <Card size="small" title={<Space size={8}>Chain-wide CE / PE OI{connectionTag(oiConnection)}</Space>}
-          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))}</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))}</Text></Space> : null}>
+        <Card size="small" title={<Space size={8}>Chain-wide OI{connectionTag(oiConnection)}</Space>}
+          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))} ({fmtOi(last(chain.ceSince))})</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))} ({fmtOi(last(chain.peSince))})</Text></Space> : null}>
           {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-          {oi.loading && !oi.data ? loadingBox : !chain?.ceTotal.length ? <Text type="secondary">No OI data yet today.</Text> : (
-            <StrikeOiDrilldownChart ceSeries={chain.ceTotal} peSeries={chain.peTotal} mode="total" dayKey={`ext-total-${dayKey}`} height={240} />
-          )}
+          {oiBody(() => (
+            <div>
+              <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+                <Segmented size="small" value={dayOiChartMode} onChange={setDayOiChartMode}
+                  options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]} />
+                <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+                <Text style={{ color: UP_COLOR }}>● PE</Text>
+              </Space>
+              <StrikeOiDrilldownChart key={`day-oi-${dayOiChartMode}-${dayKey}`}
+                ceSeries={dayOiChartMode === 'total' ? chain.ceTotal : chain.ceSince}
+                peSeries={dayOiChartMode === 'total' ? chain.peTotal : chain.peSince}
+                mode={dayOiChartMode} dayKey={`day-oi-${dayOiChartMode}-${dayKey}`} height={260} />
+            </div>
+          ))}
         </Card>
 
-        <Card size="small" title="CE / PE OI since the open"
-          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOi(last(chain.ceSince))}</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOi(last(chain.peSince))}</Text></Space> : null}>
-          {oi.loading && !oi.data ? loadingBox : !chain?.ceSince.length ? <Text type="secondary">No OI data yet today.</Text> : (
-            <StrikeOiDrilldownChart ceSeries={chain.ceSince} peSeries={chain.peSince} mode="sinceOpen" dayKey={`ext-since-${dayKey}`} height={240} />
-          )}
+        <Card size="small" title="OI change heatmap (all strikes)">
+          {oiBody(() => (
+            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Every tracked strike&apos;s own OI change, bucketed to the timeframe below. Newest minute on the left; the outlined
+                column is the one filling right now. Tap a cell for the exact number; scroll right for earlier in the day.
+              </Text>
+              <Space size={16} wrap>
+                <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
+                <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
+                <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+              </Space>
+              <div>
+                <Text strong style={{ fontSize: 12 }}>CE</Text>
+                <OiChangeHeatmapPlot label="CE" byStrike={byStrike.ceByStrike} strikes={byStrike.strikes} atmStrike={atmStrike} asOfMs={null} timeframeMinutes={heatmapTimeframeMinutes} live />
+              </div>
+              <div>
+                <Text strong style={{ fontSize: 12 }}>PE</Text>
+                <OiChangeHeatmapPlot label="PE" byStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike} asOfMs={null} timeframeMinutes={heatmapTimeframeMinutes} live />
+              </div>
+              <div>
+                <Space size={8} wrap style={{ marginBottom: 6 }}>
+                  <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
+                  <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
+                  <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+                </Space>
+                <OiTotalsChartsPopup
+                  open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike}
+                  strikes={byStrike.strikes} asOfMs={null} timeframeMinutes={heatmapTimeframeMinutes} dayKey={dayKey}
+                  extra={<HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />}
+                />
+                <br />
+                <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
+                {totalsView === 'numbers'
+                  ? <OiTotalsNumbers ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} asOfMs={null} timeframeMinutes={heatmapTimeframeMinutes} live />
+                  : <OiTotalsHeatmap ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} asOfMs={null} timeframeMinutes={heatmapTimeframeMinutes} live />}
+              </div>
+            </Space>
+          ))}
         </Card>
 
         <Card size="small" title="Net CE − PE OI · cumulative"
           extra={chain?.net.cum.length ? <Text style={{ fontSize: 12, color: last(chain.net.cum) < 0 ? BULLISH : last(chain.net.cum) > 0 ? BEARISH : undefined }}>Net {fmtOi(last(chain.net.cum))}</Text> : null}>
-          {oi.loading && !oi.data ? loadingBox : !chain?.net.cum.length ? <Text type="secondary">No OI data yet today.</Text> : (
+          {oiBody(() => chain.net.cum.length > 0 && (
             <TotalsChart cum={chain.net.cum} delta={chain.net.delta} levels={[]} dayKey={`ext-net-${dayKey}`} height={300} format={fmtOi} bullish={BULLISH} bearish={BEARISH} />
-          )}
+          ))}
           <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
             <span style={{ color: BULLISH }}>Green</span> = put writers ahead (bullish), <span style={{ color: BEARISH }}>red</span> = call writers ahead (bearish); bars: each minute&apos;s net change.
           </Text>

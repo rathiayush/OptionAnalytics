@@ -59,7 +59,8 @@ public sealed class ExternalController : ControllerBase
     }
 
     public sealed record OiPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest);
-    public sealed record OiAnswer(bool Success, string Underlying, DateOnly Date, IReadOnlyList<OiPoint> CePoints, IReadOnlyList<OiPoint> PePoints);
+    /// <summary>Step: the strike step; SpotClose: the index's last 1-minute close (the ATM strike until live spot arrives).</summary>
+    public sealed record OiAnswer(bool Success, string Underlying, DateOnly Date, int Step, decimal? SpotClose, IReadOnlyList<OiPoint> CePoints, IReadOnlyList<OiPoint> PePoints);
 
     [HttpGet("{underlying}/oi")]
     public async Task<ActionResult<OiAnswer>> Oi(string underlying, CancellationToken cancellationToken)
@@ -72,7 +73,7 @@ public sealed class ExternalController : ControllerBase
         // The same request OI Replay's live view makes for today (its nearest WEEK / MONTH series, forceLive).
         var run = await _oiReplay.RunAsync(u, today, 1, u == "BANKNIFTY" ? "MONTH" : "WEEK", cancellationToken, forceLive: true);
         if (!run.Success) return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "Today's OI is not available right now." });
-        var answer = new OiAnswer(true, u, today, Cut(run.CePoints), Cut(run.PePoints));
+        var answer = new OiAnswer(true, u, today, run.Step, run.SpotCandlesOneMinute.Count > 0 ? run.SpotCandlesOneMinute[^1].Close : null, Cut(run.CePoints), Cut(run.PePoints));
         Held[key] = (DateTimeOffset.UtcNow, answer);
         return answer;
     }

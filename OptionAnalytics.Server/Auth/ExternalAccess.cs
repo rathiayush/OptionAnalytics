@@ -31,14 +31,15 @@ public static class ExternalAccess
     }
 
     /// <summary>The SignalR groups the External page may join: the near futures' order flow ("of:{U}" and
-    /// "of:{U}:yyyy-MM-dd" - the heatmap, prints) and the nearest expiry's option legs ("c:{U}:N1" - OI), for NIFTY and
-    /// BANKNIFTY. Never positions, the DOM, spot / CDV ("u:"), the tick tape or anything else.</summary>
+    /// "of:{U}:yyyy-MM-dd" - the heatmap, prints), the nearest expiry's option legs ("c:{U}:N1" - OI) and the index's
+    /// own market feed ("u:{U}" - spot, for the ATM strike), for NIFTY and BANKNIFTY. Never positions, the DOM, the tick
+    /// tape, the staff alerts or anything else.</summary>
     public static bool MayJoin(string? group)
     {
         if (string.IsNullOrEmpty(group) || group.Length > 40) return false;
         foreach (var u in Controllers.ExternalController.Underlyings)
         {
-            if (group == $"of:{u}" || group == $"c:{u}:N1") return true;
+            if (group == $"of:{u}" || group == $"c:{u}:N1" || group == $"u:{u}") return true;
             if (group.StartsWith($"of:{u}:", StringComparison.Ordinal)
                 && DateOnly.TryParseExact(group[($"of:{u}:".Length)..], "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out _))
                 return true;
