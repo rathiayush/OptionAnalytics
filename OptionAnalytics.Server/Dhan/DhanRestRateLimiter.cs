@@ -165,8 +165,8 @@ public sealed class DhanRestRateLimiter : IDisposable
         int Status = 0, string? Body = null, double DurationMs = 0, string? Response = null);
 
     private readonly ConcurrentQueue<DhanCall> _calls = new();
-    internal static readonly TimeSpan CallLogSpan = TimeSpan.FromMinutes(60);
-    private const int CallLogMax = 5_000;
+    internal static readonly TimeSpan CallLogSpan = TimeSpan.FromHours(24);
+    private const int CallLogMax = 10_000;
 
     /// <summary>A request that was sent to Dhan (every attempt).</summary>
     internal void Log(DhanCall call)

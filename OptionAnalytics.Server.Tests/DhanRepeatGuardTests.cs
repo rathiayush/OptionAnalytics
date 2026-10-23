@@ -126,5 +126,31 @@ public class DhanRepeatGuardTests
             "Input_Exception: Missing required fields, bad values for parameters etc.", 400, body);
         Assert.Contains(expected, SystemController.Diagnose(call, now));
     }
+
+    [Fact]
+    public void Calls_filter_by_the_day_of_data_they_asked_for_and_by_result_and_window()
+    {
+        var now = new DateTimeOffset(2026, 10, 23, 17, 40, 0, TimeSpan.Zero);
+        DhanRestRateLimiter.DhanCall Call(int minutesAgo, string from, bool ok) => new(now.AddMinutes(-minutesAgo), DhanApiCategory.Data, "POST", "/charts/intraday",
+            $"spot {from}", ok, ok ? null : "Input_Exception", ok ? 200 : 400, $"{{\"fromDate\":\"{from}\",\"toDate\":\"{from}\"}}");
+        var calls = new[]
+        {
+            Call(300, "2026-10-21 09:15:00", false), Call(30, "2026-10-21 09:15:00", false), Call(20, "2026-10-22", true), Call(10, "2026-10-23 09:15:00", true),
+            new DhanRestRateLimiter.DhanCall(now.AddMinutes(-5), DhanApiCategory.NonTrading, "GET", "/positions", "positions", true, null, 200),
+        }.OrderBy(c => c.At).ToList();
+
+        var hour = SystemController.DhanCallsReportOf(calls, now);
+        Assert.Equal(4, hour.Recent.Count); // the 5-hour-old call is outside the default hour
+        Assert.Equal(new[] { "2026-10-23", "2026-10-22", "2026-10-21" }, hour.DataDates.Select(d => d.Date));
+
+        var day = SystemController.DhanCallsReportOf(calls, now, minutes: 1440, dataDate: "2026-10-21");
+        Assert.Equal(2, day.Recent.Count);
+        Assert.All(day.Recent, c => Assert.Equal("2026-10-21", c.DataDate));
+        Assert.Equal((2, 2), (day.DataDates.Single(d => d.Date == "2026-10-21").Calls, day.DataDates.Single(d => d.Date == "2026-10-21").Failed));
+
+        var okOnly = SystemController.DhanCallsReportOf(calls, now, minutes: 1440, result: "ok");
+        Assert.Equal(3, okOnly.Matching);
+        Assert.All(okOnly.Recent, c => Assert.True(c.Success));
+    }
 }
 
