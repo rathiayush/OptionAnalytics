@@ -1497,6 +1497,73 @@ const OI_TOTALS_ROW_HEIGHT = 24
 const OI_TOTALS_GAP = 6
 const OI_TOTALS_LABEL_WIDTH = 190
 
+// OI Replay's whole "OI change heatmap (all strikes)" card body: every strike's CE and PE OI change heatmap with its bucket
+// picker, the CE / PE / Net totals as Numbers or Heatmap and their Charts popup. Its own settings (bucket, Numbers /
+// Heatmap, popup) live here. Also the External page's.
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = Date.now(), dayKey }) {
+  // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
+  // timeframe picker on the page.
+  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  // The totals (CE / PE / net) as numbers (default) or as a heatmap - remembered.
+  const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
+  // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
+  const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
+  return (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
+        (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
+        out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
+        the left; while live, the outlined column is the one filling right now. Hover a cell for the exact number. Scroll
+        right for earlier in the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
+        different meaning (which side, how heavy), so this uses its own separate color language for "added vs
+        removed."
+      </Text>
+      <Space size={16} wrap>
+        <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
+        <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
+        {live && (
+          <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round((nowMs - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
+            </Text>
+          </Tooltip>
+        )}
+        <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+      </Space>
+      <div>
+        <Text strong style={{ fontSize: 12 }}>CE</Text>
+        <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
+      </div>
+      <div>
+        <Text strong style={{ fontSize: 12 }}>PE</Text>
+        <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
+      </div>
+      <div>
+        <Space size={8} wrap style={{ marginBottom: 6 }}>
+          <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
+          <Tooltip title="CE, PE and Net as charts for the whole day so far - cumulative Δ lines with each bucket's Δ - in a popup, with automatic support / resistance">
+            <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
+          </Tooltip>
+          <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+        </Space>
+        <OiTotalsChartsPopup
+          open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
+          strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={dayKey}
+          extra={<HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />}
+        />
+        <br />
+        <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
+          <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
+        </Tooltip>
+        {totalsView === 'numbers'
+          ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
+          : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />}
+      </div>
+    </Space>
+  )
+}
+
 // OI as a compact number for the totals table: lakh (L) from 1,00,000, else thousand (K) - one minute's
 // change is often a few thousand, which "0.01M" hides. The exact figure is the cell's tooltip.
 function fmtOiNum(v) {
@@ -3041,13 +3108,7 @@ export default function OiReplayPage() {
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
   const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
   const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
-  // OI change heatmap's own bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why this
-  // is independent of every other timeframe picker on the page.
-  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
-  // The totals (CE / PE / net) as numbers (default) or as a heatmap.
-  const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
-  // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
-  const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
+  // The OI change heatmap's bucket, Numbers / Heatmap and Charts popup settings live in OiChangeHeatmapSection.
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
   // The futures DOM (full market depth ladder) drawer - see DomDrawer.jsx.
@@ -5431,58 +5492,10 @@ export default function OiReplayPage() {
             {visibleSections.includes('oiHeatmap') && (
               <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>} {...orderedDropProps('oiHeatmap')}>
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
-                    (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
-                    out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
-                    the left; while live, the outlined column is the one filling right now. Hover a cell for the exact number. Scroll
-                    right for earlier in the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
-                    different meaning (which side, how heavy), so this uses its own separate color language for "added vs
-                    removed."
-                  </Text>
-                  <Space size={16} wrap>
-                    <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
-                    <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
-                    {isLive && (
-                      <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round((nowTick - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
-                        </Text>
-                      </Tooltip>
-                    )}
-                    <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
-                  </Space>
-                  <div>
-                    <Text strong style={{ fontSize: 12 }}>CE</Text>
-                    <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
-                  </div>
-                  <div>
-                    <Text strong style={{ fontSize: 12 }}>PE</Text>
-                    <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
-                  </div>
-                  <div>
-                    <Space size={8} wrap style={{ marginBottom: 6 }}>
-                      <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
-                      <Tooltip title="CE, PE and Net as charts for the whole day so far - cumulative Δ lines with each bucket's Δ - in a popup, with automatic support / resistance">
-                        <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
-                      </Tooltip>
-                      <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
-                    </Space>
-                    <OiTotalsChartsPopup
-                      open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
-                      strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={`${underlying}-${result.date}`}
-                      extra={<HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />}
-                    />
-                    <br />
-                    <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
-                      <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
-                    </Tooltip>
-                    {totalsView === 'numbers'
-                      ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />
-                      : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={isLive} />}
-                  </div>
-                </Space>
+                <OiChangeHeatmapSection
+                  ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`}
+                />
               </Card>
               </LiveSection>
             )}
