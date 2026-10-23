@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Button, Drawer, Segmented, Select, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import { AimOutlined } from '@ant-design/icons'
-import * as signalR from '@microsoft/signalr'
-import { usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, joinAllSignalRGroups, syncSignalRGroups, UP_COLOR, DOWN_COLOR, AXIS_COLOR, BORDER_COLOR } from './shared.jsx'
+import { usePersistedState, UP_COLOR, DOWN_COLOR, AXIS_COLOR, BORDER_COLOR } from './shared.jsx'
+import { useDomFeed } from './domFeed.js'
 import { formatVolume } from './OrderFlowCharts.jsx'
 
 const { Text } = Typography
@@ -32,42 +32,6 @@ export function useNarrow(maxWidth = 640) {
     return () => media.removeEventListener('change', onChange)
   }, [query])
   return narrow
-}
-
-// Its own SignalR connection, only while the drawer is open.
-function useDomFeed(underlying, open) {
-  const [dom, setDom] = useState(null)
-  const [state, setState] = useState('idle')
-  const connectionRef = useRef(null)
-  const groupsRef = useRef([])
-  const underlyingRef = useRef(underlying)
-  underlyingRef.current = underlying
-
-  useEffect(() => {
-    if (!open) return undefined
-    setState('connecting')
-    const connection = new signalR.HubConnectionBuilder().withUrl('/hubs/spot').withAutomaticReconnect(RECONNECT_RETRY_POLICY).build()
-    connectionRef.current = connection
-    onLiveBatch(connection, { domLive: (payload) => { if (payload?.meta?.underlying === underlyingRef.current) setDom(payload) } })
-    connection.onreconnecting(() => setState('reconnecting'))
-    connection.onreconnected(() => { setState('connected'); joinAllSignalRGroups(connection, groupsRef.current) })
-    connection.onclose(() => setState('disconnected'))
-    groupsRef.current = [`dom:${underlyingRef.current}`]
-    connection.start()
-      .then(() => { setState('connected'); joinAllSignalRGroups(connection, groupsRef.current) })
-      .catch((err) => { if (err?.name !== 'AbortError') setState('disconnected') })
-    return () => { connectionRef.current = null; connection.stop(); setDom(null); setState('idle') }
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    const groups = [`dom:${underlying}`]
-    syncSignalRGroups(connectionRef.current, groupsRef.current, groups)
-    groupsRef.current = groups
-    setDom(null)
-  }, [underlying, open])
-
-  return { dom, state }
 }
 
 // The ladder's rows, top (highest price) to bottom: book and traded volume grouped into `step` rows.

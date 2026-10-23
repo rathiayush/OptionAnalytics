@@ -227,6 +227,15 @@ export function findWalls(book, factor = 4) {
   return { bids: pick(book.bids), asks: pick(book.asks), median }
 }
 
+// The bids' share of the resting quantity in the top `levels` levels of each side (null when there is none) - the
+// book's lean near the price (top 20) against its lean through the whole of it (200 levels on Dhan's full depth).
+export function bidShare(book, levels = Infinity) {
+  const sum = (side) => (side ?? []).slice(0, levels).reduce((s, l) => s + (Array.isArray(l) ? l[1] : l.quantity ?? 0), 0)
+  const bids = sum(book?.bids)
+  const asks = sum(book?.asks)
+  return bids + asks > 0 ? bids / (bids + asks) : null
+}
+
 // A book (or heatmap column) as rowSize rows: [[price, quantity], ...].
 export function bucketBook(levels, rowSize) {
   const rows = new Map()
