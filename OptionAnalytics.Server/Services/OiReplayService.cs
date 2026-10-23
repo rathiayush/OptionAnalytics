@@ -136,16 +136,24 @@ public sealed class OiReplayService
     /// cache).</summary>
     public void RefreshToday(string underlying) => _today.Invalidate($"{underlying.ToUpperInvariant()}|");
 
-    /// <summary>Today's spot bars from the spot feed's memory when it holds the whole day so far (from the open to a
-    /// few minutes ago) - null otherwise (then Dhan is asked).</summary>
-    private IReadOnlyList<CandleWithVolume>? TodaySpotFromFeed(string underlying, DateOnly date)
+    /// <summary>Today's spot bars from the spot feed's memory (TodaySpotBars) - null when it does not hold them.</summary>
+    private IReadOnlyList<CandleWithVolume>? TodaySpotFromFeed(string underlying, DateOnly date, bool wholeDay)
     {
         if (_spotFeed is null || date != IstClock.Today() || !_spotFeed.States.TryGetValue(underlying.ToUpperInvariant(), out var state)) return null;
-        var bars = state.GetVolumeBars().Where(b => DateOnly.FromDateTime(b.Time.ToOffset(IstClock.Offset).DateTime) == date).OrderBy(b => b.Time).ToList();
+        return TodaySpotBars(state.GetVolumeBars(), date, DateTimeOffset.UtcNow, wholeDay);
+    }
+
+    /// <summary>`date`'s bars of the spot feed's memory, in time order. `wholeDay`: only when they hold the whole day so far
+    /// (from the open to a few minutes before `now`) - then no Dhan call is needed; otherwise any of the day's bars (what
+    /// the feed saw since the server started - shown when Dhan refuses the day). Null when there are none (or not whole).</summary>
+    internal static IReadOnlyList<CandleWithVolume>? TodaySpotBars(IReadOnlyList<CandleWithVolume> feedBars, DateOnly date, DateTimeOffset now, bool wholeDay)
+    {
+        var bars = feedBars.Where(b => DateOnly.FromDateTime(b.Time.ToOffset(IstClock.Offset).DateTime) == date).OrderBy(b => b.Time).ToList();
         if (bars.Count == 0) return null;
+        if (!wholeDay) return bars;
         var open = new DateTimeOffset(date.ToDateTime(new TimeOnly(9, 16)), IstClock.Offset);
         var close = new DateTimeOffset(date.ToDateTime(new TimeOnly(15, 29)), IstClock.Offset);
-        var recent = DateTimeOffset.UtcNow.AddMinutes(-3) < close ? DateTimeOffset.UtcNow.AddMinutes(-3) : close;
+        var recent = now.AddMinutes(-3) < close ? now.AddMinutes(-3) : close;
         return bars[0].Time <= open && bars[^1].Time >= recent ? bars : null;
     }
 
@@ -228,11 +236,23 @@ public sealed class OiReplayService
             ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
         _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
-        var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date) : null;
+        var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date, wholeDay: true) : null;
         var (spotBarsRaw, spotError) = fromFeed is not null ? (fromFeed, null) : await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
+        // Today, when Dhan refuses (or has nothing for) the day's spot: what the live feed has seen of it is shown instead
+        // of failing the whole page - from when the server's feed started (a restart part way through the day).
+        string? spotNote = null;
+        if (spotBarsRaw.Count == 0 && TodaySpotFromFeed(underlying, date, wholeDay: false) is { Count: > 0 } partial)
+        {
+            var fromIst = partial[0].Time.ToOffset(IstClock.Offset);
+            spotNote = $"Dhan did not send today's {underlying} spot candles ({spotError ?? "no data"}) - the spot is shown from the server's live feed instead, from {fromIst:HH:mm}{(fromIst.TimeOfDay > new TimeSpan(9, 16, 0) ? "; the minutes before are missing" : "")}.";
+            LoadProgress.Warn(spotNote);
+            spotBarsRaw = partial;
+            spotError = null;
+        }
 
         LoadProgress.Done(failed: spotBarsRaw.Count == 0);
         if (fromFeed is not null) LoadProgress.Ok($"Spot: {spotBarsRaw.Count} bars from the live feed's memory (no Dhan call).");
+        else if (spotNote is not null) LoadProgress.Ok($"Spot: {spotBarsRaw.Count} bars from the live feed's memory (Dhan refused the day).");
         else if (spotBarsRaw.Count > 0) LoadProgress.Ok($"Spot: {spotBarsRaw.Count} bars.");
         else LoadProgress.Error($"Spot: nothing - {spotError ?? "no data"}");
         if (spotBarsRaw.Count == 0)
@@ -360,6 +380,7 @@ public sealed class OiReplayService
             spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
         {
             SpotVwap = VwapCalculator.ComputeSeries(spotBarsRaw),
+            SpotNote = spotNote,
         };
     }
 
@@ -532,7 +553,8 @@ public sealed class OiReplayService
                 // something - a live error (auth, market holiday) should never blank out a
                 // perfectly good, merely slightly-stale stored result.
                 if (liveSpotBars.Count > 0) spotBarsRaw = liveSpotBars;
-                else spotError = liveSpotError;
+                else spotError = liveSpotError is null ? null
+                    : $"{underlying} spot 1-minute candles for {date:dd MMM yyyy} ({liveInstrument.DhanSegment}:{liveInstrument.SecurityId}) - Dhan said: {liveSpotError}";
             }
         }
         return (spotBarsRaw, spotError);

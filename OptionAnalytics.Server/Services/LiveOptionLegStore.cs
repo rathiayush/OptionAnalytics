@@ -107,13 +107,25 @@ public sealed class LiveOptionLegStore
     private static DateOnly DayOf(DateTimeOffset t) => DateOnly.FromDateTime(t.ToOffset(IstClock.Offset).DateTime);
     private static long MinuteOf(DateTimeOffset t) => t.ToUnixTimeSeconds() / 60;
 
-    // A tick of a new day clears yesterday's bars; one of an older day than the bars held is dropped.
+    // A tick of a new day clears yesterday's bars - and the newest readings of earlier days (a leg the feed no longer
+    // tracks, a strike the index has moved away from, would otherwise stay held for the life of the server); one of an
+    // older day than the bars held is dropped.
     private bool SameDay(DateTimeOffset time)
     {
         var day = DayOf(time);
-        if (day > _day) { _day = day; _options.Clear(); _futures.Clear(); }
+        if (day > _day)
+        {
+            _day = day;
+            _options.Clear();
+            _futures.Clear();
+            foreach (var (key, tick) in _latest)
+                if (DayOf(tick.Time) < day) _latest.TryRemove(KeyValuePair.Create(key, tick));
+        }
         return day == _day;
     }
+
+    /// <summary>For the tests: how many legs' newest readings are held.</summary>
+    internal int LatestCount => _latest.Count;
 
     private static void Fold(Series series, DateTimeOffset time, decimal price, long openInterest, long dayVolume)
     {

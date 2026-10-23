@@ -3088,6 +3088,8 @@ export default function OiReplayPage() {
   // Cancel button abort a load that is taking too long, instead of just staring at "Loading..."
   // with no way out. See LOAD_TIMEOUT_MS's own doc comment for the auto-cancel this also drives.
   const activeLoadController = useRef(null)
+  // Which load() the live VWAP fetch belongs to - a late answer for an index or day no longer loaded is dropped.
+  const vwapLoadRef = useRef(0)
 
   // The live "tail" beyond whatever the initial REST snapshot carried - only ever appended to while
   // isLive is true (see below), reset on every fresh load() so switching days never carries a
@@ -3127,14 +3129,16 @@ export default function OiReplayPage() {
   // data hasn't landed yet.
   const [volumeProfile, setVolumeProfile] = useState(null)
   useEffect(() => {
-    if (!result?.success || !underlying || !result.date) { setVolumeProfile(null); return }
+    // The loaded run's own index - just after switching index the old run is still shown until the new one lands.
+    const runUnderlying = result?.underlying
+    if (!result?.success || !runUnderlying || !result.date) { setVolumeProfile(null); return }
     let cancelled = false
-    fetch(`/api/oi-replay/${underlying}/previous-day-volume-profile?date=${result.date}`)
+    fetch(`/api/oi-replay/${runUnderlying}/previous-day-volume-profile?date=${result.date}`)
       .then((r) => r.json())
       .then((body) => { if (!cancelled) setVolumeProfile(body?.success ? body : null) })
       .catch((err) => { if (!cancelled) { console.error('Failed to load previous-day volume profile:', err); setVolumeProfile(null) } })
     return () => { cancelled = true }
-  }, [underlying, result?.success, result?.date])
+  }, [result?.underlying, result?.success, result?.date])
 
   // Paper trade panel state - see PaperTradePanel's own doc comment. strikeOffset defaults to 0
   // (ATM) and stays an OFFSET rather than an absolute strike, so "the default is ATM" holds true
@@ -3265,6 +3269,15 @@ export default function OiReplayPage() {
     .filter((p) => p.status === 'OPEN' && p.underlying && p.expiryFlag && !(p.underlying === underlying && p.expiryFlag === liveExpiryFlag))
     .map((p) => `${p.underlying}:${p.expiryFlag}:${p.side}:${p.strike}`)), [paperPositions, isLive, underlying, liveExpiryFlag])
   const [foreignPoints, setForeignPoints] = useState({})
+  // A chain no open position on another index needs any more (closed, or that index is on screen now) is let go -
+  // it would otherwise keep a whole day of that leg's minutes for the life of the page.
+  useEffect(() => {
+    const needed = new Set([...foreignLegs].map((leg) => leg.split(':').slice(0, 3).join(':')))
+    setForeignPoints((prev) => {
+      const kept = Object.entries(prev).filter(([key]) => needed.has(key))
+      return kept.length === Object.keys(prev).length ? prev : Object.fromEntries(kept)
+    })
+  }, [foreignLegs])
   // Seeded at once from the server's memory of each leg's newest live price (GET live-legs - the live
   // feed's own readings, never a Dhan call), so an open position on another index shows its live P&L
   // straight away - not only after its strike next ticks; the live ticks carry it on from there. At most
@@ -3341,6 +3354,9 @@ export default function OiReplayPage() {
   const cacheWriteRef = useRef({ timeoutId: null, lastWriteMs: 0, disabled: false })
   useEffect(() => {
     if (!isLive || !underlying || !date || !result || cacheWriteRef.current.disabled) return
+    // Just after switching index (or day) `result` is still the previous one until the new run lands - never saved
+    // under the new index's name, or a reload would paint the old index's day as this one.
+    if (String(result.underlying ?? '').toUpperCase() !== underlying || String(result.date ?? '').slice(0, 10) !== date.format('YYYY-MM-DD')) return
     const state = cacheWriteRef.current
     if (state.timeoutId) clearTimeout(state.timeoutId)
     const writeNow = () => {
@@ -3450,10 +3466,11 @@ export default function OiReplayPage() {
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
     // only recent/in-memory days). Independent of the main run fetch below so a slow/failed VWAP
     // fetch never blocks or fails the actual replay load.
+    const vwapLoad = ++vwapLoadRef.current
     if (effectiveLive) {
       fetch(`/api/spot/${underlying}/vwap-series`)
         .then((r) => r.json())
-        .then((vwap) => setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))))
+        .then((vwap) => { if (vwapLoadRef.current === vwapLoad) setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
         .catch((err) => console.error('Failed to load VWAP series:', err))
     }
     // While playing today live, expiryFlag (WEEK/MONTH - the historical picker) is not what the user
@@ -3861,6 +3878,14 @@ export default function OiReplayPage() {
   // there is no separate piece of state that could ever fall behind and need a manual nudge to catch
   // up. A historical day uses the manually-chosen replay position instead, exactly as before.
   const visibleCount = isLive ? oneMinBars.length : manualVisibleCount
+  // Left open past midnight, "today, live" turns into yesterday (isLive goes false): keep the whole day on screen, not
+  // the replay position its load set (the first minute).
+  const wasLiveRef = useRef(isLive)
+  useEffect(() => {
+    if (wasLiveRef.current && !isLive && todayMode === 'live') setManualVisibleCount(oneMinBars.length)
+    wasLiveRef.current = isLive
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLive])
   // Replaying: VWAP only up to the replay clock (the last bar shown) - the day's later VWAP is never drawn early.
   const replayEndTime = oneMinBars[visibleCount - 1]?.time
   const shownVwap = useMemo(
@@ -3995,7 +4020,8 @@ export default function OiReplayPage() {
   const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
   // The previous trading day's volume profile of the same futures contract (its bars from the server - Dhan, kept on
   // disk): fixed levels for the whole day, nothing of the day itself in them, so nothing shows early in a replay.
-  const prevFuturesKey = result?.success && result.date ? `${underlying}|${result.date}|${String(result.futuresExpiry ?? '').slice(0, 10)}` : null
+  // The loaded run's own index and contract (not the picked index - until its run lands that would pair it with the old contract).
+  const prevFuturesKey = result?.success && result.date && result.underlying ? `${result.underlying}|${result.date}|${String(result.futuresExpiry ?? '').slice(0, 10)}` : null
   const [prevFutures, setPrevFutures] = useState(null)
   useEffect(() => {
     if (!futuresProfileOn || !prevFuturesKey) return undefined
@@ -5165,6 +5191,8 @@ export default function OiReplayPage() {
             )}
             {isLive && liveConnectionState === 'connected' && <FeedLagAlert delayMs={feedLag.delayMs} sourceDelayMs={feedLag.sourceDelayMs} />}
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
+            {/* Today's spot from the server's live feed because Dhan refused the day (OiReplayService) - says from when. */}
+            {!error && result?.spotNote && <Alert type="warning" showIcon closable message={result.spotNote} />}
             {!loading && loadProgress && (
               <details style={{ margin: '4px 0 8px' }}>
                 <summary style={{ cursor: 'pointer', fontSize: 12 }}>

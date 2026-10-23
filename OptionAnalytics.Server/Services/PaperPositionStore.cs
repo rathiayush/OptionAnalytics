@@ -11,7 +11,9 @@ namespace OptionAnalytics.Server.Services;
 /// positions and P&amp;L; they used to live in one browser's localStorage only. A position is the page's own JSON object
 /// (an "id", a "status" OPEN / CLOSED, and the rest as the page writes it). A change is an upsert by id - except that a
 /// CLOSED position never changes again: when two open browsers both see the same stop-loss hit, the first close stands.
-/// Each change bumps the day's version, which the pages poll. Days older than KeepDays are removed.
+/// Each change bumps the day's version, which the pages poll. Days older than KeepDays are removed - counted from the
+/// server's own IST day, never from the date a page sends (a browser whose clock ran a month ahead would otherwise have
+/// removed every account's days), and only a day within KeepDays of today, or tomorrow, can be written.
 /// </summary>
 public sealed class PaperPositionStore
 {
@@ -24,6 +26,7 @@ public sealed class PaperPositionStore
     private readonly string _root;
     private readonly object _lock = new();
     private readonly ILogger<PaperPositionStore> _logger;
+    private readonly Func<DateOnly> _today;
     private DateOnly _prunedOn;
 
     public PaperPositionStore(IHostEnvironment environment, IConfiguration configuration, ILogger<PaperPositionStore> logger)
@@ -31,10 +34,11 @@ public sealed class PaperPositionStore
     {
     }
 
-    internal PaperPositionStore(string root, ILogger<PaperPositionStore> logger)
+    internal PaperPositionStore(string root, ILogger<PaperPositionStore> logger, Func<DateOnly>? today = null)
     {
         _root = root;
         _logger = logger;
+        _today = today ?? IstClock.Today;
         Directory.CreateDirectory(_root);
     }
 
@@ -63,6 +67,9 @@ public sealed class PaperPositionStore
     /// after it, or why the change was refused (nothing is applied then).</summary>
     public (Snapshot? Result, string? Error) Change(string account, DateOnly date, IReadOnlyList<JsonObject>? upsert, IReadOnlyList<string>? remove, bool clear)
     {
+        var today = _today();
+        if (date < today.AddDays(-KeepDays) || date > today.AddDays(1))
+            return (null, $"Paper positions are kept for today and the last {KeepDays} days only - {date:yyyy-MM-dd} is outside that (is this device's date right?).");
         var incoming = upsert ?? Array.Empty<JsonObject>();
         foreach (var position in incoming)
         {
@@ -101,7 +108,7 @@ public sealed class PaperPositionStore
             if (!changed && existing is not null) return (new Snapshot(date, day.Version, true, day.Positions), null);
             var saved = new Day(day.Version + 1, positions);
             Write(account, date, saved);
-            Prune(date);
+            Prune(today);
             return (new Snapshot(date, saved.Version, true, saved.Positions), null);
         }
     }
