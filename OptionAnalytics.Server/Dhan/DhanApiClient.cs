@@ -253,20 +253,8 @@ public sealed class DhanApiClient
             return await Pipeline.ExecuteAsync(
                 static async (attempt, call) =>
                 {
-                    var sentAt = DateTimeOffset.UtcNow;
-                    var clock = System.Diagnostics.Stopwatch.StartNew();
-                    DhanApiResponse answer;
-                    try
-                    {
-                        answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        // The data call's timeout (or the caller leaving): logged too, so a hanging request shows.
-                        call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, false, "no answer (timed out or cancelled)", 0, clock.Elapsed);
-                        throw;
-                    }
-                    call.Client.LogCall(sentAt, call.Category, call.Method, call.Path, call.Payload, call.Context, answer.Success, answer.ErrorMessage, (int)answer.StatusCode, clock.Elapsed);
+                    var answer = await call.Client.SendNowAsync(call.Method, call.Path, call.Payload, call.Context, attempt.CancellationToken);
+                    call.Client._rateLimiter.Log(new DhanRestRateLimiter.DhanCall(DateTimeOffset.UtcNow, call.Category, call.Method.Method, call.Path, call.Context, answer.Success, answer.ErrorMessage));
                     // Dhan said "too many requests": that category's next calls are held back (the shared limiter).
                     if (!answer.Success && DhanDataApiRateLimiter.IsRateLimited(answer.StatusCode, answer.ErrorMessage)) call.Client._rateLimiter.NoteRateLimited(call.Category);
                     return answer;
@@ -288,19 +276,6 @@ public sealed class DhanApiClient
         {
             ResilienceContextPool.Shared.Return(resilience);
         }
-    }
-
-    // The call log (the System page): the body as sent, the account's client id masked.
-    private void LogCall(DateTimeOffset at, DhanApiCategory category, HttpMethod method, string path, object? payload, string context, bool success, string? error, int status, TimeSpan took)
-    {
-        string? body = null;
-        if (payload is not null)
-        {
-            body = BodyFor(path, payload, _session.ClientId);
-            if (!string.IsNullOrEmpty(_session.ClientId)) body = body.Replace($"\"dhanClientId\":\"{_session.ClientId}\"", "\"dhanClientId\":\"***\"");
-            if (body.Length > 2000) body = body[..2000] + "...";
-        }
-        _rateLimiter.Log(new DhanRestRateLimiter.DhanCall(at, category, method.Method, path, context, success, error, status, body, took.TotalMilliseconds));
     }
 
     private async Task<DhanApiResponse> SendNowAsync(HttpMethod method, string path, object? payload, string context, CancellationToken cancellationToken)
