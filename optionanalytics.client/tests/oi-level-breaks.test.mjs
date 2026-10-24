@@ -61,3 +61,69 @@ test('the message names the index, line, level, direction and meaning', () => {
   const text = breakText('NIFTY', b, (v) => String(Math.round(v)), () => '13:39', 1)
   assert.match(text, /^NIFTY OI CE cumulative Δ broke below support 60 \(×2\) at 13:39 \(calls unwinding - bullish\) · now 40$/)
 })
+
+// ---- High probability: break + large CE − PE shift + carried at ATM ± 1 ----
+import { TOTALS_SIDES, highProbability, highProbabilityText } from '../src/oiLevelBreaks.js'
+
+// Two swing lows at 60, then a hard fall through it in one minute (16): the CE cumulative (and the net, PE flat).
+const BIG = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, -200]
+function day(cumAt, { strike = 100, atm = 100, strikes = [50, 100, 150], n = cumAt.length } = {}) {
+  const ce = new Map(strikes.map((k) => [k, new Map()]))
+  const pe = new Map(strikes.map((k) => [k, new Map()]))
+  for (let i = 0; i < n; i++) {
+    const t = T0 + i * 60
+    for (const k of strikes) { ce.get(k).set(t, k === strike ? (i === 0 ? cumAt[0] : cumAt[i] - cumAt[i - 1]) : 0); pe.get(k).set(t, 0) }
+  }
+  const totals = buildOiTotalsRows(ce, pe)
+  return { ce, pe, totals, atm, reads: completedLevelReads(totals, 60, T0 + n * 60) }
+}
+function breakOf(cumAt, opts) {
+  const before = day(cumAt, { ...opts, n: cumAt.length - 1 })
+  const now = day(cumAt, opts)
+  const watch = newBreakWatch()
+  watchBreaks(watch, before.reads, 60)
+  const b = watchBreaks(watch, now.reads, 60).find((x) => x.side.key === 'net')
+  return { b, ctx: { totals: now.totals, ce: now.ce, pe: now.pe, last: now.reads.last, atmStrike: now.atm } }
+}
+
+test('high probability: the break comes with a large CE − PE shift carried at ATM ± 1, same direction', () => {
+  const { b, ctx } = breakOf(BIG)
+  assert.ok(b, 'the net line broke its support')
+  const hp = highProbability(b, ctx)
+  assert.ok(hp)
+  assert.equal(hp.bullish, true)                 // net falling: put writers ahead
+  assert.equal(hp.shift, -200 - 120)
+  assert.ok(hp.ratio >= 2.5)
+  assert.deepEqual(hp.nearStrikes, [50, 100, 150])
+  assert.equal(hp.nearShare, 1)
+  const text = highProbabilityText('NIFTY', b, hp, (v) => String(Math.round(v)), () => '13:39', 1)
+  assert.match(text, /^HIGH PROBABILITY BULLISH · NIFTY at 13:39\n/)
+  assert.match(text, /CE − PE cumulative Δ shifted -320 in 3 min/)
+  assert.match(text, /ATM ± 1 \(50 \/ 100 \/ 150\) carried -320 of it \(100%\)/)
+})
+
+test('not high probability when the shift is away from the money', () => {
+  const { b, ctx } = breakOf(BIG, { strike: 300, atm: 100, strikes: [50, 100, 150, 200, 250, 300] })
+  assert.ok(b)
+  assert.equal(highProbability(b, ctx), null)
+})
+
+test('not high probability when the shift is not large (an ordinary break)', () => {
+  // A slow slide through the support: the 3-minute shift is no bigger than the day's usual swings.
+  const ordinary = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 110, 100, 90, 80, 70, 55]
+  const { b, ctx } = breakOf(ordinary)
+  assert.ok(b)
+  assert.equal(highProbability(b, ctx), null)
+})
+
+test('not high probability when the break disagrees with the shift', () => {
+  const { b, ctx } = breakOf(BIG)
+  // A bearish break (PE cumulative falling through support) against a bullish shift.
+  const against = { ...b, side: TOTALS_SIDES.find((s) => s.key === 'pe'), up: false }
+  assert.equal(highProbability(against, ctx), null)
+})
+
+test('not high probability without enough of the day to judge "large"', () => {
+  const { b, ctx } = breakOf(BIG)
+  assert.equal(highProbability(b, ctx, { minHistory: 40 }), null)
+})
