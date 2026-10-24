@@ -1,5 +1,4 @@
 import { createChart } from 'lightweight-charts'
-import { markHalfHours } from './halfHourMarks.js'
 
 // Zoom on BOTH axes for every lightweight-charts chart in the app.
 //
@@ -18,8 +17,9 @@ const STEP = 1.25
 export function createZoomableChart(container, options) {
   const chart = createChart(container, options)
   enableAxisZoom(chart)
-  // An "HH:MM IST" checkpoint line at every :00 / :30 in view, on each pane (halfHourMarks.js).
-  markHalfHours(chart)
+  // Room for more time labels on the axis: they are short "HH:MM" (istTickMarkFormatter), so the axis spaces them for 5
+  // characters ("09:30") rather than the library's wider default and a narrow (phone) chart still shows the time every so often.
+  chart.applyOptions({ timeScale: { tickMarkMaxCharacterLength: 5 } })
   return chart
 }
 

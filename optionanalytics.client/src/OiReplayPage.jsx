@@ -1257,9 +1257,9 @@ const HEATMAP_ROW_HEIGHT = 20
 const HEATMAP_LABEL_WIDTH = 64
 const HEATMAP_AXIS_HEIGHT = 20
 
-// IST checkpoints on an OI heatmap (columns newest first, chart-time seconds): a dashed line on the right edge of the first
-// column of each half hour (09:30 ... - every hour when columns are 30+ minutes wide) - the boundary with the half hour
-// before - and its "HH:MM" in bold under it. Returns the label spans [left, right] so the regular labels keep clear.
+// The OI heatmaps' time axis at each half hour (columns newest first, chart-time seconds): "HH:MM" in bold under the first
+// column of each half hour (09:30 ... - every hour when columns are 30+ minutes wide). Returns the label spans [left, right]
+// so the regular labels keep clear.
 function drawHeatmapCheckpoints(ctx, columns, plotHeight) {
   const ascending = [...columns].sort((a, b) => a - b)
   const bucket = ascending.length > 1 ? ascending[1] - ascending[0] : 60
@@ -1271,10 +1271,6 @@ function drawHeatmapCheckpoints(ctx, columns, plotHeight) {
     const col = colOf.get(m.time)
     if (col == null) continue
     const x = (col + 1) * HEATMAP_CELL_WIDTH - 0.5
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)'
-    ctx.setLineDash([3, 3])
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotHeight); ctx.stroke()
-    ctx.setLineDash([])
     ctx.font = 'bold 10px system-ui, -apple-system, sans-serif'
     ctx.fillStyle = '#e6e6e6'
     const w = ctx.measureText(m.label).width

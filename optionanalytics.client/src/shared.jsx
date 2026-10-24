@@ -676,6 +676,9 @@ export function fromChartTime(chartTimeSeconds) {
 const IST_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true, timeZone: 'UTC' })
 const IST_TIME_WITH_SECONDS_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true, timeZone: 'UTC' })
 const IST_TICK_DATE_FORMAT = new Intl.DateTimeFormat('en-IN', { day: 'numeric', month: 'short', timeZone: 'UTC' })
+// The time axis's own labels: short 24-hour IST ("09:30", "14:00") - the 12-hour "09:30 am" was so wide that a phone-width
+// chart fitted one or two of them (and clipped the first), so the axis showed almost no time.
+const IST_TICK_TIME_FORMAT = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'UTC' })
 
 export function istTimeFormatter(time) {
   return IST_TIME_FORMAT.format(new Date(time * 1000))
@@ -691,7 +694,7 @@ export function istTimeWithSecondsFormatter(time) {
 
 export function istTickMarkFormatter(time, tickMarkType) {
   const date = new Date(time * 1000)
-  return tickMarkType >= TickMarkType.Time ? IST_TIME_FORMAT.format(date) : IST_TICK_DATE_FORMAT.format(date)
+  return tickMarkType >= TickMarkType.Time ? IST_TICK_TIME_FORMAT.format(date) : IST_TICK_DATE_FORMAT.format(date)
 }
 
 export function toBar(c) {
