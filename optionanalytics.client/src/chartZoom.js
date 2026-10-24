@@ -1,4 +1,5 @@
 import { createChart } from 'lightweight-charts'
+import { markHalfHours } from './halfHourMarks.js'
 
 // Zoom on BOTH axes for every lightweight-charts chart in the app.
 //
@@ -17,6 +18,8 @@ const STEP = 1.25
 export function createZoomableChart(container, options) {
   const chart = createChart(container, options)
   enableAxisZoom(chart)
+  // An "HH:MM IST" checkpoint line at every :00 / :30 in view, on each pane (halfHourMarks.js).
+  markHalfHours(chart)
   return chart
 }
 
