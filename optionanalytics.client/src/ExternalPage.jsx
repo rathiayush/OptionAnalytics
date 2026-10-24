@@ -65,7 +65,7 @@ function LoadError({ error, onRetry }) {
 
 // OI Replay's OI change heatmap card - the totals, then the heatmaps of every strike - with its own 1-second clock for
 // "OI last changed … s ago" (so the rest of the page does not re-render every second).
-function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey }) {
+function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey, show = 'totals+strikes' }) {
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     if (!live) return undefined
@@ -74,7 +74,7 @@ function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey }) {
   }, [live])
   return (
     <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike}
-      asOfMs={null} live={live} lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show="totals+strikes" />
+      asOfMs={null} live={live} lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show={show} />
   )
 }
 
@@ -265,15 +265,27 @@ export default function ExternalPage() {
           ))}
         </Card>
   )
+  // A big screen shows the totals and the strikes' heatmaps as two panels of their own.
+  const totalsOnlyCard = (
+    <Card size="small" style={{ height: '100%' }} title={<Space size={8}>OI totals: CE, PE and Net (CE − PE){connectionTag(oiConnection)}</Space>}>
+      {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+      {oiBody(() => <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="totals" />)}
+    </Card>
+  )
+  const strikesCard = (
+    <Card size="small" style={{ height: '100%' }} title={<Space size={8}>OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
+      {oiBody(() => <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="strikes" />)}
+    </Card>
+  )
   const liquidityCard = (
-        <Card size="small" title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
+        <Card size="small" style={{ height: '100%' }} title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
           extra={data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
           {flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
           {flow.loading && !data
             ? loadingBox
             : !data?.heatmap?.length
               ? <Text type="secondary">No market depth recorded yet today.</Text>
-              : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={460} />}
+              : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={wide ? 860 : 460} />}
           <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
             Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
           </Text>
@@ -301,7 +313,7 @@ export default function ExternalPage() {
         </Card>
   )
   const chainCard = (
-        <Card size="small" title={<Space size={8}>Chain-wide OI{connectionTag(oiConnection)}</Space>}
+        <Card size="small" style={{ height: '100%' }} title={<Space size={8}>Chain-wide OI{connectionTag(oiConnection)}</Space>}
           extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))} ({fmtOi(last(chain.ceSince))})</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))} ({fmtOi(last(chain.peSince))})</Text></Space> : null}>
           {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
           {oiBody(() => (
@@ -357,12 +369,14 @@ export default function ExternalPage() {
         </Space>
 
         {wide ? (
-          // A big screen: every panel at once, two to a row - no tabs.
-          <Row gutter={[16, 16]}>
-            <Col span={12}>{totalsCard}</Col>
-            <Col span={12}>{chartCard}</Col>
-            <Col span={12}>{liquidityCard}</Col>
+          // A big screen: every panel at once, no tabs - the chart across the top, then the OI totals beside the chain-wide
+          // OI, then the strikes' OI heatmap beside the liquidity heatmap (each row's two panels the same height).
+          <Row gutter={[16, 16]} align="stretch">
+            <Col span={24}>{chartCard}</Col>
+            <Col span={12}>{totalsOnlyCard}</Col>
             <Col span={12}>{chainCard}</Col>
+            <Col span={12}>{strikesCard}</Col>
+            <Col span={12}>{liquidityCard}</Col>
           </Row>
         ) : (
           <>
