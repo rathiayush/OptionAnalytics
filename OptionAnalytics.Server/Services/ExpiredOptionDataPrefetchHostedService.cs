@@ -99,6 +99,8 @@ public sealed class ExpiredOptionDataPrefetchHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         // Off by default (see ExpiredOptionDataPrefetchOptions) - set
         // ExpiredOptionDataPrefetch__Enabled=true to opt a deployment into this one-time download.
         if (!_prefetchOptions.Enabled)

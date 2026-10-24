@@ -101,6 +101,8 @@ public sealed class ConfluenceAlertService : BackgroundService
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         foreach (var (underlying, spotState) in _spotFeed.States)
         {
             var capturedUnderlying = underlying;

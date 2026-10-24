@@ -159,6 +159,8 @@ public sealed class StrategyTriggerHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         try
         {
             await Task.Delay(StartupDelay, stoppingToken);

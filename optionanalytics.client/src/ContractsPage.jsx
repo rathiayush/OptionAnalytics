@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Card, Table, Tag, Button, Statistic, Row, Col, Alert, Input, Switch, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, fmtPrice, fmtIstTime, STORED_UNDERLYING, usePersistedState, pickUnderlying } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, fmtPrice, fmtIstTime, STORED_UNDERLYING, usePersistedState, pickUnderlying, POLL_HEADERS } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -62,11 +62,11 @@ export default function ContractsPage() {
       .catch((err) => console.error('Failed to load underlyings:', err))
   }, [])
 
-  const load = (picked = expiry) => {
+  const load = (picked = expiry, poll = false) => {
     if (!underlying) return
     setLoading(true)
     const url = `/api/cdv/${underlying}/contracts${picked ? `?expiry=${encodeURIComponent(picked)}` : ''}`
-    fetch(url)
+    fetch(url, poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => r.json())
       .then((payload) => {
         setData(payload)
@@ -111,7 +111,7 @@ export default function ContractsPage() {
   // a feed come alive after a restart without being a load on anything.
   useEffect(() => {
     if (!autoRefresh || !underlying) return
-    const id = setInterval(() => load(expiry), 5000)
+    const id = setInterval(() => load(expiry, true), 5000)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRefresh, underlying, expiry])

@@ -47,6 +47,8 @@ public sealed class TodayWarmupService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         if (!_enabled) return;
         try { await Task.Delay(FirstDelay, stoppingToken); } catch (OperationCanceledException) { return; }
         while (!stoppingToken.IsCancellationRequested)
