@@ -22,6 +22,8 @@ const ROW_SIZES = [1, 2, 5, 10, 20, 50]
 const LIVE_EXPIRY_FLAG = 'N1'
 // Live option ticks are applied to the charts at most this often (each recompute covers the whole day).
 const OI_PUBLISH_MS = 2_000
+const CLOSED_DAY_RECHECK_MS = 5 * 60_000
+const DAY_LABEL = new Intl.DateTimeFormat('en-IN', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
 
 function fmtOi(v) {
   if (v == null || !Number.isFinite(v)) return '—'
@@ -127,8 +129,19 @@ export default function ExternalPage() {
   // OI Replay's own settings for these cards (the same stored choices).
   const [dayOiChartMode, setDayOiChartMode] = useState('total')
 
-  const liveCe = live.u === u ? live.ce : null
-  const livePe = live.u === u ? live.pe : null
+  // A closed day (the last trading day, on a weekend / holiday / before the open) takes no live ticks - they would be another
+  // day's. While it is shown the page looks again every 5 minutes, so it moves to today once the session starts (the server
+  // answers a closed day from memory - no Dhan call).
+  const showsToday = oi.data?.live !== false
+  const liveCe = showsToday && live.u === u ? live.ce : null
+  const livePe = showsToday && live.u === u ? live.pe : null
+  const reloadOi = oi.reload
+  useEffect(() => {
+    if (!oi.data || showsToday) return undefined
+    const id = setInterval(reloadOi, CLOSED_DAY_RECHECK_MS)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [oi.data, showsToday])
   // Each side's strikes, as OI Replay groups them: today's load plus this index's live points since.
   const byStrike = useMemo(() => {
     if (!oi.data) return null
@@ -167,6 +180,11 @@ export default function ExternalPage() {
         <Space align="center" size={16} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
           <Space align="center" size={16} wrap>
             <Title level={3} style={{ margin: 0 }}>Market view</Title>
+            {oi.data && (showsToday
+              ? <Tag color="green" style={{ margin: 0 }}>Today</Tag>
+              : <Tooltip title="The market is closed (a weekend, a holiday or before the open) - the OI is the last trading day's.">
+                  <Tag color="gold" style={{ margin: 0 }}>{DAY_LABEL.format(new Date(`${oi.data.date}T00:00:00Z`))} · last trading day</Tag>
+                </Tooltip>)}
             <Select value={u} onChange={setUnderlying} style={{ width: 140 }} aria-label="Index"
               options={UNDERLYINGS.map((x) => ({ value: x, label: x }))} />
             <Space size={6}>

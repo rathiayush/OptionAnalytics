@@ -59,8 +59,16 @@ public sealed class ExternalController : ControllerBase
     }
 
     public sealed record OiPoint(DateTimeOffset Time, decimal Strike, long? OpenInterest);
-    /// <summary>Step: the strike step; SpotClose: the index's last 1-minute close (the ATM strike until live spot arrives).</summary>
-    public sealed record OiAnswer(bool Success, string Underlying, DateOnly Date, int Step, decimal? SpotClose, IReadOnlyList<OiPoint> CePoints, IReadOnlyList<OiPoint> PePoints);
+    /// <summary>Step: the strike step; SpotClose: the index's last 1-minute close (the ATM strike until live spot arrives).
+    /// Date: the day shown - today, or the last trading day (Live false) on a weekend, a holiday or before the open.</summary>
+    public sealed record OiAnswer(bool Success, string Underlying, DateOnly Date, int Step, decimal? SpotClose, IReadOnlyList<OiPoint> CePoints, IReadOnlyList<OiPoint> PePoints)
+    {
+        public bool Live { get; init; } = true;
+    }
+
+    // The last trading day found for each index, kept until the date changes (a closed day never changes; its Dhan data is
+    // kept on disk per day too - DhanDataCache - so a restart reads it back without asking Dhan again).
+    private static readonly ConcurrentDictionary<string, (DateOnly Today, OiAnswer Answer)> LastDay = new();
 
     [HttpGet("{underlying}/oi")]
     public async Task<ActionResult<OiAnswer>> Oi(string underlying, CancellationToken cancellationToken)
@@ -70,12 +78,38 @@ public sealed class ExternalController : ControllerBase
         if (Fresh(key, OiHold) is OiAnswer held) return held;
 
         var today = IstClock.Today();
-        // The same request OI Replay's live view makes for today (its nearest WEEK / MONTH series, forceLive).
-        var run = await _oiReplay.RunAsync(u, today, 1, u == "BANKNIFTY" ? "MONTH" : "WEEK", cancellationToken, forceLive: true);
-        if (!run.Success) return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "Today's OI is not available right now." });
-        var answer = new OiAnswer(true, u, today, run.Step, run.SpotCandlesOneMinute.Count > 0 ? run.SpotCandlesOneMinute[^1].Close : null, Cut(run.CePoints), Cut(run.PePoints));
+        if (LastDay.TryGetValue(u, out var kept) && kept.Today == today && !MarketHours.IsOpen(DateTimeOffset.UtcNow)) return kept.Answer;
+        var flag = u == "BANKNIFTY" ? "MONTH" : "WEEK";
+        // Today as OI Replay's live view asks it (forceLive); any other day as OI Replay replays it.
+        var picked = await PickDayAsync(today, (day, live) => _oiReplay.RunAsync(u, day, 1, flag, cancellationToken, forceLive: live));
+        if (picked is not { } p) return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "OI is not available right now." });
+        var answer = new OiAnswer(true, u, p.Day, p.Run.Step, p.Run.SpotCandlesOneMinute.Count > 0 ? p.Run.SpotCandlesOneMinute[^1].Close : null,
+            Cut(p.Run.CePoints), Cut(p.Run.PePoints)) { Live = p.Day == today };
         Held[key] = (DateTimeOffset.UtcNow, answer);
+        if (!answer.Live) LastDay[u] = (today, answer);
         return answer;
+    }
+
+    /// <summary>The day the External page shows: today when it is a weekday and today's run has OI; else (a weekend, a holiday,
+    /// before the open, or today's run failing) the last trading day with OI - weekends skipped, a holiday (an empty day)
+    /// stepped over, the walk stopped at a failed run (no loop of failing calls).</summary>
+    internal static async Task<(DateOnly Day, OiReplayResult Run)?> PickDayAsync(DateOnly today, Func<DateOnly, bool, Task<OiReplayResult>> run)
+    {
+        static bool HasOi(OiReplayResult r) => r.Success && (r.CePoints.Count > 0 || r.PePoints.Count > 0);
+        if (today.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday))
+        {
+            var todays = await run(today, true);
+            if (HasOi(todays)) return (today, todays);
+        }
+        // At most a week back: weekends are not asked; an empty day (a holiday) is stepped over; a failed run ends it.
+        for (var day = today.AddDays(-1); day >= today.AddDays(-7); day = day.AddDays(-1))
+        {
+            if (day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) continue;
+            var r = await run(day, false);
+            if (HasOi(r)) return (day, r);
+            if (!r.Success) return null;
+        }
+        return null;
     }
 
     internal static IReadOnlyList<OiPoint> Cut(IReadOnlyList<OiReplayPoint> points) =>

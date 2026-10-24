@@ -185,6 +185,54 @@ public sealed class ExternalAccessTests
         Assert.Equal(new[] { "Time", "Strike", "OpenInterest" }, typeof(ExternalController.OiPoint).GetProperties().Select(p => p.Name));
     }
 
+    // ---- Which day the External page's OI shows --------------------------------------------------------------------
+
+    private static OiReplayResult Run(DateOnly day, bool hasOi, bool success = true)
+    {
+        if (!success) return OiReplayResult.Failed("NIFTY", day, 1, "Dhan said no");
+        var points = hasOi ? new[] { new OiReplayPoint(new DateTimeOffset(day.ToDateTime(new TimeOnly(9, 15)), IstClock.Offset), 25000, 100, null, 1) } : Array.Empty<OiReplayPoint>();
+        return new OiReplayResult(true, null, "NIFTY", day, 1, 50, "WEEK", 1, Array.Empty<Candle>(), Array.Empty<Candle>(), points, points,
+            Array.Empty<FuturesBar>(), null, false, null);
+    }
+
+    [Fact]
+    public async Task On_a_weekday_with_OI_it_shows_today_live()
+    {
+        var friday = new DateOnly(2026, 10, 23);
+        var asked = new List<(DateOnly, bool)>();
+        var picked = await ExternalController.PickDayAsync(friday, (d, live) => { asked.Add((d, live)); return Task.FromResult(Run(d, true)); });
+        Assert.Equal(friday, picked?.Day);
+        Assert.Equal(new[] { (friday, true) }, asked);
+    }
+
+    [Theory]
+    [InlineData(24)]   // Saturday
+    [InlineData(25)]   // Sunday
+    public async Task On_a_weekend_it_shows_the_last_trading_day_without_asking_for_today(int date)
+    {
+        var asked = new List<(DateOnly, bool)>();
+        var picked = await ExternalController.PickDayAsync(new DateOnly(2026, 10, date), (d, live) => { asked.Add((d, live)); return Task.FromResult(Run(d, true)); });
+        Assert.Equal(new DateOnly(2026, 10, 23), picked?.Day);   // Friday
+        Assert.Equal(new[] { (new DateOnly(2026, 10, 23), false) }, asked);
+    }
+
+    [Fact]
+    public async Task Before_the_open_or_on_a_holiday_it_steps_back_to_the_last_day_with_OI()
+    {
+        // Monday 26 Oct empty (before the open), Friday 23 Oct a holiday (empty) -> Thursday 22 Oct.
+        var picked = await ExternalController.PickDayAsync(new DateOnly(2026, 10, 26), (d, _) => Task.FromResult(Run(d, d == new DateOnly(2026, 10, 22))));
+        Assert.Equal(new DateOnly(2026, 10, 22), picked?.Day);
+    }
+
+    [Fact]
+    public async Task A_failed_past_day_stops_the_walk()
+    {
+        var asked = new List<DateOnly>();
+        var picked = await ExternalController.PickDayAsync(new DateOnly(2026, 10, 24), (d, _) => { asked.Add(d); return Task.FromResult(Run(d, true, success: false)); });
+        Assert.Null(picked);
+        Assert.Equal(new[] { new DateOnly(2026, 10, 23) }, asked);
+    }
+
     private static string RepoRoot()
     {
         var dir = new DirectoryInfo(AppContext.BaseDirectory);
