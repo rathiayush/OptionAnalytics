@@ -107,7 +107,7 @@ When adding or changing a strategy:
   big-order dots, OI Replay's spot chart with its timeframe, VWAP and OI S-R walls ("Top 5" off by default), OI Replay's
   chain-wide CE / PE OI with its Total / Since open switch - those pages' own exported components
   and code, not copies) and reaches only `/api/external/...`
-  (`ExternalController`, NIFTY / BANKNIFTY, read-only, today), `/api/auth/...` and `/hubs/spot`, where it may join only
+  (`ExternalController`, NIFTY / BANKNIFTY, read-only, today - or, for the OI and chart, one of the last 5 trading days, `?date=`, allowed list from `days`), `/api/auth/...` and `/hubs/spot`, where it may join only
   "of:{U}", "of:{U}:{expiry}", "c:{U}:N1" and "u:{U}" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.

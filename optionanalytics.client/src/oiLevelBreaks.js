@@ -71,14 +71,17 @@ export function breakText(underlying, b, format, timeOf, bucketMinutes) {
 }
 
 // ---- High-probability signal ----------------------------------------------------------------------------------------
-// A break above is a high-probability signal when, in the same completed bucket and the same direction:
-//  - the CE − PE cumulative Δ made a LARGE shift: its change over the last `windowBuckets` buckets is at least
-//    `shiftVsTypical` times the day's typical (median) change over that many buckets so far;
+// A high-probability signal is three things in the same direction within one time window (`windowMinutes`, 3 - 5 min),
+// read at a completed bucket:
+//  - an OI totals line broke its support / resistance (a break above) inside the window;
+//  - the CE − PE cumulative Δ made a LARGE shift over the window: at least `shiftVsTypical` times the day's typical
+//    (median) change over a window that long;
 //  - the shift is AT THE MONEY: the ATM strike and the strike either side (ATM ± 1) carry at least `nearShare` of it,
 //    in the same direction;
-//  - the break agrees: a bullish break (CE falling / PE rising / net falling) with a falling net (put writers ahead),
-//    a bearish one with a rising net.
-export const HIGH_PROBABILITY = { windowBuckets: 3, minHistory: 10, shiftVsTypical: 2.5, nearShare: 0.3 }
+// and the break agrees: a bullish break (CE falling / PE rising / net falling) with a falling net (put writers ahead),
+// a bearish one with a rising net. The window is in buckets of the totals' size (at least one).
+export const HIGH_PROBABILITY = { windowMinutes: 5, minHistory: 10, shiftVsTypical: 2.5, nearShare: 0.3 }
+export const HIGH_PROBABILITY_WINDOWS = [3, 4, 5]
 
 const median = (xs) => {
   if (!xs.length) return 0
@@ -87,18 +90,24 @@ const median = (xs) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
 }
 
+/** How many buckets of `bucketSeconds` a window of `windowMinutes` spans (at least one). */
+export const windowBuckets = (windowMinutes, bucketSeconds) => Math.max(1, Math.round((windowMinutes * 60) / bucketSeconds))
+
 /**
- * Whether break `b` (watchBreaks) is a high-probability signal, else null. `totals`: buildOiTotalsRows of the same
- * per-strike changes `ce` / `pe` (strike -> Map(bucket -> change)); `last`: the last completed bucket (reads.last);
- * `atmStrike`: the ATM strike now. Returns { bullish, shift, typical, ratio, nearShift, nearShare, nearStrikes }.
+ * Whether break `b` (watchBreaks) makes a high-probability signal at the completed bucket `last`, else null.
+ * `totals`: buildOiTotalsRows of the per-strike changes `ce` / `pe` (strike -> Map(bucket -> change)); `atmStrike`:
+ * the ATM strike now; `bucketSeconds`: the bucket size. Only buckets up to `last` are read.
+ * Returns { bullish, shift, typical, ratio, nearShift, nearShare, nearStrikes, windowBuckets, at }.
  */
-export function highProbability(b, { totals, ce, pe, last, atmStrike }, opts = {}) {
-  const { windowBuckets: w, minHistory, shiftVsTypical, nearShare: minShare } = { ...HIGH_PROBABILITY, ...opts }
-  if (!b || !totals?.buckets?.length || !Number.isFinite(atmStrike)) return null
-  // Read at the break's own bucket (completed, at most `last`): nothing after it.
-  const done = totals.buckets.filter((t) => t <= Math.min(last, b.time))
+export function highProbability(b, { totals, ce, pe, last, atmStrike, bucketSeconds }, opts = {}) {
+  const { windowMinutes, minHistory, shiftVsTypical, nearShare: minShare } = { ...HIGH_PROBABILITY, ...opts }
+  if (!b || !totals?.buckets?.length || !Number.isFinite(atmStrike) || !(bucketSeconds > 0)) return null
+  const w = windowBuckets(windowMinutes, bucketSeconds)
+  const done = totals.buckets.filter((t) => t <= last)
   const i = done.length - 1
-  if (i < Math.max(minHistory, w) || done[i] !== b.time) return null
+  if (i < Math.max(minHistory, w)) return null
+  // The break inside the window: one of its last w buckets.
+  if (!(b.time > done[i - w] && b.time <= done[i])) return null
   const cum = done.map((t) => totals.rows.netCum.get(t) ?? 0)
   const shift = cum[i] - cum[i - w]
   if (shift === 0) return null
@@ -118,15 +127,40 @@ export function highProbability(b, { totals, ce, pe, last, atmStrike }, opts = {
   for (const k of nearStrikes) for (const t of windowTimes) nearShift += (ce.get(k)?.get(t) ?? 0) - (pe.get(k)?.get(t) ?? 0)
   const share = nearShift / shift
   if (!(share >= minShare)) return null
-  return { bullish, shift, typical, ratio, nearShift, nearShare: share, nearStrikes, windowBuckets: w }
+  return { bullish, shift, typical, ratio, nearShift, nearShare: share, nearStrikes, windowBuckets: w, at: done[i] }
+}
+
+/** Remembers recent breaks and which directions already signalled, so a signal fires once per window. */
+export const newHighProbabilityWatch = () => ({ breaks: [], lastSignal: {} })
+
+/**
+ * Feeds the new breaks of this completed bucket (watchBreaks' result) and returns the high-probability signals to send
+ * now: [{ b, hp, key }] - at most one per direction, and none within a window of the last one in that direction.
+ */
+export function watchHighProbability(watch, newBreaks, ctx, opts = {}) {
+  const { windowMinutes } = { ...HIGH_PROBABILITY, ...opts }
+  const span = windowBuckets(windowMinutes, ctx.bucketSeconds) * ctx.bucketSeconds
+  watch.breaks.push(...newBreaks)
+  watch.breaks = watch.breaks.filter((b) => b.time > ctx.last - span)
+  const out = []
+  for (const b of [...watch.breaks].reverse()) {
+    const hp = highProbability(b, ctx, opts)
+    if (!hp) continue
+    const dir = hp.bullish ? 'bull' : 'bear'
+    const prev = watch.lastSignal[dir]
+    if (prev != null && hp.at - prev < span) continue
+    watch.lastSignal[dir] = hp.at
+    out.push({ b, hp, key: `${dir}|${hp.at}` })
+  }
+  return out
 }
 
 /** The high-probability message. */
 export function highProbabilityText(underlying, b, hp, format, timeOf, bucketMinutes) {
   const span = hp.windowBuckets * bucketMinutes
   const ratio = Number.isFinite(hp.ratio) ? `${hp.ratio.toFixed(1)}× typical` : 'from a flat day'
-  return `HIGH PROBABILITY ${hp.bullish ? 'BULLISH' : 'BEARISH'} · ${underlying} at ${timeOf(b.time)}\n`
-    + `• OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} ${b.levels.map((l) => format(l.value)).join(', ')} (${b.up ? b.side.up : b.side.down})\n`
+  return `HIGH PROBABILITY ${hp.bullish ? 'BULLISH' : 'BEARISH'} · ${underlying} at ${timeOf(hp.at)}\n`
+    + `• OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} ${b.levels.map((l) => format(l.value)).join(', ')} at ${timeOf(b.time)} (${b.up ? b.side.up : b.side.down})\n`
     + `• CE − PE cumulative Δ shifted ${format(hp.shift)} in ${span} min (${ratio})\n`
     + `• ATM ± 1 (${hp.nearStrikes.join(' / ')}) carried ${format(hp.nearShift)} of it (${Math.round(hp.nearShare * 100)}%)`
 }
