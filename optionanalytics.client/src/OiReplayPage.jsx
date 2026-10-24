@@ -1726,7 +1726,9 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 // voice, notification and Telegram follow the scanner's Voice / Telegram switches; Telegram is keyed so several open
 // pages send one message.
 function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, timeframeMinutes, live, dayKey, enabled }) {
-  const active = !!(live && enabled && underlying)
+  // Never for the External account (its Market view shows no pop-ups and sends nothing), whatever a caller passes.
+  const external = useAuth()?.user?.role === 'External'
+  const active = !!(live && enabled && underlying && !external)
   const [clock, setClock] = useState(() => Date.now())
   useEffect(() => {
     if (!active) return undefined
