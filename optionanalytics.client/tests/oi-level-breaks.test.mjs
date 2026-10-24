@@ -63,7 +63,7 @@ test('the message names the index, line, level, direction and meaning', () => {
 })
 
 // ---- High probability: break + large CE − PE shift + carried at ATM ± 1 ----
-import { TOTALS_SIDES, highProbability, highProbabilityText } from '../src/oiLevelBreaks.js'
+import { TOTALS_SIDES, highProbability, highProbabilityText, newHighProbabilityWatch, watchHighProbability } from '../src/oiLevelBreaks.js'
 
 // Two swing lows at 60, then a hard fall through it in one minute (16): the CE cumulative (and the net, PE flat).
 const BIG = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, -200]
@@ -83,13 +83,13 @@ function breakOf(cumAt, opts) {
   const watch = newBreakWatch()
   watchBreaks(watch, before.reads, 60)
   const b = watchBreaks(watch, now.reads, 60).find((x) => x.side.key === 'net')
-  return { b, ctx: { totals: now.totals, ce: now.ce, pe: now.pe, last: now.reads.last, atmStrike: now.atm } }
+  return { b, ctx: { totals: now.totals, ce: now.ce, pe: now.pe, last: now.reads.last, atmStrike: now.atm, bucketSeconds: 60 } }
 }
 
 test('high probability: the break comes with a large CE − PE shift carried at ATM ± 1, same direction', () => {
   const { b, ctx } = breakOf(BIG)
   assert.ok(b, 'the net line broke its support')
-  const hp = highProbability(b, ctx)
+  const hp = highProbability(b, ctx, { windowMinutes: 3 })
   assert.ok(hp)
   assert.equal(hp.bullish, true)                 // net falling: put writers ahead
   assert.equal(hp.shift, -200 - 120)
@@ -113,7 +113,7 @@ test('not high probability when the shift is not large (an ordinary break)', () 
   const ordinary = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 110, 100, 90, 80, 70, 55]
   const { b, ctx } = breakOf(ordinary)
   assert.ok(b)
-  assert.equal(highProbability(b, ctx), null)
+  assert.equal(highProbability(b, ctx, { windowMinutes: 3 }), null)
 })
 
 test('not high probability when the break disagrees with the shift', () => {
@@ -126,4 +126,36 @@ test('not high probability when the break disagrees with the shift', () => {
 test('not high probability without enough of the day to judge "large"', () => {
   const { b, ctx } = breakOf(BIG)
   assert.equal(highProbability(b, ctx, { minHistory: 40 }), null)
+  assert.ok(highProbability(b, ctx), 'the default 5-minute window passes')
+})
+
+// The three need not land in the same minute: the line breaks at 16 with an ordinary move, and the big ATM shift comes
+// over the next two minutes - within a 5-minute window it is one signal, within a 1-minute window it is not.
+const LATE = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, 50, -100, -250]
+function run(cumAt, windowMinutes) {
+  const breaks = newBreakWatch()
+  const hp = newHighProbabilityWatch()
+  const out = []
+  for (let n = 15; n <= cumAt.length; n++) {
+    const d = day(cumAt, { n })
+    const ctx = { totals: d.totals, ce: d.ce, pe: d.pe, last: d.reads.last, atmStrike: d.atm, bucketSeconds: 60 }
+    out.push(...watchHighProbability(hp, watchBreaks(breaks, d.reads, 60), ctx, { windowMinutes }).map((s) => ({ ...s, n })))
+  }
+  return out
+}
+
+test('high probability within the window: the shift may come a few minutes after the break', () => {
+  const signals = run(LATE, 5)
+  assert.equal(signals.length, 1, JSON.stringify(signals.map((x) => [x.n, x.key])))
+  assert.equal(signals[0].hp.bullish, true)
+  assert.ok(signals[0].hp.at > signals[0].b.time, 'signalled after the break minute, when the shift arrived')
+})
+
+test('not high probability when the shift comes after the window has passed', () => {
+  assert.equal(run(LATE, 1).length, 0)
+})
+
+test('one signal per direction per window, however many lines broke', () => {
+  const signals = run(BIG, 5)
+  assert.equal(signals.length, 1)
 })

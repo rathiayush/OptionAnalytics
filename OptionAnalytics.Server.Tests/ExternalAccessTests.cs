@@ -58,6 +58,7 @@ public sealed class ExternalAccessTests
     [Theory]
     [InlineData("/api/external/NIFTY/heatmap", true)]
     [InlineData("/API/External/banknifty/oi-net", true)]
+    [InlineData("/api/external/NIFTY/days", true)]
     [InlineData("/api/auth/me", true)]
     [InlineData("/api/auth/logout", true)]
     [InlineData("/api/version", true)]
@@ -231,6 +232,26 @@ public sealed class ExternalAccessTests
         var picked = await ExternalController.PickDayAsync(new DateOnly(2026, 10, 24), (d, _) => { asked.Add(d); return Task.FromResult(Run(d, true, success: false)); });
         Assert.Null(picked);
         Assert.Equal(new[] { new DateOnly(2026, 10, 23) }, asked);
+    }
+
+    [Fact]
+    public void It_may_pick_today_or_the_last_five_trading_days_only()
+    {
+        // Saturday 24 Oct: Fri 23, Thu 22, Wed 21, Tue 20, Mon 19 - weekends skipped.
+        Assert.Equal(new[] { 23, 22, 21, 20, 19 }.Select(d => new DateOnly(2026, 10, d)), ExternalController.AllowedPastDays(new DateOnly(2026, 10, 24)));
+        // Tuesday 27 Oct: Mon 26, Fri 23, Thu 22, Wed 21, Tue 20.
+        Assert.Equal(new[] { 26, 23, 22, 21, 20 }.Select(d => new DateOnly(2026, 10, d)), ExternalController.AllowedPastDays(new DateOnly(2026, 10, 27)));
+    }
+
+    [Fact]
+    public void A_past_day_is_never_live_and_carries_only_time_strike_and_oi()
+    {
+        var day = new DateOnly(2026, 10, 22);
+        var answer = ExternalController.PastAnswer("NIFTY", day, Run(day, true));
+        Assert.False(answer.Live);
+        Assert.Equal(day, answer.Date);
+        Assert.Single(answer.CePoints);
+        Assert.Empty(ExternalController.PastAnswer("NIFTY", day, Run(day, false)).CePoints);   // a holiday: no OI
     }
 
     private static string RepoRoot()

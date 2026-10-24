@@ -78,7 +78,7 @@ function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey, show
   )
 }
 
-const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
+const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin tip="Loading…"><div style={{ padding: 30 }} /></Spin></div>
 
 export default function ExternalPage() {
   const auth = useAuth()
@@ -113,8 +113,14 @@ export default function ExternalPage() {
   const bigLots = bigMode === 'auto' ? autoLots ?? 10 : Math.max(1, largeLots)
   const largeTrades = useMemo(() => (data?.trades ?? []).filter((t) => t.quantity >= bigLots * lotSize), [data?.trades, bigLots, lotSize])
 
-  // ---- OI: OI Replay's today run, then its live "oiReplayTicks" ----
-  const oi = useLoad(`/api/external/${u}/oi`)
+  // ---- Day: today (live) or one of the last 5 trading days (read-only, loaded on pick, kept by the server) ----
+  const [dayChoice, setDayChoice] = useState('live')
+  const days = useLoad('/api/external/NIFTY/days')
+  const pastDays = days.data?.days ?? []
+  const pickedPast = dayChoice !== 'live' && pastDays.includes(dayChoice) ? dayChoice : null
+
+  // ---- OI: OI Replay's today run, then its live "oiReplayTicks" (a past day: that day's run, no live) ----
+  const oi = useLoad(pickedPast ? `/api/external/${u}/oi?date=${pickedPast}` : `/api/external/${u}/oi`)
   const [live, setLive] = useState({ u: null, ce: [], pe: [] })
   const pendingRef = useRef({ ce: [], pe: [] })
   const uRef = useRef(u)
@@ -180,11 +186,11 @@ export default function ExternalPage() {
   const livePe = showsToday && live.u === u ? live.pe : null
   const reloadOi = oi.reload
   useEffect(() => {
-    if (!oi.data || showsToday) return undefined
+    if (!oi.data || showsToday || pickedPast) return undefined
     const id = setInterval(reloadOi, CLOSED_DAY_RECHECK_MS)
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [oi.data, showsToday])
+  }, [oi.data, showsToday, pickedPast])
   // Each side's strikes, as OI Replay groups them: today's load plus this index's live points since.
   const byStrike = useMemo(() => {
     if (!oi.data) return null
@@ -249,13 +255,14 @@ export default function ExternalPage() {
   }, [byStrike, spotChart])
   const chartAtm = spotChart?.oneMinBars.length ? Math.round(spotChart.oneMinBars.at(-1).close / step) * step : atmStrike
 
-  const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">No OI data yet today.</Text> : render())
+  const noOiText = pickedPast ? 'No OI for this day (a market holiday?).' : 'No OI data yet today.'
+  const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">{noOiText}</Text> : render())
 
-  const connectionTag = (state) => (
+  const connectionTag = (state) => (pickedPast ? <Tag color="blue" style={{ margin: 0 }}>{DAY_LABEL.format(new Date(`${pickedPast}T00:00:00Z`))}</Tag> : (
     <Tag color={state === 'connected' ? 'green' : state === 'reconnecting' || state === 'connecting' ? 'gold' : 'red'} style={{ margin: 0 }}>
       {state === 'connected' ? 'Live' : state}
     </Tag>
-  )
+  ))
 
   const totalsCard = (
         <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
@@ -279,9 +286,11 @@ export default function ExternalPage() {
   )
   const liquidityCard = (
         <Card size="small" style={{ height: '100%' }} title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
-          extra={data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
-          {flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
-          {flow.loading && !data
+          extra={data && !pickedPast ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
+          {!pickedPast && flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
+          {pickedPast
+            ? <Text type="secondary">The liquidity heatmap is live only - the exchange's market depth is not kept for past days. Pick Today to see it.</Text>
+            : flow.loading && !data
             ? loadingBox
             : !data?.heatmap?.length
               ? <Text type="secondary">No market depth recorded yet today.</Text>
@@ -303,7 +312,7 @@ export default function ExternalPage() {
             </Space>
           )}>
           {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-          {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">No candles yet today.</Text> : (
+          {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">{pickedPast ? 'No candles for this day.' : 'No candles yet today.'}</Text> : (
             <ReplayChart key={`${dayKey}-${tf}`} bars={spotChart.bars} ladderRows={wallRows} dayKey={`ext-${dayKey}-${tf}`} atmStrike={chartAtm} step={step}
               top5Only={top5Only} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
           )}
@@ -339,11 +348,16 @@ export default function ExternalPage() {
         <Space align="center" size={16} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
           <Space align="center" size={16} wrap>
             <Title level={3} style={{ margin: 0 }}>Market view</Title>
-            {oi.data && (showsToday
+            {oi.data && !pickedPast && (showsToday
               ? <Tag color="green" style={{ margin: 0 }}>Today</Tag>
               : <Tooltip title="The market is closed (a weekend, a holiday or before the open) - the OI is the last trading day's.">
                   <Tag color="gold" style={{ margin: 0 }}>{DAY_LABEL.format(new Date(`${oi.data.date}T00:00:00Z`))} · last trading day</Tag>
                 </Tooltip>)}
+            {pickedPast && <Tag color="blue" style={{ margin: 0 }}>Past day · not live</Tag>}
+            <Tooltip title="Today (live), or one of the last 5 trading days - loaded when picked.">
+              <Select value={pickedPast ?? 'live'} onChange={setDayChoice} style={{ width: 170 }} aria-label="Day" loading={days.loading}
+                options={[{ value: 'live', label: 'Today (live)' }, ...pastDays.map((d) => ({ value: d, label: DAY_LABEL.format(new Date(`${d}T00:00:00Z`)) }))]} />
+            </Tooltip>
             <Select value={u} onChange={setUnderlying} style={{ width: 140 }} aria-label="Index"
               options={UNDERLYINGS.map((x) => ({ value: x, label: x }))} />
             <Space size={6}>
