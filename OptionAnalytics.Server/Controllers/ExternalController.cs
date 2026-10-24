@@ -34,10 +34,13 @@ public sealed class ExternalController : ControllerBase
     private readonly OrderFlowService _orderFlow;
     private readonly OiReplayService _oiReplay;
 
-    public ExternalController(OrderFlowService orderFlow, OiReplayService oiReplay)
+    private readonly SpotFeedHostedService? _spotFeed;
+
+    public ExternalController(OrderFlowService orderFlow, OiReplayService oiReplay, SpotFeedHostedService? spotFeed = null)
     {
         _orderFlow = orderFlow;
         _oiReplay = oiReplay;
+        _spotFeed = spotFeed;
     }
 
     /// <param name="rowSize">Points per heatmap row: 1, 2, 5, 10, 20 or 50.</param>
@@ -64,6 +67,10 @@ public sealed class ExternalController : ControllerBase
     public sealed record OiAnswer(bool Success, string Underlying, DateOnly Date, int Step, decimal? SpotClose, IReadOnlyList<OiPoint> CePoints, IReadOnlyList<OiPoint> PePoints)
     {
         public bool Live { get; init; } = true;
+        /// <summary>The day's index 1-minute candles (the Chart tab - OI Replay's spot chart).</summary>
+        public IReadOnlyList<Candle> SpotCandlesOneMinute { get; init; } = Array.Empty<Candle>();
+        /// <summary>The day's session VWAP - live, the spot feed's own (as /api/spot/{u}/vwap-series); a closed day, the run's.</summary>
+        public IReadOnlyList<ObvPoint> SpotVwap { get; init; } = Array.Empty<ObvPoint>();
     }
 
     // The last trading day found for each index, kept until the date changes (a closed day never changes; its Dhan data is
@@ -84,7 +91,14 @@ public sealed class ExternalController : ControllerBase
         var picked = await PickDayAsync(today, (day, live) => _oiReplay.RunAsync(u, day, 1, flag, cancellationToken, forceLive: live));
         if (picked is not { } p) return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "OI is not available right now." });
         var answer = new OiAnswer(true, u, p.Day, p.Run.Step, p.Run.SpotCandlesOneMinute.Count > 0 ? p.Run.SpotCandlesOneMinute[^1].Close : null,
-            Cut(p.Run.CePoints), Cut(p.Run.PePoints)) { Live = p.Day == today };
+            Cut(p.Run.CePoints), Cut(p.Run.PePoints))
+        {
+            Live = p.Day == today,
+            SpotCandlesOneMinute = p.Run.SpotCandlesOneMinute,
+            SpotVwap = p.Day == today && _spotFeed?.States.TryGetValue(u, out var spot) == true
+                ? Services.Backtesting.VwapCalculator.ComputeSeries(spot.GetVolumeBars())
+                : p.Run.SpotVwap,
+        };
         Held[key] = (DateTimeOffset.UtcNow, answer);
         if (!answer.Live) LastDay[u] = (today, answer);
         return answer;
