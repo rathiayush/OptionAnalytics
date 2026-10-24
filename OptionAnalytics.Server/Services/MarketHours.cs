@@ -1,14 +1,16 @@
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// When this server's background work may call Dhan: IST weekdays 09:00 - 16:00 (the session with the pre-open before it
-/// and the square-off / settling after it). Outside it nothing polls Dhan - no positions, orders, option chain, candles or
-/// anything else - and the websocket feeds do not (re)connect: the market is shut, so nothing new would come back.
+/// When this server's background work may POLL Dhan: IST weekdays 09:00 - 16:00 (the session with the pre-open before it
+/// and the square-off / settling after it). Outside it nothing polls live state - positions, orders, the option chain
+/// (OI / IV), quotes, P&L - because the market is shut and nothing new would come back. Candle downloads (/charts/... -
+/// the spot / option / futures backfills, a day's history) are NOT polling and still go at any hour.
 ///
 /// Two layers:
-///  - each polling loop waits for the window (WaitForOpenAsync) or skips its round (IsOpen), so it does not spin;
-///  - the safety net: work running in a BackgroundScope (every hosted service's loop, the server scanner's requests) has
-///    its Dhan REST calls refused, NOT sent, outside the window (DhanApiClient) - so a loop added later is covered too.
+///  - each polling loop skips its round outside the window (IsOpen), so it does not spin;
+///  - the safety net: work running in a BackgroundScope (every hosted service's loop, the server scanner's requests, a
+///    page's timer refresh) has its polling calls - everything but /charts/ - refused, NOT sent, outside the window
+///    (DhanApiClient), so a loop added later is covered too.
 /// A request a person makes from a page is not background and still goes to Dhan at any hour. Dhan token renewal
 /// (DhanTotpAuthService) has its own HttpClient and keeps running overnight, so the session is valid at the open.
 /// </summary>
@@ -71,11 +73,15 @@ public static class MarketHours
         return new Restore(before);
     }
 
-    /// <summary>Why a Dhan REST call must not be sent at `now`, else null: background work outside the window.</summary>
-    public static string? BlockReason(DateTimeOffset now) =>
-        InBackground && !IsOpen(now)
-            ? "Not sent: background calls to Dhan stop outside market hours (IST weekdays 09:00 - 16:00)."
+    /// <summary>Why a Dhan REST call to `path` must not be sent at `now`, else null: background polling outside the window.
+    /// Candle downloads (/charts/...) are backfills, not polling, and always go.</summary>
+    public static string? BlockReason(DateTimeOffset now, string path) =>
+        InBackground && !IsOpen(now) && !IsBackfill(path)
+            ? "Not sent: background polling of Dhan stops outside market hours (IST weekdays 09:00 - 16:00)."
             : null;
+
+    /// <summary>A candle download - a backfill, never held to the window.</summary>
+    public static bool IsBackfill(string path) => path.StartsWith("/charts/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The header a page's timer refresh carries (POLL_HEADERS in shared.jsx).</summary>
     public const string PollHeader = "X-Poll";
