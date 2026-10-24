@@ -13,9 +13,9 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Tests;
 
-/// <summary>After the close nothing in the background calls Dhan (MarketHours): the window is IST weekdays 09:00 - 16:00,
-/// and a background Dhan REST call outside it - positions, orders, candles, anything - is not sent. A page's own request
-/// still goes.</summary>
+/// <summary>After the close nothing in the background POLLS Dhan (MarketHours): the window is IST weekdays 09:00 - 16:00,
+/// and a background polling call outside it - positions, orders, the option chain (OI) - is not sent. Candle backfills
+/// (/charts/...) and a page's own request still go.</summary>
 public sealed class MarketHoursTests
 {
     private static DateTimeOffset Ist(int day, int hour, int minute) => new(2026, 10, day, hour, minute, 0, IstClock.Offset);
@@ -46,11 +46,12 @@ public sealed class MarketHoursTests
     [Fact]
     public void Only_background_work_is_held_to_the_window()
     {
-        Assert.Null(MarketHours.BlockReason(Ist(23, 18, 0)));   // a page's request
+        Assert.Null(MarketHours.BlockReason(Ist(23, 18, 0), "/positions"));   // a page's request
         using (MarketHours.BackgroundScope())
         {
-            Assert.NotNull(MarketHours.BlockReason(Ist(23, 18, 0)));
-            Assert.Null(MarketHours.BlockReason(Ist(23, 11, 0)));
+            Assert.NotNull(MarketHours.BlockReason(Ist(23, 18, 0), "/positions"));
+            Assert.Null(MarketHours.BlockReason(Ist(23, 11, 0), "/positions"));
+            Assert.Null(MarketHours.BlockReason(Ist(23, 18, 0), "/charts/intraday"));   // a backfill
         }
         Assert.False(MarketHours.InBackground);
     }
@@ -68,10 +69,10 @@ public sealed class MarketHoursTests
     [InlineData("GET", "/positions")]
     [InlineData("GET", "/orders")]
     [InlineData("GET", "/super/orders")]
-    [InlineData("POST", "/charts/intraday")]
     [InlineData("POST", "/optionchain")]
+    [InlineData("POST", "/marketfeed/quote")]
     [InlineData("POST", "/orders")]
-    public async Task After_4_PM_a_background_Dhan_call_is_not_sent(string method, string path)
+    public async Task After_4_PM_background_polling_is_not_sent(string method, string path)
     {
         var dhan = new CountingDhan();
         var api = Client(dhan, Ist(23, 16, 5));
@@ -84,6 +85,18 @@ public sealed class MarketHoursTests
         Assert.Contains("market hours", response.ErrorMessage);
         Assert.Equal(0, dhan.Sent);
         Assert.DoesNotContain(api.RateLimiter.RecentCalls(), c => c.Path == path);
+    }
+
+    [Theory]
+    [InlineData("/charts/intraday")]
+    [InlineData("/charts/historical")]
+    [InlineData("/charts/rollingoption")]
+    public async Task Candle_backfills_still_go_after_4_PM(string path)
+    {
+        var dhan = new CountingDhan();
+        using (MarketHours.BackgroundScope())
+            Assert.True((await Client(dhan, Ist(23, 21, 0)).SendAsync(HttpMethod.Post, path, new { }, "test", CancellationToken.None)).Success);
+        Assert.Equal(1, dhan.Sent);
     }
 
     [Fact]

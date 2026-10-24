@@ -698,8 +698,6 @@ public sealed class CdvHostedService : BackgroundService
         var incompleteInARow = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
-            // Market hours only (MarketHours) - after the close there is nothing new to recenter on.
-            if (!await MarketHours.WaitForOpenAsync(stoppingToken)) break;
             var complete = await RecenterAllAsync(stoppingToken);
             incompleteInARow = complete ? 0 : incompleteInARow + 1;
 

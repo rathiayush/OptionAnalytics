@@ -344,8 +344,6 @@ public sealed class SpotFeedHostedService : BackgroundService
                 return;
             }
 
-            // Market hours only (MarketHours) - after the close it waits for the next session instead of asking Dhan.
-            if (!await MarketHours.WaitForOpenAsync(stoppingToken)) return;
             var empty = States.Values.Where(s => s.GetClosedCandles().Count == 0).Select(s => s.Underlying).ToArray();
             if (empty.Length == 0) return;
 
