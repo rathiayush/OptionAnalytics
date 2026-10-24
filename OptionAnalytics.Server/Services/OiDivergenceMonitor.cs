@@ -50,6 +50,8 @@ public sealed class OiDivergenceMonitor : BackgroundService
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         if (!_options.Enabled)
         {
             _logger.LogInformation("OI divergence alerts are turned off (OiDivergence:Enabled = false).");

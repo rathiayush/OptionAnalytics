@@ -86,6 +86,8 @@ public sealed class SpotFeedHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         if (!_options.HasSession && !_options.HasTotpCredentials)
         {
             _logger.LogWarning("Neither Dhan:AccessToken nor Dhan:Pin/Dhan:TotpSecret are configured - the spot feed will not authenticate until one of them is set.");
@@ -342,6 +344,8 @@ public sealed class SpotFeedHostedService : BackgroundService
                 return;
             }
 
+            // Market hours only (MarketHours) - after the close it waits for the next session instead of asking Dhan.
+            if (!await MarketHours.WaitForOpenAsync(stoppingToken)) return;
             var empty = States.Values.Where(s => s.GetClosedCandles().Count == 0).Select(s => s.Underlying).ToArray();
             if (empty.Length == 0) return;
 

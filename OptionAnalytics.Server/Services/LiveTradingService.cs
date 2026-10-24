@@ -129,6 +129,8 @@ public sealed class LiveTradingService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         _tickSubscription = _feed.AddTickConsumer("Positions", OnTick);
         _ = RunTimeExitLoopAsync(stoppingToken);
         _orderUpdates.OrderUpdated += ApplyOrderUpdate;
@@ -138,7 +140,9 @@ public sealed class LiveTradingService : BackgroundService
             var refresh = true;
             while (!stoppingToken.IsCancellationRequested)
             {
-                if (refresh)
+                // Market hours only (MarketHours): after the close nothing reads positions / orders on its own - a page
+                // opening still reads them once (LiveTradingController).
+                if (refresh && MarketHours.IsOpenNow)
                 {
                     try
                     {

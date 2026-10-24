@@ -85,6 +85,8 @@ public sealed class HistoricalSpotDataPrefetchHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         // Off by default (see HistoricalDataPrefetchOptions) - set HistoricalDataPrefetch__Enabled=true
         // to opt a deployment into this one-time download.
         if (!_prefetchOptions.Enabled)

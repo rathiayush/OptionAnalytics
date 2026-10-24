@@ -663,6 +663,8 @@ public sealed class CdvHostedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         if (!_enabled)
         {
             _logger.LogWarning("CDV/OBV is turned off (Cdv:Enabled = false) - not tracking or processing any CDV strikes.");
@@ -696,6 +698,8 @@ public sealed class CdvHostedService : BackgroundService
         var incompleteInARow = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Market hours only (MarketHours) - after the close there is nothing new to recenter on.
+            if (!await MarketHours.WaitForOpenAsync(stoppingToken)) break;
             var complete = await RecenterAllAsync(stoppingToken);
             incompleteInARow = complete ? 0 : incompleteInARow + 1;
 

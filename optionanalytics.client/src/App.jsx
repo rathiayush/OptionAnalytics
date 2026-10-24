@@ -19,7 +19,7 @@ import StrategyTuningPage from './StrategyTuningPage.jsx'
 import ExternalPage from './ExternalPage.jsx'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS } from './shared.jsx'
 import './App.css'
 
 const { Title, Text } = Typography
@@ -1295,12 +1295,12 @@ function DashboardPage() {
   useEffect(() => {
     if (!selected) return
     const cancelledRef = { cancelled: false }
-    const load = () => fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam))
+    const load = (poll = false) => fetch(withExpiry(`/api/cdv/${selected}/chain`, expiryParam), poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => r.json())
       .then((data) => { if (!cancelledRef.cancelled) setStrikeChain(data) })
       .catch((err) => console.error('Failed to load the option chain:', err))
     load()
-    const id = setInterval(load, CHAIN_REFRESH_MS)
+    const id = setInterval(() => load(true), CHAIN_REFRESH_MS)
     return () => { cancelledRef.cancelled = true; clearInterval(id) }
   }, [selected, expiryParam, cdvSnapshot?.atmStrike])
 

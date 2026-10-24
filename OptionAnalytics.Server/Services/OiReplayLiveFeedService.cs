@@ -150,6 +150,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         _tickSubscription ??= _feedClient.AddTickConsumer("OI Replay", OnTick);
 
         // Fire-and-forget, its own independent cadence (RestQuoteInterval, not RecenterInterval) -
@@ -162,6 +164,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         // download and spot backfill, so a short retry beats waiting out the full cadence.
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Market hours only (MarketHours) - after the close there is nothing new to recenter or subscribe.
+            if (!await MarketHours.WaitForOpenAsync(stoppingToken)) break;
             var complete = true;
             var resolvedExpiries = new Dictionary<(string Underlying, string ExpiryFlag), DateOnly>();
             var allCombos = Combos.Concat(await BuildPositionalCombosAsync(stoppingToken)).ToList();

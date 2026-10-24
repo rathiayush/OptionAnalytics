@@ -78,9 +78,12 @@ public sealed class KillSwitchService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         while (!stoppingToken.IsCancellationRequested)
         {
-            try { await CheckAsync(UtcNow(), stoppingToken); }
+            // Market hours only (MarketHours): after the close nothing trades, so nothing reads the P&L or sets Dhan's switches.
+            try { if (MarketHours.IsOpen(UtcNow())) await CheckAsync(UtcNow(), stoppingToken); }
             catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogWarning(ex, "Kill switch check failed."); }
             try { await Task.Delay(CheckInterval, stoppingToken); }
             catch (OperationCanceledException) { break; }

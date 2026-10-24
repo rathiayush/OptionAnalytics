@@ -163,6 +163,8 @@ public sealed class OrderFlowService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Background work: its Dhan calls are not sent outside market hours (MarketHours).
+        using var background = MarketHours.BackgroundScope();
         if (!_enabled)
         {
             _logger.LogWarning("Order flow is turned off (OrderFlow:Enabled = false).");

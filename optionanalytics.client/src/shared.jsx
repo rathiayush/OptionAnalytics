@@ -10,6 +10,10 @@ import { reconcileCardOrder } from './cardOrder.js'
 // null. NavBar (rendered independently from four different pages) reads this via useAuth() rather
 // than each page threading it through as a prop.
 export const AuthContext = createContext(null)
+
+// Sent with a request a page's TIMER makes (not its first load, not a click): the server treats it as background work, so
+// the Dhan calls it would cause are not sent outside market hours (IST weekdays 09:00 - 16:00 - MarketHours on the server).
+export const POLL_HEADERS = { 'X-Poll': '1' }
 export function useAuth() {
   return useContext(AuthContext)
 }

@@ -384,6 +384,9 @@ app.UseStaticFiles();
 app.UseAuthentication();
 // The External account reaches its own read-only page and API only - everything else is 403 for it (ExternalAccess).
 app.UseExternalAccessFence();
+// Background requests - the server scanner's, and a page's timer refresh (X-Poll) - are background work: the Dhan calls
+// they cause are not sent outside market hours (MarketHours). A page's first load or a click still goes at any hour.
+app.UseBackgroundRequests();
 app.UseAuthorization();
 app.UseRateLimiter();
 

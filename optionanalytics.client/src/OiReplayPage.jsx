@@ -13,7 +13,7 @@ import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
   NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
-  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth,
+  syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth, POLL_HEADERS,
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
@@ -4086,13 +4086,13 @@ export default function OiReplayPage() {
   useEffect(() => {
     if (!futuresDeltaOn || !flowDate || !underlying) { setFuturesFlow(null); return undefined }
     let cancelled = false
-    const load = () => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`)
+    const load = (poll = false) => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`, poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => (r.ok ? r.json() : null))
       // A live day the server started recording part way (a restart) comes with the minutes before as an estimate.
       .then((body) => { if (!cancelled) setFuturesFlow(body ? { source: body.source, bars: deltaMinutes(body.bars, body.backfill) } : null) })
       .catch(() => { if (!cancelled) setFuturesFlow(null) })
     load()
-    const id = isLive ? setInterval(load, 60_000) : null
+    const id = isLive ? setInterval(() => load(true), 60_000) : null
     return () => { cancelled = true; if (id) clearInterval(id) }
   }, [futuresDeltaOn, flowDate, underlying, isLive])
   // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.

@@ -77,6 +77,9 @@ public sealed class DhanApiClient
     private ResiliencePipeline<DhanApiResponse>? _pipeline;
 
     private readonly HttpClient _httpClient;
+
+    /// <summary>The clock the market-hours check reads (the tests set it).</summary>
+    internal Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
     private readonly DhanOptions _options;
     private readonly DhanSession _session;
     private readonly ILogger<DhanApiClient> _logger;
@@ -241,6 +244,10 @@ public sealed class DhanApiClient
     private async Task<DhanApiResponse> SendThroughPipelineAsync(HttpMethod method, string path, object? payload, string context, bool interactive,
         CancellationToken cancellationToken, bool authRetry = true)
     {
+        // Background work (a hosted service's loop, the server scanner) outside market hours: not sent at all - no
+        // positions, orders, chain or candles polled after the close (Services.MarketHours). A page's own request goes.
+        if (Services.MarketHours.BlockReason(Clock()) is { } closed)
+            return new DhanApiResponse(false, HttpStatusCode.ServiceUnavailable, null, closed);
         var category = DhanRestRateLimiter.CategoryOf(method, path);
         var resilience = ResilienceContextPool.Shared.Get(cancellationToken);
         try
