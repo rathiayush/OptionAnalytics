@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, InputNumber, Segmented, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, Grid, InputNumber, Row, Segmented, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd'
 import { DepthHeatmap } from './OrderFlowCharts.jsx'
 import { useOrderFlowHub } from './OrderFlowPage.jsx'
 import {
@@ -82,6 +82,8 @@ const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></d
 
 export default function ExternalPage() {
   const auth = useAuth()
+  // 1600 px and wider: all four panels together (a 2 x 2 grid) instead of tabs with the chart under them.
+  const wide = !!Grid.useBreakpoint().xxl
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.external.underlying', 'NIFTY')
   const [rowSize, setRowSize] = usePersistedState('optionanalytics.external.rowSize', 5)
   // Big order: 'auto' - the top 2.5% of the day's prints (autoBigLots), as the Order Flow page - or the fixed lots.
@@ -255,8 +257,72 @@ export default function ExternalPage() {
     </Tag>
   )
 
+  const totalsCard = (
+        <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
+          {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+          {oiBody(() => (
+            <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} />
+          ))}
+        </Card>
+  )
+  const liquidityCard = (
+        <Card size="small" title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
+          extra={data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
+          {flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
+          {flow.loading && !data
+            ? loadingBox
+            : !data?.heatmap?.length
+              ? <Text type="secondary">No market depth recorded yet today.</Text>
+              : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={460} />}
+          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+            Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
+          </Text>
+        </Card>
+  )
+  const chartCard = (
+        <Card size="small" title={<Space size={8}>{`${u} chart`}{connectionTag(oiConnection)}</Space>}
+          extra={(
+            <Space size={12} wrap>
+              <Select size="small" value={tf} onChange={setTimeframe} options={TIMEFRAME_OPTIONS} style={{ width: 90 }} aria-label="Timeframe" />
+              <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+              <Tooltip title="Only the 5 strongest OI walls each side (calls above as resistance, puts below as support) instead of every strike's">
+                <Space size={4}><Switch size="small" checked={top5Only} onChange={setTop5Only} aria-label="Top 5 walls only" /><Text style={{ fontSize: 12 }}>Top 5</Text></Space>
+              </Tooltip>
+            </Space>
+          )}>
+          {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+          {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">No candles yet today.</Text> : (
+            <ReplayChart key={`${dayKey}-${tf}`} bars={spotChart.bars} ladderRows={wallRows} dayKey={`ext-${dayKey}-${tf}`} atmStrike={chartAtm} step={step}
+              top5Only={top5Only} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
+          )}
+          <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+            Index candles with the OI walls: red lines are call OI (resistance), green put OI (support) - darker is heavier.
+          </Text>
+        </Card>
+  )
+  const chainCard = (
+        <Card size="small" title={<Space size={8}>Chain-wide OI{connectionTag(oiConnection)}</Space>}
+          extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))} ({fmtOi(last(chain.ceSince))})</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))} ({fmtOi(last(chain.peSince))})</Text></Space> : null}>
+          {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+          {oiBody(() => (
+            <div>
+              <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+                <Segmented size="small" value={dayOiChartMode} onChange={setDayOiChartMode}
+                  options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]} />
+                <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+                <Text style={{ color: UP_COLOR }}>● PE</Text>
+              </Space>
+              <StrikeOiDrilldownChart key={`day-oi-${dayOiChartMode}-${dayKey}`}
+                ceSeries={dayOiChartMode === 'total' ? chain.ceTotal : chain.ceSince}
+                peSeries={dayOiChartMode === 'total' ? chain.peTotal : chain.peSince}
+                mode={dayOiChartMode} dayKey={`day-oi-${dayOiChartMode}-${dayKey}`} height={260} />
+            </div>
+          ))}
+        </Card>
+  )
+
   return (
-    <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>
+    <div style={{ maxWidth: wide ? 'none' : 1280, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={16} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
           <Space align="center" size={16} wrap>
@@ -290,71 +356,25 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Tabs activeKey={['totals', 'liquidity', 'chain', 'chart'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
-          { key: 'totals', label: 'OI totals', children: (
-            <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
-              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-              {oiBody(() => (
-                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} />
-              ))}
-            </Card>
-          ) },
-          { key: 'liquidity', label: 'Liquidity heatmap', children: (
-            <Card size="small" title={<Space size={8}>{`Liquidity heatmap · ${data?.meta?.contractSymbol ?? `${u} futures`}`}{connectionTag(flowConnection)}</Space>}
-              extra={data ? <Text type="secondary" style={{ fontSize: 12 }}>Last {data.meta?.lastPrice?.toLocaleString('en-IN')} · {row} pt rows · dots: {bigLots}+ lots</Text> : null}>
-              {flow.error && <LoadError error={flow.error} onRetry={flow.reload} />}
-              {flow.loading && !data
-                ? loadingBox
-                : !data?.heatmap?.length
-                  ? <Text type="secondary">No market depth recorded yet today.</Text>
-                  : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={460} />}
-              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-                Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
-              </Text>
-            </Card>
-          ) },
-          { key: 'chart', label: 'Chart', children: (
-            <Card size="small" title={<Space size={8}>{`${u} chart`}{connectionTag(oiConnection)}</Space>}
-              extra={(
-                <Space size={12} wrap>
-                  <Select size="small" value={tf} onChange={setTimeframe} options={TIMEFRAME_OPTIONS} style={{ width: 90 }} aria-label="Timeframe" />
-                  <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
-                  <Tooltip title="Only the 5 strongest OI walls each side (calls above as resistance, puts below as support) instead of every strike's">
-                    <Space size={4}><Switch size="small" checked={top5Only} onChange={setTop5Only} aria-label="Top 5 walls only" /><Text style={{ fontSize: 12 }}>Top 5</Text></Space>
-                  </Tooltip>
-                </Space>
-              )}>
-              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-              {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">No candles yet today.</Text> : (
-                <ReplayChart key={`${dayKey}-${tf}`} bars={spotChart.bars} ladderRows={wallRows} dayKey={`ext-${dayKey}-${tf}`} atmStrike={chartAtm} step={step}
-                  top5Only={top5Only} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
-              )}
-              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-                Index candles with the OI walls: red lines are call OI (resistance), green put OI (support) - darker is heavier.
-              </Text>
-            </Card>
-          ) },
-          { key: 'chain', label: 'Chain-wide OI', children: (
-            <Card size="small" title={<Space size={8}>Chain-wide OI{connectionTag(oiConnection)}</Space>}
-              extra={chain ? <Space size={12}><Text style={{ color: DOWN_COLOR, fontSize: 12 }}>CE {fmtOiLevel(last(chain.ceTotal))} ({fmtOi(last(chain.ceSince))})</Text><Text style={{ color: UP_COLOR, fontSize: 12 }}>PE {fmtOiLevel(last(chain.peTotal))} ({fmtOi(last(chain.peSince))})</Text></Space> : null}>
-              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
-              {oiBody(() => (
-                <div>
-                  <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-                    <Segmented size="small" value={dayOiChartMode} onChange={setDayOiChartMode}
-                      options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]} />
-                    <Text style={{ color: DOWN_COLOR }}>● CE</Text>
-                    <Text style={{ color: UP_COLOR }}>● PE</Text>
-                  </Space>
-                  <StrikeOiDrilldownChart key={`day-oi-${dayOiChartMode}-${dayKey}`}
-                    ceSeries={dayOiChartMode === 'total' ? chain.ceTotal : chain.ceSince}
-                    peSeries={dayOiChartMode === 'total' ? chain.peTotal : chain.peSince}
-                    mode={dayOiChartMode} dayKey={`day-oi-${dayOiChartMode}-${dayKey}`} height={260} />
-                </div>
-              ))}
-            </Card>
-          ) },
-        ]} />
+        {wide ? (
+          // A big screen: every panel at once, two to a row - no tabs.
+          <Row gutter={[16, 16]}>
+            <Col span={12}>{totalsCard}</Col>
+            <Col span={12}>{chartCard}</Col>
+            <Col span={12}>{liquidityCard}</Col>
+            <Col span={12}>{chainCard}</Col>
+          </Row>
+        ) : (
+          <>
+            <Tabs activeKey={['totals', 'liquidity', 'chain'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
+              { key: 'totals', label: 'OI totals', children: totalsCard },
+              { key: 'liquidity', label: 'Liquidity heatmap', children: liquidityCard },
+              { key: 'chain', label: 'Chain-wide OI', children: chainCard },
+            ]} />
+            {/* The chart is not a tab: always below them. */}
+            {chartCard}
+          </>
+        )}
       </Space>
     </div>
   )
