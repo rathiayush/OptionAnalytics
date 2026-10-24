@@ -398,7 +398,7 @@ function lastIvByStrike(points) {
 // keep arriving, the same way a real charting terminal's current bar updates mid-formation. Safe to
 // bucket the already-IST-shifted time directly - the shift (5.5 hours) divides evenly into every
 // offered timeframe (1/3/5/15 min), so it lands on the exact same bucket boundaries plain UTC would.
-function aggregateBars(oneMinBars, timeframeMinutes) {
+export function aggregateBars(oneMinBars, timeframeMinutes) {
   if (timeframeMinutes <= 1) return oneMinBars
   const bucketSeconds = timeframeMinutes * 60
   const buckets = new Map()
@@ -784,10 +784,50 @@ const SUPPORT_DARK = '#0a5c1f'
 // further data fetch, just a local re-render. Also draws the strongest OI levels on each side as
 // horizontal price lines directly on the chart (darker = heavier OI = a "harder" level) - the same
 // data the ladder shows in table form, here as the market-structure read on the price chart itself.
+// The OI / IV ladder's rows as of `asOfMs` - each strike's latest CE / PE reading, its change over the last minute and since
+// the day's start, and whether it has gone stale - highest strike first. What the ladder and ReplayChart's S-R walls read
+// (the page's ladderRows; also the External page's chart).
+export function buildLadderRows(ceByStrike, peByStrike, asOfMs, staleReferenceMs, dayStartMs) {
+  if (asOfMs == null) return []
+  const priorMs = asOfMs - 60_000
+  const strikes = new Set([...ceByStrike.keys(), ...peByStrike.keys()])
+  const rows = [...strikes].map((strike) => {
+    const ce = latestAtOrBefore(ceByStrike.get(strike) ?? [], asOfMs)
+    const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
+    const cePrior = latestAtOrBefore(ceByStrike.get(strike) ?? [], priorMs)
+    const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
+    // See PRIOR_MINUTE_TOLERANCE_MS's own doc comment - a "prior" point found well before priorMs
+    // means there was a real gap, so the resulting delta would actually span however long that gap
+    // was, not one minute. Suppressed to null rather than shown as a misleadingly labeled figure.
+    const cePriorFresh = cePrior != null && priorMs - new Date(cePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
+    const pePriorFresh = pePrior != null && priorMs - new Date(pePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
+    const ceOpen = dayStartMs != null ? latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs) : null
+    const peOpen = dayStartMs != null ? latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs) : null
+    const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
+    const peAsOfMs = pe ? new Date(pe.time).getTime() : null
+    return {
+      strike,
+      ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
+      peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
+      ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
+      peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
+      ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
+      peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
+      // "Stale" = the newest reading we have for this strike/side is already more than
+      // OI_STALE_MS behind the replay's own current time - the stored data has stopped arriving,
+      // not that the market itself has gone quiet (see OI_STALE_MS's own doc comment).
+      ceAsOfMs, peAsOfMs,
+      ceStale: ceAsOfMs != null && staleReferenceMs - ceAsOfMs > OI_STALE_MS,
+      peStale: peAsOfMs != null && staleReferenceMs - peAsOfMs > OI_STALE_MS,
+    }
+  })
+  return rows.sort((a, b) => b.strike - a.strike)
+}
+
 // Long enough for the second click of a double-click to arrive (see ReplayChart's click handler).
 const STRIKE_CLICK_DELAY_MS = 300
 
-function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -4212,42 +4252,10 @@ export default function OiReplayPage() {
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
   // reading - the ladder shows both a tick-to-tick delta and a since-open delta per strike, not
   // just the Day OI Accumulation card's own whole-band totals.
-  const ladderRows = useMemo(() => {
-    if (asOfMs == null) return []
-    const priorMs = asOfMs - 60_000
-    const strikes = new Set([...ceByStrike.keys(), ...peByStrike.keys()])
-    const rows = [...strikes].map((strike) => {
-      const ce = latestAtOrBefore(ceByStrike.get(strike) ?? [], asOfMs)
-      const pe = latestAtOrBefore(peByStrike.get(strike) ?? [], asOfMs)
-      const cePrior = latestAtOrBefore(ceByStrike.get(strike) ?? [], priorMs)
-      const pePrior = latestAtOrBefore(peByStrike.get(strike) ?? [], priorMs)
-      // See PRIOR_MINUTE_TOLERANCE_MS's own doc comment - a "prior" point found well before priorMs
-      // means there was a real gap, so the resulting delta would actually span however long that gap
-      // was, not one minute. Suppressed to null rather than shown as a misleadingly labeled figure.
-      const cePriorFresh = cePrior != null && priorMs - new Date(cePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
-      const pePriorFresh = pePrior != null && priorMs - new Date(pePrior.time).getTime() <= PRIOR_MINUTE_TOLERANCE_MS
-      const ceOpen = dayStartMs != null ? latestAtOrBefore(ceByStrike.get(strike) ?? [], dayStartMs) : null
-      const peOpen = dayStartMs != null ? latestAtOrBefore(peByStrike.get(strike) ?? [], dayStartMs) : null
-      const ceAsOfMs = ce ? new Date(ce.time).getTime() : null
-      const peAsOfMs = pe ? new Date(pe.time).getTime() : null
-      return {
-        strike,
-        ceOi: ce?.openInterest ?? null, ceIv: ce?.impliedVolatility ?? null, cePrice: ce?.price ?? null,
-        peOi: pe?.openInterest ?? null, peIv: pe?.impliedVolatility ?? null, pePrice: pe?.price ?? null,
-        ceOiChange: ce?.openInterest != null && cePriorFresh && cePrior.openInterest != null ? ce.openInterest - cePrior.openInterest : null,
-        peOiChange: pe?.openInterest != null && pePriorFresh && pePrior.openInterest != null ? pe.openInterest - pePrior.openInterest : null,
-        ceOiSinceOpen: ce?.openInterest != null && ceOpen?.openInterest != null ? ce.openInterest - ceOpen.openInterest : null,
-        peOiSinceOpen: pe?.openInterest != null && peOpen?.openInterest != null ? pe.openInterest - peOpen.openInterest : null,
-        // "Stale" = the newest reading we have for this strike/side is already more than
-        // OI_STALE_MS behind the replay's own current time - the stored data has stopped arriving,
-        // not that the market itself has gone quiet (see OI_STALE_MS's own doc comment).
-        ceAsOfMs, peAsOfMs,
-        ceStale: ceAsOfMs != null && staleReferenceMs - ceAsOfMs > OI_STALE_MS,
-        peStale: peAsOfMs != null && staleReferenceMs - peAsOfMs > OI_STALE_MS,
-      }
-    })
-    return rows.sort((a, b) => b.strike - a.strike)
-  }, [ceByStrike, peByStrike, asOfMs, staleReferenceMs, dayStartMs])
+  const ladderRows = useMemo(
+    () => buildLadderRows(ceByStrike, peByStrike, asOfMs, staleReferenceMs, dayStartMs),
+    [ceByStrike, peByStrike, asOfMs, staleReferenceMs, dayStartMs],
+  )
 
   // Same strike set/order as the ladder (descending, highest strike first) - derived straight from
   // ceByStrike/peByStrike rather than ladderRows itself: ladderRows' own useMemo also depends on

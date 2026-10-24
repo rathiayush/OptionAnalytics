@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, InputNumber, Segmented, Select, Space, Spin, Tabs, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, InputNumber, Segmented, Select, Space, Spin, Switch, Tabs, Tag, Tooltip, Typography } from 'antd'
 import { DepthHeatmap } from './OrderFlowCharts.jsx'
 import { useOrderFlowHub } from './OrderFlowPage.jsx'
 import {
-  OiChangeHeatmapSection, StrikeOiDrilldownChart, aggregateLinePoints, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
+  OiChangeHeatmapSection, ReplayChart, StrikeOiDrilldownChart, aggregateBars, buildLadderRows, aggregateLinePoints, chainOiTotalsHistory, groupByStrike, mergeLiveOptionTicks,
   toSinceOpenSeries, useOiReplayLiveFeed,
 } from './OiReplayPage.jsx'
 import { applyOrderFlowPush, orderFlowFromSnapshot } from './liveFeeds.js'
 import { autoBigLots } from './orderFlowMath.js'
-import { DOWN_COLOR, UP_COLOR, toChartTime, useAuth, usePersistedState } from './shared.jsx'
+import { DOWN_COLOR, TIMEFRAME_OPTIONS, UP_COLOR, fromChartTime, toBar, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -151,7 +151,21 @@ export default function ExternalPage() {
   // A reconnect may have missed ticks: load the day again once - only after a load that worked.
   const oiReloadRef = useRef(null)
   useEffect(() => { oiReloadRef.current = oi.error ? null : oi.reload })
-  const oiConnection = useOiReplayLiveFeed(() => {}, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
+  // The Chart tab's live candles and VWAP: the index's "spotUpdate" (as OI Replay's live chart) - its forming minute bar
+  // and session VWAP - for the index picked.
+  const [liveSpot, setLiveSpot] = useState({ u: null, bars: [], vwap: [] })
+  const handleSpotUpdate = (snapshot) => {
+    if (snapshot?.underlying !== uRef.current || !snapshot?.currentBar) return
+    const owner = uRef.current
+    const bar = toBar(snapshot.currentBar)
+    const vwapPoint = snapshot.vwap != null ? { time: toChartTime(snapshot.currentBar.time), value: snapshot.vwap } : null
+    setLiveSpot((prev) => {
+      const base = prev.u === owner ? prev : { u: owner, bars: [], vwap: [] }
+      const upsert = (list, item) => (list.length && list[list.length - 1].time === item.time ? [...list.slice(0, -1), item] : [...list, item])
+      return { u: owner, bars: upsert(base.bars, bar), vwap: vwapPoint ? upsert(base.vwap, vwapPoint) : base.vwap }
+    })
+  }
+  const oiConnection = useOiReplayLiveFeed(handleSpotUpdate, handleOiTicks, null, null, () => oiReloadRef.current?.(), null, u, LIVE_EXPIRY_FLAG)
 
   // OI Replay's own settings for these cards (the same stored choices).
   const [dayOiChartMode, setDayOiChartMode] = useState('total')
@@ -197,6 +211,42 @@ export default function ExternalPage() {
   const atmStrike = Number.isFinite(oi.data?.spotClose) ? Math.round(oi.data.spotClose / step) * step : null
   const last = (series) => series?.at(-1)?.value
   // `render` runs only once the day's OI is here.
+  // ---- Chart tab: OI Replay's spot chart (candles, VWAP, the OI S-R walls), today live ----
+  const [timeframe, setTimeframe] = usePersistedState('optionanalytics.external.timeframe', 5)
+  const [showVwap, setShowVwap] = usePersistedState('optionanalytics.external.vwap', true)
+  const [top5Only, setTop5Only] = usePersistedState('optionanalytics.external.top5', false)
+  const tf = TIMEFRAME_OPTIONS.some((o) => o.value === timeframe) ? timeframe : 5
+  const spotChart = useMemo(() => {
+    if (!oi.data) return null
+    const base = (oi.data.spotCandlesOneMinute ?? []).map(toBar)
+    const liveBars = showsToday && liveSpot.u === u ? liveSpot.bars : []
+    const oneMinBars = base.slice()
+    for (const bar of liveBars) {
+      if (oneMinBars.length && oneMinBars[oneMinBars.length - 1].time === bar.time) oneMinBars[oneMinBars.length - 1] = bar
+      else if (!oneMinBars.length || bar.time > oneMinBars[oneMinBars.length - 1].time) oneMinBars.push(bar)
+    }
+    const vwap = (oi.data.spotVwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))
+    for (const p of showsToday && liveSpot.u === u ? liveSpot.vwap : []) {
+      if (vwap.length && vwap[vwap.length - 1].time === p.time) vwap[vwap.length - 1] = p
+      else if (!vwap.length || p.time > vwap[vwap.length - 1].time) vwap.push(p)
+    }
+    return { oneMinBars, bars: aggregateBars(oneMinBars, tf), vwap }
+  }, [oi.data, liveSpot, showsToday, u, tf])
+  // The walls as of the newest reading the page holds (OI Replay's ladder rows, read at that moment).
+  const wallRows = useMemo(() => {
+    if (!byStrike || !spotChart) return []
+    let asOfMs = 0
+    for (const list of [...byStrike.ceByStrike.values(), ...byStrike.peByStrike.values()]) {
+      const last = list.at(-1)
+      if (last) asOfMs = Math.max(asOfMs, last.ms ?? new Date(last.time).getTime())
+    }
+    const lastBar = spotChart.oneMinBars.at(-1)
+    if (lastBar) asOfMs = Math.max(asOfMs, fromChartTime(lastBar.time) * 1000)
+    const dayStartMs = spotChart.oneMinBars[0] ? fromChartTime(spotChart.oneMinBars[0].time) * 1000 : null
+    return asOfMs ? buildLadderRows(byStrike.ceByStrike, byStrike.peByStrike, asOfMs, asOfMs, dayStartMs) : []
+  }, [byStrike, spotChart])
+  const chartAtm = spotChart?.oneMinBars.length ? Math.round(spotChart.oneMinBars.at(-1).close / step) * step : atmStrike
+
   const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">No OI data yet today.</Text> : render())
 
   const connectionTag = (state) => (
@@ -240,7 +290,7 @@ export default function ExternalPage() {
           </Space>
         </Space>
 
-        <Tabs activeKey={['totals', 'liquidity', 'chain'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
+        <Tabs activeKey={['totals', 'liquidity', 'chain', 'chart'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
           { key: 'totals', label: 'OI totals', children: (
             <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
               {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
@@ -260,6 +310,27 @@ export default function ExternalPage() {
                   : <DepthHeatmap columns={data.heatmap} rowSize={row} trades={largeTrades} icebergs={data.icebergs} lotSize={lotSize} showLots height={460} />}
               <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                 Time runs left to right, price bottom to top; the colour is the size of resting limit orders at that price. Dots are big orders (green bought, red sold).
+              </Text>
+            </Card>
+          ) },
+          { key: 'chart', label: 'Chart', children: (
+            <Card size="small" title={<Space size={8}>{`${u} chart`}{connectionTag(oiConnection)}</Space>}
+              extra={(
+                <Space size={12} wrap>
+                  <Select size="small" value={tf} onChange={setTimeframe} options={TIMEFRAME_OPTIONS} style={{ width: 90 }} aria-label="Timeframe" />
+                  <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+                  <Tooltip title="Only the 5 strongest OI walls each side (calls above as resistance, puts below as support) instead of every strike's">
+                    <Space size={4}><Switch size="small" checked={top5Only} onChange={setTop5Only} aria-label="Top 5 walls only" /><Text style={{ fontSize: 12 }}>Top 5</Text></Space>
+                  </Tooltip>
+                </Space>
+              )}>
+              {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
+              {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">No candles yet today.</Text> : (
+                <ReplayChart key={`${dayKey}-${tf}`} bars={spotChart.bars} ladderRows={wallRows} dayKey={`ext-${dayKey}-${tf}`} atmStrike={chartAtm} step={step}
+                  top5Only={top5Only} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
+              )}
+              <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                Index candles with the OI walls: red lines are call OI (resistance), green put OI (support) - darker is heavier.
               </Text>
             </Card>
           ) },
