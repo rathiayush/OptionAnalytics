@@ -889,6 +889,21 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     ctx.textAlign = 'left'
   }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize])
 
+  // The figures of the cell under a pointer (mouse hover or a finger's touch): its price, time, the bids and offers resting
+  // there; null off the plot.
+  const hoverAt = (e) => {
+    if (!layout) return null
+    const rect = e.currentTarget.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const y = e.clientY - rect.top
+    const col = layout.visible[Math.floor(x / layout.colW)]
+    if (!col || y < 0 || y > plotH) return null
+    const row = Math.round((layout.hiPad - Math.floor(y / layout.rowH) * step) * 100) / 100
+    const bid = col.bids.find((b) => b[0] === row)?.[1]
+    const ask = col.asks.find((a) => a[0] === row)?.[1]
+    return { x, y, row, t: col.t, bid, ask }
+  }
+
   return (
     <div ref={wrapRef} style={{ position: 'relative', width: '100%', height }}>
       <canvas
@@ -896,20 +911,25 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
         style={{ display: 'block', cursor: 'crosshair', touchAction: 'none' }}
         onPointerDown={(e) => {
           if (!layout) return
-          dragRef.current = { x: e.clientX, y: e.clientY, end: layout.end, cols: layout.visible.length, top: layout.hiPad, rowH: layout.rowH, colW: layout.colW, vertical: !!vview }
+          dragRef.current = { x: e.clientX, y: e.clientY, end: layout.end, cols: layout.visible.length, top: layout.hiPad, rowH: layout.rowH, colW: layout.colW, vertical: !!vview, moved: false }
           e.currentTarget.setPointerCapture(e.pointerId)
+          // A finger has no hover: the touch itself shows that cell's figures (kept after lifting - see onPointerUp).
+          if (e.pointerType !== 'mouse') setHover(hoverAt(e))
         }}
-        onPointerUp={() => { dragRef.current = null }}
+        onPointerUp={(e) => {
+          const d = dragRef.current
+          dragRef.current = null
+          // A tap (no drag) on a touch screen shows the tapped cell and keeps it until the next tap.
+          if (e.pointerType !== 'mouse' && d && !d.moved) setHover(hoverAt(e))
+        }}
         onPointerCancel={() => { dragRef.current = null }}
         onDoubleClick={resetView}
         onPointerMove={(e) => {
           if (!layout) return
-          const rect = e.currentTarget.getBoundingClientRect()
-          const x = e.clientX - rect.left
-          const y = e.clientY - rect.top
           const d = dragRef.current
-          if (d) {
+          if (d && (d.moved || Math.abs(e.clientX - d.x) > 6 || Math.abs(e.clientY - d.y) > 6)) {
             // Drag sideways through time; up/down through prices once the drag is clearly vertical.
+            d.moved = true
             setHover(null)
             const shift = Math.round((e.clientX - d.x) / d.colW)
             if (shift !== 0 || hview) {
@@ -922,14 +942,11 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
             }
             return
           }
-          const col = layout.visible[Math.floor(x / layout.colW)]
-          if (!col || y > plotH) { setHover(null); return }
-          const row = Math.round((layout.hiPad - Math.floor(y / layout.rowH) * step) * 100) / 100
-          const bid = col.bids.find((b) => b[0] === row)?.[1]
-          const ask = col.asks.find((a) => a[0] === row)?.[1]
-          setHover({ x, y, row, t: col.t, bid, ask })
+          if (d) return
+          setHover(hoverAt(e))
         }}
-        onPointerLeave={() => setHover(null)}
+        // A finger lifting also "leaves" - keep the tapped cell's figures on a touch screen.
+        onPointerLeave={(e) => { if (e.pointerType === 'mouse') setHover(null) }}
       />
       <div style={{ position: 'absolute', left: 6, bottom: HM_TIME_H + 4, display: 'flex', gap: 3 }}>
         <Button size="small" onClick={() => zoomColsBy(1 / 1.25)} aria-label="Heatmap zoom out (time)">⟷−</Button>
@@ -946,6 +963,17 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
           <div><b>{priceText(hover.row)}</b> · {IST_HHMMSS.format(new Date(hover.t))}</div>
           {hover.bid != null && <div style={{ color: UP_COLOR }}>Bids resting: {formatVolume(hover.bid, lotSize, showLots)}{showLots ? ' lots' : ''}</div>}
           {hover.ask != null && <div style={{ color: DOWN_COLOR }}>Offers resting: {formatVolume(hover.ask, lotSize, showLots)}{showLots ? ' lots' : ''}</div>}
+          {(() => {
+            // Bids minus offers at this price: which side is heavier, and by how much.
+            const diff = (hover.bid ?? 0) - (hover.ask ?? 0)
+            const unit = showLots ? ' lots' : ''
+            return (
+              <div style={{ color: diff > 0 ? UP_COLOR : diff < 0 ? DOWN_COLOR : undefined }}>
+                Difference: {diff > 0 ? '+' : diff < 0 ? '−' : ''}{formatVolume(Math.abs(diff), lotSize, showLots)}{unit}
+                {diff !== 0 && ` (${diff > 0 ? 'bids' : 'offers'} heavier)`}
+              </div>
+            )
+          })()}
         </div>
       )}
     </div>
