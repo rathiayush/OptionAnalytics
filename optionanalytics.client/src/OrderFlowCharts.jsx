@@ -7,6 +7,7 @@ import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
 import { bidShare, heatmapPriceRange } from './orderFlowMath.js'
+import { checkpoints, checkpointStep } from './halfHourMarks.js'
 
 const { Text } = Typography
 
@@ -14,6 +15,7 @@ const { Text } = Typography
 // lightweight-charts, so they are drawn directly; the cumulative delta chart uses lightweight-charts
 // like the rest of the app.
 
+const IST_OFFSET_S = 19800
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const EXH_COLOR = '#9254de'
 // Stacked imbalances: a sell stack's bid-side (left) cells purple, a buy stack's ask-side (right) cells white.
@@ -870,10 +872,27 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText(priceText(price), plotW + 6, i * rowH + rowH / 2)
     }
     ctx.textAlign = 'center'
-    const labels = Math.max(2, Math.floor(plotW / 110))
-    for (let i = 0; i <= labels; i++) {
-      const t = t0 + ((t1 - t0) * i) / labels
-      ctx.fillText(IST_HHMM.format(new Date(t)), Math.min(plotW - 20, Math.max(20, xTime(t))), plotH + HM_TIME_H / 2)
+    // IST checkpoints: a faint line and its time at every :00 / :30 in view (every hour, 2 h ... when zoomed out -
+    // halfHourMarks.js); with fewer than two in view, evenly spaced times as before.
+    const istSeconds = visible.map((c) => Math.floor(c.t / 1000) + IST_OFFSET_S)
+    const spanS = (t1 - t0) / 1000
+    const checks = spanS > 0 ? checkpoints(istSeconds, checkpointStep((plotW - colW) / spanS)) : []
+    if (checks.length >= 2) {
+      ctx.save()
+      ctx.strokeStyle = 'rgba(255,255,255,0.18)'
+      ctx.setLineDash([3, 4])
+      for (const c of checks) {
+        const x = Math.round(xTime((c.time - IST_OFFSET_S) * 1000)) + 0.5
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke()
+      }
+      ctx.restore()
+      for (const c of checks) ctx.fillText(c.label, Math.min(plotW - 20, Math.max(20, xTime((c.time - IST_OFFSET_S) * 1000))), plotH + HM_TIME_H / 2)
+    } else {
+      const labels = Math.max(2, Math.floor(plotW / 110))
+      for (let i = 0; i <= labels; i++) {
+        const t = t0 + ((t1 - t0) * i) / labels
+        ctx.fillText(IST_HHMM.format(new Date(t)), Math.min(plotW - 20, Math.max(20, xTime(t))), plotH + HM_TIME_H / 2)
+      }
     }
     ctx.textAlign = 'left'
   }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize])

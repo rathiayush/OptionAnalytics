@@ -41,6 +41,7 @@ import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
+import { checkpoints } from './halfHourMarks.js'
 
 const { Text, Title } = Typography
 
@@ -1256,6 +1257,35 @@ const HEATMAP_ROW_HEIGHT = 20
 const HEATMAP_LABEL_WIDTH = 64
 const HEATMAP_AXIS_HEIGHT = 20
 
+// IST checkpoints on an OI heatmap (columns newest first, chart-time seconds): a dashed line on the right edge of the first
+// column of each half hour (09:30 ... - every hour when columns are 30+ minutes wide) - the boundary with the half hour
+// before - and its "HH:MM" in bold under it. Returns the label spans [left, right] so the regular labels keep clear.
+function drawHeatmapCheckpoints(ctx, columns, plotHeight) {
+  const ascending = [...columns].sort((a, b) => a - b)
+  const bucket = ascending.length > 1 ? ascending[1] - ascending[0] : 60
+  const marks = checkpoints(ascending, bucket >= 1800 ? 3600 : 1800)
+  const colOf = new Map(columns.map((t, col) => [t, col]))
+  const taken = []
+  ctx.save()
+  for (const m of marks) {
+    const col = colOf.get(m.time)
+    if (col == null) continue
+    const x = (col + 1) * HEATMAP_CELL_WIDTH - 0.5
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)'
+    ctx.setLineDash([3, 3])
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotHeight); ctx.stroke()
+    ctx.setLineDash([])
+    ctx.font = 'bold 10px system-ui, -apple-system, sans-serif'
+    ctx.fillStyle = '#e6e6e6'
+    const w = ctx.measureText(m.label).width
+    const left = Math.max(1, x - w - 2)
+    ctx.fillText(m.label, left, plotHeight + 14)
+    taken.push([left, left + w])
+  }
+  ctx.restore()
+  return taken
+}
+
 // The all-strikes OI-change plot - a genuine rendered chart (HTML5 canvas), not a table dressed up
 // with cell colors: an actual x/y grid with real axes (strike rows down the left, time columns along
 // the bottom) and a live hover readout, matching how every other chart on this page works. Canvas
@@ -1371,13 +1401,14 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
     // would push half of it off the canvas; any label that would then overlap the one before it is
     // skipped rather than drawn on top of it.
     ctx.textAlign = 'left'
+    const taken = drawHeatmapCheckpoints(ctx, columns, plotHeight)
     let nextFreeX = -Infinity
     columns.forEach((t, col) => {
       if (col % labelEvery !== 0) return
       const text = formatBucketTime(t)
       const width = ctx.measureText(text).width
       const x = col === 0 ? 1 : col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2 - width / 2
-      if (x < nextFreeX) return
+      if (x < nextFreeX || taken.some(([a, b]) => x < b + 6 && x + width + 6 > a)) return
       ctx.fillText(text, x, plotHeight + 14)
       nextFreeX = x + width + 6
     })
@@ -1501,8 +1532,8 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // picker, the CE / PE / Net totals as Numbers or Heatmap and their Charts popup. Its own settings (bucket, Numbers /
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
-// = both, as one card.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = Date.now(), dayKey, show = 'all' }) {
+// = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all' }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
@@ -1510,9 +1541,8 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
   const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
-  return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      {show !== 'totals' && <>
+  const strikesPart = (
+    <>
       <Text type="secondary" style={{ fontSize: 12 }}>
         Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
         (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
@@ -1528,7 +1558,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
         {live && (
           <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
             <Text type="secondary" style={{ fontSize: 12 }}>
-              OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round((nowMs - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
+              OI last changed: {lastOiChangeMs ? `${istTimeWithSecondsFormatter(toChartTime(lastOiChangeMs))} (${Math.max(0, Math.round(((nowMs ?? lastOiChangeMs) - lastOiChangeMs) / 1000))}s ago)` : 'no live change yet'}
             </Text>
           </Tooltip>
         )}
@@ -1542,8 +1572,9 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
         <Text strong style={{ fontSize: 12 }}>PE</Text>
         <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
       </div>
-      </>}
-      {show !== 'strikes' && (
+    </>
+  )
+  const totalsPart = (
       <div>
         <Space size={8} wrap style={{ marginBottom: 6 }}>
           <Segmented size="small" value={totalsView} onChange={setTotalsView} options={[{ value: 'numbers', label: 'Numbers' }, { value: 'heatmap', label: 'Heatmap' }]} aria-label="Totals as numbers or heatmap" />
@@ -1565,7 +1596,13 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
           : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />}
       </div>
-      )}
+  )
+  return (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      {show === 'totals+strikes' ? <>{totalsPart}{strikesPart}</>
+        : show === 'totals' ? totalsPart
+          : show === 'strikes' ? strikesPart
+            : <>{strikesPart}{totalsPart}</>}
     </Space>
   )
 }
@@ -1708,13 +1745,14 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
     ctx.font = '10px system-ui, -apple-system, sans-serif'
     ctx.textAlign = 'left'
     const labelEvery = Math.max(1, Math.round(60 / HEATMAP_CELL_WIDTH))
+    const taken = drawHeatmapCheckpoints(ctx, columns, plotHeight)
     let nextFreeX = -Infinity
     columns.forEach((t, col) => {
       if (col % labelEvery !== 0) return
       const text = formatBucketTime(t)
       const width = ctx.measureText(text).width
       const x = col === 0 ? 1 : col * HEATMAP_CELL_WIDTH + HEATMAP_CELL_WIDTH / 2 - width / 2
-      if (x < nextFreeX) return
+      if (x < nextFreeX || taken.some(([a, b]) => x < b + 6 && x + width + 6 > a)) return
       ctx.fillText(text, x, plotHeight + 14)
       nextFreeX = x + width + 6
     })

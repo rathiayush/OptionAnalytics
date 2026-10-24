@@ -63,6 +63,21 @@ function LoadError({ error, onRetry }) {
 }
 
 
+// OI Replay's OI change heatmap card - the totals, then the heatmaps of every strike - with its own 1-second clock for
+// "OI last changed … s ago" (so the rest of the page does not re-render every second).
+function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey }) {
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  useEffect(() => {
+    if (!live) return undefined
+    const id = setInterval(() => setNowMs(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [live])
+  return (
+    <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike}
+      asOfMs={null} live={live} lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show="totals+strikes" />
+  )
+}
+
 const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></div>
 
 export default function ExternalPage() {
@@ -101,11 +116,23 @@ export default function ExternalPage() {
   const [live, setLive] = useState({ u: null, ce: [], pe: [] })
   const pendingRef = useRef({ ce: [], pe: [] })
   const uRef = useRef(u)
-  useEffect(() => { uRef.current = u; pendingRef.current = { ce: [], pe: [] } }, [u])
+  // "OI last changed", as OI Replay: when a leg's live OI differed from its previous live reading - per index.
+  const lastOiByLegRef = useRef(new Map())
+  const [oiChanged, setOiChanged] = useState({ u: null, ms: null })
+  useEffect(() => { uRef.current = u; pendingRef.current = { ce: [], pe: [] }; lastOiByLegRef.current = new Map() }, [u])
   const handleOiTicks = (batch) => {
+    let changedAt = 0
     for (const tick of batch) {
       if (tick?.underlying !== uRef.current || tick?.expiryFlag !== LIVE_EXPIRY_FLAG) continue
       ;(tick.side === 'CE' ? pendingRef.current.ce : pendingRef.current.pe).push(tick)
+      const key = `${tick.side}:${tick.strike}`
+      const previous = lastOiByLegRef.current.get(key)
+      if (previous != null && previous !== tick.openInterest) changedAt = Math.max(changedAt, new Date(tick.time).getTime() || 0)
+      lastOiByLegRef.current.set(key, tick.openInterest)
+    }
+    if (changedAt) {
+      const owner = uRef.current
+      setOiChanged((prev) => ({ u: owner, ms: prev.u === owner ? Math.max(prev.ms ?? 0, changedAt) : changedAt }))
     }
   }
   useEffect(() => {
@@ -164,6 +191,10 @@ export default function ExternalPage() {
     return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal) }
   }, [byStrike])
   const dayKey = `${u}-${oi.data?.date ?? ''}`
+  const lastOiChangeMs = showsToday && oiChanged.u === u ? oiChanged.ms : null
+  // The strike heatmaps' ATM row: the index's last 1-minute close of the day shown.
+  const step = oi.data?.step || 50
+  const atmStrike = Number.isFinite(oi.data?.spotClose) ? Math.round(oi.data.spotClose / step) * step : null
   const last = (series) => series?.at(-1)?.value
   // `render` runs only once the day's OI is here.
   const oiBody = (render) => (oi.loading && !oi.data ? loadingBox : !byStrike?.strikes.length || !chain ? <Text type="secondary">No OI data yet today.</Text> : render())
@@ -211,11 +242,10 @@ export default function ExternalPage() {
 
         <Tabs activeKey={['totals', 'liquidity', 'chain'].includes(tab) ? tab : 'totals'} onChange={setTab} destroyOnHidden items={[
           { key: 'totals', label: 'OI totals', children: (
-            <Card size="small" title={<Space size={8}>OI totals: CE, PE and Net (CE − PE){connectionTag(oiConnection)}</Space>}>
+            <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
               {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
               {oiBody(() => (
-                <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes}
-                  asOfMs={null} live dayKey={dayKey} show="totals" />
+                <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} />
               ))}
             </Card>
           ) },
