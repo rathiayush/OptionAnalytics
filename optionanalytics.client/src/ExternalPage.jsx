@@ -82,8 +82,8 @@ const loadingBox = <div style={{ padding: 40, textAlign: 'center' }}><Spin /></d
 
 export default function ExternalPage() {
   const auth = useAuth()
-  // 1600 px and wider: all four panels together (a 2 x 2 grid) instead of tabs with the chart under them.
-  const wide = !!Grid.useBreakpoint().xxl
+  // 1200 px and wider: every panel together (chart, then two half-width rows) instead of tabs with the chart under them.
+  const wide = !!Grid.useBreakpoint().xl
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.external.underlying', 'NIFTY')
   const [rowSize, setRowSize] = usePersistedState('optionanalytics.external.rowSize', 5)
   // Big order: 'auto' - the top 2.5% of the day's prints (autoBigLots), as the Order Flow page - or the fixed lots.
