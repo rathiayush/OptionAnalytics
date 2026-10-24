@@ -7,15 +7,11 @@ import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { oiTotalsSeries } from './oiTotalsHeatmap.js'
 import { lineLevels } from './lineLevels.js'
+import { TOTALS_SIDES } from './oiLevelBreaks.js'
 
 const { Text } = Typography
 
-// What the cumulative line going UP or DOWN means, per side (oiMeaning).
-const SIDES = [
-  { key: 'ce', label: 'CE', up: 'call writing - bearish', down: 'calls unwinding - bullish' },
-  { key: 'pe', label: 'PE', up: 'put writing - bullish', down: 'puts unwinding - bearish' },
-  { key: 'net', label: 'Net (CE − PE)', up: 'call writers gaining - bearish', down: 'put writers gaining - bullish' },
-]
+const SIDES = TOTALS_SIDES
 const RESISTANCE_COLOR = '#ffa940'
 const SUPPORT_COLOR = '#69b1ff'
 const NEUTRAL_COLOR = '#d9d9d9'

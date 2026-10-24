@@ -2,7 +2,8 @@ import { Component, useCallback, useEffect, useMemo, useRef, useState } from 're
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
-import { chime, speak } from './alerts.js'
+import { chime, speak, telegram } from './alerts.js'
+import { breakMeaning, breakText, completedLevelReads, newBreakWatch, watchBreaks } from './oiLevelBreaks.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
@@ -1569,7 +1570,7 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all' }) {
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
@@ -1577,6 +1578,10 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
   const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
+  // Telegram / notification when a totals cumulative line breaks its support / resistance (only where the page
+  // passes alertUnderlying - OI Replay live).
+  const [breakAlertsOn, setBreakAlertsOn] = usePersistedState('optionanalytics.oiReplay.breakAlerts', true)
+  useOiBreakAlerts({ underlying: alertUnderlying, ceByStrike, peByStrike, strikes, timeframeMinutes: heatmapTimeframeMinutes, live, dayKey, enabled: breakAlertsOn })
   const strikesPart = (
     <>
       <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1618,6 +1623,14 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
             <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
           </Tooltip>
           <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+          {alertUnderlying && (
+            <Tooltip title={`Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete. Voice and Telegram follow the strategy scanner's switches.${live ? '' : ' Live only.'}`}>
+              <Space size={4}>
+                <Switch size="small" checked={breakAlertsOn} onChange={setBreakAlertsOn} aria-label="S/R break alerts" />
+                <Text style={{ fontSize: 12 }}>S/R break alerts</Text>
+              </Space>
+            </Tooltip>
+          )}
         </Space>
         <OiTotalsChartsPopup
           open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
@@ -1708,6 +1721,50 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 }
 
 // The same totals as charts for the whole day so far, in a popup (OiTotalsCharts.jsx) - worked out only while it is open.
+// Alerts when an OI totals cumulative line (CE, PE or net) breaks its own support / resistance - the totals charts'
+// "broke S" / "broke R" arrows (oiLevelBreaks.js), at the totals' bucket size, on completed buckets, live only. Chime,
+// voice, notification and Telegram follow the scanner's Voice / Telegram switches; Telegram is keyed so several open
+// pages send one message.
+function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, timeframeMinutes, live, dayKey, enabled }) {
+  const active = !!(live && enabled && underlying)
+  const [clock, setClock] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return undefined
+    const id = setInterval(() => setClock(Date.now()), 15_000)
+    return () => clearInterval(id)
+  }, [active])
+  const watch = useRef(newBreakWatch())
+  useEffect(() => { watch.current = newBreakWatch() }, [underlying, dayKey, timeframeMinutes, active])
+  const bucketSeconds = timeframeMinutes * 60
+  // Only the completed buckets: re-read when one completes (or the data changes), not on every clock tick.
+  const boundary = Math.floor(toChartTime(clock) / bucketSeconds) * bucketSeconds
+  const reads = useMemo(() => {
+    if (!active) return null
+    const ce = buildOiChangeMatrix(ceByStrike, strikes, null, timeframeMinutes).perStrikeChange
+    const pe = buildOiChangeMatrix(peByStrike, strikes, null, timeframeMinutes).perStrikeChange
+    return completedLevelReads(buildOiTotalsRows(ce, pe), bucketSeconds, boundary)
+  }, [active, ceByStrike, peByStrike, strikes, timeframeMinutes, bucketSeconds, boundary])
+  useEffect(() => {
+    if (!active) return
+    const breaks = watchBreaks(watch.current, reads, bucketSeconds)
+    if (!breaks.length) return
+    let cfg = {}
+    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    for (const b of breaks) {
+      const text = breakText(underlying, b, fmtOiNum, istTimeFormatter, timeframeMinutes)
+      const bullish = breakMeaning(b.side.key, b.up) > 0
+      chime(bullish)
+      if (cfg.voice !== false) speak(`${underlying} O I ${b.side.key === 'net' ? 'net' : b.side.label} cumulative broke ${b.up ? 'resistance' : 'support'}. ${bullish ? 'Bullish' : 'Bearish'}.`)
+      if (cfg.telegram !== false) telegram(`🧱 ${text}`, `oi-break|${underlying}|${dayKey}|${timeframeMinutes}|${b.key}`)
+      notification.open({
+        key: `oi-break-${underlying}-${b.key}`, placement: 'topRight', duration: 20,
+        message: <span style={{ color: bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🧱 {underlying} OI {b.side.label} broke {b.up ? 'resistance' : 'support'} · {bullish ? 'bullish' : 'bearish'}</span>,
+        description: <span style={{ fontSize: 12 }}>{text}</span>,
+      })
+    }
+  }, [active, reads, bucketSeconds, underlying, dayKey, timeframeMinutes])
+}
+
 export function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra }) {
   const totals = useMemo(() => {
     if (!open) return null
@@ -5542,7 +5599,7 @@ export default function OiReplayPage() {
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>} {...orderedDropProps('oiHeatmap')}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
                 />
               </Card>
               </LiveSection>
