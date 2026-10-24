@@ -872,20 +872,12 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText(priceText(price), plotW + 6, i * rowH + rowH / 2)
     }
     ctx.textAlign = 'center'
-    // IST checkpoints: a faint line and its time at every :00 / :30 in view (every hour, 2 h ... when zoomed out -
-    // halfHourMarks.js); with fewer than two in view, evenly spaced times as before.
+    // The time axis: IST at every :00 / :30 in view (every hour, 2 h ... when zoomed out - halfHourMarks.js); with fewer than
+    // two in view, evenly spaced times as before.
     const istSeconds = visible.map((c) => Math.floor(c.t / 1000) + IST_OFFSET_S)
     const spanS = (t1 - t0) / 1000
     const checks = spanS > 0 ? checkpoints(istSeconds, checkpointStep((plotW - colW) / spanS)) : []
     if (checks.length >= 2) {
-      ctx.save()
-      ctx.strokeStyle = 'rgba(255,255,255,0.18)'
-      ctx.setLineDash([3, 4])
-      for (const c of checks) {
-        const x = Math.round(xTime((c.time - IST_OFFSET_S) * 1000)) + 0.5
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, plotH); ctx.stroke()
-      }
-      ctx.restore()
       for (const c of checks) ctx.fillText(c.label, Math.min(plotW - 20, Math.max(20, xTime((c.time - IST_OFFSET_S) * 1000))), plotH + HM_TIME_H / 2)
     } else {
       const labels = Math.max(2, Math.floor(plotW / 110))
