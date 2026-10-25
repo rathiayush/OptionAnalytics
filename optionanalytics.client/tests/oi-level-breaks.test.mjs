@@ -63,7 +63,7 @@ test('the message names the index, line, level, direction and meaning', () => {
 })
 
 // ---- High probability: break + large CE − PE shift + carried at ATM ± 1 ----
-import { TOTALS_SIDES, highProbability, highProbabilityText, newHighProbabilityWatch, watchHighProbability } from '../src/oiLevelBreaks.js'
+import { HIGH_PROBABILITY, TOTALS_SIDES, highProbability, highProbabilityText, newHighProbabilityWatch, watchHighProbability } from '../src/oiLevelBreaks.js'
 
 // Two swing lows at 60, then a hard fall through it in one minute (16): the CE cumulative (and the net, PE flat).
 const BIG = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, -200]
@@ -113,7 +113,19 @@ test('not high probability when the shift is not large (an ordinary break)', () 
   const ordinary = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 110, 100, 90, 80, 70, 55]
   const { b, ctx } = breakOf(ordinary)
   assert.ok(b)
-  assert.equal(highProbability(b, ctx, { windowMinutes: 3 }), null)
+  // At 150% above usual (2.5x) it is clearly not large; the default 20% is a looser bar.
+  assert.equal(highProbability(b, ctx, { windowMinutes: 3, shiftAbovePct: 150 }), null)
+})
+
+test('the "large shift" bar is a percentage above the usual move, default 20%', () => {
+  const { b, ctx } = breakOf(BIG)
+  const hp = highProbability(b, ctx, { windowMinutes: 3 })
+  assert.ok(hp)
+  const abovePct = (hp.ratio - 1) * 100            // how far above usual this shift is
+  assert.ok(highProbability(b, ctx, { windowMinutes: 3, shiftAbovePct: abovePct - 1 }), 'just under the bar passes')
+  assert.equal(highProbability(b, ctx, { windowMinutes: 3, shiftAbovePct: abovePct + 1 }), null)
+  assert.ok(highProbability(b, ctx, { windowMinutes: 3, shiftAbovePct: 0 }), '0% = any shift at least as big as usual')
+  assert.equal(HIGH_PROBABILITY.shiftAbovePct, 20)
 })
 
 test('not high probability when the break disagrees with the shift', () => {
@@ -130,16 +142,17 @@ test('not high probability without enough of the day to judge "large"', () => {
 })
 
 // The three need not land in the same minute: the line breaks at 16 with an ordinary move, and the big ATM shift comes
-// over the next two minutes - within a 5-minute window it is one signal, within a 1-minute window it is not.
+// over the next two minutes - within a 5-minute window it is one signal, within a 1-minute window it is not. These pin the
+// bar at 150% above usual (2.5x) so the break minute alone is not "large" - they test the window, not the bar.
 const LATE = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, 50, -100, -250]
-function run(cumAt, windowMinutes) {
+function run(cumAt, windowMinutes, shiftAbovePct = 150) {
   const breaks = newBreakWatch()
   const hp = newHighProbabilityWatch()
   const out = []
   for (let n = 15; n <= cumAt.length; n++) {
     const d = day(cumAt, { n })
     const ctx = { totals: d.totals, ce: d.ce, pe: d.pe, last: d.reads.last, atmStrike: d.atm, bucketSeconds: 60 }
-    out.push(...watchHighProbability(hp, watchBreaks(breaks, d.reads, 60), ctx, { windowMinutes }).map((s) => ({ ...s, n })))
+    out.push(...watchHighProbability(hp, watchBreaks(breaks, d.reads, 60), ctx, { windowMinutes, shiftAbovePct }).map((s) => ({ ...s, n })))
   }
   return out
 }
