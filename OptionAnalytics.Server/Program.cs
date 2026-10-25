@@ -100,6 +100,11 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("external", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
         context.User.Identity?.Name ?? context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
+    // The visit beacon (AuthController.Visit - anyone, signed in or not): 60 a minute per client address (only held in
+    // memory for the limit - ClientAddress).
+    options.AddPolicy("visit", context => System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+        OptionAnalytics.Server.Services.Visitors.ClientAddress.Of(context)?.ToString() ?? "unknown",
+        _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions { PermitLimit = 60, Window = TimeSpan.FromMinutes(1), QueueLimit = 0 }));
 });
 
 // Fallback policy: every endpoint requires SOME signed-in account by default, unless it opts out
@@ -335,6 +340,13 @@ builder.Services.AddSingleton<ScannerRunnerStore>();
 builder.Services.AddSingleton<TradeSettingsStore>();
 // OI Replay's paper positions per account and day, on the server so every browser shows the same (PaperPositionStore).
 builder.Services.AddSingleton<PaperPositionStore>();
+// Who opens which page, when and from where (the admin Visitors page): the place from the connection, looked up in a
+// database kept here and refreshed monthly - addresses are never kept (VisitorLog / GeoLocator / GeoDbUpdater).
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.Visitors.VisitorLog>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.Visitors.GeoLocator>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.Visitors.VisitRecorder>();
+builder.Services.AddHttpClient(nameof(OptionAnalytics.Server.Services.Visitors.GeoDbUpdater));
+builder.Services.AddHostedService<OptionAnalytics.Server.Services.Visitors.GeoDbUpdater>();
 // The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();

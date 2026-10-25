@@ -3,7 +3,7 @@ import { Select, Space, Typography, Spin, Card, Button, Modal, Table, Tag, Check
 import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import BacktestPage from './BacktestPage.jsx'
 import StrikeDataPage from './StrikeDataPage.jsx'
 import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
@@ -17,6 +17,8 @@ import LoginPage from './LoginPage.jsx'
 import TradeSettingsPage from './TradeSettingsPage.jsx'
 import StrategyTuningPage from './StrategyTuningPage.jsx'
 import ExternalPage from './ExternalPage.jsx'
+import VisitorsPage from './VisitorsPage.jsx'
+import { reportVisit, visitPage } from './visits.js'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS } from './shared.jsx'
@@ -1707,6 +1709,12 @@ export default function App() {
   // Every page, every tab: pick up a new deploy instead of running stale code against it.
   useReloadOnNewDeploy()
 
+  // The visitor log (the admin Visitors page): the page this browser is on - the login screen too - once each time it
+  // changes or someone signs in / out.
+  const { pathname } = useLocation()
+  const visitedPage = user === undefined ? null : visitPage(user, pathname)
+  useEffect(() => { if (visitedPage) reportVisit(visitedPage) }, [visitedPage, user?.email])
+
   // The trade settings per index (lots, SL / target / trail, slippage - trade-settings.csv on the server)
   // into this browser once signed in, and again whenever the tab comes back.
   useEffect(() => {
@@ -1803,6 +1811,7 @@ export default function App() {
         <Route path="/rolling-strike-data" element={<RollingStrikeDataPage />} />
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
+        <Route path="/visitors" element={<RequireAdmin><VisitorsPage /></RequireAdmin>} />
         <Route path="/trade-settings" element={<TradeSettingsPage />} />
         <Route path="/strategy-tuning" element={<StrategyTuningPage />} />
       </Routes>
