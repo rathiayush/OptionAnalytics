@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Dhan;
+using OptionAnalytics.Server.Services.Visitors;
 
 namespace OptionAnalytics.Server.Controllers;
 
@@ -31,6 +32,18 @@ public sealed class SystemController : ControllerBase
         _keyManager = keyManager;
         _feedClient = feedClient;
         _dhanLimiter = dhanLimiter;
+    }
+
+    public sealed record VisitorsReport(bool LocationsReady, int KeepDays, int Days, IReadOnlyList<VisitEntry> Entries);
+
+    /// <summary>Who opened which page, signed in, failed to or signed out in the last `days` IST days, newest first -
+    /// every account and visitors with no account, with the place from their connection (never an address).</summary>
+    [HttpGet("visitors")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public VisitorsReport Visitors([FromServices] VisitorLog log, [FromServices] GeoLocator geo, [FromQuery] int days = 1)
+    {
+        days = Math.Clamp(days, 1, VisitorLog.KeepDays);
+        return new VisitorsReport(geo.Ready, VisitorLog.KeepDays, days, log.Read(days));
     }
 
     public sealed record DhanCallsByEndpoint(string Category, string Method, string Path, int LastMinute, int Last15Minutes, int Failed);

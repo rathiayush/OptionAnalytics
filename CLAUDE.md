@@ -111,5 +111,12 @@ When adding or changing a strategy:
   "of:{U}", "of:{U}:{expiry}", "c:{U}:N1" and "u:{U}" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
+- The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
+  visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
+  sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one JSON-lines file per IST day
+  under `Storage:VisitorLogPath`, 90 days). NEVER store or show an IP address: `ClientAddress` gives the address only for the
+  lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
+  `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
+  reaches the file.
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode; alerts and the default auto trade are paper.

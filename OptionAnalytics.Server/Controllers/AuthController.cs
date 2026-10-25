@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Auth;
+using OptionAnalytics.Server.Services.Visitors;
 
 namespace OptionAnalytics.Server.Controllers;
 
@@ -20,11 +21,13 @@ public sealed class AuthController : ControllerBase
 {
     private readonly AuthService _auth;
     private readonly ILogger<AuthController> _logger;
+    private readonly VisitRecorder? _visits;
 
-    public AuthController(AuthService auth, ILogger<AuthController> logger)
+    public AuthController(AuthService auth, ILogger<AuthController> logger, VisitRecorder? visits = null)
     {
         _auth = auth;
         _logger = logger;
+        _visits = visits;
     }
 
     public sealed record LoginRequest(string? Email, string? Password);
@@ -38,6 +41,7 @@ public sealed class AuthController : ControllerBase
         {
             // Never says which of email/password was wrong - see AuthService's own doc comment.
             _logger.LogWarning("Failed login attempt for {Email}.", request.Email);
+            _visits?.Record(HttpContext, "login-failed", account: VisitorLog.CleanTyped(request.Email));
             return Unauthorized(new { error = "Invalid email or password." });
         }
 
@@ -54,14 +58,30 @@ public sealed class AuthController : ControllerBase
             new AuthenticationProperties { IsPersistent = true });
 
         _logger.LogInformation("{Email} logged in as {Role}.", email, role);
+        _visits?.Record(HttpContext, "login", account: email, role: role);
         return Ok(new { email, role });
     }
 
     [HttpPost("logout")]
     public async Task<IActionResult> Logout()
     {
+        if (User.Identity?.IsAuthenticated == true) _visits?.Record(HttpContext, "logout");
         await HttpContext.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
         return Ok();
+    }
+
+    public sealed record VisitRequest(string? Page, string? Visitor);
+
+    /// <summary>POST /api/auth/visit - the page a browser is on (every account, and visitors not signed in - the
+    /// login screen too), for the admin Visitors page (VisitorLog). Only the page path and the browser's random
+    /// visitor id are taken from the body; the place comes from the connection and the address is not kept.</summary>
+    [HttpPost("visit")]
+    [EnableRateLimiting("visit")]
+    public IActionResult Visit([FromBody] VisitRequest? request)
+    {
+        var page = VisitorLog.CleanPage(request?.Page);
+        if (page is not null) _visits?.Record(HttpContext, "page", page, VisitorLog.CleanVisitor(request?.Visitor));
+        return NoContent();
     }
 
     [HttpGet("me")]

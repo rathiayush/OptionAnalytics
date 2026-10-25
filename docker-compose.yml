@@ -37,6 +37,10 @@ services:
       Storage__PaperPositionsPath: /app/data/paper-positions
       # Live trades the server closes itself at the scanner's time stop / 15:10 (LiveTimeExitStore).
       Storage__LiveTimeExitsPath: /app/data/live-time-exits.json
+      # Who opens which page, when and from where (the admin Visitors page - VisitorLog), 90 days; and the
+      # IP-to-city database that place comes from (GeoLocator, downloaded monthly). No address is ever kept.
+      Storage__VisitorLogPath: /app/data/visitor-log
+      Storage__GeoDbPath: /app/data/geo
       # Keeps the login cookie's signing/encryption key ring on the same persistent volume, so
       # everyone stays logged in across a redeploy instead of the whole key ring (and every
       # outstanding session) resetting every time the container restarts.
