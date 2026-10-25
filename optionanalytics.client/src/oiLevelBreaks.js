@@ -74,13 +74,13 @@ export function breakText(underlying, b, format, timeOf, bucketMinutes) {
 // A high-probability signal is three things in the same direction within one time window (`windowMinutes`, 3 - 5 min),
 // read at a completed bucket:
 //  - an OI totals line broke its support / resistance (a break above) inside the window;
-//  - the CE − PE cumulative Δ made a LARGE shift over the window: at least `shiftVsTypical` times the day's typical
-//    (median) change over a window that long;
+//  - the CE − PE cumulative Δ made a LARGE shift over the window: at least `shiftAbovePct` % bigger than the day's
+//    typical (median) change over a window that long (20% = 1.2x typical);
 //  - the shift is AT THE MONEY: the ATM strike and the strike either side (ATM ± 1) carry at least `nearShare` of it,
 //    in the same direction;
 // and the break agrees: a bullish break (CE falling / PE rising / net falling) with a falling net (put writers ahead),
 // a bearish one with a rising net. The window is in buckets of the totals' size (at least one).
-export const HIGH_PROBABILITY = { windowMinutes: 5, minHistory: 10, shiftVsTypical: 2.5, nearShare: 0.3 }
+export const HIGH_PROBABILITY = { windowMinutes: 5, minHistory: 10, shiftAbovePct: 20, nearShare: 0.3 }
 export const HIGH_PROBABILITY_WINDOWS = [3, 4, 5]
 
 const median = (xs) => {
@@ -100,7 +100,7 @@ export const windowBuckets = (windowMinutes, bucketSeconds) => Math.max(1, Math.
  * Returns { bullish, shift, typical, ratio, nearShift, nearShare, nearStrikes, windowBuckets, at }.
  */
 export function highProbability(b, { totals, ce, pe, last, atmStrike, bucketSeconds }, opts = {}) {
-  const { windowMinutes, minHistory, shiftVsTypical, nearShare: minShare } = { ...HIGH_PROBABILITY, ...opts }
+  const { windowMinutes, minHistory, shiftAbovePct, nearShare: minShare } = { ...HIGH_PROBABILITY, ...opts }
   if (!b || !totals?.buckets?.length || !Number.isFinite(atmStrike) || !(bucketSeconds > 0)) return null
   const w = windowBuckets(windowMinutes, bucketSeconds)
   const done = totals.buckets.filter((t) => t <= last)
@@ -113,7 +113,7 @@ export function highProbability(b, { totals, ce, pe, last, atmStrike, bucketSeco
   if (shift === 0) return null
   const typical = median(Array.from({ length: i - w }, (_, k) => Math.abs(cum[k + w] - cum[k])))
   const ratio = typical > 0 ? Math.abs(shift) / typical : Infinity
-  if (ratio < shiftVsTypical) return null
+  if (ratio < 1 + Math.max(0, shiftAbovePct) / 100) return null
   const bullish = shift < 0   // net CE − PE falling: put writers gaining
   if ((breakMeaning(b.side.key, b.up) > 0) !== bullish) return null
   // ATM ± 1 strike.
