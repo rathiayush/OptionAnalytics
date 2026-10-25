@@ -1207,6 +1207,12 @@ export function NavBar() {
               <Tag color="warning">Logins reset at last deploy</Tag>
             </Tooltip>
           )}
+          {/* Always in view for an admin (the menu's own "Visitors" item can fold into its "···" on a laptop screen). */}
+          {isAdmin && (
+            <Tooltip title="Who opened which page, when and from where - every account and visitors with no account">
+              <Button size="small" type={location.pathname === '/visitors' ? 'primary' : 'default'} onClick={() => go('/visitors')}>👥 Visitors</Button>
+            </Tooltip>
+          )}
           <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
           <Button size="small" onClick={auth.logout}>Log out</Button>
         </Space>
