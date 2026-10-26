@@ -5998,7 +5998,7 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
-            {/* The ATM straddle from a set time (09:21 by default): the range the options priced (re-centred only when a
+            {/* The ATM straddle from a set time (09:15 by default): the range the options priced (re-centred only when a
                 break is accepted), the sideways check and the read - up to the replay clock, today live (straddle.js). */}
             {visibleSections.includes('straddle') && (
               <LiveSection version={sectionVersion}>

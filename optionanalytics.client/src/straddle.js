@@ -1,5 +1,5 @@
-// The ATM straddle (the call + the put at the strike nearest spot) read through the day from a set time - 09:21 by
-// default, after the opening minutes settle. The straddle is what the option market charges for the move, so:
+// The ATM straddle (the call + the put at the strike nearest spot) read through the day from a set time - 09:15 (the
+// open) by default. The straddle is what the option market charges for the move, so:
 //
 //  - a RANGE is the straddle's strike ± the move the market priced from there. The straddle itself prices the move to
 //    EXPIRY (a short straddle's breakevens) - days away on most days, far wider than one session. So by default
@@ -38,7 +38,7 @@ const STALE_MINUTES = 5
 const HOLD_SHARE = 0.8
 const IV_MOVE = 0.5
 
-export const STRADDLE_START_DEFAULT = '09:21'
+export const STRADDLE_START_DEFAULT = '09:15'
 
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN
 

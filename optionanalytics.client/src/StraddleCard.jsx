@@ -134,7 +134,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
-      <Tooltip title="When the straddle is first read - its value then, around its strike, is the range the options priced. 09:21: after the opening minutes settle.">
+      <Tooltip title="When the straddle is first read - its value then, around its strike, is the range the options priced. 09:15 (the open) by default; a few minutes later (e.g. 09:21) skips the opening minutes' wide prices.">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>From</Text>
           <TimePicker

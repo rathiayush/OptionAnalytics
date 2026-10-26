@@ -131,7 +131,7 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
-- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:21 by default, "From") the range
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:15 by default, "From") the range
   the options priced - by default ("Range: Today") the ATM strike ± today's share of the straddle (0.8 x spot x ATM IV x
   sqrt(minutes left to 15:30 / (252 x 375)), never more than the straddle: the straddle itself prices the move to EXPIRY);
   "To expiry" = strike ± the straddle. The range moves ONLY when a break is accepted - spot still outside

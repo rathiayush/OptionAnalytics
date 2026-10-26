@@ -3,7 +3,10 @@
 // no look-ahead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { istClockOn, straddleRead } from '../src/straddle.js'
+import { STRADDLE_START_DEFAULT, istClockOn, straddleRead as readFrom } from '../src/straddle.js'
+
+// The scenarios below are timed from a 09:21 start (the default is 09:15 - tested on its own).
+const straddleRead = (ce, pe, spots, opts = {}) => readFrom(ce, pe, spots, { start: '09:21', ...opts })
 
 const MIN = 60_000
 const OPEN = Date.parse('2026-10-20T09:15:00+05:30')
@@ -38,6 +41,15 @@ function day({ minutes = 200, spot, tv, iv = () => 12, volume = () => 1000, skip
   return { ce, pe, spots }
 }
 const minuteOfDay = (hhmm) => (at(hhmm) - OPEN) / MIN
+
+test('the straddle is read from 09:15 by default', () => {
+  assert.equal(STRADDLE_START_DEFAULT, '09:15')
+  const d = day({ spot: () => 25010, tv: () => 70 })
+  const read = readFrom(d.ce, d.pe, d.spots)
+  assert.equal(read.startMs, at('09:15'))
+  assert.equal(read.series[0].time, at('09:15'))
+  assert.equal(read.day.time, at('09:15'))
+})
 
 test('the start time is IST on the day of the bars, and configurable', () => {
   assert.equal(istClockOn(OPEN, '09:21'), at('09:21'))
