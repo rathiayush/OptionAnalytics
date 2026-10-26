@@ -157,6 +157,66 @@ public sealed class VisitorLogTests : IDisposable
     }
 
     [Fact]
+    public void Each_day_is_a_csv_file_with_a_header_and_a_row_per_entry()
+    {
+        var log = Log();
+        log.Record(Page("/oi-replay", "admin@x"));
+        var file = Assert.Single(Directory.GetFiles(Path.Combine(_dir, "log")));
+        Assert.Equal("2026-10-23.csv", Path.GetFileName(file));
+        var lines = File.ReadAllLines(file);
+        Assert.Equal(VisitorLog.Header, lines[0]);
+        Assert.Equal("time_ist,time_utc,event,account,role,page,visitor,city,region,country,device", lines[0]);
+        Assert.Equal("2026-10-23 11:00:00,2026-10-23T05:30:00Z,page,admin@x,Admin,/oi-replay,visitor-1,Mumbai,Maharashtra,India,Chrome · Windows", lines[1]);
+    }
+
+    [Fact]
+    public void Commas_quotes_and_formulas_are_kept_safe_in_the_csv_and_read_back_as_typed()
+    {
+        var log = Log();
+        var typed = "=HYPERLINK(\"http://x\",\"a, b\")";
+        log.Record(new VisitEntry(default, "login-failed", typed, null, null, null, "Navi Mumbai, Ghansoli", "Maharashtra", "India", "Safari · iPhone"));
+        var row = File.ReadAllLines(Assert.Single(Directory.GetFiles(Path.Combine(_dir, "log"))))[1];
+        Assert.Contains("\"'=HYPERLINK(\"\"http://x\"\",\"\"a, b\"\")\"", row);   // apostrophe first: a spreadsheet shows it, never runs it
+        Assert.Contains("\"Navi Mumbai, Ghansoli\"", row);
+        var back = Assert.Single(log.Read(1));
+        Assert.Equal(typed, back.Account);
+        Assert.Equal("Navi Mumbai, Ghansoli", back.City);
+    }
+
+    [Fact]
+    public void Days_kept_as_json_lines_by_the_first_version_move_into_the_csv()
+    {
+        var dir = Path.Combine(_dir, "log");
+        Directory.CreateDirectory(dir);
+        var old = new VisitEntry(new DateTimeOffset(2026, 10, 23, 9, 30, 0, IstClock.Offset), "login", "admin@x", "Admin", null, null, "Pune", "Maharashtra", "India", "Chrome · Windows");
+        File.WriteAllText(Path.Combine(dir, "2026-10-23.jsonl"), System.Text.Json.JsonSerializer.Serialize(old, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)) + "\n");
+        var log = Log();
+        Assert.False(File.Exists(Path.Combine(dir, "2026-10-23.jsonl")));
+        Assert.True(File.Exists(Path.Combine(dir, "2026-10-23.csv")));
+        log.Record(Page("/", "admin@x"));
+        var read = log.Read(1);
+        Assert.Equal(new[] { "page", "login" }, read.Select(e => e.Kind));
+        Assert.Equal(old.Time, read[1].Time);
+    }
+
+    [Fact]
+    public void The_download_is_one_csv_oldest_first_with_the_header_once()
+    {
+        var log = Log();
+        log.Record(Page("/a", "admin@x"));
+        _now = _now.AddDays(1);
+        log.Record(Page("/b", "admin@x"));
+        var lines = log.Csv(7).TrimEnd('\n').Split('\n');
+        Assert.Equal(3, lines.Length);
+        Assert.Equal(VisitorLog.Header, lines[0]);
+        Assert.Contains(",/a,", lines[1]);
+        Assert.Contains(",/b,", lines[2]);
+        var download = typeof(SystemController).GetMethod(nameof(SystemController.VisitorsCsv))!;
+        Assert.Equal(AuthRoles.Admin, download.GetCustomAttribute<AuthorizeAttribute>()?.Roles);
+        Assert.False(ExternalAccess.Allows("/api/system/visitors.csv"));
+    }
+
+    [Fact]
     public void Only_an_admin_reads_the_visitors()
     {
         var method = typeof(SystemController).GetMethod(nameof(SystemController.Visitors))!;
