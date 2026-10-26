@@ -223,7 +223,7 @@ export default function ExternalPage() {
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.external.timeframe', 5)
   const [showVwap, setShowVwap] = usePersistedState('optionanalytics.external.vwap', true)
   const [top5Only, setTop5Only] = usePersistedState('optionanalytics.external.top5', false)
-  const [shortLabels, setShortLabels] = usePersistedState('optionanalytics.external.wallLabelsShort', false)
+  const [shortLabels, setShortLabels] = usePersistedState('optionanalytics.external.wallLabelsShort', true)
   const tf = TIMEFRAME_OPTIONS.some((o) => o.value === timeframe) ? timeframe : 5
   const spotChart = useMemo(() => {
     if (!oi.data) return null

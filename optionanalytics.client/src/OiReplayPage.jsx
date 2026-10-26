@@ -4976,8 +4976,8 @@ export default function OiReplayPage() {
   // whole fetched band instead (see ReplayChart's own top5Only doc comment).
   const [top5WallsOnly, setTop5WallsOnly] = useState(true)
   // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
-  // the candles. Remembered in this browser.
-  const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, false)
+  // the candles. On by default; unticked shows the full labels. Remembered in this browser.
+  const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, true)
 
   const activeAlerts = useMemo(() => {
     if (atmStrike == null || ladderRows.length === 0) return []
