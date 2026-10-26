@@ -21,6 +21,7 @@ import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
 import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
+import { readoutPlacement } from './readoutPlacement.js'
 import { usePaperPositionsSync } from './paperSync.js'
 import { dayEndExit, paperExitReason } from './paperExit.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
@@ -1303,6 +1304,8 @@ const LIVE_COLUMN_OUTLINE_COLOR = 'rgba(255, 255, 255, 0.55)'
 // The border on a column's biggest OI change when it sits at ATM or one strike either side (see oiHeatmapPeaks.js) -
 // yellow, apart from the cells' own blue (added) / orange (removed).
 const ATM_PEAK_BORDER_COLOR = '#fadb14'
+// "ATM ± 1" with no-break spaces - a phone wraps it as one, never leaving "± 1" alone on the next line.
+const ATM_PLUS_MINUS_ONE = 'ATM\u00a0±\u00a01'
 
 // The heatmaps' legend entry for that border.
 function AtmPeakLegend() {
@@ -1310,7 +1313,7 @@ function AtmPeakLegend() {
     <Tooltip title="In each column, the strike with the biggest OI change - added or removed - is bordered when it is the ATM strike or one either side. ATM is the spot's as that column ended.">
       <Text style={{ fontSize: 12 }}>
         <span style={{ display: 'inline-block', width: 10, height: 13, border: `2px solid ${ATM_PEAK_BORDER_COLOR}`, verticalAlign: 'middle', marginRight: 4 }} />
-        Biggest change at ATM ± 1
+        {`Biggest change at ${ATM_PLUS_MINUS_ONE}`}
       </Text>
     </Tooltip>
   )
@@ -1591,37 +1594,28 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
       {hover && (
         <div
           style={{
-            position: 'fixed',
-            // Flips to the LEFT of the cursor once there isn't roughly enough room to the right for
-            // the widest label this ever renders ("CE 22,650 @ 03:14 pm: +1.23M") - fixed `left:
-            // clientX + 14` alone ran the label straight off the right edge of the screen on a phone
-            // (or anywhere the cursor/touch lands in that last ~220px), clipping it exactly like the
-            // real screenshot caught. translateX(-100%) shifts the box fully behind its own anchor
-            // point instead of needing this label's own actual rendered width up front.
-            ...(hover.clientX > window.innerWidth - 220
-              ? { left: hover.clientX - 14, transform: 'translateX(-100%)' }
-              : { left: hover.clientX + 14 }),
-            top: hover.clientY + 14, zIndex: 1000,
+            position: 'fixed', ...readoutPlacement(hover.clientX, hover.clientY), zIndex: 1000,
             background: '#161a22', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px',
-            fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
+            fontSize: 11, color: '#fff', pointerEvents: 'none', boxSizing: 'border-box',
           }}
         >
           {label} {hover.strike.toLocaleString()} @ {formatBucketTime(hover.time)}:{' '}
           <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
             {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
           </Text>
-          {hover.atmPeak && <span style={{ color: ATM_PEAK_BORDER_COLOR }}> · the column's biggest change, at ATM ± 1</span>}
+          {hover.atmPeak && <span style={{ color: ATM_PEAK_BORDER_COLOR }}>{` · the column's biggest change, at ${ATM_PLUS_MINUS_ONE}`}</span>}
         </div>
       )}
     </div>
-    <Space size={16} style={{ marginTop: 6 }}>
-      <Text style={{ fontSize: 12 }}>
+    {/* Wraps whole items on a phone - a figure never splits from its label or its unit. */}
+    <Space size={[16, 2]} wrap style={{ marginTop: 6 }}>
+      <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
         Total {label} OI added: <Text strong style={{ color: OI_ADDED_COLOR }}>{formatOiMillions(totals.added)}</Text>
       </Text>
-      <Text style={{ fontSize: 12 }}>
+      <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
         Total {label} OI removed: <Text strong style={{ color: OI_REMOVED_COLOR }}>{formatOiMillions(Math.abs(totals.removed))}</Text>
       </Text>
-      <Text style={{ fontSize: 12 }}>
+      <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
         Δ: <Text strong style={{ color: totals.delta >= 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>{formatOiMillions(totals.delta, { signed: true })}</Text>
       </Text>
     </Space>
@@ -2082,13 +2076,9 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
       {hover && (
         <div
           style={{
-            position: 'fixed',
-            ...(hover.clientX > window.innerWidth - 260
-              ? { left: hover.clientX - 14, transform: 'translateX(-100%)' }
-              : { left: hover.clientX + 14 }),
-            top: hover.clientY + 14, zIndex: 1000,
+            position: 'fixed', ...readoutPlacement(hover.clientX, hover.clientY), zIndex: 1000,
             background: '#161a22', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px',
-            fontSize: 11, color: '#fff', pointerEvents: 'none', whiteSpace: 'nowrap',
+            fontSize: 11, color: '#fff', pointerEvents: 'none', boxSizing: 'border-box',
           }}
         >
           {hover.row.label} @ {formatBucketTime(hover.time)}:{' '}
