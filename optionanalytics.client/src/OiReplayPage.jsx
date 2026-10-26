@@ -3762,7 +3762,7 @@ export default function OiReplayPage() {
         // silently rejoins N1's group instead, ticking an expiry the screen isn't even showing.
         if (cached.liveExpiryFlag) setLiveExpiryFlag(cached.liveExpiryFlag)
         setPaperPositions(serverPaperPositions(dateKey) ?? readPersistedPaperPositions(dateKey))
-        setVwapSeries(cached.vwapSeries ?? [])
+        setVwapSeries((cached.vwapSeries ?? []).filter((p) => inMarketSession(fromChartTime(p.time) * 1000)))
       }
     }
 
@@ -3799,7 +3799,7 @@ export default function OiReplayPage() {
     if (effectiveLive) {
       fetch(`/api/spot/${underlying}/vwap-series`)
         .then((r) => r.json())
-        .then((vwap) => { if (vwapLoadRef.current === vwapLoad) setVwapSeries((vwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
+        .then((vwap) => { if (vwapLoadRef.current === vwapLoad) setVwapSeries((vwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
         .catch((err) => console.error('Failed to load VWAP series:', err))
     }
     // While playing today live, expiryFlag (WEEK/MONTH - the historical picker) is not what the user
@@ -3848,7 +3848,7 @@ export default function OiReplayPage() {
         setResult(usesRunsCePeData ? body : { ...body, cePoints: [], pePoints: [] })
         // A replayed day's VWAP comes with the day (the server's, off the spot's own index volume); today's live
         // VWAP is the vwap-series fetch above, grown by the live feed.
-        if (!effectiveLive) setVwapSeries((body.spotVwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+        if (!effectiveLive) setVwapSeries((body.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
         // This fresh, authoritative result now covers everything up to THIS moment - reset the live
         // arrays so only ticks arriving AFTER it (genuinely new) populate them again. Only needed on
         // the cache-restore path: its own liveBars/etc could still be holding whatever accumulated
@@ -3966,10 +3966,12 @@ export default function OiReplayPage() {
   // REST snapshot's own bars, with the live feed's tail merged on top (replacing the still-forming
   // final minute in place as it updates, appending once a new minute actually starts).
   const oneMinBars = useMemo(() => {
-    const base = (result?.spotCandlesOneMinute ?? []).map(toBar)
+    // Market hours only: the spot feed's own day may hold minutes after the close (marketSession.js).
+    const base = (result?.spotCandlesOneMinute ?? []).filter((c) => inMarketSession(c.time)).map(toBar)
     if (!isLive || liveBars.length === 0) return base
     const merged = base.slice()
     for (const bar of liveBars) {
+      if (!inMarketSession(fromChartTime(bar.time) * 1000)) continue   // a cached tail from before this fix
       if (merged.length > 0 && merged[merged.length - 1].time === bar.time) merged[merged.length - 1] = bar
       else if (merged.length === 0 || bar.time > merged[merged.length - 1].time) merged.push(bar)
     }
@@ -4015,6 +4017,9 @@ export default function OiReplayPage() {
     lastTickAtRef.current = receivedAt
     lastSpotAtRef.current = receivedAt
     feedLag.recordSource(new Date(snapshot.timestampUtc).getTime(), snapshot.exchangeTimeUtc ? new Date(snapshot.exchangeTimeUtc).getTime() : null)
+    // Market hours only (marketSession.js): the feed is alive, but no spot candle or VWAP point after the 15:30 close
+    // or before 09:15.
+    if (!inMarketSession(snapshot.currentBar.time)) return
     const bar = toBar(snapshot.currentBar)
     setLiveBars((prev) => {
       if (prev.length > 0 && prev[prev.length - 1].time === bar.time) {
