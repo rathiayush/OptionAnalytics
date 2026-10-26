@@ -514,11 +514,20 @@ export function toSinceOpenSeries(totalSeries) {
 // Drawn, it showed up as one huge fake column that set the color scale and left every genuine live
 // change after it nearly invisible - the heatmap looked frozen while it was in fact updating. Live
 // points are the ones carrying their own pre-parsed `ms` (see mergeLiveOptionTicks).
+// The F&O session, 09:15 - 15:30 IST, as minutes of the day: OI readings outside it (Dhan re-sends snapshots after the
+// close, the stored database may hold them) are not minutes of the market - no blank columns past 15:29.
+const FNO_OPEN_MINUTE = 9 * 60 + 15
+const FNO_CLOSE_MINUTE = 15 * 60 + 30
+const inFnoSession = (p) => {
+  const minute = Math.floor((((toChartTime(p.time) % 86_400) + 86_400) % 86_400) / 60)
+  return minute >= FNO_OPEN_MINUTE && minute < FNO_CLOSE_MINUTE
+}
+
 export function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
-    const raw = (byStrike.get(strike) ?? []).filter((p) => asOfMs == null || pointMs(p) <= asOfMs)
+    const raw = (byStrike.get(strike) ?? []).filter((p) => (asOfMs == null || pointMs(p) <= asOfMs) && inFnoSession(p))
     const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest, live: p.ms != null })), timeframeMinutes)
     const byBucket = new Map()
     for (let i = 1; i < total.length; i++) {
