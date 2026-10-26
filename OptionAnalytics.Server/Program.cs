@@ -382,6 +382,41 @@ if (builder.Environment.IsDevelopment())
 var app = builder.Build();
 // Dhan's scrip master: one kept copy on the persistent volume, shared by the spot / futures / option-chain masters (DhanScripMasterFile).
 DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environment, app.Configuration), "scrip-master");
+// The Dhan disk cache saves Dhan calls only when its folder can be written and outlives a deploy (a mounted volume -
+// docker-compose: optionanalytics-data:/app/data). Checked once here: logged, and shown to an admin in the page header.
+{
+    var cache = app.Services.GetRequiredService<DhanDataCache>();
+    var (writable, error) = cache.CheckFolder();
+    var kept = OptionAnalytics.Server.StorageVolume.IsPersistent(cache.Directory);
+    OptionAnalytics.Server.Controllers.SystemController.DhanCacheFolder = (writable, kept);
+    if (!writable)
+        app.Logger.LogError("The Dhan cache folder {Dir} cannot be written ({Error}) - nothing is kept, every day is asked of Dhan again. " +
+            "Give the app's user (uid 1001) write access to it, or mount a named volume at /app/data.", cache.Directory, error);
+    else if (kept == false)
+        app.Logger.LogWarning("The Dhan cache folder {Dir} is NOT on a persistent volume - every deploy starts it empty and asks Dhan for every day again. " +
+            "Mount a named volume at /app/data (docker-compose does: optionanalytics-data:/app/data; Dokploy Dockerfile deploys: Advanced > Volumes).", cache.Directory);
+    else
+        app.Logger.LogInformation("Dhan cache folder: {Dir} - writable, kept across deploys: {Kept}.", cache.Directory, kept?.ToString() ?? "unknown");
+    // What it holds - counted in the background (a full cache is many files): a day saved before this start came through it.
+    _ = Task.Run(() =>
+    {
+        try
+        {
+            var held = cache.CountKept();
+            OptionAnalytics.Server.Controllers.SystemController.DhanCacheKeptAtStart = held;
+            var survived = OptionAnalytics.Server.Controllers.SystemController.CacheSurvivedRestart(held.OldestSavedUtc,
+                new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()));
+            app.Logger.LogInformation("Dhan cache holds {Files} days ({Mb:0.#} MB), the oldest saved {Oldest:u} - {Survived}.", held.Files, held.Bytes / 1048576d,
+                held.OldestSavedUtc, survived switch
+                {
+                    true => "kept through the restart",
+                    false => "all saved since this start",
+                    null => "empty: a first start, or the last deploy lost the folder (mount a named volume at /app/data)",
+                });
+        }
+        catch (Exception ex) { app.Logger.LogWarning(ex, "Dhan cache could not be counted."); }
+    });
+}
 
 if (app.Environment.IsDevelopment())
 {
