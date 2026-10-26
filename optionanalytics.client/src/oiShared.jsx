@@ -1294,7 +1294,10 @@ function useFloatingPanelZIndex() {
   return { zIndex: FLOATING_PANEL_BASE_Z + Math.min(Math.max(position, 0), 40), raise: () => raiseFloatingPanel(id) }
 }
 
-export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, onClose, children }) {
+// Each − / + click (sizeButtons) shrinks / grows the panel by this factor, both ways.
+const FLOATING_PANEL_SIZE_STEP = 1.2
+
+export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeChange, sizeButtons = false, onClose, children }) {
   const { zIndex, raise } = useFloatingPanelZIndex()
   const dragRef = useRef(null)
   const resizeRef = useRef(null)
@@ -1419,6 +1422,22 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
   }
   const endResize = () => { resizeRef.current = null }
 
+  // − / + in the header (opt-in, sizeButtons): one step at a time from the panel's size as shown, within the floor and
+  // the screen. Growing past the right / bottom edge moves the panel left / up to make room, so + still grows it when
+  // it sits against an edge.
+  const stepSize = (factor) => {
+    if (!panelRef.current || !onSizeChange) return
+    const rect = panelRef.current.getBoundingClientRect()
+    const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, window.innerWidth - 16)
+    const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, window.innerHeight - 16)
+    const width = Math.round(Math.min(Math.max(FLOATING_PANEL_MIN_WIDTH, rect.width * factor), maxWidth))
+    const height = Math.round(Math.min(Math.max(FLOATING_PANEL_MIN_HEIGHT, rect.height * factor), maxHeight))
+    const x = Math.max(0, Math.min(pos.x, window.innerWidth - 8 - width))
+    const y = Math.max(0, Math.min(pos.y, window.innerHeight - 8 - height))
+    if (x !== pos.x || y !== pos.y) onPosChange({ x, y })
+    onSizeChange({ width, height })
+  }
+
   const onResizeHandleMouseDown = (e) => {
     e.stopPropagation() // Never also start a HEADER drag - the two gestures share no pixels, but bubbling would otherwise reach the same window-level listeners twice.
     beginResize(e.clientX, e.clientY)
@@ -1487,7 +1506,21 @@ export function DraggableFloatingPanel({ title, pos, onPosChange, size, onSizeCh
         }}
       >
         <Text strong style={{ fontSize: 'clamp(12px, 3.2vw, 13px)' }}>{title}</Text>
-        <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
+        <span style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          {sizeButtons && onSizeChange && (
+            <>
+              <Tooltip title="Smaller">
+                <Button type="text" size="small" aria-label="Smaller" onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
+                  onClick={() => stepSize(1 / FLOATING_PANEL_SIZE_STEP)} style={{ padding: '0 6px' }}>−</Button>
+              </Tooltip>
+              <Tooltip title="Bigger">
+                <Button type="text" size="small" aria-label="Bigger" onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
+                  onClick={() => stepSize(FLOATING_PANEL_SIZE_STEP)} style={{ padding: '0 6px' }}>+</Button>
+              </Tooltip>
+            </>
+          )}
+          <Button type="text" size="small" onClick={onClose} style={{ padding: '0 4px' }}>✕</Button>
+        </span>
       </div>
       <div style={{ padding: 12, overflow: 'auto', flex: '1 1 auto', minHeight: 0 }}>{children}</div>
       {onSizeChange && (

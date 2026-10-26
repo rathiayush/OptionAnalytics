@@ -364,6 +364,27 @@ function applyIvSnapshot(prev, ivByStrike) {
 
 const STORED_REPLAY_CONTROLS_FLOATING = 'optionanalytics.oiReplay.replayControlsFloating'
 const STORED_SPOT_FLOATING = 'optionanalytics.oiReplay.spotFloating'
+const STORED_SPOT_PANEL_SIZE = 'optionanalytics.oiReplay.spotPanelSize'
+const STORED_WALL_LABELS_SHORT = 'optionanalytics.oiReplay.wallLabelsShort'
+const SPOT_PANEL_DEFAULT_SIZE = { width: 740 }
+// The floating spot chart never gets shorter than this however small its panel is made (the panel scrolls instead).
+const FLOATING_SPOT_CHART_MIN_HEIGHT = 200
+
+// The height a box is laid out at, followed as it changes (ResizeObserver) - the floating spot chart fills its panel.
+// A callback ref, so a box that mounts later (the floating panel opening) is observed too.
+function useBoxHeight() {
+  const [height, setHeight] = useState(null)
+  const observerRef = useRef(null)
+  const ref = useCallback((node) => {
+    observerRef.current?.disconnect()
+    observerRef.current = null
+    if (!node) return
+    const observer = new ResizeObserver(([entry]) => setHeight(Math.floor(entry.contentRect.height)))
+    observer.observe(node)
+    observerRef.current = observer
+  }, [])
+  return [ref, height]
+}
 
 // Replay position (a visible-bar count) for a picked IST wall-clock time: the last 1-minute bar at
 // or before it, so Start plays on from exactly there. A time before the first bar lands on the first
@@ -831,8 +852,20 @@ export function buildLadderRows(ceByStrike, peByStrike, asOfMs, staleReferenceMs
 // Long enough for the second click of a double-click to arrive (see ReplayChart's click handler).
 const STRIKE_CLICK_DELAY_MS = 300
 
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
+// One OI wall's price-line label. Short (the "Δ and S-R only" box): the side, strike, Δ since the open and S-R - the
+// full one also carries the OI bar, the OI and the IV, and with every wall drawn the labels cover the candles.
+function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short = false }) {
+  const delta = sinceOpen != null ? `Δ ${formatOiMillions(sinceOpen, { signed: true })}` : null
+  const sr = `S-R ${formatOiMillions(srDiff, { signed: true })}`
+  const staleTag = stale ? ' [STALE]' : ''
+  if (short) return `${prefix} ${strike} ${delta ? `${delta} · ` : ''}${sr}${staleTag}`
+  return `${prefix} ${oiBarText(t)} ${strike} (${formatOiMillions(oi)} OI${iv != null ? `, IV ${iv.toFixed(1)}` : ''}${delta ? `, ${delta}` : ''}, ${sr})${staleTag}`
+}
+
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
   const containerRef = useRef(null)
+  // Read once at creation; a later height (a floating panel resized) is applied to the same chart, not a new one.
+  const heightRef = useRef(height)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
@@ -888,7 +921,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     if (!containerRef.current) return
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       // A bigger fontSize than the page's other charts - the OI-wall price-line labels here carry
       // the strike, OI, IV and now separate Δ/S-R badges, all crammed against the right axis, and
       // the user's own "labels bit bigger, [I] can see it" ask was specifically about this chart.
@@ -950,7 +983,11 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       vwapSeriesRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
-  }, [height])
+  }, [])
+
+  // A new height resizes the chart in place - dragging a floating panel's size must not rebuild the chart (and lose its
+  // zoom) on every pixel.
+  useEffect(() => { chartRef.current?.applyOptions({ height }) }, [height])
 
   useEffect(() => {
     if (!seriesRef.current) return
@@ -1043,7 +1080,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
           lineWidth: 1 + Math.round(t * 2), // thicker as OI (and darkness) increases too
           lineStyle: stale ? 1 : 2, // dotted when stale, dashed when live
           axisLabelVisible: true,
-          title: `${labelPrefix} ${oiBarText(t)} ${row.strike} (${formatOiMillions(row[key])} OI${row[ivKey] != null ? `, IV ${row[ivKey].toFixed(1)}` : ''}${sinceOpen != null ? `, Δ ${formatOiMillions(sinceOpen, { signed: true })}` : ''}, S-R ${formatOiMillions(srDiff, { signed: true })})${stale ? ' [STALE]' : ''}`,
+          title: wallLabel({ prefix: labelPrefix, strike: row.strike, oi: row[key], iv: row[ivKey], sinceOpen, srDiff, t, stale, short: shortLabels }),
         })
         priceLinesRef.current.push(line)
       }
@@ -1051,7 +1088,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 
     drawSide(topRows, 'ceOi', 'ceIv', 'ceStale', 'ceOiSinceOpen', RESISTANCE_LIGHT, RESISTANCE_DARK, 'R')
     drawSide(topRows, 'peOi', 'peIv', 'peStale', 'peOiSinceOpen', SUPPORT_LIGHT, SUPPORT_DARK, 'S')
-  }, [topRows])
+  }, [topRows, shortLabels])
 
   // The single heaviest strike on each side - the actual level just drawn as "R"/"S" above - read as
   // a bullish/bearish tag from its OI change since today's open: rising CALL OI means fresh call
@@ -3185,7 +3222,7 @@ function ReviewFootprint({ state, asOfMs, isLive }) {
 function PreTradeReview({
   open, onCancel, onPlace, order, underlying, dateKey, asOfMs, isLive,
   totals, dayOi, ceByStrike, peByStrike, strikes, atmStrike, step,
-  spotBars, ladderRows, vwapSeries, showVwap, top5Only, dayKey,
+  spotBars, ladderRows, vwapSeries, showVwap, top5Only, shortLabels, dayKey,
 }) {
   const [current, setCurrent] = useState(0)
   const [windowMinutes, setWindowMinutes] = useState(20)
@@ -3249,7 +3286,7 @@ function PreTradeReview({
       case 3:
         return spotBars.length > 0 ? (
           <ChartErrorBoundary key={`review-${dayKey}`}>
-            <ReplayChart bars={spotBars} ladderRows={ladderRows} dayKey={`review-${dayKey}`} atmStrike={atmStrike} step={step} top5Only={top5Only} vwapSeries={vwapSeries} showVwap={showVwap} height={380} />
+            <ReplayChart bars={spotBars} ladderRows={ladderRows} dayKey={`review-${dayKey}`} atmStrike={atmStrike} step={step} top5Only={top5Only} shortLabels={shortLabels} vwapSeries={vwapSeries} showVwap={showVwap} height={380} />
           </ChartErrorBoundary>
         ) : <Empty description="No spot chart yet." />
       case 4:
@@ -3570,7 +3607,11 @@ export default function OiReplayPage() {
   const liveTradeActive = tradeMode === 'live' && isAdmin
   const liveExtraGroups = useMemo(() => (liveTradeActive ? ['positions'] : []), [liveTradeActive])
   const [spotPanelPos, setSpotPanelPos] = useState(() => ({ x: Math.max(24, window.innerWidth - 780), y: 70 }))
-  const [spotPanelSize, setSpotPanelSize] = useState({ width: 740 })
+  // Remembered in this browser, like whether it floats at all. No height until the panel is resized (− / +, or the
+  // corner): the chart is then its usual 440 px; with a height the chart fills the panel.
+  const [storedSpotPanelSize, setSpotPanelSize] = usePersistedState(STORED_SPOT_PANEL_SIZE, SPOT_PANEL_DEFAULT_SIZE)
+  const spotPanelSize = Number.isFinite(storedSpotPanelSize?.width) ? storedSpotPanelSize : SPOT_PANEL_DEFAULT_SIZE
+  const [floatingChartBoxRef, floatingChartBoxHeight] = useBoxHeight()
 
   // BANKNIFTY has no weekly expiry - NSE discontinued it (same rule Expired Backtest enforces).
   // Corrected right in the underlying picker's own onChange below, not a separate effect - this
@@ -4934,6 +4975,9 @@ export default function OiReplayPage() {
   // user's own "switch ... if true show top 5 else all wall" ask, off shows every real wall in the
   // whole fetched band instead (see ReplayChart's own top5Only doc comment).
   const [top5WallsOnly, setTop5WallsOnly] = useState(true)
+  // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
+  // the candles. Remembered in this browser.
+  const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, false)
 
   const activeAlerts = useMemo(() => {
     if (atmStrike == null || ladderRows.length === 0) return []
@@ -5210,7 +5254,27 @@ export default function OiReplayPage() {
   // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
   // must not assume a loaded day: live candles keep arriving while today's fetch is being redone
   // or has failed, and reading result.date then crashed the whole page.
-  const spotChartHeight = spotFloating ? 440 : 560
+  const spotPanelSized = spotFloating && Number.isFinite(spotPanelSize.height) && floatingChartBoxHeight != null
+  const spotChartHeight = !spotFloating ? 560 : spotPanelSized ? Math.max(FLOATING_SPOT_CHART_MIN_HEIGHT, floatingChartBoxHeight) : 440
+  const spotChart = oneMinBars.length > 0
+    ? (
+      <ChartErrorBoundary key={`${underlying}-${result?.date}-${timeframe}`}>
+        <ReplayChart
+          bars={displayBars}
+          ladderRows={ladderRows}
+          dayKey={`${underlying}-${result?.date}-${timeframe}`}
+          atmStrike={atmStrike}
+          step={step}
+          top5Only={top5WallsOnly}
+          shortLabels={wallLabelsShort}
+          vwapSeries={shownVwap}
+          showVwap={showVwap}
+          onStrikeClick={setDrilldownStrike}
+          height={spotChartHeight}
+        />
+      </ChartErrorBoundary>
+    )
+    : <Empty description="No spot candles for this day." />
   const spotCardContent = result && (
     <>
       {/* Playback controls, literally inside the same card as the chart, right above
@@ -5296,6 +5360,9 @@ export default function OiReplayPage() {
         />
         <Text type="secondary" style={{ fontSize: 12 }}>Top 5 walls only</Text>
         <Switch checked={top5WallsOnly} onChange={setTop5WallsOnly} />
+        <Tooltip title="Wall labels show only the strike, Δ since the open and S-R - shorter, so they cover less of the chart.">
+          <Checkbox checked={wallLabelsShort} onChange={(e) => setWallLabelsShort(e.target.checked)}>Δ and S-R only</Checkbox>
+        </Tooltip>
       </Space>
       {activeAlerts.length > 0 && (
         <Alert
@@ -5306,24 +5373,9 @@ export default function OiReplayPage() {
           description={activeAlerts.map((a) => `${a.side} ${a.strike}: ${formatOiMillions(a.change, { signed: true })} in the last minute (${a.change >= 0 ? 'loading' : 'unwinding'})`).join(' · ')}
         />
       )}
-      {oneMinBars.length > 0
-        ? (
-          <ChartErrorBoundary key={`${underlying}-${result?.date}-${timeframe}`}>
-            <ReplayChart
-              bars={displayBars}
-              ladderRows={ladderRows}
-              dayKey={`${underlying}-${result?.date}-${timeframe}`}
-              atmStrike={atmStrike}
-              step={step}
-              top5Only={top5WallsOnly}
-              vwapSeries={shownVwap}
-              showVwap={showVwap}
-              onStrikeClick={setDrilldownStrike}
-              height={spotChartHeight}
-            />
-          </ChartErrorBoundary>
-        )
-        : <Empty description="No spot candles for this day." />}
+      {spotFloating
+        ? <div ref={floatingChartBoxRef} style={{ flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>{spotChart}</div>
+        : spotChart}
     </>
   )
 
@@ -6159,17 +6211,18 @@ export default function OiReplayPage() {
           underlying={underlying} dateKey={result?.date} asOfMs={asOfMs} isLive={isLive}
           totals={{ totalCeOi, totalPeOi, pcr, maxPain }} dayOi={dayOiSummary}
           ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} step={step}
-          spotBars={displayBars} ladderRows={ladderRows} vwapSeries={shownVwap} showVwap={showVwap} top5Only={top5WallsOnly}
+          spotBars={displayBars} ladderRows={ladderRows} vwapSeries={shownVwap} showVwap={showVwap} top5Only={top5WallsOnly} shortLabels={wallLabelsShort}
           dayKey={`${underlying}-${result?.date}-${timeframe}`}
         />
       )}
       {spotFloating && result && (
         <DraggableFloatingPanel
           title={`Spot - ${underlying}`} pos={spotPanelPos} onPosChange={setSpotPanelPos}
-          size={spotPanelSize} onSizeChange={setSpotPanelSize}
+          size={spotPanelSize} onSizeChange={setSpotPanelSize} sizeButtons
           onClose={() => setSpotFloating(false)}
         >
-          {spotCardContent}
+          {/* A column filling the panel, so the chart (the last, growing part) takes whatever height the panel has. */}
+          <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>{spotCardContent}</div>
         </DraggableFloatingPanel>
       )}
       {!isLive && replayControlsFloating && result && (
