@@ -111,6 +111,13 @@ When adding or changing a strategy:
   "of:{U}", "of:{U}:{expiry}", "c:{U}:N1" and "u:{U}" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
+- The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
+  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
+  index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). 🎯 = a cumulative-line break AND the CE or PE
+  OI at ATM ± 1 shifting `atmShiftPct` % (default 20) of its size the same way, within the window. Settings (on / window / %) are
+  `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
+  `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
+  the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one JSON-lines file per IST day
