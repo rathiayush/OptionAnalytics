@@ -18,7 +18,7 @@ import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotPro
 import { tpoRowFor } from '../src/profiles.js'
 import {
   IST_OFFSET_SECONDS, OI_BREAK_ALERT_DEFAULTS, breakAlertKey, breakMeaning, breakText, chartTimeHHmm, fmtOiLakh, highProbabilityAlertKey, highProbabilityText,
-  newOiBreakAlertState, perStrikeChanges, stepOiBreakAlerts,
+  changesFromLevels, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts,
 } from '../src/oiLevelBreaks.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
@@ -250,12 +250,12 @@ export class IndexScanner {
       on: c.on !== false,
       bucketMinutes: clamp(c.bucketMinutes, 1, 15, 1),
       windowMinutes: clamp(c.windowMinutes, 1, 15, OI_BREAK_ALERT_DEFAULTS.windowMinutes),
-      shiftAbovePct: clamp(c.shiftAbovePct, 0, 1000, OI_BREAK_ALERT_DEFAULTS.shiftAbovePct),
+      atmShiftPct: clamp(c.atmShiftPct, 1, 500, OI_BREAK_ALERT_DEFAULTS.atmShiftPct),
     }
   }
 
-  // A CE / PE / Net cumulative line breaking its support / resistance, and a break with a large CE - PE shift carried
-  // at ATM +-1 within the window - Telegram, tagged [Server], with no page open. Keyed like the page's, so the two
+  // A CE / PE / Net cumulative line breaking its support / resistance, and a break with the ATM +-1 CE or PE OI shifting
+  // the set % the same way within the window - Telegram, tagged [Server], with no page open. Keyed like the page's, so the two
   // never send the same message twice. Completed buckets only; what was already broken when the day loaded is not sent.
   async checkOiBreaks(d, nowMs) {
     const set = this.oiBreakSettings()
@@ -271,10 +271,12 @@ export class IndexScanner {
     ob.at = this.io.now()
     const spot = d.oi.spot?.at(-1)?.close
     const step = d.oi.step || 50
+    const ceLevels = perStrikeLevels(d.oi.ce, bucketSeconds)
+    const peLevels = perStrikeLevels(d.oi.pe, bucketSeconds)
     const { breaks, signals } = stepOiBreakAlerts(ob.state, {
-      ce: perStrikeChanges(d.oi.ce, bucketSeconds), pe: perStrikeChanges(d.oi.pe, bucketSeconds),
+      ce: changesFromLevels(ceLevels), pe: changesFromLevels(peLevels), ceLevels, peLevels,
       bucketSeconds, nowSec: boundary, atmStrike: spot > 0 ? Math.round(spot / step) * step : null,
-    }, { windowMinutes: set.windowMinutes, shiftAbovePct: set.shiftAbovePct })
+    }, { windowMinutes: set.windowMinutes, atmShiftPct: set.atmShiftPct })
     if (!breaks.length && !signals.length) return
     const cfg = this.settings()
     const dayKey = `${this.underlying}-${this.date}`

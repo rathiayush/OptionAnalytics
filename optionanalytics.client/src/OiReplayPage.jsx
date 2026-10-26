@@ -3,7 +3,7 @@ import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
-import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, stepOiBreakAlerts } from './oiLevelBreaks.js'
+import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
@@ -1583,22 +1583,22 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const [breakAlertsOn, setBreakAlertsOn] = usePersistedState('optionanalytics.oiReplay.breakAlerts', true)
   // The window the high-probability signal's three conditions must fall in (minutes).
   const [hpWindowMinutes, setHpWindowMinutes] = usePersistedState('optionanalytics.oiReplay.hpWindowMinutes', 5)
-  // How much bigger than the day's usual move over that window the CE − PE shift must be (%).
-  const [hpShiftPct, setHpShiftPct] = usePersistedState('optionanalytics.oiReplay.hpShiftPct', 20)
+  // How far the CE or PE OI at the ATM strike and the strike either side must shift over that window (% of its size).
+  const [hpAtmShiftPct, setHpAtmShiftPct] = usePersistedState('optionanalytics.oiReplay.hpAtmShiftPct', 20)
   // The server scanner sends these to Telegram with no page open; the settings are shared with it - the page shows the
   // server's on load and saves a change back (an admin's - others get 403 and keep their own).
   const serverOiBreaks = useServerOiBreakAlerts(alertUnderlying, (server) => {
     setBreakAlertsOn(server.on !== false)
     if (HIGH_PROBABILITY_WINDOWS.includes(server.windowMinutes)) setHpWindowMinutes(server.windowMinutes)
-    if (Number.isFinite(server.shiftAbovePct)) setHpShiftPct(server.shiftAbovePct)
+    if (Number.isFinite(server.atmShiftPct)) setHpAtmShiftPct(server.atmShiftPct)
   })
   const saveOiBreaks = (patch) => {
-    const next = { on: breakAlertsOn, bucketMinutes: 1, windowMinutes: hpWindowMinutes, shiftAbovePct: hpShiftPct, ...patch }
+    const next = { on: breakAlertsOn, bucketMinutes: 1, windowMinutes: hpWindowMinutes, atmShiftPct: hpAtmShiftPct, ...patch }
     fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oiBreakAlerts: next }) }).catch(() => {})
   }
   useOiBreakAlerts({
     underlying: alertUnderlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes: heatmapTimeframeMinutes, live, dayKey, enabled: breakAlertsOn,
-    hpWindowMinutes, hpShiftPct, serverCovers: !!serverOiBreaks?.covers,
+    hpWindowMinutes, hpAtmShiftPct, serverCovers: !!serverOiBreaks?.covers,
   })
   const serverSent = serverOiBreaks?.alerts?.sent ?? []
   const strikesPart = (
@@ -1643,7 +1643,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           </Tooltip>
           <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
           {alertUnderlying && (
-            <Tooltip title={`Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break, a large CE − PE cumulative shift (at least the set % bigger than the day's usual move over the window) and ATM ± 1 strike carrying 30%+ of it all happen within the window you pick (3 - 5 min), in the same direction. Voice and Telegram follow the strategy scanner's switches.${live ? '' : ' Live only.'}`}>
+            <Tooltip title={`Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the strategy scanner's switches.${live ? '' : ' Live only.'}`}>
               <Space size={4}>
                 <Switch size="small" checked={breakAlertsOn} onChange={(v) => { setBreakAlertsOn(v); saveOiBreaks({ on: v }) }} aria-label="S/R break alerts" />
                 <Text style={{ fontSize: 12 }}>S/R break alerts</Text>
@@ -1660,11 +1660,11 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
             </Tooltip>
           )}
           {alertUnderlying && (
-            <Tooltip title="🎯 High probability: how much bigger than the day's usual move (the median over the same window) the CE − PE cumulative shift must be. 20% = 1.2× usual; 150% = 2.5× usual. Higher = fewer, stronger alerts.">
+            <Tooltip title="🎯 High probability: at the ATM strike and the strike either side, the CE OI or the PE OI must shift by at least this % of its own size within the window (e.g. CE 50L → 40L = −20%: calls unwinding, bullish; PE 50L → 60L = +20%: put writing, bullish) - at the same time as a break on the cumulative charts, both the same way.">
               <Space size={4}>
-                <Text style={{ fontSize: 12 }}>shift ≥ usual +</Text>
-                <InputNumber size="small" min={0} max={1000} step={10} value={hpShiftPct} onChange={(v) => { setHpShiftPct(v ?? 20); saveOiBreaks({ shiftAbovePct: v ?? 20 }) }} disabled={!breakAlertsOn}
-                  style={{ width: 90 }} addonAfter="%" aria-label="High probability shift percent" />
+                <Text style={{ fontSize: 12 }}>ATM ±1 OI shift ≥</Text>
+                <InputNumber size="small" min={1} max={500} step={5} value={hpAtmShiftPct} onChange={(v) => { setHpAtmShiftPct(v ?? 20); saveOiBreaks({ atmShiftPct: v ?? 20 }) }} disabled={!breakAlertsOn}
+                  style={{ width: 90 }} addonAfter="%" aria-label="High probability ATM shift percent" />
               </Space>
             </Tooltip>
           )}
@@ -1776,7 +1776,7 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 // page open (scanner-runner/indexScanner.mjs) and sends the Telegram then - this page only chimes, speaks and shows
 // them; it sends Telegram itself only when the server is not covering this index. Same keys either way, so a message
 // goes once.
-function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, dayKey, enabled, hpWindowMinutes = 5, hpShiftPct = 20, serverCovers = false }) {
+function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, dayKey, enabled, hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false }) {
   // Never for the External account (its Market view shows no pop-ups and sends nothing), whatever a caller passes.
   const external = useAuth()?.user?.role === 'External'
   const active = !!(live && enabled && underlying && !external)
@@ -1787,23 +1787,27 @@ function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStri
     return () => clearInterval(id)
   }, [active])
   const state = useRef(newOiBreakAlertState())
-  useEffect(() => { state.current = newOiBreakAlertState() }, [underlying, dayKey, timeframeMinutes, active, hpWindowMinutes, hpShiftPct])
+  useEffect(() => { state.current = newOiBreakAlertState() }, [underlying, dayKey, timeframeMinutes, active, hpWindowMinutes, hpAtmShiftPct])
   const bucketSeconds = timeframeMinutes * 60
   // Only the completed buckets: re-read when one completes (or the data changes), not on every clock tick.
   const boundary = Math.floor(toChartTime(clock) / bucketSeconds) * bucketSeconds
   const day = useMemo(() => {
     if (!active) return null
+    // Each strike's OI level per bucket too - the ATM ± 1 shift reads levels, not changes.
+    const levels = (byStrike) => perStrikeLevels(new Map([...byStrike].map(([k, list]) => [k, list.map((p) => ({ t: pointMs(p), oi: p.openInterest }))])), timeframeMinutes * 60)
     return {
       ce: buildOiChangeMatrix(ceByStrike, strikes, null, timeframeMinutes).perStrikeChange,
       pe: buildOiChangeMatrix(peByStrike, strikes, null, timeframeMinutes).perStrikeChange,
+      ceLevels: levels(ceByStrike),
+      peLevels: levels(peByStrike),
     }
   }, [active, ceByStrike, peByStrike, strikes, timeframeMinutes])
   const latest = useRef({ atmStrike, serverCovers })
   useEffect(() => { latest.current = { atmStrike, serverCovers } })
   useEffect(() => {
     if (!active || !day) return
-    const { breaks, signals } = stepOiBreakAlerts(state.current, { ce: day.ce, pe: day.pe, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike },
-      { windowMinutes: hpWindowMinutes, shiftAbovePct: hpShiftPct })
+    const { breaks, signals } = stepOiBreakAlerts(state.current, { ce: day.ce, pe: day.pe, ceLevels: day.ceLevels, peLevels: day.peLevels, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike },
+      { windowMinutes: hpWindowMinutes, atmShiftPct: hpAtmShiftPct })
     if (!breaks.length && !signals.length) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
@@ -1831,7 +1835,7 @@ function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStri
         description: <span style={{ fontSize: 12, whiteSpace: 'pre-line' }}>{text.split('\n').slice(1).join('\n')}</span>,
       })
     }
-  }, [active, day, boundary, bucketSeconds, underlying, dayKey, timeframeMinutes, hpWindowMinutes, hpShiftPct])
+  }, [active, day, boundary, bucketSeconds, underlying, dayKey, timeframeMinutes, hpWindowMinutes, hpAtmShiftPct])
 }
 
 // What the server scanner does with these alerts for `underlying` (GET /api/scanner-runner/status, every minute):

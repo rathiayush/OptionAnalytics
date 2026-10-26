@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { IndexScanner, TAG } from '../scanner-runner/indexScanner.mjs'
-import { IST_OFFSET_SECONDS, perStrikeChanges, newOiBreakAlertState, stepOiBreakAlerts, newBreakWatch, watchBreaks, completedLevelReads } from '../src/oiLevelBreaks.js'
+import { IST_OFFSET_SECONDS, perStrikeChanges, perStrikeLevels, newOiBreakAlertState, stepOiBreakAlerts, newBreakWatch, watchBreaks, completedLevelReads } from '../src/oiLevelBreaks.js'
 import { buildOiTotalsRows } from '../src/oiTotalsHeatmap.js'
 
 const MIN = 60_000
@@ -13,6 +13,8 @@ const T0 = Date.UTC(2026, 9, 26, 3, 45)   // 09:15 IST
 // The ATM strike's CE cumulative: two swing lows at 60, then a hard fall through it at minute 16.
 const BIG = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, -200, -210, -220]
 const STRIKES = [24950, 25000, 25050]
+// 3 lakh a strike: the fall takes the ATM ± 1 CE OI from 9.8 L to 7 L (-28.6%) - calls unwinding, bullish.
+const BASE = 300_000
 
 // The runner's live OI context after `n` minutes: strike -> [{ t, oi }] (minute start), spot at 25000.
 function oiAfter(n, pattern = BIG) {
@@ -20,8 +22,8 @@ function oiAfter(n, pattern = BIG) {
   const pe = new Map(STRIKES.map((k) => [k, []]))
   for (let m = 0; m < n; m++) {
     for (const k of STRIKES) {
-      ce.get(k).push({ t: T0 + m * MIN, oi: 1_000_000 + (k === 25000 ? 1000 * pattern[m] : 0) })
-      pe.get(k).push({ t: T0 + m * MIN, oi: 1_000_000 })
+      ce.get(k).push({ t: T0 + m * MIN, oi: BASE + (k === 25000 ? 1000 * pattern[m] : 0) })
+      pe.get(k).push({ t: T0 + m * MIN, oi: BASE })
     }
   }
   return { step: 50, live: true, ce, pe, futures: [], spot: [{ t: T0 + (n - 1) * MIN, close: 25000 }] }
@@ -57,8 +59,9 @@ test('the shared step is the page\'s break watch plus the high-probability watch
   const pe = perStrikeChanges(oiAfter(17).pe, 60)
   const nowSec = (T0 + 17 * MIN) / 1000 + IST_OFFSET_SECONDS
   const state = newOiBreakAlertState()
-  stepOiBreakAlerts(state, { ce: perStrikeChanges(oiAfter(16).ce, 60), pe: perStrikeChanges(oiAfter(16).pe, 60), bucketSeconds: 60, nowSec: nowSec - 60, atmStrike: 25000 })
-  const { breaks, signals } = stepOiBreakAlerts(state, { ce, pe, bucketSeconds: 60, nowSec, atmStrike: 25000 })
+  const levels = (n) => ({ ceLevels: perStrikeLevels(oiAfter(n).ce, 60), peLevels: perStrikeLevels(oiAfter(n).pe, 60) })
+  stepOiBreakAlerts(state, { ce: perStrikeChanges(oiAfter(16).ce, 60), pe: perStrikeChanges(oiAfter(16).pe, 60), ...levels(16), bucketSeconds: 60, nowSec: nowSec - 60, atmStrike: 25000 })
+  const { breaks, signals } = stepOiBreakAlerts(state, { ce, pe, ...levels(17), bucketSeconds: 60, nowSec, atmStrike: 25000 })
   const watch = newBreakWatch()
   watchBreaks(watch, completedLevelReads(buildOiTotalsRows(perStrikeChanges(oiAfter(16).ce, 60), perStrikeChanges(oiAfter(16).pe, 60)), 60, nowSec - 60), 60)
   const direct = watchBreaks(watch, completedLevelReads(buildOiTotalsRows(ce, pe), 60, nowSec), 60)
@@ -76,7 +79,7 @@ test('the server sends the break and the high-probability signal to Telegram, ta
   assert.match(breaks[0].key, /^oi-break\|NIFTY\|NIFTY-2026-10-26\|1\|ce\|down\|\d+$/)
   const hp = io.sent.filter((m) => m.text.startsWith(`${TAG} 🎯 HIGH PROBABILITY BULLISH · NIFTY`))
   assert.equal(hp.length, 1)
-  assert.match(hp[0].text, /ATM ± 1 \(24950 \/ 25000 \/ 25050\)/)
+  assert.match(hp[0].text, /ATM ± 1 \(24950 \/ 25000 \/ 25050\) in 5 min: CE OI shifted -\d+\.\d%/)
   assert.match(hp[0].key, /^oi-hp\|NIFTY\|NIFTY-2026-10-26\|1\|bull\|\d+$/)
   assert.equal(new Set(io.sent.map((m) => m.key)).size, io.sent.length, 'every message once')
   // The page's status: settings and what was sent.
@@ -91,23 +94,20 @@ test('switched off on the page (config.oiBreakAlerts.on false) the server sends 
   assert.equal(io.sent.length, 0)
 })
 
-// A milder fall through the same support: over 5 minutes about 3x the usual move at the break minute (read up to it -
-// the fall goes on afterwards, and inside the window a later minute can still make it a 🎯).
-const MILD = [120, 110, 100, 80, 60, 80, 100, 120, 100, 80, 60, 80, 100, 120, 100, 80, 20, 10, 0]
-
-test('the page\'s window and % reach the server: the % decides whether the same break is a 🎯', async () => {
-  const strict = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, shiftAbovePct: 400 } })   // 5x usual
-  await runMinutes(strict.scanner, strict.io, 17, MILD)
+test('the page\'s window and % reach the server: the ATM ± 1 % decides whether the same break is a 🎯', async () => {
+  // The ATM ± 1 CE fall peaks around -33% in the window: a 40% bar is never cleared, 20% is.
+  const strict = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, atmShiftPct: 40 } })
+  await runMinutes(strict.scanner, strict.io, 19)
   assert.ok(strict.io.sent.some((m) => m.text.includes('🧱')))
   assert.ok(!strict.io.sent.some((m) => m.text.includes('🎯')), JSON.stringify(strict.io.sent.map((m) => m.text)))
-  assert.deepEqual([strict.scanner.status().oiBreakAlerts.windowMinutes, strict.scanner.status().oiBreakAlerts.shiftAbovePct], [5, 400])
+  assert.deepEqual([strict.scanner.status().oiBreakAlerts.windowMinutes, strict.scanner.status().oiBreakAlerts.atmShiftPct], [5, 40])
 
-  const loose = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, shiftAbovePct: 100 } })   // 2x usual
-  await runMinutes(loose.scanner, loose.io, 17, MILD)
+  const loose = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, atmShiftPct: 20 } })
+  await runMinutes(loose.scanner, loose.io, 19)
   assert.ok(loose.io.sent.some((m) => m.text.includes('🎯')), JSON.stringify(loose.io.sent.map((m) => m.text)))
 
-  const capped = scannerWithIo({ oiBreakAlerts: { shiftAbovePct: 100_000, windowMinutes: 99 } })
-  assert.deepEqual([capped.scanner.status().oiBreakAlerts.shiftAbovePct, capped.scanner.status().oiBreakAlerts.windowMinutes], [1000, 15])
+  const capped = scannerWithIo({ oiBreakAlerts: { atmShiftPct: 100_000, windowMinutes: 99 } })
+  assert.deepEqual([capped.scanner.status().oiBreakAlerts.atmShiftPct, capped.scanner.status().oiBreakAlerts.windowMinutes], [500, 15])
 })
 
 test('a break already there when the day loads is not sent, and Telegram off in the scanner settings sends nothing', async () => {

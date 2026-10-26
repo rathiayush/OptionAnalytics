@@ -71,63 +71,80 @@ export function breakText(underlying, b, format, timeOf, bucketMinutes) {
 }
 
 // ---- High-probability signal ----------------------------------------------------------------------------------------
-// A high-probability signal is three things in the same direction within one time window (`windowMinutes`, 3 - 5 min),
+// A high-probability signal is two things in the same direction within one time window (`windowMinutes`, 3 - 5 min),
 // read at a completed bucket:
-//  - an OI totals line broke its support / resistance (a break above) inside the window;
-//  - the CE − PE cumulative Δ made a LARGE shift over the window: at least `shiftAbovePct` % bigger than the day's
-//    typical (median) change over a window that long (20% = 1.2x typical);
-//  - the shift is AT THE MONEY: the ATM strike and the strike either side (ATM ± 1) carry at least `nearShare` of it,
-//    in the same direction;
-// and the break agrees: a bullish break (CE falling / PE rising / net falling) with a falling net (put writers ahead),
-// a bearish one with a rising net. The window is in buckets of the totals' size (at least one).
-export const HIGH_PROBABILITY = { windowMinutes: 5, minHistory: 10, shiftAbovePct: 20, nearShare: 0.3 }
+//  - an OI totals cumulative line (CE, PE or Net) broke its support / resistance (a break above) inside the window;
+//  - the OI AT THE MONEY shifted: at the ATM strike and the strike either side (ATM ± 1), the CE OI or the PE OI changed
+//    by at least `atmShiftPct` % of its own size over the window - CE up (call writing) / PE down (puts unwinding) is
+//    bearish, CE down (calls unwinding) / PE up (put writing) is bullish;
+// and both point the same way. The window is in buckets of the totals' size (at least one).
+export const HIGH_PROBABILITY = { windowMinutes: 5, atmShiftPct: 20 }
 export const HIGH_PROBABILITY_WINDOWS = [3, 4, 5]
-
-const median = (xs) => {
-  if (!xs.length) return 0
-  const s = [...xs].sort((a, b) => a - b)
-  const m = Math.floor(s.length / 2)
-  return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2
-}
 
 /** How many buckets of `bucketSeconds` a window of `windowMinutes` spans (at least one). */
 export const windowBuckets = (windowMinutes, bucketSeconds) => Math.max(1, Math.round((windowMinutes * 60) / bucketSeconds))
 
+// A strike's OI at the end of bucket `t`: its last level at or before it.
+function levelAt(byBucket, t) {
+  let best = null
+  let bestT = -Infinity
+  for (const [bt, v] of byBucket ?? []) if (bt <= t && bt > bestT) { best = v; bestT = bt }
+  return best
+}
+
+// One side's OI summed over `strikes` at the end of bucket `t` (null when a strike has nothing yet).
+function sumAt(levels, strikes, t) {
+  let sum = 0
+  for (const k of strikes) {
+    const v = levelAt(levels.get(k), t)
+    if (v == null) return null
+    sum += v
+  }
+  return sum
+}
+
 /**
  * Whether break `b` (watchBreaks) makes a high-probability signal at the completed bucket `last`, else null.
- * `totals`: buildOiTotalsRows of the per-strike changes `ce` / `pe` (strike -> Map(bucket -> change)); `atmStrike`:
- * the ATM strike now; `bucketSeconds`: the bucket size. Only buckets up to `last` are read.
- * Returns { bullish, shift, typical, ratio, nearShift, nearShare, nearStrikes, windowBuckets, at }.
+ * `totals`: buildOiTotalsRows (its buckets); `ceLevels` / `peLevels`: each strike's OI level per bucket
+ * (perStrikeLevels); `atmStrike`: the ATM strike now; `bucketSeconds`: the bucket size. Only buckets up to `last` are
+ * read. Returns { bullish, side ('CE' | 'PE'), pct, from, to, ce, pe, nearStrikes, windowBuckets, at } - `ce` / `pe`:
+ * each side's { from, to, pct } at ATM ± 1.
  */
-export function highProbability(b, { totals, ce, pe, last, atmStrike, bucketSeconds }, opts = {}) {
-  const { windowMinutes, minHistory, shiftAbovePct, nearShare: minShare } = { ...HIGH_PROBABILITY, ...opts }
-  if (!b || !totals?.buckets?.length || !Number.isFinite(atmStrike) || !(bucketSeconds > 0)) return null
+export function highProbability(b, { totals, ceLevels, peLevels, last, atmStrike, bucketSeconds }, opts = {}) {
+  const { windowMinutes, atmShiftPct } = { ...HIGH_PROBABILITY, ...opts }
+  if (!b || !totals?.buckets?.length || !ceLevels || !peLevels || !Number.isFinite(atmStrike) || !(bucketSeconds > 0)) return null
   const w = windowBuckets(windowMinutes, bucketSeconds)
   const done = totals.buckets.filter((t) => t <= last)
   const i = done.length - 1
-  if (i < Math.max(minHistory, w)) return null
+  if (i < w) return null
   // The break inside the window: one of its last w buckets.
-  if (!(b.time > done[i - w] && b.time <= done[i])) return null
-  const cum = done.map((t) => totals.rows.netCum.get(t) ?? 0)
-  const shift = cum[i] - cum[i - w]
-  if (shift === 0) return null
-  const typical = median(Array.from({ length: i - w }, (_, k) => Math.abs(cum[k + w] - cum[k])))
-  const ratio = typical > 0 ? Math.abs(shift) / typical : Infinity
-  if (ratio < 1 + Math.max(0, shiftAbovePct) / 100) return null
-  const bullish = shift < 0   // net CE − PE falling: put writers gaining
-  if ((breakMeaning(b.side.key, b.up) > 0) !== bullish) return null
+  const start = done[i - w]
+  const end = done[i]
+  if (!(b.time > start && b.time <= end)) return null
   // ATM ± 1 strike.
-  const strikes = [...new Set([...ce.keys(), ...pe.keys()])].sort((x, y) => x - y)
+  const strikes = [...new Set([...ceLevels.keys(), ...peLevels.keys()])].sort((x, y) => x - y)
   let step = Infinity
   for (let k = 1; k < strikes.length; k++) step = Math.min(step, strikes[k] - strikes[k - 1])
   if (!Number.isFinite(step)) return null
   const nearStrikes = strikes.filter((k) => Math.abs(k - atmStrike) <= step * 1.01)
-  const windowTimes = done.slice(i - w + 1)
-  let nearShift = 0
-  for (const k of nearStrikes) for (const t of windowTimes) nearShift += (ce.get(k)?.get(t) ?? 0) - (pe.get(k)?.get(t) ?? 0)
-  const share = nearShift / shift
-  if (!(share >= minShare)) return null
-  return { bullish, shift, typical, ratio, nearShift, nearShare: share, nearStrikes, windowBuckets: w, at: done[i] }
+  if (!nearStrikes.length) return null
+  const shiftOf = (levels) => {
+    const from = sumAt(levels, nearStrikes, start)
+    const to = sumAt(levels, nearStrikes, end)
+    return from > 0 && to != null ? { from, to, pct: ((to - from) / from) * 100 } : null
+  }
+  const ce = shiftOf(ceLevels)
+  const pe = shiftOf(peLevels)
+  const bar = Math.max(0, atmShiftPct)
+  const breakBullish = breakMeaning(b.side.key, b.up) > 0
+  // A side that shifted at least the bar, in the break's direction: CE falling / PE rising is bullish.
+  const candidates = [
+    ce && Math.abs(ce.pct) >= bar && (ce.pct < 0) === breakBullish ? { side: 'CE', ...ce } : null,
+    pe && Math.abs(pe.pct) >= bar && (pe.pct > 0) === breakBullish ? { side: 'PE', ...pe } : null,
+  ].filter(Boolean).sort((x, y) => Math.abs(y.pct) - Math.abs(x.pct))
+  if (!candidates.length) return null
+  const top = candidates[0]
+  return { bullish: breakBullish, side: top.side, pct: top.pct, from: top.from, to: top.to, ce, pe, nearStrikes, windowBuckets: w, at: end }
 }
 
 /** Remembers recent breaks and which directions already signalled, so a signal fires once per window. */
@@ -158,11 +175,13 @@ export function watchHighProbability(watch, newBreaks, ctx, opts = {}) {
 /** The high-probability message. */
 export function highProbabilityText(underlying, b, hp, format, timeOf, bucketMinutes) {
   const span = hp.windowBuckets * bucketMinutes
-  const ratio = Number.isFinite(hp.ratio) ? `${hp.ratio.toFixed(1)}× typical` : 'from a flat day'
+  const pctText = (p) => `${p > 0 ? '+' : ''}${p.toFixed(1)}%`
+  const lakh = (v) => format(v).replace(/^[+−-]/, '')
+  const sideLine = (name, x, rise, fall) => (x ? `${name} OI ${lakh(x.from)} → ${lakh(x.to)} (${pctText(x.pct)}${x.pct > 0 ? ` - ${rise}` : x.pct < 0 ? ` - ${fall}` : ''})` : `${name} OI -`)
   return `HIGH PROBABILITY ${hp.bullish ? 'BULLISH' : 'BEARISH'} · ${underlying} at ${timeOf(hp.at)}\n`
     + `• OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} ${b.levels.map((l) => format(l.value)).join(', ')} at ${timeOf(b.time)} (${b.up ? b.side.up : b.side.down})\n`
-    + `• CE − PE cumulative Δ shifted ${format(hp.shift)} in ${span} min (${ratio})\n`
-    + `• ATM ± 1 (${hp.nearStrikes.join(' / ')}) carried ${format(hp.nearShift)} of it (${Math.round(hp.nearShare * 100)}%)`
+    + `• ATM ± 1 (${hp.nearStrikes.join(' / ')}) in ${span} min: ${hp.side} OI shifted ${pctText(hp.pct)}\n`
+    + `  ${sideLine('CE', hp.ce, 'call writing', 'calls unwinding')} · ${sideLine('PE', hp.pe, 'put writing', 'puts unwinding')}`
 }
 
 // ---- One step for the page and the server ---------------------------------------------------------------------------
@@ -176,18 +195,19 @@ export const IST_OFFSET_SECONDS = 19_800
 export const newOiBreakAlertState = () => ({ breaks: newBreakWatch(), hp: newHighProbabilityWatch() })
 
 /** The breaks and high-probability signals new at `nowSec` (chart seconds - IST-shifted), from the per-strike changes
- *  `ce` / `pe` (strike -> Map(bucket -> change)). `opts`: { windowMinutes, shiftAbovePct }. */
-export function stepOiBreakAlerts(state, { ce, pe, bucketSeconds, nowSec, atmStrike }, opts = {}) {
+ *  `ce` / `pe` (strike -> Map(bucket -> change)) and levels `ceLevels` / `peLevels` (strike -> Map(bucket -> OI)).
+ *  `opts`: { windowMinutes, atmShiftPct }. */
+export function stepOiBreakAlerts(state, { ce, pe, ceLevels, peLevels, bucketSeconds, nowSec, atmStrike }, opts = {}) {
   const totals = buildOiTotalsRows(ce, pe)
   const reads = completedLevelReads(totals, bucketSeconds, nowSec)
   const breaks = watchBreaks(state.breaks, reads, bucketSeconds)
-  const signals = reads ? watchHighProbability(state.hp, breaks, { totals, ce, pe, last: reads.last, atmStrike, bucketSeconds }, opts) : []
+  const signals = reads ? watchHighProbability(state.hp, breaks, { totals, ceLevels, peLevels, last: reads.last, atmStrike, bucketSeconds }, opts) : []
   return { breaks, signals }
 }
 
-/** Each strike's OI change per bucket (chart seconds) from a live series - strike -> [{ t (ms), oi }] (the server
- *  scanner's OI context): a bucket's OI is its last reading, the first bucket has no change (as the page's matrix). */
-export function perStrikeChanges(series, bucketSeconds) {
+/** Each strike's OI level per bucket (chart seconds) - its last reading in the bucket - from a live series
+ *  (strike -> [{ t (ms), oi }]). */
+export function perStrikeLevels(series, bucketSeconds) {
   const out = new Map()
   for (const [strike, points] of series ?? []) {
     const byBucket = new Map()
@@ -196,6 +216,15 @@ export function perStrikeChanges(series, bucketSeconds) {
       const sec = Math.floor(p.t / 1000) + IST_OFFSET_SECONDS
       byBucket.set(Math.floor(sec / bucketSeconds) * bucketSeconds, p.oi)
     }
+    out.set(strike, byBucket)
+  }
+  return out
+}
+
+/** perStrikeChanges from the levels (each bucket's level less the bucket before; the first bucket has none). */
+export function changesFromLevels(levels) {
+  const out = new Map()
+  for (const [strike, byBucket] of levels) {
     const buckets = [...byBucket.keys()].sort((a, b) => a - b)
     const changes = new Map()
     for (let i = 1; i < buckets.length; i++) changes.set(buckets[i], byBucket.get(buckets[i]) - byBucket.get(buckets[i - 1]))
@@ -203,6 +232,10 @@ export function perStrikeChanges(series, bucketSeconds) {
   }
   return out
 }
+
+/** Each strike's OI change per bucket (chart seconds) from a live series - strike -> [{ t (ms), oi }] (the server
+ *  scanner's OI context): a bucket's OI is its last reading, the first bucket has no change (as the page's matrix). */
+export const perStrikeChanges = (series, bucketSeconds) => changesFromLevels(perStrikeLevels(series, bucketSeconds))
 
 /** The Telegram key of a break / signal: `dayKey` = "{UNDERLYING}-{date}". */
 export const breakAlertKey = (underlying, dayKey, bucketMinutes, b) => `oi-break|${underlying}|${dayKey}|${bucketMinutes}|${b.key}`
@@ -221,4 +254,4 @@ export function fmtOiLakh(v) {
 export const chartTimeHHmm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16)
 
 /** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). */
-export const OI_BREAK_ALERT_DEFAULTS = { on: true, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, shiftAbovePct: HIGH_PROBABILITY.shiftAbovePct }
+export const OI_BREAK_ALERT_DEFAULTS = { on: true, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }
