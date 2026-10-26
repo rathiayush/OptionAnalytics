@@ -20,8 +20,9 @@ function cdf(x) {
 }
 const callPrice = (s, k, w) => (s - k) * cdf((s - k) / w) + w * phi((s - k) / w)
 
-// A day minute by minute: spot(m), each leg's time value at the money tv(m), IV iv(m), volume per leg per minute.
-function day({ minutes = 200, spot, tv, iv = () => 12, volume = () => 1000, skip = () => false }) {
+// A day minute by minute: spot(m), each leg's time value at the money tv(m), IV iv(m), volume per leg per minute. By
+// default IV moves with the time value - the fixture's premium moves are the options being sold / bought, not time decay.
+function day({ minutes = 200, spot, tv, iv = (m) => 12 * tv(m) / tv(0), volume = () => 1000, skip = () => false }) {
   const ce = [], pe = [], spots = []
   for (let m = 0; m < minutes; m++) {
     const time = new Date(OPEN + m * MIN).toISOString()
@@ -72,7 +73,8 @@ test('the ATM straddle follows the strike nearest spot each minute; its VWAP is 
   // VWAP = sum(value x (CE + PE volume)) / sum(volume) since the range started.
   const upTo = read.series.filter((p) => p.time <= at('09:45'))
   const vols = upTo.map((p) => 2 * ((p.time - OPEN) / MIN % 2 ? 3000 : 1000))
-  const vwap = upTo.reduce((a, p, i) => a + p.value * vols[i], 0) / vols.reduce((a, b) => a + b, 0)
+  // (of the line read - here the straddle with time decay taken out)
+  const vwap = upTo.reduce((a, p, i) => a + p.read * vols[i], 0) / vols.reduce((a, b) => a + b, 0)
   assert.ok(Math.abs(read.series.find((p) => p.time === at('09:45')).vwap - vwap) < 1e-9)
 
   // No volume known (a live minute): the plain average.
@@ -122,11 +124,41 @@ test('sideways: spot inside, the straddle under its VWAP and the centre straddle
   assert.ok(read.centre.sellerPnl > 0)
   // Too early to read in the first minutes.
   assert.equal(straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('09:30') }).verdict.kind, 'early')
-  // The straddle fading while IV rises: the fall is time decay, said so.
+  // The plain straddle fading while IV rises: the fall is time decay, said so.
   const decay = day({ spot: () => 25000, tv: (m) => 75 - m * 0.08, iv: (m) => 12 + m * 0.05 })
-  const r = straddleRead(decay.ce, decay.pe, decay.spots, { asOfMs: at('11:30') })
+  const r = straddleRead(decay.ce, decay.pe, decay.spots, { asOfMs: at('11:30'), decay: 'raw' })
   assert.equal(r.checks.ivSteady, false)
   assert.match(r.verdict.notes.join(' '), /time decay/)
+  // With time decay taken out (the default) the same day reads as the options being bought - no "sellers".
+  const removed = straddleRead(decay.ce, decay.pe, decay.spots, { asOfMs: at('11:30') })
+  assert.equal(removed.control, 'buyers')
+  assert.notEqual(removed.verdict.kind, 'sideways')
+})
+
+test('time decay alone is not selling: the plain straddle falls all day, the line read stays flat', () => {
+  // Spot steady, IV flat at 12, the straddle losing value minute by minute - only the clock moving.
+  const d = day({ spot: (m) => 25000 + 30 * Math.sin(m / 9), tv: (m) => 75 - m * 0.1, iv: () => 12 })
+  const raw = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('11:30'), decay: 'raw' })
+  assert.equal(raw.control, 'sellers') // what the card used to say every day
+  const read = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('11:30') })
+  assert.ok(read.series.every((p) => p.decayRemoved))
+  assert.ok(read.now.value < read.series[0].value - 10, 'the plain straddle fell')
+  // The line read = the start straddle x spot x IV / (start spot x start IV): flat within the spot's wiggle.
+  for (const p of read.series) assert.ok(Math.abs(p.read - read.range.value * p.spot / read.range.spot) < 1e-9)
+  assert.notEqual(read.control, 'sellers')
+  assert.equal(read.checks.premiumFalling, false)
+  assert.notEqual(read.verdict.kind, 'sideways')
+  // A switch of the ATM strike does not make the line read jump.
+  const switches = read.series.filter((p, i) => i > 0 && p.strike !== read.series[i - 1].strike)
+  assert.ok(switches.length > 0)
+  for (const p of switches) {
+    const prev = read.series[read.series.indexOf(p) - 1]
+    assert.ok(Math.abs(p.read - prev.read) < 1)
+  }
+  // No IV at the range start: the plain straddle is read, said by decayRemoved.
+  const noIv = day({ spot: () => 25000, tv: (m) => 75 - m * 0.1, iv: () => 0 })
+  const plain = straddleRead(noIv.ce, noIv.pe, noIv.spots, { asOfMs: at('11:30') })
+  assert.ok(plain.series.every((p) => !p.decayRemoved && p.read === p.value))
 })
 
 test('drift: premium still falling but spot walking off the centre - not sideways', () => {

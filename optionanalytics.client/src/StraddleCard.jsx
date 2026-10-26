@@ -13,6 +13,7 @@ const { Text } = Typography
 const STRADDLE_COLOR = '#f5a623'
 const VWAP_COLOR = '#4c9ffe'
 const CENTRE_COLOR = '#9aa4b2'
+const RAW_COLOR = '#f5a62366'
 const SPOT_COLOR = '#d9d9d9'
 const NEW_RANGE_COLOR = '#ffd54f'
 const DAY_RANGE_COLOR = '#8c8c8c'
@@ -86,7 +87,7 @@ const HOW_TO_READ = (
     <p style={{ margin: '0 0 6px' }}><b>2. Sideways = all three checks.</b> Spot inside the range; the ATM straddle under its VWAP (premium being sold); the centre straddle (the range&apos;s own strike) below what it was at the start (a seller there is ahead - spot moved less than priced).</p>
     <p style={{ margin: '0 0 6px' }}><b>3. A break.</b> Spot outside the range. The straddle over its VWAP = buyers paying for the move: trend. Still falling under its VWAP = sellers not worried: likely fake. Upside only needs the straddle to stop falling (an index rally lowers IV).</p>
     <p style={{ margin: '0 0 6px' }}><b>4. Re-centre.</b> Only when the market accepts the move - spot still outside after the minutes set. Then a new range starts around the ATM there and the questions start again: sideways at the new level, or the trend going on. A break that comes back first is a failed break - the range stays.</p>
-    <p style={{ margin: 0 }}><b>5. IV.</b> The straddle falls every minute by time decay alone. Falling with IV rising: quiet now, but options are being bought - a break may come.</p>
+    <p style={{ margin: 0 }}><b>5. Time decay.</b> The straddle falls every minute by time decay alone, so read plain it is under its VWAP almost always. With time decay removed (the default) the yellow line moves only with ATM IV and spot: under its VWAP = options really being sold, over it = bought.</p>
   </div>
 )
 
@@ -104,16 +105,20 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
   const [acceptMinutes, setAcceptMinutes] = usePersistedState('optionanalytics.oiReplay.straddleAccept', 10)
   const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
   const [scope, setScope] = usePersistedState('optionanalytics.oiReplay.straddleScope', 'day')
+  const [decay, setDecay] = usePersistedState('optionanalytics.oiReplay.straddleDecay', 'removed')
 
   const read = useMemo(
-    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, acceptMinutes, holdMinutes, scope }),
-    [cePoints, pePoints, spotBars, start, asOfMs, acceptMinutes, holdMinutes, scope],
+    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, acceptMinutes, holdMinutes, scope, decay }),
+    [cePoints, pePoints, spotBars, start, asOfMs, acceptMinutes, holdMinutes, scope, decay],
   )
   const charts = useMemo(() => {
     const s = read.series
     const line = (pick) => s.filter((p) => Number.isFinite(pick(p))).map((p) => ({ time: p.time, value: pick(p) }))
+    // The yellow line is the one read against the VWAP: time decay taken out (default) - the plain straddle stays faint.
+    const removed = decay === 'removed'
     const straddle = [
-      { id: 'straddle', title: 'ATM', color: STRADDLE_COLOR, data: line((p) => p.value) },
+      { id: 'straddle', title: removed ? 'ATM ex-decay' : 'ATM', color: STRADDLE_COLOR, data: line((p) => p.read) },
+      ...(removed ? [{ id: 'raw', title: 'ATM', color: RAW_COLOR, width: 1, data: line((p) => p.value) }] : []),
       { id: 'vwap', title: 'VWAP', color: VWAP_COLOR, width: 1, style: LineStyle.Dashed, data: line((p) => p.vwap) },
       { id: 'centre', title: 'Centre', color: CENTRE_COLOR, width: 1, style: LineStyle.Dotted, data: line((p) => p.centre) },
     ]
@@ -130,7 +135,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
     ]
     const markers = read.ranges.slice(1).map((r) => ({ time: r.time, position: r.reason === 'down' ? 'belowBar' : 'aboveBar', color: NEW_RANGE_COLOR, shape: 'circle', text: `new range ${r.strike}` }))
     return { straddle, spot, markers }
-  }, [read])
+  }, [read, decay])
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
@@ -152,6 +157,12 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>Range</Text>
           <Segmented size="small" value={scope} onChange={setScope} options={[{ value: 'day', label: 'Today' }, { value: 'expiry', label: 'To expiry' }]} />
+        </Space>
+      </Tooltip>
+      <Tooltip title="Every straddle loses value each minute by time decay alone, so the plain line falls all day and sits under its VWAP almost always. Removed: the straddle at the range start moved only by ATM IV and spot since then - it falls when the options are sold and rises when they are bought, and a change of the ATM strike does not make it jump. The plain straddle stays as the faint line.">
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Time decay</Text>
+          <Segmented size="small" value={decay} onChange={setDecay} options={[{ value: 'removed', label: 'Removed' }, { value: 'raw', label: 'In' }]} />
         </Space>
       </Tooltip>
       <Tooltip title="A break is accepted when spot is still outside the range after this long: a new range then starts around the ATM there and is read again. A break that comes back inside first is a failed break - the range stays.">
@@ -190,7 +201,8 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
 
   const { day, range, now, verdict, centre, checks } = read
   const passed = [checks.inside, checks.premiumFalling, checks.centreBelowStart].filter((v) => v === true).length
-  const under = now.value < now.vwap
+  const under = now.read < now.vwap
+  const lineName = now.decayRemoved ? 'ATM straddle ex-decay' : 'ATM straddle'
   const dayBreaks = [read.dayBreaks.up && `broke up ${hhmm(read.dayBreaks.up)}`, read.dayBreaks.down && `broke down ${hhmm(read.dayBreaks.down)}`].filter(Boolean)
   const newRanges = read.ranges.slice(1)
   const checkRow = (ok, text) => (
@@ -208,7 +220,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Sideways check {passed}/3</Text>
           {checkRow(checks.inside, <>Spot {num(now.spot, 0)} inside the range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(range.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(range.upper, 0)}</Text> ({range.strike} ± {num(range.width, 0)} from {hhmm(range.time)}){read.outsideFor ? ` - outside ${read.outsideFor} min` : ''}</>)}
-          {checkRow(checks.premiumFalling, <>ATM straddle <Text style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text> under its VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text>: {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min{checks.premiumFalling == null ? ` (needs ${holdMinutes} min of this range)` : `, ${under ? 'under' : 'over'} now`}</>)}
+          {checkRow(checks.premiumFalling, <>{lineName} <Text style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.read)}</Text> under its VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text>: {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min{checks.premiumFalling == null ? ` (needs ${holdMinutes} min of this range)` : `, ${under ? 'under' : 'over'} now`}</>)}
           {checkRow(checks.centreBelowStart, <>{centre.strike} straddle {num(centre.now)} below its {hhmm(centre.time)} value {num(centre.value)} ({signed(centre.sellerPnl)} for a seller there)</>)}
           {now.iv != null && checkRow(checks.ivSteady, <>ATM IV {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)} in ${holdMinutes} min)` : ''} - not rising</>)}
         </Col>
@@ -232,14 +244,14 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
             </div>
           )}
           <div style={{ fontSize: 12 }}>
-            {hhmm(now.time)} ATM {now.strike} straddle {num(now.value)} · {signed(read.change)} in {holdMinutes} min
+            {hhmm(now.time)} ATM {now.strike} straddle {num(now.value)}{now.decayRemoved ? ` (ex-decay ${num(now.read)})` : ''} · {signed(read.change)} in {holdMinutes} min
           </div>
         </Col>
       </Row>
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>ATM straddle &amp; its VWAP</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · ATM: the nearest strike each minute; VWAP and Centre (the range&apos;s strike) start again with each new range</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · ATM: the nearest strike each minute{decay === 'removed' ? '; yellow: time decay taken out (faint: the plain straddle)' : ''}; VWAP and Centre (the range&apos;s strike) start again with each new range</Text>
           <LinesChart lines={charts.straddle} markers={charts.markers} dayKey={`straddle-${dayKey}-${start}`} height={height} />
         </Col>
         <Col xs={24} lg={12}>
