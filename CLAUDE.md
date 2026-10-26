@@ -70,13 +70,17 @@ When adding or changing a strategy:
   The Order Flow page's live engines already run all three indices' near futures all day (`OrderFlowService`).
 - Every PAST day of the Dhan Data API (intraday spot / futures / option candles, the rolling / expired-option chain - NIFTY,
   BANKNIFTY, SENSEX alike) is kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in
-  docker-compose), ONE FILE PER INSTRUMENT AND DAY (`DhanDayWindow`): any window reads the days kept from disk and asks Dhan
-  for the rest in one call - so a window running into today (the chart backfills) still keeps its past days. A day is kept
+  docker-compose), ONE GZIP JSON FILE PER INSTRUMENT AND DAY (`DhanDayWindow`; gzip only - no CSV): any window reads the
+  days kept from disk and asks Dhan for the rest in one call - so a window running into today (the chart backfills) still keeps its past days. A day is kept
   when it is before today and Dhan sent a full session of it (its own timestamps - a thin option strike's untraded minutes
   come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept) or a later past day
   in the same answer (a holiday is then kept empty, a short session short); today, empty answers and a half LAST day go to
   Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
-  `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). A new Dhan data call for
+  `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
+  and failed writes (`LoadProgress`), and at start the folder is checked writable and on a volume kept across a deploy
+  (`DhanDataCache.CheckFolder`, `StorageVolume` from /proc/self/mountinfo) - logged, and an admin header tag when not
+  ("Dhan cache not writable" / "Dhan cache lost at every deploy"); what it held at start is counted (`CountKept`) and
+  shown as "Dhan cache ✓ N files" (days saved before the start = kept through the restart) or "Dhan cache started empty". A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`). EVERY Dhan REST call goes through `DhanApiClient`'s Polly pipeline (stale-token retry -> chart
   "too many requests" retry, never an order -> rate limiter -> a data call's 20 s timeout from when it is SENT), whose rate
@@ -134,6 +138,11 @@ When adding or changing a strategy:
   over" and now), the centre straddle below its start value; the other reads are drift / premium bought / trend / breakout /
   not confirmed. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live; the read describes the
   day, it is not a measured signal and feeds no strategy.
+- OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
+  out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
+  by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
+  minute, EMA 9). CDV is drawn raw like the dashboard's chart ("Smooth CDV (EMA 9)" checkbox for the Pine look). One fixed
+  day is held to the same numbers on both sides (`CdvParityTests.cs`, `tests/option-flow.test.mjs`) - change one, change both.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

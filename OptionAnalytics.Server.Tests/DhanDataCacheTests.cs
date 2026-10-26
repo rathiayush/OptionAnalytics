@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server;
+using OptionAnalytics.Server.Controllers;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 
@@ -411,6 +412,97 @@ public sealed class DhanDataCacheTests : IDisposable
         var set = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Storage:DhanCacheMaxGb"] = "2.5" }).Build();
         Assert.Equal((long)(2.5 * 1024 * 1024 * 1024), DhanDataCache.MaxBytesOf(set));
         Assert.Contains(Path.Combine("v1", "charts-rollingoption", "days", "2025-09", "15"), Cache().FileOfDay("/charts/rollingoption", new { s = 1 }, PastDay));
+    }
+
+    // ---- Gzip JSON only, and whether the cache works ----
+
+    [Fact]
+    public async Task APastDay_IsKeptAsGzipJson_Only_AndReadBackWithNoDhanCall()
+    {
+        var requests = new List<string>();
+        var load = new OptionAnalytics.Server.Services.LoadProgress("t");
+        IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars;
+        using (OptionAnalytics.Server.Services.LoadProgress.Use(load))
+            (bars, _) = await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+3", "PUT", PastDay, PastDay, 1, CancellationToken.None);
+
+        var file = Assert.Single(Directory.GetFiles(_dir, "*", SearchOption.AllDirectories));
+        Assert.EndsWith(".json.gz", file);
+        Assert.Contains(Path.Combine("v1", "charts-rollingoption", "days", "2025-09", "15"), file);
+        Assert.Equal(1, JsonDocument.Parse(JsonSerializer.Serialize(load.Snapshot(0))).RootElement.GetProperty("savedToDisk").GetInt32());
+
+        var (again, error) = await Rolling(requests, Cache(), session: false).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+3", "PUT", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Null(error);
+        Assert.Single(requests);
+        Assert.Equal(bars, again);
+    }
+
+    [Fact]
+    public void TheDaysKept_AreCountedAtStart_AndSaidToHaveComeThroughTheRestart()
+    {
+        var empty = Cache();
+        Assert.Equal((0L, 0L, (DateTimeOffset?)null), empty.CountKept());
+        var none = SystemController.CacheStatus((true, true), empty.CountKept(), 0, 0, 0, DateTimeOffset.UtcNow);
+        Assert.Equal((0L, (bool?)null), (none.DaysAtStart!.Value, none.SurvivedRestart));        // nothing kept: a first start, or the folder was lost
+
+        var cache = Cache();
+        Assert.True(cache.CheckFolder().Writable);                                                 // its check file is not counted
+        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":[1],"timestamp":[1]}"""));
+        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay.AddDays(1), w => w.WriteRawValue("""{"close":[2],"timestamp":[2]}"""));
+        var savedBefore = new DateTime(2026, 10, 1, 4, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(Directory.GetFiles(_dir, "*.json.gz", SearchOption.AllDirectories)[0], savedBefore);
+
+        // A new server process over the same folder (a restart / deploy on a kept volume) finds both days.
+        var held = Cache().CountKept();
+        Assert.Equal(2, held.Files);
+        Assert.True(held.Bytes > 0);
+        Assert.Equal(savedBefore, held.OldestSavedUtc!.Value.UtcDateTime);
+        var restarted = SystemController.CacheStatus((true, true), held, 0, 0, 0, new DateTimeOffset(savedBefore).AddDays(3));
+        Assert.Equal((2L, (bool?)true), (restarted.DaysAtStart!.Value, restarted.SurvivedRestart));
+        // Every day saved since this start: nothing came through it.
+        Assert.False(SystemController.CacheStatus((true, true), held, 0, 0, 0, new DateTimeOffset(savedBefore).AddSeconds(-30)).SurvivedRestart);
+        // Not counted yet: unknown.
+        Assert.Null(SystemController.CacheStatus((true, true), null, 0, 0, 0, DateTimeOffset.UtcNow).DaysAtStart);
+    }
+
+    [Fact]
+    public void AFolderThatCannotBeWritten_IsSaid_AtStartAndOnEveryLoad()
+    {
+        var notADir = Path.Combine(Path.GetTempPath(), $"not-a-dir-{Guid.NewGuid():N}");
+        File.WriteAllText(notADir, "x");
+        try
+        {
+            var broken = new DhanDataCache(notADir, NullLogger<DhanDataCache>.Instance, () => new DateOnly(2026, 10, 12));
+            Assert.False(broken.CheckFolder().Writable);
+            var load = new OptionAnalytics.Server.Services.LoadProgress("t");
+            using (OptionAnalytics.Server.Services.LoadProgress.Use(load))
+                broken.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":[1],"timestamp":[1]}"""));
+            Assert.Equal(1, broken.WriteErrors);
+            var snapshot = JsonDocument.Parse(JsonSerializer.Serialize(load.Snapshot(0))).RootElement;
+            Assert.Equal((1, 0), (snapshot.GetProperty("diskErrors").GetInt32(), snapshot.GetProperty("savedToDisk").GetInt32()));
+
+            var good = Cache();
+            Assert.True(good.CheckFolder().Writable);
+            var ok = new OptionAnalytics.Server.Services.LoadProgress("u");
+            using (OptionAnalytics.Server.Services.LoadProgress.Use(ok))
+                good.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":[1],"timestamp":[1]}"""));
+            Assert.Equal(1, JsonDocument.Parse(JsonSerializer.Serialize(ok.Snapshot(0))).RootElement.GetProperty("savedToDisk").GetInt32());
+        }
+        finally { File.Delete(notADir); }
+    }
+
+    private const string Overlay = "1061 1004 0:51 / / rw,relatime master:540 - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/ABC\n" +
+                                   "1062 1061 0:54 / /proc rw,nosuid - proc proc rw\n";
+    private const string NamedVolume = "1080 1061 8:1 /var/lib/docker/volumes/optionanalytics_optionanalytics-data/_data /app/data rw,relatime - ext4 /dev/sda1 rw\n";
+
+    [Fact]
+    public void TheCacheFolder_IsKeptAcrossADeploy_OnlyOnAMountedVolume()
+    {
+        Assert.False(StorageVolume.IsPersistent("/app/data/dhan-cache", Overlay), "the container's own file system - gone at a deploy");
+        Assert.True(StorageVolume.IsPersistent("/app/data/dhan-cache", Overlay + NamedVolume), "a named volume at /app/data");
+        Assert.False(StorageVolume.IsPersistent("/app/database/dhan-cache", Overlay + NamedVolume), "beside the volume, not on it");
+        Assert.False(StorageVolume.IsPersistent("/app/data/x", Overlay + NamedVolume + "1090 1080 0:60 / /app/data/x rw - tmpfs tmpfs rw\n"), "memory");
+        Assert.True(StorageVolume.IsPersistent("/srv/my data/cache", "1 0 8:1 / / rw - overlay o rw\n2 1 8:2 / /srv/my\\040data rw - xfs /dev/sdb rw\n"));
+        Assert.Null(StorageVolume.IsPersistent("/app/data", ""));
     }
 
     /// <summary>The (from, to) days a recorded request asked Dhan for.</summary>

@@ -18,7 +18,7 @@ public sealed class LoadProgress
     private readonly object _lock = new();
     private readonly List<Entry> _entries = new();
     private readonly System.Diagnostics.Stopwatch _clock = System.Diagnostics.Stopwatch.StartNew();
-    private int _total, _done, _failed, _fromDisk, _dhanCalls, _rateLimited, _retries;
+    private int _total, _done, _failed, _fromDisk, _dhanCalls, _rateLimited, _retries, _savedToDisk, _diskErrors;
     // Every entry ever added - the page's cursor (the oldest drop off the front past MaxEntries).
     private int _added;
     private string _stage = "starting";
@@ -61,6 +61,10 @@ public sealed class LoadProgress
     public static void Recovered() { if (Current is { } p) lock (p._lock) p._failed = Math.Max(0, p._failed - 1); }
     public static void FromDisk() { if (Current is { } p) lock (p._lock) p._fromDisk++; }
     public static void DhanCall() { if (Current is { } p) lock (p._lock) p._dhanCalls++; }
+    /// <summary>A past day Dhan sent was written to the disk cache (DhanDataCache) - the next load reads it from there.</summary>
+    public static void SavedToDisk() { if (Current is { } p) lock (p._lock) p._savedToDisk++; }
+    /// <summary>A past day could not be written to the disk cache - it will be asked of Dhan again next time.</summary>
+    public static void DiskError(string text) { if (Current is { } p) { lock (p._lock) p._diskErrors++; p.Add("error", text); } }
     public static void RateLimited() { if (Current is { } p) lock (p._lock) p._rateLimited++; }
     public static void Retry() { if (Current is { } p) lock (p._lock) p._retries++; }
 
@@ -103,6 +107,8 @@ public sealed class LoadProgress
                 failed = _failed,
                 fromDisk = _fromDisk,
                 dhanCalls = _dhanCalls,
+                savedToDisk = _savedToDisk,
+                diskErrors = _diskErrors,
                 rateLimited = _rateLimited,
                 retries = _retries,
                 next = _added,

@@ -99,7 +99,27 @@ public sealed class SystemController : ControllerBase
         DateTimeOffset? LoginKeysCreatedUtc,
         bool? LoginsSurviveRestart,
         int SubscribedInstruments,
-        IReadOnlyList<TickConsumerStats> Feed);
+        IReadOnlyList<TickConsumerStats> Feed,
+        DhanCacheStatus? DhanCache = null);
+
+    /// <summary>The Dhan disk cache's folder (DhanDataCache): whether it can be written and is on a volume kept across a deploy
+    /// (StorageVolume - null when it cannot be told) - checked once at start (Program.cs); with the days read from / written
+    /// to it and the writes refused since; and what it held when the server started (null until counted): the days kept, their
+    /// size, when the oldest was saved and so whether they came through the restart. No path - this goes to every signed-in page.</summary>
+    public sealed record DhanCacheStatus(bool Writable, bool? KeptAcrossDeploys, long ReadsFromDisk, long SavedToDisk, long WriteErrors,
+        long? DaysAtStart = null, long? BytesAtStart = null, DateTimeOffset? OldestSavedUtc = null, bool? SurvivedRestart = null);
+
+    /// <summary>What the folder held at start (DhanDataCache.CountKept) - counted in the background after start; null until then.</summary>
+    public static (long Files, long Bytes, DateTimeOffset? OldestSavedUtc)? DhanCacheKeptAtStart { get; set; }
+
+    /// <summary>True when the cache holds a day saved before this server started - it came through the restart; false when
+    /// every day was saved since (a first start, or a deploy that lost the folder); null when it holds nothing. A minute of
+    /// slack covers the clock around the start.</summary>
+    internal static bool? CacheSurvivedRestart(DateTimeOffset? oldestSavedUtc, DateTimeOffset processStartedUtc) =>
+        oldestSavedUtc is null ? null : oldestSavedUtc < processStartedUtc - TimeSpan.FromMinutes(1);
+
+    /// <summary>Set once at start (Program.cs).</summary>
+    public static (bool Writable, bool? KeptAcrossDeploys)? DhanCacheFolder { get; set; }
 
     [HttpGet("info")]
     public SystemInfo Info()
@@ -117,9 +137,18 @@ public sealed class SystemController : ControllerBase
         {
             // Diagnostics only - an unreadable key ring just means "unknown" here.
         }
+        var cache = HttpContext?.RequestServices.GetService<DhanDataCache>();
+        var folder = DhanCacheFolder;
         return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc),
-            _feedClient.SubscribedCount, _feedClient.GetConsumerStats());
+            _feedClient.SubscribedCount, _feedClient.GetConsumerStats(),
+            cache is null || folder is null ? null : CacheStatus(folder.Value, DhanCacheKeptAtStart, cache.Hits, cache.Writes, cache.WriteErrors, StartedUtc));
     }
+
+    internal static DhanCacheStatus CacheStatus((bool Writable, bool? KeptAcrossDeploys) folder, (long Files, long Bytes, DateTimeOffset? OldestSavedUtc)? kept,
+        long reads, long writes, long writeErrors, DateTimeOffset processStartedUtc) =>
+        new(folder.Writable, folder.KeptAcrossDeploys, reads, writes, writeErrors,
+            kept?.Files, kept?.Bytes, kept?.OldestSavedUtc,
+            kept is { } c ? CacheSurvivedRestart(c.OldestSavedUtc, processStartedUtc) : null);
 
     /// <summary>True when the key ring predates this process (it was loaded from storage, so logins
     /// issued before the restart still work); false when it was generated after the process started;

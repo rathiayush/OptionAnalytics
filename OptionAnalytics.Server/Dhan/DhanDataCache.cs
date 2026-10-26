@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Dhan;
 
@@ -21,9 +22,12 @@ namespace OptionAnalytics.Server.Dhan;
 /// again; a disk problem is logged and never fails the call.
 ///
 /// The folder is held to Storage:DhanCacheMaxGb (default 10 GB): once over it, the files read least recently go first,
-/// down to 90% of it. Files: {dir}/v1/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz, the hash of the endpoint, the
+/// down to 90% of it. Gzip JSON only. Files: {dir}/v1/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz, the hash of the endpoint, the
 /// request without its dates and the day (a folder a day - a full cache is some hundred thousand files). The older whole-window files ({dir}/v1/{kind}/{yyyy-MM}/{last day}-{hash}.json.gz)
 /// are still read for the very request they hold, and split into days as they are.
+///
+/// Whether it works is shown: each day written counts as "saved to disk" on OI Replay's load panel and a write the disk
+/// refuses as "disk write failed" (LoadProgress); CheckFolder tells at start whether the folder can be written at all.
 /// </summary>
 public sealed class DhanDataCache
 {
@@ -37,6 +41,7 @@ public sealed class DhanDataCache
     private readonly long _maxBytes;
     private long _hits;
     private long _writes;
+    private long _writeErrors;
     /// <summary>The folder's size as last counted plus what was written since; -1 until the first count.</summary>
     private long _bytes = -1;
     private int _trimming;
@@ -71,6 +76,46 @@ public sealed class DhanDataCache
     /// <summary>Calls answered from disk / responses written since the start.</summary>
     public long Hits => Interlocked.Read(ref _hits);
     public long Writes => Interlocked.Read(ref _writes);
+    /// <summary>Writes the disk refused since the start (a folder not writable - see CheckFolder).</summary>
+    public long WriteErrors => Interlocked.Read(ref _writeErrors);
+
+    /// <summary>Whether the cache folder can be written: creates it and writes / deletes a small file. The error when not.</summary>
+    public (bool Writable, string? Error) CheckFolder()
+    {
+        var probe = Path.Combine(_dir, $".write-check-{Guid.NewGuid():N}");
+        try
+        {
+            System.IO.Directory.CreateDirectory(_dir);
+            File.WriteAllText(probe, "ok");
+            File.Delete(probe);
+            return (true, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    /// <summary>What the folder holds: the kept files (days), their size, and when the oldest was saved - kept from before the
+    /// server started means it survived the restart (SystemController.CacheSurvivedRestart). Counted once at start.</summary>
+    public (long Files, long Bytes, DateTimeOffset? OldestSavedUtc) CountKept()
+    {
+        long files = 0, bytes = 0;
+        DateTime? oldest = null;
+        if (!System.IO.Directory.Exists(_dir)) return (0, 0, null);
+        foreach (var path in System.IO.Directory.EnumerateFiles(_dir, "*.json.gz", SearchOption.AllDirectories))
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                files++;
+                bytes += info.Length;
+                if (oldest is null || info.LastWriteTimeUtc < oldest) oldest = info.LastWriteTimeUtc;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return (files, bytes, oldest is { } o ? new DateTimeOffset(DateTime.SpecifyKind(o, DateTimeKind.Utc)) : null);
+    }
 
     /// <summary>Whether a window ending on <paramref name="lastDay"/> (IST) has closed - only those are kept.</summary>
     public bool Cacheable(DateOnly lastDay) => lastDay < _today();
@@ -184,11 +229,14 @@ public sealed class DhanDataCache
             var added = new FileInfo(tmp).Length - (File.Exists(path) ? new FileInfo(path).Length : 0);
             File.Move(tmp, path, overwrite: true);
             Interlocked.Increment(ref _writes);
+            LoadProgress.SavedToDisk();
             Grew(added);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            Interlocked.Increment(ref _writeErrors);
             _logger.LogWarning("Dhan response for {Endpoint} not cached ({Error}).", endpoint, ex.Message);
+            LoadProgress.DiskError($"Could not save to the disk cache ({ex.Message}) - this day will be asked of Dhan again next time.");
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
     }

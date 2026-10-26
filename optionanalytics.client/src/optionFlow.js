@@ -10,11 +10,15 @@
 //    times the weight, summed across the side's strikes and run from the day's zero;
 //  - OBV: per strike, a running sum of sign(close - previous close) x volume x weight; the strikes' running totals
 //    summed at each minute (a strike with no bar that minute keeps its last total), the day rebased to its first
-//    minute, then EMA(9)-smoothed (GetObvSeries).
+//    minute, then EMA(9)-smoothed (GetObvSeries). Its weight is the dashboard's too: ONE spot for every bar - the latest
+//    known one (CdvUnderlyingState.LastSpot), here the spot at the replay clock - so as the clock moves the whole line is
+//    re-weighted, as the dashboard's is when the spot moves. (CDV weights each minute by that minute's spot, as the
+//    dashboard's CDV does.)
 //
-// Every point uses only bars up to its own minute, so cutting the series at the replay clock never shows anything
-// that had not happened yet. Live, the same works on today's bars plus each live minute (its volume from the rise of
-// Dhan's cumulative day volume within the minute), recomputed as the ticks arrive.
+// Asked as of the replay clock (`asOfMs`), only bars up to that minute and the spot known then are used - nothing that
+// had not happened yet. Live, the same works on today's bars plus each live minute (its volume from the rise of Dhan's
+// cumulative day volume within the minute), recomputed as the ticks arrive. Today, live, the page shows the dashboard's
+// own series instead (dashboardFlow.js).
 
 const SMOOTH_LEN = 9
 
@@ -104,8 +108,8 @@ function spotLookup(spotBars) {
   }
 }
 
-function sideFlow(points, spotAt, isCall) {
-  const all = bars(points).sort((a, b) => a.t - b.t || a.strike - b.strike)
+function sideFlow(points, spotAt, isCall, clock, obvSpot) {
+  const all = bars(points).filter((b) => clock == null || b.t <= clock).sort((a, b) => a.t - b.t || a.strike - b.strike)
   // CDV: increments per minute, run from zero.
   const cdvByMinute = new Map()
   // OBV: each strike's running total, carried at every minute of the side's timeline.
@@ -115,8 +119,9 @@ function sideFlow(points, spotAt, isCall) {
     const w = spot ? deltaWeight(b.strike, spot, isCall) : 0
     cdvByMinute.set(b.t, (cdvByMinute.get(b.t) ?? 0) + barProxyDelta(b) * w)
     let s = byStrike.get(b.strike)
-    if (!s) byStrike.set(b.strike, s = { prevClose: null, running: 0, byMinute: new Map() })
-    if (s.prevClose != null) s.running += Math.sign(b.close - s.prevClose) * b.volume * w
+    // OBV: the strike's weight at the one latest spot (1 with none - as the server).
+    if (!s) byStrike.set(b.strike, s = { prevClose: null, running: 0, byMinute: new Map(), w: obvSpot ? deltaWeight(b.strike, obvSpot, isCall) : 1 })
+    if (s.prevClose != null) s.running += Math.sign(b.close - s.prevClose) * b.volume * s.w
     s.prevClose = b.close
     s.byMinute.set(b.t, s.running)
   }
@@ -141,10 +146,13 @@ function sideFlow(points, spotAt, isCall) {
 }
 
 /** The day's option CDV and OBV, CE and PE: `{ ceCdv, peCdv, ceObv, peObv }`, each `[{ time (ms), value }]` one per
- *  minute that side had a bar. */
-export function optionFlowSeries(cePoints, pePoints, spotBars) {
+ *  minute that side had a bar - as of `asOfMs` (the replay clock: its minute's bars and the ones before, the spot known
+ *  then); null = every bar given. */
+export function optionFlowSeries(cePoints, pePoints, spotBars, asOfMs = null) {
   const spotAt = spotLookup(spotBars)
-  const ce = sideFlow(cePoints, spotAt, true)
-  const pe = sideFlow(pePoints, spotAt, false)
+  const clock = asOfMs == null ? null : minuteOf(asOfMs)
+  const obvSpot = spotAt(clock ?? Infinity)
+  const ce = sideFlow(cePoints, spotAt, true, clock, obvSpot)
+  const pe = sideFlow(pePoints, spotAt, false, clock, obvSpot)
   return { ceCdv: ce.cdv, peCdv: pe.cdv, ceObv: ce.obv, peObv: pe.obv }
 }

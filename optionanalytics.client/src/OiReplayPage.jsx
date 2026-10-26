@@ -5563,6 +5563,7 @@ export default function OiReplayPage() {
               <details style={{ margin: '4px 0 8px' }}>
                 <summary style={{ cursor: 'pointer', fontSize: 12 }}>
                   Last load: {loadProgress.error ? 'failed' : 'done'} in {loadProgress.elapsedSeconds}s · {loadProgress.dhanCalls} Dhan calls · {loadProgress.fromDisk} from disk
+                  {loadProgress.savedToDisk > 0 ? ` · ${loadProgress.savedToDisk} days saved to disk` : ''}{loadProgress.diskErrors > 0 ? ` · ${loadProgress.diskErrors} disk writes failed` : ''}
                   {loadProgress.rateLimited > 0 ? ` · ${loadProgress.rateLimited} rate-limited` : ''}{loadProgress.failed > 0 ? ` · ${loadProgress.failed} failed` : ''}
                 </summary>
                 <div style={{ marginTop: 6 }}><LoadProgressPanel progress={loadProgress} height={260} /></div>
@@ -5981,7 +5982,7 @@ export default function OiReplayPage() {
                     size="small"
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±{flowBand}, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}
                     extra={(
-                      <Tooltip title="Chart timeframe: one point per step (its last value); CDV's EMA 9 runs over these steps, as the Pine indicator does on that chart timeframe">
+                      <Tooltip title="Chart timeframe: one point per step (its last value), as the dashboard's charts">
                         <Segmented size="small" value={flowTimeframe} onChange={setFlowTimeframe} options={FLOW_TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
                       </Tooltip>
                     )}
