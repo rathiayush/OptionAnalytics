@@ -131,6 +131,13 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:21 by default, "From") the range
+  the options priced (the ATM strike ± its straddle). The range moves ONLY when a break is accepted - spot still outside
+  after "New range after" minutes - to a new range around the ATM there (VWAP and the centre straddle start again); a break
+  that comes back first is a failed break. Sideways = all three: spot inside, the ATM straddle under its VWAP (80% of "Read
+  over" and now), the centre straddle below its start value; the other reads are drift / premium bought / trend / breakout /
+  not confirmed. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live; the read describes the
+  day, it is not a measured signal and feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

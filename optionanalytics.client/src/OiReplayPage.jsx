@@ -31,6 +31,7 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
+import { StraddleCard } from './StraddleCard.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -716,6 +717,7 @@ const SECTION_OPTIONS = [
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'optionFlow', label: 'Option CDV / OBV' },
+  { value: 'straddle', label: 'ATM straddle' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -727,7 +729,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -5989,6 +5991,27 @@ export default function OiReplayPage() {
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
                       endTime={isLive && dashboardFlow ? null : replayEndTime} dayKey={`${underlying}-${result.date}`}
                       dashboardFlow={dashboardFlow} sourceNote={flowSourceNote} timeframe={flowTimeframe}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+              </LiveSection>
+            )}
+
+            {/* The ATM straddle from a set time (09:21 by default): the range the options priced (re-centred only when a
+                break is accepted), the sideways check and the read - up to the replay clock, today live (straddle.js). */}
+            {visibleSections.includes('straddle') && (
+              <LiveSection version={sectionVersion}>
+              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('straddle')}>
+                <Col span={24}>
+                  <Card
+                    size="small"
+                    title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (call + put at the strike nearest spot){isLive ? ' · live' : ''}</Space>}
+                  >
+                    <StraddleCard
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
+                      asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
+                      dayKey={`${underlying}-${result.date}`}
                     />
                   </Card>
                 </Col>

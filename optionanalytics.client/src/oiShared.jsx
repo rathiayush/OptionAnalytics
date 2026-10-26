@@ -83,7 +83,12 @@ export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
     const chart = chartRef.current
     const previousLength = prevLengthRef.current
     prevLengthRef.current = dataLength
-    if (!chart || dataLength === 0 || dataLength <= previousLength) return
+    if (!chart || dataLength === 0 || dataLength === previousLength) return
+    // Fewer points: the replay was taken back - fit what is left, or the view stays on the later, now empty stretch.
+    if (dataLength < previousLength) {
+      if (!userControlRef.current) fitWholeDay(chart)
+      return
+    }
     // Once the viewer has dragged or zoomed, the view is exactly where they put it - no following
     // the newest bar either, even if it is still on screen (that used to scroll a chart the viewer
     // had nudged left back to the right on every new candle). Double-click hands it back.
