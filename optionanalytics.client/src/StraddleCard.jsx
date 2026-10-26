@@ -82,7 +82,7 @@ function LinesChart({ lines, markers = [], dayKey, height }) {
 // How to read the card - the method in straddle.js, in the order a trader reads it.
 const HOW_TO_READ = (
   <div style={{ maxWidth: 420, fontSize: 12 }}>
-    <p style={{ margin: '0 0 6px' }}><b>1. The range.</b> At the start time the ATM straddle is what the market charges for the move: strike ± straddle is the range it priced. It stays put while spot moves inside it - its edges are the levels to fade.</p>
+    <p style={{ margin: '0 0 6px' }}><b>1. The range.</b> At the start time the ATM straddle is what the market charges for the move to expiry. Today&apos;s share of it (the straddle at the ATM IV over the hours left) around the strike is the range priced for this session; &quot;To expiry&quot; shows the straddle&apos;s full breakevens. It stays put while spot moves inside it - its edges are the levels to fade.</p>
     <p style={{ margin: '0 0 6px' }}><b>2. Sideways = all three checks.</b> Spot inside the range; the ATM straddle under its VWAP (premium being sold); the centre straddle (the range&apos;s own strike) below what it was at the start (a seller there is ahead - spot moved less than priced).</p>
     <p style={{ margin: '0 0 6px' }}><b>3. A break.</b> Spot outside the range. The straddle over its VWAP = buyers paying for the move: trend. Still falling under its VWAP = sellers not worried: likely fake. Upside only needs the straddle to stop falling (an index rally lowers IV).</p>
     <p style={{ margin: '0 0 6px' }}><b>4. Re-centre.</b> Only when the market accepts the move - spot still outside after the minutes set. Then a new range starts around the ATM there and the questions start again: sideways at the new level, or the trend going on. A break that comes back first is a failed break - the range stays.</p>
@@ -103,10 +103,11 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
   const [start, setStart] = usePersistedState('optionanalytics.oiReplay.straddleStart', STRADDLE_START_DEFAULT)
   const [acceptMinutes, setAcceptMinutes] = usePersistedState('optionanalytics.oiReplay.straddleAccept', 10)
   const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
+  const [scope, setScope] = usePersistedState('optionanalytics.oiReplay.straddleScope', 'day')
 
   const read = useMemo(
-    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, acceptMinutes, holdMinutes }),
-    [cePoints, pePoints, spotBars, start, asOfMs, acceptMinutes, holdMinutes],
+    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, acceptMinutes, holdMinutes, scope }),
+    [cePoints, pePoints, spotBars, start, asOfMs, acceptMinutes, holdMinutes, scope],
   )
   const charts = useMemo(() => {
     const s = read.series
@@ -145,6 +146,12 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
               disabledMinutes: (h) => Array.from({ length: 60 }, (_, m) => m).filter((m) => (h === 9 && m < 15) || (h === 15 && m > 29)),
             })}
           />
+        </Space>
+      </Tooltip>
+      <Tooltip title="Today: the part of the straddle's move left for this session (the straddle at the ATM IV over the minutes left to 15:30) - the straddle itself prices the move to expiry, often days away. To expiry: the straddle's own breakevens (strike ± straddle).">
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Range</Text>
+          <Segmented size="small" value={scope} onChange={setScope} options={[{ value: 'day', label: 'Today' }, { value: 'expiry', label: 'To expiry' }]} />
         </Space>
       </Tooltip>
       <Tooltip title="A break is accepted when spot is still outside the range after this long: a new range then starts around the ATM there and is read again. A break that comes back inside first is a failed break - the range stays.">
@@ -200,7 +207,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
       <Row gutter={[16, 8]} style={{ marginBottom: 8 }}>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Sideways check {passed}/3</Text>
-          {checkRow(checks.inside, <>Spot {num(now.spot, 0)} inside the range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(range.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(range.upper, 0)}</Text> ({range.strike} ± {num(range.value, 0)} from {hhmm(range.time)}){read.outsideFor ? ` - outside ${read.outsideFor} min` : ''}</>)}
+          {checkRow(checks.inside, <>Spot {num(now.spot, 0)} inside the range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(range.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(range.upper, 0)}</Text> ({range.strike} ± {num(range.width, 0)} from {hhmm(range.time)}){read.outsideFor ? ` - outside ${read.outsideFor} min` : ''}</>)}
           {checkRow(checks.premiumFalling, <>ATM straddle <Text style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text> under its VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text>: {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min{checks.premiumFalling == null ? ` (needs ${holdMinutes} min of this range)` : `, ${under ? 'under' : 'over'} now`}</>)}
           {checkRow(checks.centreBelowStart, <>{centre.strike} straddle {num(centre.now)} below its {hhmm(centre.time)} value {num(centre.value)} ({signed(centre.sellerPnl)} for a seller there)</>)}
           {now.iv != null && checkRow(checks.ivSteady, <>ATM IV {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)} in ${holdMinutes} min)` : ''} - not rising</>)}
@@ -208,13 +215,15 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>The day</Text>
           <div style={{ fontSize: 12 }}>
-            {hhmm(day.time)} ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> ({num(day.pct, 2)}% of spot) → priced {num(day.lower, 0)} – {num(day.upper, 0)}
+            {hhmm(day.time)} ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> (to expiry)
+            {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text> (IV {num(day.iv)})</> : ''}
+            {' '}→ range {num(day.lower, 0)} – {num(day.upper, 0)} ({num(day.pct, 2)}% of spot)
             {dayBreaks.length ? ` · ${dayBreaks.join(' · ')}` : ' · spot inside it so far'}
           </div>
           {newRanges.length > 0 && (
             <div style={{ fontSize: 12 }}>
               New range{newRanges.length > 1 ? 's' : ''} (break accepted):{' '}
-              {newRanges.map((r) => `${hhmm(r.time)} ${r.reason === 'up' ? '↑' : '↓'} ${r.strike} ± ${num(r.value, 0)}`).join(' · ')}
+              {newRanges.map((r) => `${hhmm(r.time)} ${r.reason === 'up' ? '↑' : '↓'} ${r.strike} ± ${num(r.width, 0)}`).join(' · ')}
             </div>
           )}
           {range.breaks.filter((b) => b.to != null).length > 0 && (
@@ -236,7 +245,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Spot vs the range</Text>
           <Text type="secondary" style={{ fontSize: 11 }}> · the range moves only when a break is accepted{newRanges.length ? `; dashed: the ${hhmm(day.time)} range` : ''}</Text>
-          <LinesChart lines={charts.spot} dayKey={`straddle-spot-${dayKey}-${start}`} height={height} />
+          <LinesChart lines={charts.spot} dayKey={`straddle-spot-${dayKey}-${start}-${scope}`} height={height} />
         </Col>
       </Row>
     </>

@@ -1,8 +1,11 @@
 // The ATM straddle (the call + the put at the strike nearest spot) read through the day from a set time - 09:21 by
 // default, after the opening minutes settle. The straddle is what the option market charges for the move, so:
 //
-//  - a RANGE is the straddle's strike ± its value at the moment the range starts (a short straddle's breakevens) - the
-//    move the market priced from there. The first range starts at the start time;
+//  - a RANGE is the straddle's strike ± the move the market priced from there. The straddle itself prices the move to
+//    EXPIRY (a short straddle's breakevens) - days away on most days, far wider than one session. So by default
+//    (`scope: 'day'`) the range is the part of it left for TODAY: the straddle at the ATM IV over the minutes left to
+//    15:30 - 0.8 x spot x IV x sqrt(minutes left / (252 x 375)) (a straddle is worth 0.8 sigma), never more than the
+//    straddle. `scope: 'expiry'` (or no IV) keeps the straddle's own breakevens. The first range starts at the start time;
 //  - spot closing outside the range is a BREAK. A break the market accepts - spot still outside after `acceptMinutes`
 //    (0 = never) - starts a NEW RANGE around the ATM at that minute: the move is done, the question is asked again from
 //    the new level (sideways there, or the trend going on). A break that comes back inside first is a FAILED break and
@@ -93,6 +96,15 @@ function straddleAt(ce, pe, strike, t) {
   }
 }
 
+// The straddle's worth of move left for today: 0.8 sigma (a straddle's value) at the ATM IV (% a year, 252 trading days
+// of 375 minutes) over the minutes left to the close. Null without an IV.
+const ANNUAL_MINUTES = 252 * 375
+function dayMove(spot, iv, msLeft) {
+  if (!(iv > 0) || !(spot > 0)) return null
+  const vol = iv < 3 ? iv : iv / 100   // a fraction or a percent
+  return Math.sqrt(2 / Math.PI) * spot * vol * Math.sqrt(Math.max(msLeft / MIN, 1) / ANNUAL_MINUTES)
+}
+
 /** HH:mm in IST. */
 export const istHhmm = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16)
 const pts = (v) => (Number.isFinite(v) ? v.toFixed(0) : '-')
@@ -106,7 +118,7 @@ const pts = (v) => (Number.isFinite(v) ? v.toFixed(0) : '-')
  * fields are null until there is a straddle to read.
  */
 export function straddleRead(cePoints, pePoints, spotBars, {
-  start = STRADDLE_START_DEFAULT, asOfMs = null, acceptMinutes = 10, holdMinutes = 15,
+  start = STRADDLE_START_DEFAULT, asOfMs = null, acceptMinutes = 10, holdMinutes = 15, scope = 'day',
 } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
@@ -122,6 +134,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const pe = legs(pePoints)
   const strikes = [...ce.keys()].filter((k) => pe.has(k)).sort((a, b) => a - b)
   const byDistance = (spot) => strikes.slice().sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot) || a - b)
+  const closeMs = istClockOn(spots[0].t, '15:30')
 
   const series = []
   const ranges = []
@@ -150,7 +163,9 @@ export function straddleRead(cePoints, pePoints, spotBars, {
       }
     }
     if (!range) {
-      range = { time: t, strike: atm.strike, value: atm.value, spot, iv: atm.iv, lower: atm.strike - atm.value, upper: atm.strike + atm.value, reason, breaks: [] }
+      const today = scope === 'day' ? dayMove(spot, atm.iv, closeMs - t) : null
+      const width = today != null ? Math.min(today, atm.value) : atm.value
+      range = { time: t, strike: atm.strike, value: atm.value, width, today, spot, iv: atm.iv, lower: atm.strike - width, upper: atm.strike + width, reason, breaks: [] }
       ranges.push(range)
       priceVolume = 0; volume = 0; sum = 0; count = 0
     }
@@ -164,7 +179,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   if (!series.length) return { ...empty, startMs }
 
   const first = ranges[0]
-  const day = { ...first, pct: (first.value / first.spot) * 100 }
+  const day = { ...first, pct: (first.width / first.spot) * 100 }
   const dayBreaks = { up: series.find((p) => p.spot > day.upper)?.time ?? null, down: series.find((p) => p.spot < day.lower)?.time ?? null }
   const current = ranges.at(-1)
   const now = series.at(-1)
