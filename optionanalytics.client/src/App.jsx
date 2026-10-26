@@ -233,11 +233,13 @@ function appendClosedBar(series, bar) {
 // Tracks one live stream's forming bar and returns the PREVIOUS one the moment a new minute starts
 // (i.e. the bar that just closed), or null. `key` identifies what the bars belong to (a strike) - a
 // change of key drops the tracked bar instead of handing a different contract's bar back as "closed".
+// No bar at all ends the previous one too: after the 15:30 close the spot feed sends the index with no
+// forming bar (market hours only), and the 15:29 bar must stay on the chart.
 function takeClosedBar(tracker, key, bar) {
   const previous = tracker.key === key ? tracker.bar : null
   tracker.key = key
   tracker.bar = bar ?? null
-  return previous && bar && previous.time !== bar.time ? previous : null
+  return previous && (!bar || previous.time !== bar.time) ? previous : null
 }
 
 // One strike's live-forming premium bar out of a CDV snapshot - any tracked strike (strikeBars),

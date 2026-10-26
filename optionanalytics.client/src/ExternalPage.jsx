@@ -8,6 +8,7 @@ import {
 } from './OiReplayPage.jsx'
 import { applyOrderFlowPush, orderFlowFromSnapshot } from './liveFeeds.js'
 import { autoBigLots } from './orderFlowMath.js'
+import { inMarketSession } from './marketSession.js'
 import { DOWN_COLOR, TIMEFRAME_OPTIONS, UP_COLOR, fromChartTime, toBar, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -164,6 +165,8 @@ export default function ExternalPage() {
   const [liveSpot, setLiveSpot] = useState({ u: null, bars: [], vwap: [] })
   const handleSpotUpdate = (snapshot) => {
     if (snapshot?.underlying !== uRef.current || !snapshot?.currentBar) return
+    // Market hours only (marketSession.js): no spot candle or VWAP point after the 15:30 close or before 09:15.
+    if (!inMarketSession(snapshot.currentBar.time)) return
     const owner = uRef.current
     const bar = toBar(snapshot.currentBar)
     const vwapPoint = snapshot.vwap != null ? { time: toChartTime(snapshot.currentBar.time), value: snapshot.vwap } : null
@@ -226,14 +229,14 @@ export default function ExternalPage() {
   const tf = TIMEFRAME_OPTIONS.some((o) => o.value === timeframe) ? timeframe : 5
   const spotChart = useMemo(() => {
     if (!oi.data) return null
-    const base = (oi.data.spotCandlesOneMinute ?? []).map(toBar)
+    const base = (oi.data.spotCandlesOneMinute ?? []).filter((c) => inMarketSession(c.time)).map(toBar)
     const liveBars = showsToday && liveSpot.u === u ? liveSpot.bars : []
     const oneMinBars = base.slice()
     for (const bar of liveBars) {
       if (oneMinBars.length && oneMinBars[oneMinBars.length - 1].time === bar.time) oneMinBars[oneMinBars.length - 1] = bar
       else if (!oneMinBars.length || bar.time > oneMinBars[oneMinBars.length - 1].time) oneMinBars.push(bar)
     }
-    const vwap = (oi.data.spotVwap ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))
+    const vwap = (oi.data.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv }))
     for (const p of showsToday && liveSpot.u === u ? liveSpot.vwap : []) {
       if (vwap.length && vwap[vwap.length - 1].time === p.time) vwap[vwap.length - 1] = p
       else if (!vwap.length || p.time > vwap[vwap.length - 1].time) vwap.push(p)

@@ -115,11 +115,16 @@ public sealed class SpotUnderlyingState
     }
 
     /// <summary>Folds one tick into the currently-forming 1-minute bar, closing the previous bar
-    /// when the tick lands in a new minute. Returns the (possibly just-started) current bar.</summary>
-    public Candle ApplyTick(SpotTick tick)
+    /// when the tick lands in a new minute. Returns the (possibly just-started) current bar.
+    ///
+    /// Market hours only (MarketHours.InTradingSession, 09:15 - 15:30 IST): after the close Dhan keeps
+    /// sending the index into the evening. The last price still follows it, but no bar or volume is
+    /// built; the first tick after the close finishes the forming 15:29 bar, so the chart ends there.
+    /// Null then (no bar is forming).</summary>
+    public Candle? ApplyTick(SpotTick tick)
     {
         Candle? justClosed = null;
-        Candle result;
+        Candle? result;
 
         lock (_lock)
         {
@@ -129,47 +134,23 @@ public sealed class SpotUnderlyingState
 
             var minute = FloorToMinute(tick.ExchangeTimestamp);
 
-            if (_currentBar is not { } bar || bar.Time != minute)
+            if (!MarketHours.InTradingSession(tick.ExchangeTimestamp))
             {
-                if (_currentBar is { } previous)
+                // Out-of-session volume never reaches a bar; the baseline still moves, so the session's
+                // first tick does not count it either.
+                _prevVolume = tick.Volume;
+                // Only a LATER tick ends the forming bar (a stray packet with an older time does not).
+                if (_currentBar is { } open && minute > open.Time)
                 {
-                    // The historical backfill's last returned candle can be the still-forming
-                    // minute at the moment it was queried (Dhan includes the in-progress bar, not
-                    // just fully-closed ones) - the live feed then builds its OWN _currentBar for
-                    // that same minute, and closing it here would otherwise append a second entry
-                    // at a time _closedCandles already has one for, violating lightweight-charts'
-                    // strict-ascending requirement and crashing the chart. The live version, having
-                    // captured the rest of that minute's real ticks, replaces the partial
-                    // backfilled one instead of duplicating it.
-                    if (_closedCandles.Count > 0 && _closedCandles[^1].Time == previous.Time)
-                        _closedCandles[^1] = previous;
-                    else
-                        _closedCandles.Add(previous);
-                    justClosed = previous;
+                    justClosed = CloseCurrentBarNoLock();
+                    CloseCurrentVolumeBarNoLock();
                 }
-                _currentBar = new Candle(minute, tick.LastPrice, tick.LastPrice, tick.LastPrice, tick.LastPrice);
+                result = _currentBar;
             }
             else
             {
-                _currentBar = bar with
-                {
-                    High = Math.Max(bar.High, tick.LastPrice),
-                    Low = Math.Min(bar.Low, tick.LastPrice),
-                    Close = tick.LastPrice,
-                };
+                result = ApplySessionTickNoLock(tick, minute, ref justClosed);
             }
-
-            result = _currentBar.Value;
-
-            // The very first live tick only seeds the cumulative-volume baseline - same convention
-            // CdvUnderlyingState.ApplyTick uses for option ticks - so today's (or this process's)
-            // entire pre-subscription volume is not counted as one giant fake delta on the first
-            // tick. tick.Volume < prevVolume (a fresh trading day's counter having reset, or a
-            // corrupt packet) contributes zero rather than a negative amount; _prevVolume is still
-            // advanced unconditionally so the NEXT tick resumes diffing correctly either way.
-            var deltaVolume = _prevVolume is { } prev && tick.Volume >= prev ? tick.Volume - prev : 0L;
-            _prevVolume = tick.Volume;
-            ApplyVolumeTick(tick.LastPrice, deltaVolume, minute);
         }
 
         // Raised outside the lock - a subscriber (EmaCrossoverAlertService) calling back into
@@ -177,6 +158,57 @@ public sealed class SpotUnderlyingState
         if (justClosed is { } closed) BarClosed?.Invoke(closed);
 
         return result;
+    }
+
+    /// <summary>Moves the forming bar into the closed bars. Must be called inside the lock.
+    ///
+    /// The historical backfill's last returned candle can be the still-forming minute at the moment
+    /// it was queried (Dhan includes the in-progress bar, not just fully-closed ones) - the live feed
+    /// then builds its OWN _currentBar for that same minute, and closing it here would otherwise
+    /// append a second entry at a time _closedCandles already has one for, violating
+    /// lightweight-charts' strict-ascending requirement and crashing the chart. The live version,
+    /// having captured the rest of that minute's real ticks, replaces the partial backfilled one
+    /// instead of duplicating it.</summary>
+    private Candle? CloseCurrentBarNoLock()
+    {
+        if (_currentBar is not { } previous) return null;
+        if (_closedCandles.Count > 0 && _closedCandles[^1].Time == previous.Time)
+            _closedCandles[^1] = previous;
+        else
+            _closedCandles.Add(previous);
+        _currentBar = null;
+        return previous;
+    }
+
+    /// <summary>ApplyTick for a tick inside the session. Must be called inside the lock.</summary>
+    private Candle ApplySessionTickNoLock(SpotTick tick, DateTimeOffset minute, ref Candle? justClosed)
+    {
+        if (_currentBar is not { } bar || bar.Time != minute)
+        {
+            justClosed = CloseCurrentBarNoLock();
+            _currentBar = new Candle(minute, tick.LastPrice, tick.LastPrice, tick.LastPrice, tick.LastPrice);
+        }
+        else
+        {
+            _currentBar = bar with
+            {
+                High = Math.Max(bar.High, tick.LastPrice),
+                Low = Math.Min(bar.Low, tick.LastPrice),
+                Close = tick.LastPrice,
+            };
+        }
+
+        // The very first live tick only seeds the cumulative-volume baseline - same convention
+        // CdvUnderlyingState.ApplyTick uses for option ticks - so today's (or this process's)
+        // entire pre-subscription volume is not counted as one giant fake delta on the first
+        // tick. tick.Volume < prevVolume (a fresh trading day's counter having reset, or a
+        // corrupt packet) contributes zero rather than a negative amount; _prevVolume is still
+        // advanced unconditionally so the NEXT tick resumes diffing correctly either way.
+        var deltaVolume = _prevVolume is { } prev && tick.Volume >= prev ? tick.Volume - prev : 0L;
+        _prevVolume = tick.Volume;
+        ApplyVolumeTick(tick.LastPrice, deltaVolume, minute);
+
+        return _currentBar.Value;
     }
 
     /// <summary>Folds one tick's own incremental volume into the currently-forming 1-minute volume
@@ -190,13 +222,7 @@ public sealed class SpotUnderlyingState
     {
         if (_currentVolumeBar is not { } cur || cur.Time != minute)
         {
-            if (_currentVolumeBar is { } previous)
-            {
-                if (_closedVolumeBars.Count > 0 && _closedVolumeBars[^1].Time == previous.Time)
-                    _closedVolumeBars[^1] = previous;
-                else
-                    _closedVolumeBars.Add(previous);
-            }
+            CloseCurrentVolumeBarNoLock();
             _currentVolumeBar = new CandleWithVolume(minute, price, price, price, price, tickVolume);
         }
         else
@@ -209,6 +235,17 @@ public sealed class SpotUnderlyingState
                 Volume = cur.Volume + tickVolume,
             };
         }
+    }
+
+    /// <summary>CloseCurrentBarNoLock for the volume bars. Must be called inside the lock.</summary>
+    private void CloseCurrentVolumeBarNoLock()
+    {
+        if (_currentVolumeBar is not { } previous) return;
+        if (_closedVolumeBars.Count > 0 && _closedVolumeBars[^1].Time == previous.Time)
+            _closedVolumeBars[^1] = previous;
+        else
+            _closedVolumeBars.Add(previous);
+        _currentVolumeBar = null;
     }
 
     /// <summary>Volume-bearing counterpart to GetCandles - what VwapCalculator reads. Includes the

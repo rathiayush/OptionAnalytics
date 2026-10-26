@@ -101,9 +101,12 @@ When adding or changing a strategy:
 
 - Charts show MARKET HOURS only - the F&O session, weekdays 09:15 - 15:30 IST (15:29 the last minute): after the close
   Dhan keeps re-sending snapshots and the book. Server: `MarketHours.InTradingSession` - the OI Replay live feed keeps no
-  bar / sends no chart tick outside it (only each leg's last reading), the Order Flow engine takes no heatmap column.
-  Page: `marketSession.js` - `groupByStrike` (every OI chart, heatmap, totals, walls, the External page) and
-  `mergeFuturesLive` drop readings outside it. A new chart feed must do the same (`tests/market-session.test.mjs`).
+  bar / sends no chart tick outside it (only each leg's last reading), the Order Flow engine takes no heatmap column, the
+  spot feed (`SpotUnderlyingState.ApplyTick`) builds no spot candle / volume outside it (the last price still follows the
+  index; the first tick after the close ends the 15:29 bar, so `spotUpdate` then carries no forming bar).
+  Page: `marketSession.js` - `groupByStrike` (every OI chart, heatmap, totals, walls, the External page),
+  `mergeFuturesLive`, and the OI Replay / External spot candles and VWAP (loaded and live) drop readings outside it. A new
+  chart feed must do the same (`tests/market-session.test.mjs`, `SpotUnderlyingStateTests.cs`).
 
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
