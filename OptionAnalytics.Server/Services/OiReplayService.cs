@@ -128,13 +128,36 @@ public sealed class OiReplayService
     private readonly TodayFetchShare _today = new();
     private readonly LiveOptionLegStore? _liveBars;
     private readonly SpotFeedHostedService? _spotFeed;
+    // Each of today's backfills is also kept on disk (TodayDiskStore, CSV) with when it was fetched: after a restart or a
+    // deploy it is read back instead of asking Dhan again - while the live minutes saved with it (LiveOptionLegStore,
+    // read back too) carry on from it with no hole longer than MaxRestartGap. A longer hole asks Dhan, as before.
+    private readonly TodayDiskStore? _todayDisk;
+    internal static readonly TimeSpan MaxRestartGap = TimeSpan.FromMinutes(10);
     private TimeSpan TodayWindow => _liveBars is null ? TodayFetchShare.DefaultWindow : TimeSpan.MaxValue;
     private Task<T> ReuseTodayAsync<T>(string key, DateOnly date, Func<CancellationToken, Task<T>> fetch, Func<T, bool> keep, CancellationToken cancellationToken) =>
         _today.ReuseAsync(key, date, IstClock.Today(), fetch, keep, cancellationToken);
 
     /// <summary>Forgets today's held backfill of `underlying` - its next run asks Dhan afresh (the page's Clear
     /// cache).</summary>
-    public void RefreshToday(string underlying) => _today.Invalidate($"{underlying.ToUpperInvariant()}|");
+    public void RefreshToday(string underlying)
+    {
+        _today.Invalidate($"{underlying.ToUpperInvariant()}|");
+        _todayDisk?.DeleteSeries(IstClock.Today(), $"{underlying.ToUpperInvariant()}|");
+    }
+
+    /// <summary>Today's saved backfill (TodayDiskStore) when it may stand in for asking Dhan: not a force fetch, and the live
+    /// minutes held carry on from when it was fetched (LiveOptionLegStore.CarriesOnFrom).</summary>
+    private T? SavedToday<T>(DateOnly date, Func<TodayDiskStore, T?> read, Func<T, DateTimeOffset> fetchedAt) where T : class
+    {
+        if (_todayDisk is null || _liveBars is null || date != IstClock.Today() || DhanDataCache.ForceRefresh) return null;
+        var saved = read(_todayDisk);
+        return saved is not null && SavedTodayUsable(date, IstClock.Today(), DhanDataCache.ForceRefresh, _liveBars, fetchedAt(saved), DateTimeOffset.UtcNow) ? saved : null;
+    }
+
+    /// <summary>Whether a backfill of `date` saved at `fetchedAt` may stand in for asking Dhan: it is today's, not a force fetch,
+    /// and the live minutes held carry on from it with no hole longer than MaxRestartGap.</summary>
+    internal static bool SavedTodayUsable(DateOnly date, DateOnly today, bool forceFetch, LiveOptionLegStore liveBars, DateTimeOffset fetchedAt, DateTimeOffset now) =>
+        date == today && !forceFetch && liveBars.CarriesOnFrom(fetchedAt, now, MaxRestartGap);
 
     /// <summary>Today's spot bars from the spot feed's memory (TodaySpotBars) - null when it does not hold them.</summary>
     private IReadOnlyList<CandleWithVolume>? TodaySpotFromFeed(string underlying, DateOnly date, bool wholeDay)
@@ -162,9 +185,10 @@ public sealed class OiReplayService
         DhanSpotInstrumentMaster instrumentMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
         DhanHistoricalDataService historicalData, DhanRollingOptionDataService rollingOption,
         AppEnvironment appEnvironment, NseFuturesContractArchive? futuresArchive = null, NseChartHistory? nseChart = null,
-        LiveOptionLegStore? liveBars = null, SpotFeedHostedService? spotFeed = null)
+        LiveOptionLegStore? liveBars = null, SpotFeedHostedService? spotFeed = null, TodayDiskStore? todayDisk = null)
     {
         _liveBars = liveBars;
+        _todayDisk = todayDisk;
         _spotFeed = spotFeed;
         _futuresArchive = futuresArchive;
         _nseChart = nseChart;
@@ -232,8 +256,18 @@ public sealed class OiReplayService
         LoadProgress.AddTotal(2 + 2 * (2 * StrikeBandSteps + 1));
         LoadProgress.Info($"Loading {underlying} {date:dd MMM yyyy} ({expiryFlag}): spot, futures and {2 * (2 * StrikeBandSteps + 1)} option series (ATM±{StrikeBandSteps}, CE and PE).");
         var futuresClock = System.Diagnostics.Stopwatch.StartNew();
-        var futuresTask = _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
-            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
+        var futuresKey = $"{underlying}|fut";
+        var futuresTask = _today.ReuseWithTimeAsync(futuresKey, date, IstClock.Today(), async ct =>
+            {
+                await Task.Yield(); // the disk read below runs outside TodayFetchShare's lock
+                // After a restart: today's futures backfill read back from disk (no Dhan call) - see SavedToday.
+                if (SavedToday(date, d => d.ReadFutures(date, futuresKey), f => f.FetchedAt) is { } saved)
+                    return (saved.Bars, saved.Expiry, saved.OiAvailable, (string?)null, saved.FetchedAt);
+                var started = DateTimeOffset.UtcNow;
+                var (bars, expiry, oi, error) = await GetFuturesAsync(underlying, date, ct);
+                if (date == IstClock.Today() && bars.Count > 0) _todayDisk?.SaveFutures(date, futuresKey, started, bars, expiry, oi);
+                return (bars, expiry, oi, error, started);
+            }, r => r.Item1.Count > 0, cancellationToken, TodayWindow);
         _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
 
         var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date, wholeDay: true) : null;
@@ -361,10 +395,10 @@ public sealed class OiReplayService
         LoadProgress.Stage("futures");
         var futuresLeft = FuturesBudget - futuresClock.Elapsed;
         var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
-        var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = futuresDone
-            ? await futuresTask
-            : ((Array.Empty<FuturesBar>(), (DateOnly?)null, false,
-                $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (an expired contract's day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them."),
+        var (futuresBars, futuresExpiry, futuresOiAvailable, futuresError, futuresAt) = futuresDone
+            ? (await futuresTask).Value
+            : (Array.Empty<FuturesBar>(), (DateOnly?)null, false,
+                $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (an expired contract's day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them.",
                DateTimeOffset.UtcNow);
         LoadProgress.Done(failed: futuresBars.Count == 0);
         if (futuresBars.Count > 0) LoadProgress.Ok($"Futures: {futuresBars.Count} bars ({futuresClock.Elapsed.TotalSeconds:0.0} s).");
@@ -464,9 +498,17 @@ public sealed class OiReplayService
         var instrument = await resolveInstrument();
         if (instrument is null) return storedBars;
 
-        var ((liveBars, _), fetchedAt) = await _today.ReuseWithTimeAsync($"{underlying}|opt|{expiryFlag}|{strikeToken}|{drvOptionType}", date, IstClock.Today(),
-            ct => _rollingOption.GetRollingOptionCandlesAsync(underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, ct),
-            r => r.Bars.Count > 0, cancellationToken, TodayWindow);
+        var key = $"{underlying}|opt|{expiryFlag}|{strikeToken}|{drvOptionType}";
+        var (liveBars, fetchedAt) = (await _today.ReuseWithTimeAsync(key, date, IstClock.Today(), async ct =>
+            {
+                await Task.Yield(); // the disk read below runs outside TodayFetchShare's lock
+                // After a restart: today's backfill of this series read back from disk (no Dhan call) - see SavedToday.
+                if (SavedToday(date, d => d.ReadOptionSeries(date, key), o => o.FetchedAt) is { } saved) return (saved.Bars, saved.FetchedAt);
+                var started = DateTimeOffset.UtcNow;
+                var (bars, _) = await _rollingOption.GetRollingOptionCandlesAsync(underlying, instrument.SecurityId, expiryFlag, NearestExpiryCode, strikeToken, drvOptionType, date, date, 1, ct);
+                if (date == IstClock.Today() && bars.Count > 0) _todayDisk?.SaveOptionSeries(date, key, started, bars);
+                return (bars, started);
+            }, r => r.Item1.Count > 0, cancellationToken, TodayWindow)).Value;
         if (liveBars.Count > 0) backfilledAt?.Invoke(fetchedAt);
         return liveBars.Count > 0 ? liveBars : storedBars;
     }

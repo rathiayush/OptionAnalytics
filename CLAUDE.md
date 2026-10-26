@@ -64,7 +64,14 @@ When adding or changing a strategy:
   (`OiReplayLiveFeedService`) keeps every tracked index's option legs and near futures as 1-minute bars
   (`LiveOptionLegStore`, all day, page open or not), spot is the spot feed's own day (`SpotFeedHostedService`), and
   `OiReplayService` joins the one backfill (`TodayFetchShare`) to the feed's bars since (`MergeTodayLive`) - so
-  switching index on the live page asks Dhan nothing. The page's Clear cache drops it (`refresh=true`).
+  switching index on the live page asks Dhan nothing. The page's Clear cache drops it (`refresh=true`). TODAY is on disk
+  too, as CSV (`TodayDiskStore`, `{DhanCachePath}/today/{yyyy-MM-dd}/`, only today kept): each backfill from Dhan with when
+  it was fetched (`series/*.csv`), and the feed's completed minutes (`live-bars.csv`, written every 15 s and at shutdown,
+  read back at start - `TodayDataPersistenceService`). After a restart / deploy a saved backfill is used instead of asking
+  Dhan while the saved minutes carry on from it with no hole over 10 min (`LiveOptionLegStore.CarriesOnFrom`,
+  `OiReplayService.SavedTodayUsable`); a longer hole, a force fetch or Clear cache asks Dhan (`TodayDiskStoreTests.cs`).
+  The page header tells an admin when the cache folder is NOT on a persistent volume (`StorageVolume`, from
+  /proc/self/mountinfo) - then every deploy starts it empty.
   `TodayWarmupService` keeps every index ready before anyone switches: in market hours, every 5 minutes, it asks each
   index's live run and Order Flow backfill (Dhan once a day, memory after; a restart is ready again within one pass).
   The Order Flow page's live engines already run all three indices' near futures all day (`OrderFlowService`).

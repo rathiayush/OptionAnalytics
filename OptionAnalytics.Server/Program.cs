@@ -329,6 +329,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<OiDivergenceMonito
 builder.Services.AddSingleton<LiveOptionLegStore>();
 // What each OI Replay day load is doing, for the page's progress panel (GET /api/oi-replay/progress/{id}).
 builder.Services.AddSingleton<LoadProgressStore>();
+// Today's OI Replay data on disk (CSV, {DhanCachePath}/today/{day}/): each backfill from Dhan and the live feed's minute
+// bars - read back after a restart / deploy instead of asking Dhan for the day again. Started before the warm-up below,
+// so today's saved minutes are back in LiveOptionLegStore before the first run asks for them.
+builder.Services.AddSingleton<TodayDiskStore>();
+builder.Services.AddHostedService<TodayDataPersistenceService>();
 // Today ready for every index before anyone switches to it - see TodayWarmupService.
 builder.Services.AddHostedService<TodayWarmupService>();
 builder.Services.AddHostedService<OiReplayLiveFeedService>();
@@ -382,6 +387,18 @@ if (builder.Environment.IsDevelopment())
 var app = builder.Build();
 // Dhan's scrip master: one kept copy on the persistent volume, shared by the spot / futures / option-chain masters (DhanScripMasterFile).
 DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environment, app.Configuration), "scrip-master");
+// The Dhan cache (past days - DhanDataCache; today - TodayDiskStore) only saves Dhan calls across a deploy when its folder is on
+// a mounted volume (docker-compose: optionanalytics-data:/app/data). Said at start, and to an admin in the page header.
+{
+    var cacheDir = DhanDataCache.PathOf(app.Environment, app.Configuration);
+    var kept = OptionAnalytics.Server.StorageVolume.IsPersistent(cacheDir);
+    OptionAnalytics.Server.Controllers.SystemController.DhanCacheKeptAcrossDeploys = kept;
+    if (kept == false)
+        app.Logger.LogWarning("The Dhan cache folder {Dir} is NOT on a persistent volume - every deploy starts it empty and asks Dhan for every day again. " +
+            "Mount a volume there (docker-compose: optionanalytics-data:/app/data with Storage__DhanCachePath=/app/data/dhan-cache).", cacheDir);
+    else
+        app.Logger.LogInformation("Dhan cache folder: {Dir} (kept across deploys: {Kept}).", cacheDir, kept?.ToString() ?? "unknown");
+}
 
 if (app.Environment.IsDevelopment())
 {

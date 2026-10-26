@@ -99,7 +99,12 @@ public sealed class SystemController : ControllerBase
         DateTimeOffset? LoginKeysCreatedUtc,
         bool? LoginsSurviveRestart,
         int SubscribedInstruments,
-        IReadOnlyList<TickConsumerStats> Feed);
+        IReadOnlyList<TickConsumerStats> Feed,
+        bool? DhanCacheKeptAcrossDeploys = null);
+
+    /// <summary>Whether the Dhan cache folder (DhanDataCache, TodayDiskStore) is on a volume kept across a deploy
+    /// (StorageVolume) - set once at start (Program.cs); null when it cannot be told.</summary>
+    public static bool? DhanCacheKeptAcrossDeploys { get; set; }
 
     [HttpGet("info")]
     public SystemInfo Info()
@@ -118,7 +123,7 @@ public sealed class SystemController : ControllerBase
             // Diagnostics only - an unreadable key ring just means "unknown" here.
         }
         return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc),
-            _feedClient.SubscribedCount, _feedClient.GetConsumerStats());
+            _feedClient.SubscribedCount, _feedClient.GetConsumerStats(), DhanCacheKeptAcrossDeploys);
     }
 
     /// <summary>True when the key ring predates this process (it was loaded from storage, so logins

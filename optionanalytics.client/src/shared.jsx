@@ -1207,6 +1207,11 @@ export function NavBar() {
               <Tag color="warning">Logins reset at last deploy</Tag>
             </Tooltip>
           )}
+          {isAdmin && systemInfo?.dhanCacheKeptAcrossDeploys === false && (
+            <Tooltip title="The Dhan cache folder (past days, and today's OI Replay data) is not on a persistent volume, so every deploy starts it empty and the server asks Dhan for everything again. Deploy with docker-compose's volume (optionanalytics-data:/app/data, Storage__DhanCachePath=/app/data/dhan-cache) or mount a volume at the cache folder (Dokploy: Advanced > Volumes).">
+              <Tag color="error">Dhan cache lost at every deploy</Tag>
+            </Tooltip>
+          )}
           {/* Always in view for an admin (the menu's own "Visitors" item can fold into its "···" on a laptop screen). */}
           {isAdmin && (
             <Tooltip title="Who opened which page, when and from where - every account and visitors with no account">
