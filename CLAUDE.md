@@ -127,6 +127,11 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): the call + put at the strike nearest spot from a set
+  time (09:21 by default, the card's "From"), its VWAP, the range the options priced then (strike ± straddle), the straddle
+  re-centred after spot moves N strikes ("Re-centre after") and read again from there, ATM IV, and the read (sideways /
+  premium bought / trend / breakout / not confirmed) over "Read over" minutes. It runs on the replay clock (nothing after it -
+  `tests/straddle.test.mjs`) and live; the read is a description of the day, not a measured signal - it feeds no strategy.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

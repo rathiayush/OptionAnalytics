@@ -1,0 +1,211 @@
+import { useEffect, useMemo, useRef } from 'react'
+import { Col, Row, Segmented, Select, Space, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import dayjs from 'dayjs'
+import { CrosshairMode, LineSeries, LineStyle, LineType, createSeriesMarkers } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
+import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
+import { useFitContentAsDataGrows } from './oiShared.jsx'
+import { STRADDLE_START_DEFAULT, straddleRead } from './straddle.js'
+import { sanitizeLine } from './chartLine.js'
+
+const { Text } = Typography
+
+const STRADDLE_COLOR = '#f5a623'
+const VWAP_COLOR = '#4c9ffe'
+const HELD_COLOR = '#9aa4b2'
+const SPOT_COLOR = '#d9d9d9'
+const RECENTRE_COLOR = '#ffd54f'
+
+const VERDICT_COLORS = {
+  sideways: 'geekblue', building: 'purple', none: 'default', early: 'default', unconfirmed: 'gold', fake: 'orange',
+}
+const verdictColor = (v) => (v.kind === 'trend' || v.kind === 'breakout' ? (v.side === 'down' ? 'red' : 'green') : VERDICT_COLORS[v.kind] ?? 'default')
+
+// HH:mm in IST, whatever the browser's own zone.
+const hhmm = (ms) => new Date(ms + 330 * 60_000).toISOString().slice(11, 16)
+const num = (v, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
+const signed = (v, digits = 1) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}` : '-')
+
+// A few lines on one time axis. `lines`: [{ id, title, color, width, style, steps, data: [{ time (ms), value }] }] -
+// the set of ids is fixed for a chart's life (a new set rebuilds it); `markers` go on the first line.
+function LinesChart({ lines, markers = [], dayKey, height }) {
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(new Map())
+  const markersRef = useRef(null)
+  const ids = lines.map((l) => l.id).join('|')
+
+  useEffect(() => {
+    if (!containerRef.current) return undefined
+    const chart = createZoomableChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 4 },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    const series = new Map()
+    lines.forEach((l) => {
+      series.set(l.id, chart.addSeries(LineSeries, {
+        color: l.color, lineWidth: l.width ?? 2, lineStyle: l.style ?? LineStyle.Solid, lineType: l.steps ? LineType.WithSteps : LineType.Simple,
+        title: l.title ?? '', priceLineVisible: false, lastValueVisible: l.lastValue ?? true,
+        priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
+      }))
+    })
+    seriesRef.current = series
+    markersRef.current = lines.length ? createSeriesMarkers(series.get(lines[0].id), []) : null
+    const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
+    resize.observe(containerRef.current)
+    return () => {
+      resize.disconnect()
+      chart.remove()
+      chartRef.current = null
+      seriesRef.current = new Map()
+      markersRef.current = null
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [height, ids])
+
+  useEffect(() => {
+    for (const l of lines) seriesRef.current.get(l.id)?.setData(sanitizeLine(l.data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
+    markersRef.current?.setMarkers(markers.map((m) => ({ ...m, time: toChartTime(m.time) })))
+  }, [lines, markers])
+  useFitContentAsDataGrows(chartRef, lines[0]?.data.length ?? 0, dayKey)
+
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+/**
+ * The ATM straddle (call + put at the strike nearest spot) from a set time - straddle.js: the range the options priced,
+ * the straddle against its VWAP, its re-centre after a move, ATM IV and the read (sideways / trend / breakout / fake) -
+ * as of the replay clock (`asOfMs`; null - live - every minute given; 0 - the replay not started), so it runs with OI
+ * Replay, replayed or live.
+ */
+export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, step, height = 260 }) {
+  const [start, setStart] = usePersistedState('optionanalytics.oiReplay.straddleStart', STRADDLE_START_DEFAULT)
+  const [recentreStrikes, setRecentreStrikes] = usePersistedState('optionanalytics.oiReplay.straddleRecentre', 2)
+  const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
+
+  const read = useMemo(
+    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, step, recentreStrikes, holdMinutes }),
+    [cePoints, pePoints, spotBars, start, asOfMs, step, recentreStrikes, holdMinutes],
+  )
+  const charts = useMemo(() => {
+    const s = read.series
+    const line = (pick) => s.filter((p) => Number.isFinite(pick(p))).map((p) => ({ time: p.time, value: pick(p) }))
+    const straddle = [
+      { id: 'straddle', title: 'Straddle', color: STRADDLE_COLOR, data: line((p) => p.value) },
+      { id: 'vwap', title: 'VWAP', color: VWAP_COLOR, width: 1, style: LineStyle.Dashed, data: line((p) => p.vwap) },
+      { id: 'held', title: 'Held', color: HELD_COLOR, width: 1, style: LineStyle.Dotted, data: line((p) => p.held) },
+    ]
+    const day = read.day
+    const spot = [
+      { id: 'spot', title: 'Spot', color: SPOT_COLOR, data: line((p) => p.spot) },
+      { id: 'upper', title: day ? `${hhmm(day.time)} +${num(day.value, 0)}` : '', color: UP_COLOR, width: 1, style: LineStyle.Dashed, data: day ? s.map((p) => ({ time: p.time, value: day.upper })) : [] },
+      { id: 'lower', title: day ? `${hhmm(day.time)} −${num(day.value, 0)}` : '', color: DOWN_COLOR, width: 1, style: LineStyle.Dashed, data: day ? s.map((p) => ({ time: p.time, value: day.lower })) : [] },
+      ...(recentreStrikes > 0 ? [
+        { id: 'reUpper', color: RECENTRE_COLOR, width: 1, style: LineStyle.Dotted, steps: true, lastValue: false, data: line((p) => p.upper) },
+        { id: 'reLower', color: RECENTRE_COLOR, width: 1, style: LineStyle.Dotted, steps: true, lastValue: false, data: line((p) => p.lower) },
+      ] : []),
+    ]
+    const markers = read.anchors.slice(1).map((a) => ({ time: a.time, position: 'aboveBar', color: RECENTRE_COLOR, shape: 'circle', text: `→${a.strike}` }))
+    return { straddle, spot, markers }
+  }, [read, recentreStrikes])
+
+  const controls = (
+    <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
+      <Tooltip title="The time the straddle is first read - its value then, around its strike, is the range the options priced for the day. 09:21: after the opening minutes settle.">
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>From</Text>
+          <TimePicker
+            size="small" format="HH:mm" allowClear={false} needConfirm={false} showNow={false} style={{ width: 82 }}
+            value={dayjs(`2000-01-01T${start}`)}
+            onChange={(v) => v && setStart(v.format('HH:mm'))}
+            disabledTime={() => ({
+              disabledHours: () => Array.from({ length: 24 }, (_, h) => h).filter((h) => h < 9 || h > 15),
+              disabledMinutes: (h) => Array.from({ length: 60 }, (_, m) => m).filter((m) => (h === 9 && m < 15) || (h === 15 && m > 29)),
+            })}
+          />
+        </Space>
+      </Tooltip>
+      <Tooltip title="After a move: once spot is this many strikes from the straddle's strike, it is shifted to the new ATM and the range read again from there (the dotted yellow lines; the grey 'Held' line is that straddle's value).">
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Re-centre after</Text>
+          <Select
+            size="small" value={recentreStrikes} onChange={setRecentreStrikes} style={{ width: 96 }}
+            options={[{ value: 0, label: 'never' }, { value: 1, label: '1 strike' }, { value: 2, label: '2 strikes' }, { value: 3, label: '3 strikes' }]}
+          />
+        </Space>
+      </Tooltip>
+      <Tooltip title="How long the straddle must stay under / over its VWAP for the read (80% of these minutes and now).">
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Read over</Text>
+          <Segmented size="small" value={holdMinutes} onChange={setHoldMinutes} options={[10, 15, 30].map((v) => ({ value: v, label: `${v}m` }))} />
+        </Space>
+      </Tooltip>
+    </Space>
+  )
+
+  if (!read.series.length) {
+    const waiting = read.startMs != null && asOfMs != null && asOfMs < read.startMs
+    return (
+      <>
+        {controls}
+        <Text type="secondary" style={{ display: 'block' }}>
+          {waiting ? `The straddle is read from ${start}${asOfMs > 0 ? ` - the replay is at ${hhmm(asOfMs)}` : ''}.`
+            : 'No straddle yet - it needs the call and the put of the strike nearest spot from the start time.'}
+        </Text>
+      </>
+    )
+  }
+
+  const { day, now, verdict, held } = read
+  const under = now.value < now.vwap
+  const breaks = [read.breaks.up && `broke up ${hhmm(read.breaks.up)}`, read.breaks.down && `broke down ${hhmm(read.breaks.down)}`].filter(Boolean)
+  return (
+    <>
+      {controls}
+      <div style={{ borderLeft: '3px solid #4c9ffe', padding: '4px 10px', marginBottom: 8 }}>
+        <Tag color={verdictColor(verdict)} style={{ marginRight: 8 }}>{verdict.title}{verdict.side && verdict.kind !== 'early' ? (verdict.side === 'up' ? ' ↑' : ' ↓') : ''}</Tag>
+        <Text style={{ fontSize: 12 }}>{verdict.detail}</Text>
+        {verdict.note && <Text type="warning" style={{ fontSize: 12, display: 'block' }}>{verdict.note}</Text>}
+      </div>
+      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
+        <Text style={{ fontSize: 12 }}>
+          <Text strong style={{ fontSize: 12 }}>{hhmm(day.time)}</Text> ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> ({num(day.pct, 2)}% of spot)
+          {' '}→ priced range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(day.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(day.upper, 0)}</Text>
+          {breaks.length ? ` · ${breaks.join(' · ')}` : ' · spot inside it so far'}
+        </Text>
+        <Text style={{ fontSize: 12 }}>
+          <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> ATM {now.strike} straddle <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
+          {' '}· VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text> ({under ? 'under' : 'over'} it; under {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min)
+          {' '}· {signed(read.change)} in {holdMinutes} min
+          {now.iv != null && <> · ATM IV {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)})` : ''}</>}
+        </Text>
+        {held && (
+          <Text style={{ fontSize: 12 }}>
+            Re-centred <Text strong style={{ fontSize: 12 }}>{hhmm(held.time)}</Text> to {held.strike}: straddle {num(held.value)} → range from there{' '}
+            <Text style={{ fontSize: 12, color: RECENTRE_COLOR }}>{num(held.lower, 0)} – {num(held.upper, 0)}</Text>
+            {' '}· now {num(held.now)} ({signed(held.sellerPnl)} for a seller){read.anchors.length > 2 ? ` · ${read.anchors.length - 1} re-centres today` : ''}
+          </Text>
+        )}
+      </Space>
+      <Row gutter={[16, 12]}>
+        <Col xs={24} lg={12}>
+          <Text strong style={{ fontSize: 12 }}>ATM straddle &amp; its VWAP</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · re-centred on the nearest strike each minute; Held = the straddle taken at {hhmm(day.time)}{recentreStrikes > 0 ? ', shifted after the move' : ''}</Text>
+          <LinesChart lines={charts.straddle} markers={charts.markers} dayKey={`straddle-${dayKey}-${start}`} height={height} />
+        </Col>
+        <Col xs={24} lg={12}>
+          <Text strong style={{ fontSize: 12 }}>Spot vs the priced range</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · dashed: from {hhmm(day.time)}{recentreStrikes > 0 ? '; dotted: from the last re-centre' : ''}</Text>
+          <LinesChart lines={charts.spot} dayKey={`straddle-spot-${dayKey}-${start}`} height={height} />
+        </Col>
+      </Row>
+    </>
+  )
+}
