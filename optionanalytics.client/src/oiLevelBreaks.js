@@ -7,7 +7,7 @@
 // confirmed afterwards), is not announced.
 
 import { lineLevels } from './lineLevels.js'
-import { oiTotalsSeries } from './oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiTotalsSeries } from './oiTotalsHeatmap.js'
 
 // What the cumulative line going UP or DOWN means, per side.
 export const TOTALS_SIDES = [
@@ -164,3 +164,61 @@ export function highProbabilityText(underlying, b, hp, format, timeOf, bucketMin
     + `• CE − PE cumulative Δ shifted ${format(hp.shift)} in ${span} min (${ratio})\n`
     + `• ATM ± 1 (${hp.nearStrikes.join(' / ')}) carried ${format(hp.nearShift)} of it (${Math.round(hp.nearShare * 100)}%)`
 }
+
+// ---- One step for the page and the server ---------------------------------------------------------------------------
+// The OI Replay page (useOiBreakAlerts) and the server scanner (scanner-runner/indexScanner.mjs) both run the same step
+// on their own data each time a bucket completes or OI changes: the breaks to announce and the high-probability
+// signals. The Telegram keys are the same too, so when both are running the server sends each message once.
+
+
+export const IST_OFFSET_SECONDS = 19_800
+
+export const newOiBreakAlertState = () => ({ breaks: newBreakWatch(), hp: newHighProbabilityWatch() })
+
+/** The breaks and high-probability signals new at `nowSec` (chart seconds - IST-shifted), from the per-strike changes
+ *  `ce` / `pe` (strike -> Map(bucket -> change)). `opts`: { windowMinutes, shiftAbovePct }. */
+export function stepOiBreakAlerts(state, { ce, pe, bucketSeconds, nowSec, atmStrike }, opts = {}) {
+  const totals = buildOiTotalsRows(ce, pe)
+  const reads = completedLevelReads(totals, bucketSeconds, nowSec)
+  const breaks = watchBreaks(state.breaks, reads, bucketSeconds)
+  const signals = reads ? watchHighProbability(state.hp, breaks, { totals, ce, pe, last: reads.last, atmStrike, bucketSeconds }, opts) : []
+  return { breaks, signals }
+}
+
+/** Each strike's OI change per bucket (chart seconds) from a live series - strike -> [{ t (ms), oi }] (the server
+ *  scanner's OI context): a bucket's OI is its last reading, the first bucket has no change (as the page's matrix). */
+export function perStrikeChanges(series, bucketSeconds) {
+  const out = new Map()
+  for (const [strike, points] of series ?? []) {
+    const byBucket = new Map()
+    for (const p of points ?? []) {
+      if (!(p?.oi > 0) || !Number.isFinite(p.t)) continue
+      const sec = Math.floor(p.t / 1000) + IST_OFFSET_SECONDS
+      byBucket.set(Math.floor(sec / bucketSeconds) * bucketSeconds, p.oi)
+    }
+    const buckets = [...byBucket.keys()].sort((a, b) => a - b)
+    const changes = new Map()
+    for (let i = 1; i < buckets.length; i++) changes.set(buckets[i], byBucket.get(buckets[i]) - byBucket.get(buckets[i - 1]))
+    out.set(strike, changes)
+  }
+  return out
+}
+
+/** The Telegram key of a break / signal: `dayKey` = "{UNDERLYING}-{date}". */
+export const breakAlertKey = (underlying, dayKey, bucketMinutes, b) => `oi-break|${underlying}|${dayKey}|${bucketMinutes}|${b.key}`
+export const highProbabilityAlertKey = (underlying, dayKey, bucketMinutes, key) => `oi-hp|${underlying}|${dayKey}|${bucketMinutes}|${key}`
+
+/** OI as lakh (L) from 1,00,000, else thousand (K), signed - the totals table's format. */
+export function fmtOiLakh(v) {
+  if (v == null || !Number.isFinite(v)) return '—'
+  if (v === 0) return '0'
+  const a = Math.abs(v)
+  const text = a >= 1e5 ? `${(a / 1e5).toFixed(2)}L` : `${(a / 1e3).toFixed(1)}K`
+  return `${v > 0 ? '+' : '−'}${text}`
+}
+
+/** A chart time (IST-shifted seconds) as "HH:mm" IST. */
+export const chartTimeHHmm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16)
+
+/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). */
+export const OI_BREAK_ALERT_DEFAULTS = { on: true, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, shiftAbovePct: HIGH_PROBABILITY.shiftAbovePct }

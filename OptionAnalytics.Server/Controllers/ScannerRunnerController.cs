@@ -53,7 +53,7 @@ public sealed class ScannerRunnerController : ControllerBase
     public IActionResult PutConfig([FromBody] JsonObject patch)
     {
         if (patch is null) return BadRequest(new { error = "No body." });
-        var allowed = new HashSet<string> { "settings", "levels", "enabled", "alertIds", "profileAlerts" };
+        var allowed = new HashSet<string> { "settings", "levels", "enabled", "alertIds", "profileAlerts", "oiBreakAlerts" };
         var unknown = patch.Select(kv => kv.Key).Where(k => !allowed.Contains(k)).ToList();
         if (unknown.Count > 0) return BadRequest(new { error = $"Unknown keys: {string.Join(", ", unknown)}" });
         // Which indices the server scans lives with the rest of each index's trade settings.

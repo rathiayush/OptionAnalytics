@@ -16,11 +16,18 @@ import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, a
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
 import { tpoRowFor } from '../src/profiles.js'
+import {
+  IST_OFFSET_SECONDS, OI_BREAK_ALERT_DEFAULTS, breakAlertKey, breakMeaning, breakText, chartTimeHHmm, fmtOiLakh, highProbabilityAlertKey, highProbabilityText,
+  newOiBreakAlertState, perStrikeChanges, stepOiBreakAlerts,
+} from '../src/oiLevelBreaks.js'
 
 // The page's own defaults (StrategyScanner / OrderFlowPage) for anything the config does not say.
 export const DEFAULT_SETTINGS = { alerts: true, telegram: true, pick: 'top15', custom: [], filters: {}, trail: { on: true, ...DEFAULT_TRAIL }, autoPaper: 'sell', paperLots: 1, moneyness: 0 }
 export const DEFAULT_ROW_SIZES = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
 const RETRY_MS = 30_000
+// OI break alerts: looked at when a bucket completes, or at most this often while OI ticks arrive.
+const OI_BREAK_EVERY_MS = 5_000
+const OI_BREAK_RECENT = 30
 const LOG_EVERY_MS = 3_000
 export const TAG = '[Server]'
 
@@ -55,6 +62,7 @@ export class IndexScanner {
     this.watching = []
     this.profileWatch = newProfileWatch()
     this.profileLevelsOf = { futures: [], spotOwn: [] }
+    this.oiBreaks = { state: newOiBreakAlertState(), settingsSig: null, boundary: null, at: 0, sent: [] }
     this.appliedLevels = null
     this.appliedTrail = null
     this.dirty = false
@@ -233,6 +241,58 @@ export class IndexScanner {
     }
   }
 
+  // The OI Replay page's S/R break and high-probability alerts (oiLevelBreaks.js), on the server: the page's settings
+  // (config.oiBreakAlerts), on by default.
+  oiBreakSettings() {
+    const c = { ...OI_BREAK_ALERT_DEFAULTS, ...(this.config.oiBreakAlerts ?? {}) }
+    const clamp = (v, lo, hi, dflt) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Number(v))) : dflt)
+    return {
+      on: c.on !== false,
+      bucketMinutes: clamp(c.bucketMinutes, 1, 15, 1),
+      windowMinutes: clamp(c.windowMinutes, 1, 15, OI_BREAK_ALERT_DEFAULTS.windowMinutes),
+      shiftAbovePct: clamp(c.shiftAbovePct, 0, 1000, OI_BREAK_ALERT_DEFAULTS.shiftAbovePct),
+    }
+  }
+
+  // A CE / PE / Net cumulative line breaking its support / resistance, and a break with a large CE - PE shift carried
+  // at ATM +-1 within the window - Telegram, tagged [Server], with no page open. Keyed like the page's, so the two
+  // never send the same message twice. Completed buckets only; what was already broken when the day loaded is not sent.
+  async checkOiBreaks(d, nowMs) {
+    const set = this.oiBreakSettings()
+    const ob = this.oiBreaks
+    const sig = JSON.stringify(set)
+    if (ob.settingsSig !== sig) { ob.state = newOiBreakAlertState(); ob.settingsSig = sig; ob.boundary = null }
+    if (!set.on || !d.oi?.ce || !d.oi?.pe) return
+    const bucketSeconds = set.bucketMinutes * 60
+    const nowSec = Math.floor(nowMs / 1000) + IST_OFFSET_SECONDS
+    const boundary = Math.floor(nowSec / bucketSeconds) * bucketSeconds
+    if (boundary === ob.boundary && this.io.now() - ob.at < OI_BREAK_EVERY_MS) return
+    ob.boundary = boundary
+    ob.at = this.io.now()
+    const spot = d.oi.spot?.at(-1)?.close
+    const step = d.oi.step || 50
+    const { breaks, signals } = stepOiBreakAlerts(ob.state, {
+      ce: perStrikeChanges(d.oi.ce, bucketSeconds), pe: perStrikeChanges(d.oi.pe, bucketSeconds),
+      bucketSeconds, nowSec: boundary, atmStrike: spot > 0 ? Math.round(spot / step) * step : null,
+    }, { windowMinutes: set.windowMinutes, shiftAbovePct: set.shiftAbovePct })
+    if (!breaks.length && !signals.length) return
+    const cfg = this.settings()
+    const dayKey = `${this.underlying}-${this.date}`
+    const send = async (text, key) => {
+      this.io.log(`${this.underlying}: ${text.replace(/\n/g, ' ')}`)
+      ob.sent = [...ob.sent, { t: nowMs, text }].slice(-OI_BREAK_RECENT)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${text}`, key)
+    }
+    for (const b of breaks) {
+      await send(`🧱 ${breakText(this.underlying, b, fmtOiLakh, chartTimeHHmm, set.bucketMinutes)} ${breakMeaning(b.side.key, b.up) > 0 ? '🟢' : '🔴'}`,
+        breakAlertKey(this.underlying, dayKey, set.bucketMinutes, b))
+    }
+    for (const { b, hp, key } of signals) {
+      await send(`🎯 ${highProbabilityText(this.underlying, b, hp, fmtOiLakh, chartTimeHHmm, set.bucketMinutes)}`,
+        highProbabilityAlertKey(this.underlying, dayKey, set.bucketMinutes, key))
+    }
+  }
+
   async evaluate() {
     const d = this.data
     if (!this.enabled || !d?.view || !d.oi) return
@@ -241,6 +301,7 @@ export class IndexScanner {
     const nowMs = this.clock()
     if (!nowMs || istDate(nowMs) !== this.date) return
     await this.checkProfileLevels(d)
+    await this.checkOiBreaks(d, nowMs)
     const look = [Math.floor(nowMs / 10_000), d.view.minuteBars?.length ?? 0, d.prints.at(-1)?.seq ?? 0, this.oiVersion, !!d.profile].join()
     if (look === this.lastLook) return
     this.lastLook = look
@@ -365,6 +426,7 @@ export class IndexScanner {
         spot: this.profileAlertsOn().spot && (this.profileLevelsOf.futures.length > 0 || this.profileLevelsOf.spotOwn.length > 0),
         levels: this.profileLevelsOf.futures.length + this.profileLevelsOf.spotOwn.length,
       },
+      oiBreakAlerts: { ...this.oiBreakSettings(), ready: !!this.data?.oi, sent: this.oiBreaks.sent },
       signals: outcomes.map((s) => ({
         id: s.id, no: meta(s.id)?.no, name: meta(s.id)?.name, side: s.side, t: s.t, entry: s.entry, stop: s.stop, target: s.target,
         alerted: this.alertIds().includes(s.id), status: s.outcome?.status, r: s.outcome?.r ?? null, exitAt: s.outcome?.exitAt ?? null,

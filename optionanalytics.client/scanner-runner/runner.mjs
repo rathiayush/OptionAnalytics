@@ -49,7 +49,8 @@ const io = {
   api,
   now: () => Date.now(),
   log,
-  telegram: (text) => api('/api/alerts/telegram', { method: 'POST', body: { text } }).catch((err) => log(`telegram failed: ${err.message}`)),
+  // `key`: one event - the server sends a keyed message once a day, however many senders report it (the OI Replay page too).
+  telegram: (text, key = null) => api('/api/alerts/telegram', { method: 'POST', body: { text, key } }).catch((err) => log(`telegram failed: ${err.message}`)),
   previousSession: (u, date, rowSize) => fetchPreviousSession(u, date, rowSize),
   loadState: async (u, date) => {
     try { return existsSync(statePath(u, date)) ? JSON.parse(readFileSync(statePath(u, date), 'utf8')) : null } catch { return null }
