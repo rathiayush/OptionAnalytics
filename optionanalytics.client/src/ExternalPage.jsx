@@ -226,6 +226,7 @@ export default function ExternalPage() {
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.external.timeframe', 5)
   const [showVwap, setShowVwap] = usePersistedState('optionanalytics.external.vwap', true)
   const [top5Only, setTop5Only] = usePersistedState('optionanalytics.external.top5', false)
+  const [shortLabels, setShortLabels] = usePersistedState('optionanalytics.external.wallLabelsShort', true)
   const tf = TIMEFRAME_OPTIONS.some((o) => o.value === timeframe) ? timeframe : 5
   const spotChart = useMemo(() => {
     if (!oi.data) return null
@@ -312,12 +313,15 @@ export default function ExternalPage() {
               <Tooltip title="Only the 5 strongest OI walls each side (calls above as resistance, puts below as support) instead of every strike's">
                 <Space size={4}><Switch size="small" checked={top5Only} onChange={setTop5Only} aria-label="Top 5 walls only" /><Text style={{ fontSize: 12 }}>Top 5</Text></Space>
               </Tooltip>
+              <Tooltip title="Wall labels show only the strike, Δ since the open and S-R - shorter, so they cover less of the chart.">
+                <Checkbox checked={shortLabels} onChange={(e) => setShortLabels(e.target.checked)}>Δ and S-R only</Checkbox>
+              </Tooltip>
             </Space>
           )}>
           {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
           {oi.loading && !oi.data ? loadingBox : !spotChart?.bars.length ? <Text type="secondary">{pickedPast ? 'No candles for this day.' : 'No candles yet today.'}</Text> : (
             <ReplayChart key={`${dayKey}-${tf}`} bars={spotChart.bars} ladderRows={wallRows} dayKey={`ext-${dayKey}-${tf}`} atmStrike={chartAtm} step={step}
-              top5Only={top5Only} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
+              top5Only={top5Only} shortLabels={shortLabels} vwapSeries={spotChart.vwap} showVwap={showVwap} height={440} />
           )}
           <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
             Index candles with the OI walls: red lines are call OI (resistance), green put OI (support) - darker is heavier.
