@@ -31,6 +31,20 @@ public static class MarketHours
 
     public static bool IsOpenNow => IsOpen(Now);
 
+    /// <summary>The F&amp;O trading session - NSE and BSE index futures and options trade weekdays 09:15 to 15:30 IST (the
+    /// 15:29 minute is the last). What the charts show: a reading outside it is not a minute of the market (Dhan keeps
+    /// re-sending snapshots after the close, the book keeps arriving) - OiReplayLiveFeedService keeps no bar for it and
+    /// OrderFlowEngine no heatmap column.</summary>
+    public static readonly TimeSpan SessionOpens = new(9, 15, 0);
+    public static readonly TimeSpan SessionCloses = new(15, 30, 0);
+
+    public static bool InTradingSession(DateTimeOffset time)
+    {
+        var ist = time.ToOffset(IstClock.Offset);
+        if (ist.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
+        return ist.TimeOfDay >= SessionOpens && ist.TimeOfDay < SessionCloses;
+    }
+
     /// <summary>How long from `now` until the window next opens (zero while it is open).</summary>
     public static TimeSpan UntilOpen(DateTimeOffset now)
     {

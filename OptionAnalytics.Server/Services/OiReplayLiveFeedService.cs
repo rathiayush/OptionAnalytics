@@ -508,15 +508,10 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// <summary>The clock a reading is stamped with (tests set it).</summary>
     internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
 
-    /// <summary>Whether an observed IST time is inside the F&amp;O session - weekdays 09:15 to 15:30 (the 15:29 minute is the
-    /// last). After the close Dhan's feed keeps re-sending every leg's snapshot (the same OI) until about 16:00; stamped
+    /// <summary>Whether an observed time is inside the F&amp;O session (MarketHours.InTradingSession - weekdays 09:15 to
+    /// 15:30). After the close Dhan's feed keeps re-sending every leg's snapshot (the same OI) until about 16:00; stamped
     /// with the time they ARRIVE, those used to open a new minute each - the OI heatmap grew empty columns to 16:57.</summary>
-    internal static bool InFnoSession(DateTimeOffset observedIst)
-    {
-        var ist = observedIst.ToOffset(IstClock.Offset);
-        if (ist.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return false;
-        return ist.TimeOfDay >= new TimeSpan(9, 15, 0) && ist.TimeOfDay < new TimeSpan(15, 30, 0);
-    }
+    internal static bool InFnoSession(DateTimeOffset observed) => MarketHours.InTradingSession(observed);
 
     internal void OnTick(SpotTick tick)
     {

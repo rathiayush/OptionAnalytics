@@ -343,6 +343,8 @@ public sealed class OrderFlowEngine
     private void MaybeSnapshot(DateTimeOffset now)
     {
         if (now - _lastSnapshotAt < SnapshotInterval || (_bids.Length == 0 && _asks.Length == 0)) return;
+        // The heatmap is the session's book only: Dhan keeps sending the book after the close (MarketHours.InTradingSession).
+        if (!MarketHours.InTradingSession(now)) return;
         _lastSnapshotAt = now;
         _snapshots.Add(new DepthSnapshot(now, HeatRows(_bids), HeatRows(_asks)));
     }

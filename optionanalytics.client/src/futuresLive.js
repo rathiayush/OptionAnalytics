@@ -2,6 +2,8 @@
 // minutes are matched by their time, not their text - the server's bars carry +05:30 and the live minutes UTC, so a
 // text match missed the minute the page loaded in and that candle stayed frozen until the next one began.
 
+import { inMarketSession } from './marketSession.js'
+
 const msOf = (p) => new Date(p.time).getTime()
 
 /**
@@ -10,10 +12,11 @@ const msOf = (p) => new Date(p.time).getTime()
  * part of that minute); a newer one is added. A live minute older than the bars' last is the bars' to say.
  */
 export function mergeFuturesLive(bars, live) {
-  const merged = [...bars].filter((p) => Number.isFinite(msOf(p))).sort((a, b) => msOf(a) - msOf(b))
+  // Market hours only (marketSession.js): no futures minute after the 15:30 close or before 09:15.
+  const merged = [...bars].filter((p) => Number.isFinite(msOf(p)) && inMarketSession(msOf(p))).sort((a, b) => msOf(a) - msOf(b))
   for (const point of live ?? []) {
     const ms = msOf(point)
-    if (!Number.isFinite(ms)) continue
+    if (!Number.isFinite(ms) || !inMarketSession(ms)) continue
     const last = merged.at(-1)
     const lastMs = last ? msOf(last) : null
     if (last && lastMs === ms) {

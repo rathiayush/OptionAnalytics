@@ -205,6 +205,19 @@ public sealed class OrderFlowEngineTests
         Assert.Equal(T0.AddSeconds(8), engine.Snapshot(0, 1, 3).Heatmap[^1].Time);
     }
 
+    [Fact]
+    public void The_heatmap_is_the_sessions_book_only_no_column_after_the_15_30_close()
+    {
+        var engine = NewEngine();
+        var close = new DateTimeOffset(2026, 10, 5, 15, 29, 50, TimeSpan.FromHours(5.5));
+        // 15:29:50 and :52 in the session, then the book keeps arriving after the close.
+        for (var s = 0; s < 120; s += 2) engine.OnTick(Tick(100m, 1000 + s, 99.95m, 100m), close.AddSeconds(s));
+
+        var heatmap = engine.Snapshot(0, 1, 1000).Heatmap;
+        Assert.Equal(5, heatmap.Count);   // 15:29:50, :52, :54, :56, :58
+        Assert.True(heatmap.All(c => c.Time.ToOffset(TimeSpan.FromHours(5.5)).TimeOfDay < new TimeSpan(15, 30, 0)));
+    }
+
     // ---- icebergs -----------------------------------------------------------------------------
 
     [Fact]

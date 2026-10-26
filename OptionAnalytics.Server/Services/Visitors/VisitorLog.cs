@@ -108,6 +108,29 @@ public sealed class VisitorLog
         return all;
     }
 
+    /// <summary>Deletes the whole history (every day's file) - the Visitors page's Clear history, an admin's. Returns how
+    /// many entries were removed.</summary>
+    public int Clear()
+    {
+        lock (_lock)
+        {
+            var removed = 0;
+            foreach (var file in Directory.EnumerateFiles(_root).Where(f => f.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase)).ToList())
+            {
+                try
+                {
+                    removed += file.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) ? CountRows(file) : File.ReadLines(file).Count();
+                    File.Delete(file);
+                }
+                catch (IOException ex) { _logger.LogWarning(ex, "Could not delete {File} from the visitor log.", file); }
+            }
+            _recent.Clear();
+            _countDay = default;
+            _countToday = 0;
+            return removed;
+        }
+    }
+
     /// <summary>The last `days` IST days as one CSV (the header once, oldest entry first) - the page's download.</summary>
     public string Csv(int days)
     {

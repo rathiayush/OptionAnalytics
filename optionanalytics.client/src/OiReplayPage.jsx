@@ -19,6 +19,7 @@ import {
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive } from './futuresLive.js'
+import { inMarketSession } from './marketSession.js'
 import { usePaperPositionsSync } from './paperSync.js'
 import { dayEndExit, paperExitReason } from './paperExit.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
@@ -225,6 +226,8 @@ export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTick
 export function groupByStrike(points) {
   const byStrike = new Map()
   for (const p of points) {
+    // Market hours only (marketSession.js): no point after the 15:30 close or before 09:15 reaches any chart.
+    if (!inMarketSession(p.ms ?? p.time)) continue
     let list = byStrike.get(p.strike)
     if (!list) byStrike.set(p.strike, (list = []))
     list.push(p)
@@ -514,20 +517,11 @@ export function toSinceOpenSeries(totalSeries) {
 // Drawn, it showed up as one huge fake column that set the color scale and left every genuine live
 // change after it nearly invisible - the heatmap looked frozen while it was in fact updating. Live
 // points are the ones carrying their own pre-parsed `ms` (see mergeLiveOptionTicks).
-// The F&O session, 09:15 - 15:30 IST, as minutes of the day: OI readings outside it (Dhan re-sends snapshots after the
-// close, the stored database may hold them) are not minutes of the market - no blank columns past 15:29.
-const FNO_OPEN_MINUTE = 9 * 60 + 15
-const FNO_CLOSE_MINUTE = 15 * 60 + 30
-const inFnoSession = (p) => {
-  const minute = Math.floor((((toChartTime(p.time) % 86_400) + 86_400) % 86_400) / 60)
-  return minute >= FNO_OPEN_MINUTE && minute < FNO_CLOSE_MINUTE
-}
-
 export function buildOiChangeMatrix(byStrike, strikes, asOfMs, timeframeMinutes) {
   const perStrikeChange = new Map()
   const bucketSet = new Set()
   for (const strike of strikes) {
-    const raw = (byStrike.get(strike) ?? []).filter((p) => (asOfMs == null || pointMs(p) <= asOfMs) && inFnoSession(p))
+    const raw = (byStrike.get(strike) ?? []).filter((p) => asOfMs == null || pointMs(p) <= asOfMs)
     const total = aggregateLinePoints(raw.map((p) => ({ time: toChartTime(p.time), value: p.openInterest, live: p.ms != null })), timeframeMinutes)
     const byBucket = new Map()
     for (let i = 1; i < total.length; i++) {
