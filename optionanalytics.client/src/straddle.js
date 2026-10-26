@@ -11,13 +11,7 @@
 //    the new level (sideways there, or the trend going on). A break that comes back inside first is a FAILED break and
 //    the range stays. Moves inside a range never move it, so its edges stay put to be faded;
 //  - the ATM straddle each minute (re-centred on the strike nearest spot every minute, so a move does not count as
-//    premium) against its VWAP since the range started. A straddle loses value every minute by time decay alone, so the
-//    raw line falls all day and sits under its VWAP almost always - read like that it says "sellers" on every day. By
-//    default (`decay: 'removed'`) the line read is the straddle with time decay taken out: the range start's straddle
-//    moved by the ATM IV and spot since then (a straddle is worth 0.8 x spot x IV x sqrt(time left), so at the start's
-//    time left it is start value x spot x IV / (start spot x start IV)) - it falls only when the options are SOLD (IV
-//    falling) and rises when they are bought, and a switch of the ATM strike does not make it jump. `decay: 'raw'` (or no
-//    IV at the range start) reads the plain straddle (weighted by the two legs' traded volume; the plain average
+//    premium) against its VWAP since the range started (weighted by the two legs' traded volume; the plain average
 //    while no volume is known): under it = premium being sold, over it = premium being bought;
 //  - the CENTRE straddle (the range's own strike all along): below its value at the range start = a seller there is
 //    ahead = the market has moved less than priced;
@@ -118,14 +112,13 @@ const pts = (v) => (Number.isFinite(v) ? v.toFixed(0) : '-')
 /**
  * The day's ATM straddle read, as of `asOfMs` (null = every minute given). `cePoints` / `pePoints`: the OI Replay run's
  * option points (strike, time, price, volume, impliedVolatility); `spotBars`: `[{ time (ms), close }]` one per minute.
- * `decay`: 'removed' (default) reads the straddle with time decay taken out, 'raw' the plain straddle (see the top).
  * Returns `{ startMs, series, ranges, day, dayBreaks, range, now, position, control, belowShare, change, ivChange, centre,
  * checks, outsideFor, failed, verdict }` - `series` one point per minute from the start time (`{ time, spot, strike,
- * value (the plain straddle), read (the line read: decay taken out, or the plain straddle), decayRemoved, vwap (of read), iv, rangeIndex, centre, lower, upper }`), `ranges` the start's range and every accepted move's; the read
+ * value, vwap, iv, rangeIndex, centre, lower, upper }`), `ranges` the start's range and every accepted move's; the read
  * fields are null until there is a straddle to read.
  */
 export function straddleRead(cePoints, pePoints, spotBars, {
-  start = STRADDLE_START_DEFAULT, asOfMs = null, acceptMinutes = 10, holdMinutes = 15, scope = 'day', decay = 'removed',
+  start = STRADDLE_START_DEFAULT, asOfMs = null, acceptMinutes = 10, holdMinutes = 15, scope = 'day',
 } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
@@ -148,7 +141,6 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   let range = null
   let outside = null   // the break in progress: { side, from, to, accepted }
   let priceVolume = 0, volume = 0, sum = 0, count = 0
-  let lastIv = null   // the ATM IV last read in this range - a minute without one keeps it
   for (const { t, spot } of spots) {
     if (t < startMs || t > clock) continue
     let atm = null
@@ -175,18 +167,12 @@ export function straddleRead(cePoints, pePoints, spotBars, {
       const width = today != null ? Math.min(today, atm.value) : atm.value
       range = { time: t, strike: atm.strike, value: atm.value, width, today, spot, iv: atm.iv, lower: atm.strike - width, upper: atm.strike + width, reason, breaks: [] }
       ranges.push(range)
-      range.decayRemoved = decay === 'removed' && range.iv > 0
       priceVolume = 0; volume = 0; sum = 0; count = 0
-      lastIv = null
     }
-    if (atm.iv > 0) lastIv = atm.iv
-    // The line read against its VWAP: the straddle with time decay taken out (see the top), else the plain straddle.
-    const read = range.decayRemoved ? range.value * (spot * lastIv) / (range.spot * range.iv) : atm.value
-    count++; sum += read; priceVolume += read * atm.volume; volume += atm.volume
+    count++; sum += atm.value; priceVolume += atm.value * atm.volume; volume += atm.volume
     const centre = straddleAt(ce, pe, range.strike, t)
     series.push({
-      time: t, spot, strike: atm.strike, value: atm.value, read, decayRemoved: range.decayRemoved,
-      vwap: volume > 0 ? priceVolume / volume : sum / count, iv: atm.iv,
+      time: t, spot, strike: atm.strike, value: atm.value, vwap: volume > 0 ? priceVolume / volume : sum / count, iv: atm.iv,
       rangeIndex: ranges.length - 1, centre: centre?.value ?? null, lower: range.lower, upper: range.upper,
     })
   }
@@ -201,13 +187,13 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   // The last `holdMinutes` of this range: how much of it the straddle spent under its VWAP, and how it and IV moved.
   const own = series.filter((p) => p.time >= current.time)
   const window = own.filter((p) => p.time > now.time - holdMinutes * MIN)
-  const belowShare = window.filter((p) => p.read < p.vwap).length / window.length
+  const belowShare = window.filter((p) => p.value < p.vwap).length / window.length
   const enough = now.time - current.time >= (holdMinutes - 1) * MIN
   const control = !enough ? 'early'
-    : belowShare >= HOLD_SHARE && now.read < now.vwap ? 'sellers'
-      : 1 - belowShare >= HOLD_SHARE && now.read > now.vwap ? 'buyers' : 'mixed'
+    : belowShare >= HOLD_SHARE && now.value < now.vwap ? 'sellers'
+      : 1 - belowShare >= HOLD_SHARE && now.value > now.vwap ? 'buyers' : 'mixed'
   const ago = [...own].reverse().find((p) => p.time <= now.time - holdMinutes * MIN) ?? own[0]
-  const change = now.read - ago.read
+  const change = now.value - ago.value
   const ivChange = now.iv != null && ago.iv != null ? now.iv - ago.iv : null
   const centre = { strike: current.strike, time: current.time, value: current.value, now: now.centre, sellerPnl: now.centre != null ? current.value - now.centre : null }
   const checks = {
@@ -258,8 +244,7 @@ function readVerdict({ range, now, position, control, change, ivChange, checks, 
   const notes = []
   if (position === 'inside' && failed) notes.push(`Back inside after a failed break ${failed.side} (${istHhmm(failed.from)} – ${istHhmm(failed.to)}): the move was not accepted.`)
   // IV takes time decay out of the read.
-  // (Only for the plain straddle: with time decay taken out the line already moves with IV.)
-  if (!now.decayRemoved && ivChange != null && control === 'sellers' && ivChange >= IV_MOVE) notes.push(`ATM IV is up ${ivChange.toFixed(1)} in ${holdMinutes} min - the straddle's fall is time decay, not selling; a break may be coming.`)
-  if (!now.decayRemoved && ivChange != null && control === 'buyers' && ivChange <= -IV_MOVE) notes.push(`ATM IV is down ${(-ivChange).toFixed(1)} in ${holdMinutes} min - the straddle's rise is the spot's move, not premium buying.`)
+  if (ivChange != null && control === 'sellers' && ivChange >= IV_MOVE) notes.push(`ATM IV is up ${ivChange.toFixed(1)} in ${holdMinutes} min - the straddle's fall is time decay, not selling; a break may be coming.`)
+  if (ivChange != null && control === 'buyers' && ivChange <= -IV_MOVE) notes.push(`ATM IV is down ${(-ivChange).toFixed(1)} in ${holdMinutes} min - the straddle's rise is the spot's move, not premium buying.`)
   return { ...verdict, notes }
 }
