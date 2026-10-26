@@ -382,6 +382,22 @@ if (builder.Environment.IsDevelopment())
 var app = builder.Build();
 // Dhan's scrip master: one kept copy on the persistent volume, shared by the spot / futures / option-chain masters (DhanScripMasterFile).
 DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environment, app.Configuration), "scrip-master");
+// The Dhan disk cache saves Dhan calls only when its folder can be written and outlives a deploy (a mounted volume -
+// docker-compose: optionanalytics-data:/app/data). Checked once here: logged, and shown to an admin in the page header.
+{
+    var cache = app.Services.GetRequiredService<DhanDataCache>();
+    var (writable, error) = cache.CheckFolder();
+    var kept = OptionAnalytics.Server.StorageVolume.IsPersistent(cache.Directory);
+    OptionAnalytics.Server.Controllers.SystemController.DhanCacheFolder = (writable, kept);
+    if (!writable)
+        app.Logger.LogError("The Dhan cache folder {Dir} cannot be written ({Error}) - nothing is kept, every day is asked of Dhan again. " +
+            "Give the app's user (uid 1001) write access to it, or mount a named volume at /app/data.", cache.Directory, error);
+    else if (kept == false)
+        app.Logger.LogWarning("The Dhan cache folder {Dir} is NOT on a persistent volume - every deploy starts it empty and asks Dhan for every day again. " +
+            "Mount a named volume at /app/data (docker-compose does: optionanalytics-data:/app/data; Dokploy Dockerfile deploys: Advanced > Volumes).", cache.Directory);
+    else
+        app.Logger.LogInformation("Dhan cache folder: {Dir} - writable, kept across deploys: {Kept}.", cache.Directory, kept?.ToString() ?? "unknown");
+}
 
 if (app.Environment.IsDevelopment())
 {

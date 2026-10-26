@@ -99,7 +99,16 @@ public sealed class SystemController : ControllerBase
         DateTimeOffset? LoginKeysCreatedUtc,
         bool? LoginsSurviveRestart,
         int SubscribedInstruments,
-        IReadOnlyList<TickConsumerStats> Feed);
+        IReadOnlyList<TickConsumerStats> Feed,
+        DhanCacheStatus? DhanCache = null);
+
+    /// <summary>The Dhan disk cache's folder (DhanDataCache): whether it can be written and is on a volume kept across a deploy
+    /// (StorageVolume - null when it cannot be told) - checked once at start (Program.cs); with the days read from / written
+    /// to it and the writes refused since. No path - this goes to every signed-in page.</summary>
+    public sealed record DhanCacheStatus(bool Writable, bool? KeptAcrossDeploys, long ReadsFromDisk, long SavedToDisk, long WriteErrors);
+
+    /// <summary>Set once at start (Program.cs).</summary>
+    public static (bool Writable, bool? KeptAcrossDeploys)? DhanCacheFolder { get; set; }
 
     [HttpGet("info")]
     public SystemInfo Info()
@@ -117,8 +126,11 @@ public sealed class SystemController : ControllerBase
         {
             // Diagnostics only - an unreadable key ring just means "unknown" here.
         }
+        var cache = HttpContext?.RequestServices.GetService<DhanDataCache>();
+        var folder = DhanCacheFolder;
         return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc),
-            _feedClient.SubscribedCount, _feedClient.GetConsumerStats());
+            _feedClient.SubscribedCount, _feedClient.GetConsumerStats(),
+            cache is null || folder is null ? null : new DhanCacheStatus(folder.Value.Writable, folder.Value.KeptAcrossDeploys, cache.Hits, cache.Writes, cache.WriteErrors));
     }
 
     /// <summary>True when the key ring predates this process (it was loaded from storage, so logins

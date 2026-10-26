@@ -1207,6 +1207,17 @@ export function NavBar() {
               <Tag color="warning">Logins reset at last deploy</Tag>
             </Tooltip>
           )}
+          {/* The Dhan disk cache (past days) only saves Dhan calls when its folder can be written and outlives a deploy. */}
+          {isAdmin && systemInfo?.dhanCache?.writable === false && (
+            <Tooltip title="The server cannot write its Dhan cache folder (/app/data/dhan-cache), so nothing is kept and every day is asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose) - a bind mount of a root-owned host folder is not writable by the app.">
+              <Tag color="error">Dhan cache not writable</Tag>
+            </Tooltip>
+          )}
+          {isAdmin && systemInfo?.dhanCache?.writable !== false && systemInfo?.dhanCache?.keptAcrossDeploys === false && (
+            <Tooltip title="The Dhan cache folder (/app/data/dhan-cache) is not on a persistent volume, so every deploy starts it empty and the past days are asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose).">
+              <Tag color="error">Dhan cache lost at every deploy</Tag>
+            </Tooltip>
+          )}
           {/* Always in view for an admin (the menu's own "Visitors" item can fold into its "···" on a laptop screen). */}
           {isAdmin && (
             <Tooltip title="Who opened which page, when and from where - every account and visitors with no account">

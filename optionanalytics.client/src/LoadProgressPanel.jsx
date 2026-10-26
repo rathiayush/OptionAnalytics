@@ -26,6 +26,9 @@ export function LoadProgressPanel({ progress, height = 220 }) {
         <Text style={{ fontSize: 12 }}>{progress.finished ? (progress.error ? 'Failed' : 'Done') : progress.stage} · {progress.elapsedSeconds}s</Text>
         <Tag color="blue">Dhan calls {progress.dhanCalls}</Tag>
         <Tag color="green">from disk {progress.fromDisk}</Tag>
+        {/* Days Dhan sent now, written to the server's disk cache - the next load of them reads the disk. */}
+        {progress.savedToDisk > 0 && <Tag color="cyan">saved to disk {progress.savedToDisk}</Tag>}
+        {progress.diskErrors > 0 && <Tag color="red">disk write failed {progress.diskErrors}</Tag>}
         {progress.rateLimited > 0 && <Tag color="orange">rate-limited {progress.rateLimited}</Tag>}
         {progress.retries > 0 && <Tag color="gold">retries {progress.retries}</Tag>}
         {progress.failed > 0 && <Tag color="red">failed {progress.failed}</Tag>}

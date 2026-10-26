@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { Col, Row, Typography } from 'antd'
+import { Checkbox, Col, Row, Tooltip, Typography } from 'antd'
 import { CrosshairMode, LineSeries } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
-import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime } from './shared.jsx'
+import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, fromChartTime, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { formatOiMillions, useFitContentAsDataGrows } from './oiShared.jsx'
 import { bucketLine, optionFlowSeries, smoothLine } from './optionFlow.js'
 import { sanitizeLine } from './chartLine.js'
@@ -54,23 +54,29 @@ function FlowChart({ ce, pe, dayKey, height }) {
 }
 
 /**
- * The day's option CDV and OBV, CE against PE, as the dashboard shows them for today - worked out from the replayed
- * day's own 1-minute option bars (optionFlow.js: the dashboard's formulas) and drawn only up to the replay clock
- * (`endTime`, chart time; null - live - draws it all), so nothing later in the day shows early. Live, `dashboardFlow`
- * (the dashboard's own tick-by-tick series - dashboardFlow.js) is shown instead when the dashboard has it.
+ * The day's option CDV and OBV, CE against PE, drawn as the dashboard draws them - worked out from the replayed day's own
+ * 1-minute option bars (optionFlow.js: the dashboard's formulas) as of the replay clock (`endTime`, chart time; null -
+ * live - all of it), so nothing later in the day shows early. Live, `dashboardFlow` (the dashboard's own tick-by-tick
+ * series - dashboardFlow.js) is shown instead when the dashboard has it.
+ *
+ * Like the dashboard's charts: one point per `timeframe` step (its last value), CDV as it is - the running total - and
+ * OBV EMA(9)-smoothed per minute (the server's GetObvSeries). "Smooth CDV (EMA 9)" draws CDV through an EMA(9) over
+ * those steps instead, as the Pine indicator plots it - remembered; off by default, so the card reads like the dashboard.
  */
 export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, dashboardFlow = null, sourceNote = null, timeframe = 3, height = 260 }) {
-  // Live, the dashboard's own tick-by-tick numbers when it has them (dashboardFlow.js); else worked out from the bars.
-  const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars)), [dashboardFlow, cePoints, pePoints, spotBars])
+  const [smoothCdv, setSmoothCdv] = usePersistedState('optionanalytics.oiReplay.flowSmoothCdv', false)
+  // Live, the dashboard's own tick-by-tick numbers when it has them (dashboardFlow.js); else worked out from the bars,
+  // as of the replay clock (OBV is weighted by the spot then - see optionFlow.js).
+  const asOfMs = endTime == null ? null : fromChartTime(endTime) * 1000
+  const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars, asOfMs)), [dashboardFlow, cePoints, pePoints, spotBars, asOfMs])
   const flow = dashboardFlow ?? ownFlow
   const lines = useMemo(() => {
-    // Minutes up to the replay clock only, then one point per `timeframe` step (its last value); CDV is then
-    // EMA(9)-smoothed over those steps as the Pine indicator plots it on that chart timeframe (OBV already is smoothed).
+    // Minutes up to the replay clock only, then one point per `timeframe` step (its last value).
     const upToClock = (series) => (endTime == null ? series : series.filter((p) => toChartTime(p.time) <= endTime))
-    const cdv = (series) => toLine(smoothLine(bucketLine(upToClock(series), timeframe)))
+    const cdv = (series) => toLine(smoothCdv ? smoothLine(bucketLine(upToClock(series), timeframe)) : bucketLine(upToClock(series), timeframe))
     const obv = (series) => toLine(bucketLine(upToClock(series), timeframe))
     return { ceCdv: cdv(flow.ceCdv), peCdv: cdv(flow.peCdv), ceObv: obv(flow.ceObv), peObv: obv(flow.peObv) }
-  }, [flow, endTime, timeframe])
+  }, [flow, endTime, timeframe, smoothCdv])
   const last = (series) => series.at(-1)?.value
   const hasVolume = flow.ceCdv.some((p) => p.value !== 0) || flow.peCdv.some((p) => p.value !== 0)
 
@@ -80,10 +86,13 @@ export function OptionFlowCard({ cePoints, pePoints, spotBars, endTime, dayKey, 
     {sourceNote && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginBottom: 6 }}>{sourceNote}</Text>}
     <Row gutter={[16, 12]}>
       <Col xs={24} lg={12}>
-        <Text strong style={{ fontSize: 12 }}>CDV (cumulative delta volume, EMA 9) </Text>
+        <Text strong style={{ fontSize: 12 }}>CDV (cumulative delta volume{smoothCdv ? ', EMA 9' : ''}) </Text>
         <Text style={{ fontSize: 12, color: CE_COLOR }}>CE {formatOiMillions(last(lines.ceCdv) ?? 0, { signed: true })}</Text>
         <Text style={{ fontSize: 12 }}> · </Text>
         <Text style={{ fontSize: 12, color: PE_COLOR }}>PE {formatOiMillions(last(lines.peCdv) ?? 0, { signed: true })}</Text>
+        <Tooltip title="Off: CDV as the dashboard draws it - the running total. On: drawn through an EMA(9) over the chart's steps, as the Pine indicator plots it.">
+          <Checkbox checked={smoothCdv} onChange={(e) => setSmoothCdv(e.target.checked)} style={{ marginLeft: 12, fontSize: 12 }}>Smooth CDV (EMA 9)</Checkbox>
+        </Tooltip>
         <FlowChart ce={lines.ceCdv} pe={lines.peCdv} dayKey={`cdv-${dayKey}-${timeframe}`} height={height} />
       </Col>
       <Col xs={24} lg={12}>
