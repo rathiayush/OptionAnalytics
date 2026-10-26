@@ -20,6 +20,7 @@ import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
+import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
 import { usePaperPositionsSync } from './paperSync.js'
 import { dayEndExit, paperExitReason } from './paperExit.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
@@ -1299,6 +1300,21 @@ function oiTotalsCellTitle(row, v, meaning, flow, trend) {
 const HEATMAP_MIN_ALPHA = 0.12
 const HEATMAP_MAX_ALPHA = 0.9
 const LIVE_COLUMN_OUTLINE_COLOR = 'rgba(255, 255, 255, 0.55)'
+// The border on a column's biggest OI change when it sits at ATM or one strike either side (see oiHeatmapPeaks.js) -
+// yellow, apart from the cells' own blue (added) / orange (removed).
+const ATM_PEAK_BORDER_COLOR = '#fadb14'
+
+// The heatmaps' legend entry for that border.
+function AtmPeakLegend() {
+  return (
+    <Tooltip title="In each column, the strike with the biggest OI change - added or removed - is bordered when it is the ATM strike or one either side. ATM is the spot's as that column ended.">
+      <Text style={{ fontSize: 12 }}>
+        <span style={{ display: 'inline-block', width: 10, height: 13, border: `2px solid ${ATM_PEAK_BORDER_COLOR}`, verticalAlign: 'middle', marginRight: 4 }} />
+        Biggest change at ATM ± 1
+      </Text>
+    </Tooltip>
+  )
+}
 
 // The heatmap's own bucket size - independent of every other timeframe picker on this page (chart B,
 // the Total OI Lookback table), since none of those need a sub-minute option and this one specifically
@@ -1372,7 +1388,7 @@ function drawHeatmapCheckpoints(ctx, columns, plotHeight) {
 // real heatmap out of a library with no native heatmap series type, and the cheapest to render at
 // this cell count. The strike-label column is plain HTML (not baked into the canvas) so it can stay
 // visually fixed while only the canvas itself scrolls horizontally through the day.
-export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfMs, timeframeMinutes, live = false, windowMinutes = null, spotBars = null, step = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
@@ -1389,6 +1405,16 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
   const formatBucketTime = timeframeMinutes < 1 ? istTimeWithSecondsFormatter : istTimeFormatter
 
   const maxAbs = useMemo(() => heatmapScale(perStrikeChange), [perStrikeChange])
+
+  // Bordered cells: each column's biggest OI change when it sits at that column's ATM or one strike either side. The
+  // column's ATM is the spot's as it ended (spotBars - 1-minute, chart time), else - no spot passed, or none yet - the
+  // ATM now.
+  const atmPeaks = useMemo(() => {
+    const gap = step ?? strikeStep(strikes)
+    const bucketSeconds = timeframeMinutes * 60
+    const fromSpot = spotBars?.length && gap ? atmAtFromBars(spotBars, gap) : null
+    return atmPeakCells(perStrikeChange, columns, strikes, (t) => fromSpot?.(t, bucketSeconds) ?? atmStrike, gap)
+  }, [perStrikeChange, columns, strikes, spotBars, step, atmStrike, timeframeMinutes])
 
   // `strikes` is the UNION of every strike EITHER side has ever reported (see heatmapStrikes' own
   // doc comment) - a strike with real PE activity but that this side (say CE) has simply never
@@ -1459,6 +1485,17 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
       })
     })
 
+    // The column's biggest change at ATM ± 1 (atmPeaks), bordered inside its cell.
+    ctx.strokeStyle = ATM_PEAK_BORDER_COLOR
+    ctx.lineWidth = 2
+    columns.forEach((t, col) => {
+      const marked = atmPeaks.get(t)
+      if (!marked) return
+      strikes.forEach((strike, row) => {
+        if (marked.has(strike)) ctx.strokeRect(col * HEATMAP_CELL_WIDTH + 1, row * HEATMAP_ROW_HEIGHT + 1, HEATMAP_CELL_WIDTH - 3, HEATMAP_ROW_HEIGHT - 3)
+      })
+    })
+
     // While live, the newest (leftmost) column is the bucket still filling - outlined so it's
     // obvious which column is updating right now (a quiet bucket has no colored cells yet, which
     // otherwise reads as nothing happening).
@@ -1489,7 +1526,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
       ctx.fillText(text, x, plotHeight + 14)
       nextFreeX = x + width + 6
     })
-  }, [columns, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live])
+  }, [columns, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live, atmPeaks])
 
   // Brings the view back to the newest minute (the left edge) whenever a new column appears - not on
   // every tick within a minute, which would yank a reader's own scroll into history on every update.
@@ -1509,7 +1546,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
     if (y >= plotHeight || col < 0 || col >= columns.length || row < 0 || row >= strikes.length) { setHover(null); return }
     const strike = strikes[row]
     const t = columns[col]
-    setHover({ clientX: e.clientX, clientY: e.clientY, strike, time: t, value: perStrikeChange.get(strike)?.get(t) })
+    setHover({ clientX: e.clientX, clientY: e.clientY, strike, time: t, value: perStrikeChange.get(strike)?.get(t), atmPeak: !!atmPeaks.get(t)?.has(strike) })
   }
 
   if (buckets.length === 0) return <Empty description={`No ${label} OI data yet.`} />
@@ -1524,7 +1561,6 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
     <>
     <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
       <div style={{ flexShrink: 0, width: HEATMAP_LABEL_WIDTH, background: '#161a22' }}>
-        <div style={{ height: HEATMAP_AXIS_HEIGHT }} />
         {strikes.map((strike) => {
           const noData = strikesWithNoData.has(strike)
           return (
@@ -1545,6 +1581,9 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
             </div>
           )
         })}
+        {/* Beside the time axis, which the canvas draws UNDER the rows - this spacer sat above the labels, putting each
+            strike's label one row below its own cells. */}
+        <div style={{ height: HEATMAP_AXIS_HEIGHT }} />
       </div>
       <div ref={scrollRef} style={{ overflowX: 'auto', overflowY: 'hidden' }} onMouseLeave={() => setHover(null)}>
         <canvas ref={canvasRef} onMouseMove={handleMouseMove} style={{ display: 'block' }} />
@@ -1571,6 +1610,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
           <Text strong style={{ color: !hover.value ? '#fff' : hover.value > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR }}>
             {hover.value == null ? '—' : formatOiMillions(hover.value, { signed: true })}
           </Text>
+          {hover.atmPeak && <span style={{ color: ATM_PEAK_BORDER_COLOR }}> · the column's biggest change, at ATM ± 1</span>}
         </div>
       )}
     </div>
@@ -1610,7 +1650,7 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null }) {
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null, spotBars = null, step = null }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page.
   const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
@@ -1655,6 +1695,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
       <Space size={16} wrap>
         <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
         <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
+        <AtmPeakLegend />
         {live && (
           <Tooltip title="When Dhan last reported a changed open interest on any tracked strike. Prices tick constantly; OI only moves when positions are opened or closed, so a column can sit empty for a while in a quiet market.">
             <Text type="secondary" style={{ fontSize: 12 }}>
@@ -1666,11 +1707,11 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
       </Space>
       <div>
         <Text strong style={{ fontSize: 12 }}>CE</Text>
-        <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
+        <OiChangeHeatmapPlot label="CE" byStrike={ceByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} spotBars={spotBars} step={step} />
       </div>
       <div>
         <Text strong style={{ fontSize: 12 }}>PE</Text>
-        <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
+        <OiChangeHeatmapPlot label="PE" byStrike={peByStrike} strikes={strikes} atmStrike={atmStrike} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} spotBars={spotBars} step={step} />
       </div>
     </>
   )
@@ -3274,6 +3315,7 @@ function PreTradeReview({
               <Segmented size="small" value={windowMinutes} onChange={setWindowMinutes} options={REVIEW_HEATMAP_WINDOWS.map((v) => ({ value: v, label: `${v} min` }))} />
               <Text style={{ color: OI_ADDED_COLOR, fontSize: 12 }}>■ OI added</Text>
               <Text style={{ color: OI_REMOVED_COLOR, fontSize: 12 }}>■ OI removed</Text>
+              <AtmPeakLegend />
             </Space>
             <Text strong style={{ fontSize: 12 }}>Totals · CE, PE and Net (CE − PE) - Δ and cumulative Δ</Text>
             <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={1} windowMinutes={windowMinutes} live={isLive} />
@@ -5760,6 +5802,7 @@ export default function OiReplayPage() {
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                   lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
+                  spotBars={oneMinBars} step={step}
                 />
               </Card>
               </LiveSection>

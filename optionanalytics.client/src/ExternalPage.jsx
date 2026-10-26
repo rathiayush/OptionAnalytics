@@ -66,7 +66,7 @@ function LoadError({ error, onRetry }) {
 
 // OI Replay's OI change heatmap card - the totals, then the heatmaps of every strike - with its own 1-second clock for
 // "OI last changed … s ago" (so the rest of the page does not re-render every second).
-function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey, show = 'totals+strikes' }) {
+function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey, show = 'totals+strikes', spotBars = null, step = null }) {
   const [nowMs, setNowMs] = useState(() => Date.now())
   useEffect(() => {
     if (!live) return undefined
@@ -75,7 +75,7 @@ function OiHeatmapLive({ byStrike, atmStrike, live, lastOiChangeMs, dayKey, show
   }, [live])
   return (
     <OiChangeHeatmapSection ceByStrike={byStrike.ceByStrike} peByStrike={byStrike.peByStrike} strikes={byStrike.strikes} atmStrike={atmStrike}
-      asOfMs={null} live={live} lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show={show} />
+      asOfMs={null} live={live} lastOiChangeMs={lastOiChangeMs} nowMs={nowMs} dayKey={dayKey} show={show} spotBars={spotBars} step={step} />
   )
 }
 
@@ -272,7 +272,7 @@ export default function ExternalPage() {
         <Card size="small" title={<Space size={8}>OI totals and OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
           {oi.error && <LoadError error={oi.error} onRetry={oi.reload} />}
           {oiBody(() => (
-            <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} />
+            <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} spotBars={spotChart?.oneMinBars} step={step} />
           ))}
         </Card>
   )
@@ -285,7 +285,7 @@ export default function ExternalPage() {
   )
   const strikesCard = (
     <Card size="small" style={{ height: '100%' }} title={<Space size={8}>OI heatmap (all strikes){connectionTag(oiConnection)}</Space>}>
-      {oiBody(() => <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="strikes" />)}
+      {oiBody(() => <OiHeatmapLive byStrike={byStrike} atmStrike={atmStrike} live={showsToday} lastOiChangeMs={lastOiChangeMs} dayKey={dayKey} show="strikes" spotBars={spotChart?.oneMinBars} step={step} />)}
     </Card>
   )
   const liquidityCard = (
