@@ -217,6 +217,34 @@ public sealed class VisitorLogTests : IDisposable
     }
 
     [Fact]
+    public void Clear_deletes_the_whole_history_and_leaves_one_entry_saying_who_cleared_it()
+    {
+        var log = Log();
+        log.Record(Page("/a", "admin@x"));
+        _now = _now.AddDays(1);
+        log.Record(Page("/b", visitor: "anon-123456"));
+        Assert.Equal(2, log.Read(7).Count);
+
+        Assert.Equal(2, log.Clear());
+        Assert.Empty(log.Read(VisitorLog.KeepDays));
+        Assert.Empty(Directory.GetFiles(Path.Combine(_dir, "log")));
+
+        using var geo = new GeoLocator(Path.Combine(_dir, "geo"));
+        var context = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim(ClaimTypes.Name, "admin@x"), new Claim(ClaimTypes.Role, AuthRoles.Admin) }, "test")),
+        };
+        new VisitRecorder(log, geo).Record(context, "cleared");
+        var left = Assert.Single(log.Read(1));
+        Assert.Equal(("cleared", "admin@x"), (left.Kind, left.Account));
+        // The same page again right after a clear is a new visit, not a repeat.
+        Assert.True(log.Record(Page("/a", "admin@x")));
+
+        var clear = typeof(SystemController).GetMethod(nameof(SystemController.ClearVisitors))!;
+        Assert.Equal(AuthRoles.Admin, clear.GetCustomAttribute<AuthorizeAttribute>()?.Roles);
+    }
+
+    [Fact]
     public void Only_an_admin_reads_the_visitors()
     {
         var method = typeof(SystemController).GetMethod(nameof(SystemController.Visitors))!;

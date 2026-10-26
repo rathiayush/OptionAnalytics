@@ -33,6 +33,16 @@ public sealed class MarketHoursTests
     public void The_window_is_IST_weekdays_9_to_4(int day, int hour, int minute, bool open) =>
         Assert.Equal(open, MarketHours.IsOpen(Ist(day, hour, minute)));
 
+    [Theory]
+    [InlineData(23, 9, 14, false)]   // Friday, before the open
+    [InlineData(23, 9, 15, true)]
+    [InlineData(23, 15, 29, true)]   // the last minute
+    [InlineData(23, 15, 30, false)]  // the close
+    [InlineData(23, 15, 40, false)]
+    [InlineData(24, 11, 0, false)]   // Saturday
+    public void The_trading_session_the_charts_show_is_weekdays_9_15_to_15_30(int day, int hour, int minute, bool open) =>
+        Assert.Equal(open, MarketHours.InTradingSession(Ist(day, hour, minute)));
+
     [Fact]
     public void After_the_close_it_waits_for_the_next_weekday_open()
     {

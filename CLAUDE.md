@@ -99,6 +99,12 @@ When adding or changing a strategy:
   instead of waiting out a 20 - 30 s timeout per request. Dhan's scrip master is ONE kept file shared by the spot / futures / option-chain masters
   (`DhanScripMasterFile`, `{DhanCachePath}/scrip-master`, re-downloaded after 4 h; a failed download uses the copy kept) - not three downloads after every start.
 
+- Charts show MARKET HOURS only - the F&O session, weekdays 09:15 - 15:30 IST (15:29 the last minute): after the close
+  Dhan keeps re-sending snapshots and the book. Server: `MarketHours.InTradingSession` - the OI Replay live feed keeps no
+  bar / sends no chart tick outside it (only each leg's last reading), the Order Flow engine takes no heatmap column.
+  Page: `marketSession.js` - `groupByStrike` (every OI chart, heatmap, totals, walls, the External page) and
+  `mergeFuturesLive` drop readings outside it. A new chart feed must do the same (`tests/market-session.test.mjs`).
+
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with
   a mocked `/api`, or a local feeder.
@@ -122,7 +128,8 @@ When adding or changing a strategy:
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
   `{yyyy-MM-dd}.csv`, a header row, formula-safe cells - under `Storage:VisitorLogPath`, 90 days; the page's Download CSV is
-  `GET /api/system/visitors.csv`, admin only). NEVER store or show an IP address: `ClientAddress` gives the address only for the
+  `GET /api/system/visitors.csv`, admin only; Clear history is `DELETE /api/system/visitors`, admin only - it leaves one "cleared"
+  entry naming who cleared it). NEVER store or show an IP address: `ClientAddress` gives the address only for the
   lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
   `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
   reaches the file.

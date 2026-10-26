@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Alert, Button, Card, Col, Input, Row, Segmented, Select, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
-import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Col, Input, Popconfirm, Row, Segmented, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { DeleteOutlined, DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 import { NavBar, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -24,6 +24,7 @@ const KIND = {
   login: { label: 'Signed in', color: 'green' },
   'login-failed': { label: 'Failed sign-in', color: 'red' },
   logout: { label: 'Signed out', color: 'blue' },
+  cleared: { label: 'Cleared the history', color: 'orange' },
 }
 const ROLE_COLOR = { Admin: 'gold', User: 'blue', External: 'purple', Runner: 'cyan' }
 const REFRESH_MS = 60_000
@@ -63,6 +64,15 @@ export default function VisitorsPage() {
     const id = setInterval(load, REFRESH_MS)
     return () => { cancelled = true; clearInterval(id) }
   }, [days, nonce])
+
+  const clearHistory = () => fetch('/api/system/visitors', { method: 'DELETE' })
+    .then(async (r) => {
+      if (!r.ok) throw new Error(`Could not clear the history (HTTP ${r.status}).`)
+      const body = await r.json().catch(() => ({}))
+      message.success(`Visitor history cleared${body.removed != null ? ` - ${body.removed} entries removed` : ''}.`)
+      setNonce((n) => n + 1)
+    })
+    .catch((err) => message.error(err.message))
 
   // The last answer, kept on screen while a new period loads.
   const state = { loading: loaded.key !== askKey, error: loaded.error, report: loaded.report }
@@ -118,6 +128,12 @@ export default function VisitorsPage() {
               <Tooltip title="The history the server keeps as CSV (a file per day) - this period, oldest first, time in IST and UTC. Opens in Excel / Google Sheets.">
                 <Button size="small" icon={<DownloadOutlined />} href={`/api/system/visitors.csv?days=${days}`}>Download CSV</Button>
               </Tooltip>
+              <Popconfirm
+                title="Clear the visitor history?"
+                description={`Every entry the server keeps (up to ${report?.keepDays ?? 90} days) is deleted - download the CSV first to keep a copy. One entry stays: that you cleared it.`}
+                okText="Clear" okButtonProps={{ danger: true }} onConfirm={clearHistory}>
+                <Button size="small" danger icon={<DeleteOutlined />}>Clear history</Button>
+              </Popconfirm>
               <Button size="small" icon={<ReloadOutlined />} loading={state.loading} onClick={() => setNonce((n) => n + 1)}>Refresh</Button>
             </Space>
           )}>

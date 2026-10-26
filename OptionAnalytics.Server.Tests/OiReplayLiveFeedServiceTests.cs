@@ -116,28 +116,28 @@ public sealed class OiReplayLiveFuturesTickTests
         var service = new OiReplayLiveFeedService(null!, null!, null!, null!, null!, null!, batcher,
             Microsoft.Extensions.Logging.Abstractions.NullLogger<OiReplayLiveFeedService>.Instance, legStore: store);
         service.FuturesLegs[FuturesId] = new OiReplayLiveFeedService.FuturesLeg("NIFTY", IstClock.Today().AddDays(7));
+        service.OptionLegs[OptionId] = new() { ["WEEK"] = new OiReplayLiveFeedService.LegInfo("NIFTY", "WEEK", 25_000m, true, IstClock.Today().AddDays(3)) };
+        service.Clock = () => Now;
         return (service, batcher, store);
     }
 
-    // Both ticks in one minute: not in the last half second of one.
-    private static void AwayFromMinuteEdge()
-    {
-        var now = DateTimeOffset.UtcNow;
-        if (now.Second == 59 && now.Millisecond > 500) Thread.Sleep(600);
-    }
+    private const uint OptionId = 51234;
+    // A Friday, mid-session: the readings' time comes from the service's clock.
+    private static DateTimeOffset Now = new(2026, 10, 23, 11, 0, 10, IstClock.Offset);
 
     private static OptionAnalytics.Server.Dhan.SpotTick Tick(uint id, decimal price, long volume) =>
-        new(id, price, price, price, price, price, volume, 0, 0, 1_000_000, DateTimeOffset.UtcNow);
+        new(id, price, price, price, price, price, volume, 0, 0, 1_000_000, Now);
 
     [Fact]
     public void A_futures_tick_is_sent_to_the_page_and_kept_as_todays_bar()
     {
         var (service, batcher, store) = Service();
         batcher.Join("page", "u:NIFTY");
-        AwayFromMinuteEdge();
-        var started = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+        Now = new(2026, 10, 23, 11, 0, 10, IstClock.Offset);
+        var started = Now.AddMinutes(-1);
 
         service.OnTick(Tick(FuturesId, 25_610.5m, 1_200));
+        Now = Now.AddSeconds(20);
         service.OnTick(Tick(FuturesId, 25_612m, 1_500));
 
         var items = batcher.Flush(DateTimeOffset.UtcNow).Single(b => b.ConnectionId == "page").Batch.Items;
@@ -153,11 +153,61 @@ public sealed class OiReplayLiveFuturesTickTests
     {
         var (service, batcher, store) = Service();
         batcher.Join("page", "u:NIFTY");
-        var started = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+        Now = new(2026, 10, 23, 11, 0, 10, IstClock.Offset);
+        var started = Now.AddMinutes(-1);
 
         service.OnTick(Tick(FuturesId + 1, 25_610.5m, 1_200));
 
         Assert.DoesNotContain(batcher.Flush(DateTimeOffset.UtcNow).SelectMany(b => b.Batch.Items), i => i.E == "futuresTicks");
         Assert.Empty(store.FuturesBarsFrom("NIFTY", started));
+    }
+
+    [Theory]
+    [InlineData(23, 9, 14, false)]   // Friday, before the open
+    [InlineData(23, 9, 15, true)]
+    [InlineData(23, 15, 29, true)]   // the last minute
+    [InlineData(23, 15, 30, false)]  // the close
+    [InlineData(23, 16, 57, false)]
+    [InlineData(24, 11, 0, false)]   // Saturday
+    public void The_session_is_weekdays_9_15_to_15_30(int day, int hour, int minute, bool open) =>
+        Assert.Equal(open, OiReplayLiveFeedService.InFnoSession(new DateTimeOffset(2026, 10, day, hour, minute, 0, IstClock.Offset)));
+
+    [Fact]
+    public void After_the_close_the_feed_adds_no_new_minute_but_keeps_each_legs_last_reading()
+    {
+        var (service, batcher, store) = Service();
+        batcher.Join("page", "u:NIFTY");
+        batcher.Join("page", "c:NIFTY:WEEK");
+
+        Now = new(2026, 10, 23, 15, 29, 10, IstClock.Offset);   // the last minute of the session
+        service.OnTick(Tick(OptionId, 120m, 5_000));
+        service.OnTick(Tick(FuturesId, 25_600m, 9_000));
+        batcher.Flush(DateTimeOffset.UtcNow);
+
+        // Dhan keeps re-sending snapshots after 15:30 - stamped when they arrive, they used to open a minute each.
+        foreach (var t in new[] { new DateTimeOffset(2026, 10, 23, 15, 31, 0, IstClock.Offset), new DateTimeOffset(2026, 10, 23, 16, 57, 0, IstClock.Offset) })
+        {
+            Now = t;
+            service.OnTick(Tick(OptionId, 121m, 5_000));
+            service.OnTick(Tick(FuturesId, 25_605m, 9_000));
+        }
+
+        Assert.DoesNotContain(batcher.Flush(DateTimeOffset.UtcNow).SelectMany(b => b.Batch.Items), i => i.E is "oiReplayTicks" or "futuresTicks");
+        var from = new DateTimeOffset(2026, 10, 23, 9, 0, 0, IstClock.Offset);
+        Assert.Equal(new[] { 15 * 60 + 29 }, store.OptionPointsFrom("NIFTY", "WEEK", "CE", from).Select(p => IstClock.MinutesOfDay(p.Time)));
+        Assert.Equal(new[] { 15 * 60 + 29 }, store.FuturesBarsFrom("NIFTY", from).Select(b => IstClock.MinutesOfDay(b.Time)));
+        // The leg's newest reading is still kept (its closing price for a page that asks).
+        Assert.Equal(121m, Assert.Single(store.Latest("NIFTY", "WEEK", new DateOnly(2026, 10, 23))).Price);
+    }
+
+    [Fact]
+    public void Before_the_open_nothing_is_kept_as_a_bar()
+    {
+        var (service, batcher, store) = Service();
+        batcher.Join("page", "c:NIFTY:WEEK");
+        Now = new(2026, 10, 23, 9, 7, 0, IstClock.Offset);   // pre-open: F&O does not trade
+        service.OnTick(Tick(OptionId, 118m, 0));
+        Assert.DoesNotContain(batcher.Flush(DateTimeOffset.UtcNow).SelectMany(b => b.Batch.Items), i => i.E == "oiReplayTicks");
+        Assert.Empty(store.OptionPointsFrom("NIFTY", "WEEK", "CE", new DateTimeOffset(2026, 10, 23, 9, 0, 0, IstClock.Offset)));
     }
 }

@@ -46,6 +46,17 @@ public sealed class SystemController : ControllerBase
         return new VisitorsReport(geo.Ready, VisitorLog.KeepDays, days, log.Read(days));
     }
 
+    /// <summary>DELETE /api/system/visitors - clears the whole visitor history (the page's Clear history). One entry is
+    /// left behind: who cleared it and when, so a clear is never silent.</summary>
+    [HttpDelete("visitors")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult ClearVisitors([FromServices] VisitorLog log, [FromServices] VisitRecorder recorder)
+    {
+        var removed = log.Clear();
+        recorder.Record(HttpContext, "cleared");
+        return Ok(new { removed });
+    }
+
     /// <summary>GET /api/system/visitors.csv - the same history as a CSV download (the files the server keeps: one row
     /// per entry, the time in IST and UTC; never an address).</summary>
     [HttpGet("visitors.csv")]

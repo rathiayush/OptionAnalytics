@@ -19,6 +19,7 @@ import {
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive } from './futuresLive.js'
+import { inMarketSession } from './marketSession.js'
 import { usePaperPositionsSync } from './paperSync.js'
 import { dayEndExit, paperExitReason } from './paperExit.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
@@ -225,6 +226,8 @@ export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTick
 export function groupByStrike(points) {
   const byStrike = new Map()
   for (const p of points) {
+    // Market hours only (marketSession.js): no point after the 15:30 close or before 09:15 reaches any chart.
+    if (!inMarketSession(p.ms ?? p.time)) continue
     let list = byStrike.get(p.strike)
     if (!list) byStrike.set(p.strike, (list = []))
     list.push(p)

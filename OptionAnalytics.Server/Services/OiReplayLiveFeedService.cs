@@ -130,6 +130,7 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     private readonly ConcurrentDictionary<uint, FuturesLeg> _futuresLegsBySecurityId = new();
     /// <summary>For the tests: the futures contracts being tracked, by security id.</summary>
     internal ConcurrentDictionary<uint, FuturesLeg> FuturesLegs => _futuresLegsBySecurityId;
+    internal ConcurrentDictionary<uint, ConcurrentDictionary<string, LegInfo>> OptionLegs => _legsBySecurityId;
 
     public OiReplayLiveFeedService(
         SpotFeedHostedService spotFeed, DhanOptionChainMaster optionChainMaster, DhanFuturesInstrumentMaster futuresInstrumentMaster,
@@ -504,6 +505,14 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         return monthly.Count > 0 ? monthly[0] : listedFromToday[0];
     }
 
+    /// <summary>The clock a reading is stamped with (tests set it).</summary>
+    internal Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
+
+    /// <summary>Whether an observed time is inside the F&amp;O session (MarketHours.InTradingSession - weekdays 09:15 to
+    /// 15:30). After the close Dhan's feed keeps re-sending every leg's snapshot (the same OI) until about 16:00; stamped
+    /// with the time they ARRIVE, those used to open a new minute each - the OI heatmap grew empty columns to 16:57.</summary>
+    internal static bool InFnoSession(DateTimeOffset observed) => MarketHours.InTradingSession(observed);
+
     internal void OnTick(SpotTick tick)
     {
         // The shared feed carries every subscriber's instruments - only this service's legs and futures go further.
@@ -516,15 +525,17 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         // stamped with that same old trade time). Stamping with it filed fresh OI into long-past
         // buckets and left the current one empty - the scattered live heatmap. The trade time is still
         // forwarded as lastTradeTime for anything that genuinely wants it.
-        var observedAt = DateTimeOffset.UtcNow.ToOffset(IstClock.Offset);
+        var observedAt = Clock().ToOffset(IstClock.Offset);
         var lastTradeTime = tick.ExchangeTimestamp.ToOffset(IstClock.Offset);
+        // Outside the session: no new minute on the charts, no bar kept - only each leg's newest reading (its close).
+        var inSession = InFnoSession(observedAt);
 
         var minuteKey = observedAt.ToUnixTimeSeconds() / 60;
 
         // The near futures first: they are not option legs, and the legs' early return below used to drop every
         // futures tick - the page's futures chart never ticked and today's futures bars (LiveOptionLegStore) stayed
         // empty, so a reload showed them frozen at the morning's backfill.
-        if (futuresLeg is not null && tick.LastPrice > 0)
+        if (futuresLeg is not null && tick.LastPrice > 0 && inSession)
         {
             var futuresUnderlying = futuresLeg.Underlying;
             // Futures has no expiryFlag concept (see FuturesUnderlyings' own doc comment) - the plain
@@ -544,9 +555,6 @@ public sealed class OiReplayLiveFeedService : BackgroundService
             var side = leg.IsCall ? "CE" : "PE";
             var group = $"c:{leg.Underlying}:{leg.ExpiryFlag}";
 
-            // The nearest listed expiry's OI feeds the price-vs-OI divergence alert (OiDivergenceMonitor).
-            if (leg.ExpiryFlag == "N1") _divergence?.RecordOi(leg.Underlying, side, leg.Strike, observedAt, tick.OpenInterest);
-
             // Conflated for the charts (see LiveBroadcastBatcher): the newest reading per leg per
             // minute, folded with any earlier ticks the browser hasn't received yet (keeps their
             // open and widens high/low). Keyed by minute so a candle never absorbs the previous
@@ -555,10 +563,16 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 leg.Underlying, leg.ExpiryFlag, leg.Strike, side,
                 Open: tick.LastPrice, Price: tick.LastPrice, High: tick.LastPrice, Low: tick.LastPrice,
                 OpenInterest: tick.OpenInterest, Time: observedAt, DayVolume: tick.Volume);
-            _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
+            if (inSession)
+            {
+                // The nearest listed expiry's OI feeds the price-vs-OI divergence alert (OiDivergenceMonitor).
+                if (leg.ExpiryFlag == "N1") _divergence?.RecordOi(leg.Underlying, side, leg.Strike, observedAt, tick.OpenInterest);
+                _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
+            }
             // Each leg's newest reading, in memory - a page reads an index's current option prices from it, no Dhan call.
-            // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService); the newest reading for every leg.
-            if (tick.LastPrice > 0) _legStore?.Record(optionTick, tick.Volume, keepBars: leg.ExpiryFlag is "WEEK" or "MONTH");
+            // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService), in the session only; the newest
+            // reading for every leg at any hour.
+            if (tick.LastPrice > 0) _legStore?.Record(optionTick, tick.Volume, keepBars: inSession && (leg.ExpiryFlag is "WEEK" or "MONTH"));
 
             // The raw per-tick tape, on its own "t:" group, for the Live Strike Data page - its whole
             // purpose is to show every individual tick, so only a page that joined it pays for that
