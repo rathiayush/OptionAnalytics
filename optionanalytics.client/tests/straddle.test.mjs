@@ -205,3 +205,27 @@ test('a strike missing a leg for over 5 minutes is skipped for the next nearest'
   assert.equal(read.series.find((p) => p.time === at('10:04')).strike, 25000)   // its 09:59 reading, 5 minutes old
   assert.equal(read.series.find((p) => p.time === at('10:05')).strike, 25050)
 })
+
+test('the range is today\'s share of the straddle (ATM IV over the minutes left), not the move to expiry', () => {
+  // A straddle of ~350 (expiry days away) at IV 12: today's priced move from 09:21 is ~150.
+  const d = day({ minutes: 375, spot: () => 25000, tv: () => 175, iv: () => 12 })
+  const today = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('10:00') })
+  const left = (at('15:30') - at('09:21')) / MIN
+  const expected = Math.sqrt(2 / Math.PI) * 25000 * 0.12 * Math.sqrt(left / (252 * 375))
+  assert.ok(today.day.value > 340)
+  assert.ok(Math.abs(today.day.width - expected) < 1e-9)
+  assert.ok(Math.abs(today.day.upper - (25000 + expected)) < 1e-9 && Math.abs(today.day.lower - (25000 - expected)) < 1e-9)
+  // To expiry: the straddle's own breakevens.
+  const expiry = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('10:00'), scope: 'expiry' })
+  assert.equal(expiry.day.width, expiry.day.value)
+  // A range started later in the day prices less time.
+  const late = straddleRead(d.ce, d.pe, d.spots, { start: '14:00' })
+  assert.ok(late.day.width < today.day.width)
+  // Without an IV it falls back to the straddle.
+  const noIv = day({ spot: () => 25000, tv: () => 175, iv: () => null })
+  assert.equal(straddleRead(noIv.ce, noIv.pe, noIv.spots).day.width, straddleRead(noIv.ce, noIv.pe, noIv.spots).day.value)
+  // Never wider than the straddle (expiry day: the straddle IS today's move).
+  const expiryDay = day({ spot: () => 25000, tv: () => 30, iv: () => 40 })
+  const e = straddleRead(expiryDay.ce, expiryDay.pe, expiryDay.spots)
+  assert.equal(e.day.width, e.day.value)
+})
