@@ -413,143 +413,26 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Contains(Path.Combine("v1", "charts-rollingoption", "days", "2025-09", "15"), Cache().FileOfDay("/charts/rollingoption", new { s = 1 }, PastDay));
     }
 
-    // ---- The days kept as CSV files ----
+    // ---- Gzip JSON only, and whether the cache works ----
 
     [Fact]
-    public async Task APastDay_IsKeptAsACsvFile_AMinuteARow_AndReadBackWithNoDhanCall()
+    public async Task APastDay_IsKeptAsGzipJson_Only_AndReadBackWithNoDhanCall()
     {
         var requests = new List<string>();
-        var (first, oi, _) = await Historical(requests, Cache(), session: true).GetIntradayFuturesCandlesAsync(55, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
-        Assert.True(oi);
+        var load = new OptionAnalytics.Server.Services.LoadProgress("t");
+        IReadOnlyList<(CandleWithVolume Bar, decimal? Strike, decimal? Spot, long? OpenInterest, decimal? ImpliedVolatility)> bars;
+        using (OptionAnalytics.Server.Services.LoadProgress.Use(load))
+            (bars, _) = await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+3", "PUT", PastDay, PastDay, 1, CancellationToken.None);
 
-        var file = Assert.Single(Directory.GetFiles(_dir, "*.csv", SearchOption.AllDirectories));
-        Assert.Contains(Path.Combine("csv", "charts-intraday", "2025-09", "2025-09-15"), file);
-        Assert.StartsWith("55_NSE_FNO_", Path.GetFileName(file));
-        Assert.Empty(Directory.GetFiles(_dir, "*.json.gz", SearchOption.AllDirectories));
-        var lines = File.ReadAllLines(file);
-        Assert.Contains("# endpoint=/charts/intraday", lines);
-        Assert.Contains("# day=2025-09-15 (IST)", lines);
-        var rows = lines.Where(l => !l.StartsWith("# ")).ToList();
-        Assert.Equal("time_ist,open,high,low,close,volume,timestamp,open_interest", rows[0]);
-        Assert.Equal(1 + 375, rows.Count);
-        Assert.StartsWith("2025-09-15 09:15,100,101,99,100.5,10,", rows[1]);
-        Assert.StartsWith("2025-09-15 15:29,", rows[^1]);
-
-        // A restart with Dhan not logged in: the day comes from the CSV.
-        var (again, oiAgain, error) = await Historical(requests, Cache(), session: false).GetIntradayFuturesCandlesAsync(55, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
-        Assert.Null(error);
-        Assert.Single(requests);
-        Assert.True(oiAgain);
-        Assert.Equal(first, again);
-    }
-
-    [Fact]
-    public async Task AnOptionDay_IsKeptAsACsvFile_NamedByItsStrikeAndSide()
-    {
-        var requests = new List<string>();
-        var (bars, _) = await Rolling(requests, Cache(), session: true).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+3", "PUT", PastDay, PastDay, 1, CancellationToken.None);
-        var file = Assert.Single(Directory.GetFiles(_dir, "*.csv", SearchOption.AllDirectories));
-        Assert.Contains(Path.Combine("csv", "charts-rollingoption", "2025-09", "2025-09-15"), file);
-        Assert.Contains("_WEEK_1_ATMp3_PUT", Path.GetFileName(file));
-        var lines = File.ReadAllLines(file);
-        Assert.Contains("# series=data.pe", lines);
-        Assert.Equal("time_ist,open,high,low,close,volume,timestamp,oi,iv,strike,spot", lines.First(l => !l.StartsWith("# ")));
+        var file = Assert.Single(Directory.GetFiles(_dir, "*", SearchOption.AllDirectories));
+        Assert.EndsWith(".json.gz", file);
+        Assert.Contains(Path.Combine("v1", "charts-rollingoption", "days", "2025-09", "15"), file);
+        Assert.Equal(1, JsonDocument.Parse(JsonSerializer.Serialize(load.Snapshot(0))).RootElement.GetProperty("savedToDisk").GetInt32());
 
         var (again, error) = await Rolling(requests, Cache(), session: false).GetRollingOptionCandlesAsync("NIFTY", 13, "WEEK", 1, "ATM+3", "PUT", PastDay, PastDay, 1, CancellationToken.None);
         Assert.Null(error);
         Assert.Single(requests);
         Assert.Equal(bars, again);
-    }
-
-    [Fact]
-    public void Numbers_AndGaps_ComeBackExactly_AndAnEmptyDayStaysEmpty()
-    {
-        var cache = Cache();
-        const string day = """{"open":[22512.35,0.05,null],"volume":[123456789012,0,7],"timestamp":[1757908500,1757908560,1757908620]}""";
-        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue(day));
-        using (var back = cache.TryGetDay("/charts/intraday", new { s = 1 }, PastDay))
-            Assert.Equal(day, back!.RootElement.GetRawText());
-
-        // A holiday of an option strike: kept empty, in Dhan's own shape.
-        const string empty = """{"data":{"ce":{"open":[],"timestamp":[]}}}""";
-        cache.PutDay("/charts/rollingoption", new { s = 2 }, PastDay, w => w.WriteRawValue(empty));
-        using (var back = cache.TryGetDay("/charts/rollingoption", new { s = 2 }, PastDay))
-            Assert.Equal(empty, back!.RootElement.GetRawText());
-        Assert.Equal(2, Directory.GetFiles(_dir, "*.csv", SearchOption.AllDirectories).Length);
-    }
-
-    [Fact]
-    public void ADayKeptBeforeAsGzipJson_IsReadAndMovedToCsv_NeverAskedOfDhanAgain()
-    {
-        var cache = Cache();
-        var key = new { securityId = "13" };
-        const string response = """{"close":[1.5,2],"timestamp":[1757908500,1757908560]}""";
-        // The file as the cache wrote it before the CSV files.
-        var legacy = cache.FileOfDay("/charts/intraday", key, PastDay);
-        Directory.CreateDirectory(Path.GetDirectoryName(legacy)!);
-        using (var gz = new System.IO.Compression.GZipStream(File.Create(legacy), System.IO.Compression.CompressionLevel.Optimal))
-        using (var w = new Utf8JsonWriter(gz))
-        {
-            w.WriteStartObject();
-            w.WriteString("endpoint", "/charts/intraday");
-            w.WritePropertyName("response");
-            w.WriteRawValue(response);
-            w.WriteEndObject();
-        }
-
-        Assert.True(cache.HasDay("/charts/intraday", key, PastDay));
-        using (var doc = cache.TryGetDay("/charts/intraday", key, PastDay)) Assert.Equal(response, doc!.RootElement.GetRawText());
-        Assert.False(File.Exists(legacy), "moved to CSV");
-        Assert.True(File.Exists(cache.CsvFileOfDay("/charts/intraday", key, PastDay)));
-        using (var doc = cache.TryGetDay("/charts/intraday", key, PastDay)) Assert.Equal(response, doc!.RootElement.GetRawText());
-    }
-
-    [Fact]
-    public void AnAnswerThatIsNotPlainColumns_IsStillKept_AsGzipJson()
-    {
-        var cache = Cache();
-        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":["x"],"timestamp":[1]}"""));
-        Assert.False(File.Exists(cache.CsvFileOfDay("/charts/intraday", new { s = 1 }, PastDay)));
-        Assert.True(File.Exists(cache.FileOfDay("/charts/intraday", new { s = 1 }, PastDay)));
-        using var doc = cache.TryGetDay("/charts/intraday", new { s = 1 }, PastDay);
-        Assert.Contains("\"x\"", doc!.RootElement.GetRawText());
-    }
-
-    [Fact]
-    public void ABrokenCsv_IsDeleted_SoTheDayIsFetchedAgain()
-    {
-        var cache = Cache();
-        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":[1,2],"timestamp":[1,2]}"""));
-        var file = cache.CsvFileOfDay("/charts/intraday", new { s = 1 }, PastDay);
-        File.AppendAllText(file, "3\n");   // a row with one cell of two
-        Assert.Null(cache.TryGetDay("/charts/intraday", new { s = 1 }, PastDay));
-        Assert.False(File.Exists(file));
-        Assert.False(cache.HasDay("/charts/intraday", new { s = 1 }, PastDay));
-    }
-
-    [Fact]
-    public void TheCap_CountsTheCsvDays_ButNeverTheScripMasterBesideThem()
-    {
-        var cache = new DhanDataCache(_dir, NullLogger<DhanDataCache>.Instance, () => new DateOnly(2026, 10, 12), maxBytes: long.MaxValue);
-        var noise = string.Join(",", Enumerable.Range(0, 4000).Select(i => (i * 7919 % 10007).ToString()));
-        var stamps = string.Join(",", Enumerable.Range(0, 4000));
-        var days = Enumerable.Range(0, 10).Select(i => PastDay.AddDays(i)).ToList();
-        foreach (var d in days) cache.PutDay("/charts/intraday", new { d }, d, w => w.WriteRawValue($"{{\"close\":[{noise}],\"timestamp\":[{stamps}]}}"));
-        var files = days.Select(d => cache.CsvFileOfDay("/charts/intraday", new { d }, d)).ToList();
-        Assert.All(files, f => Assert.True(File.Exists(f)));
-        var scripMaster = Path.Combine(_dir, "scrip-master", "api-scrip-master.csv");
-        Directory.CreateDirectory(Path.GetDirectoryName(scripMaster)!);
-        File.WriteAllText(scripMaster, new string('x', 2_000_000));
-        File.SetLastAccessTimeUtc(scripMaster, DateTime.UtcNow.AddYears(-1));
-        File.SetLastWriteTimeUtc(scripMaster, DateTime.UtcNow.AddYears(-1));
-        for (var i = 0; i < files.Count; i++) File.SetLastAccessTimeUtc(files[i], DateTime.UtcNow.AddDays(-30 + i));
-
-        var each = new FileInfo(files[0]).Length;
-        new DhanDataCache(_dir, NullLogger<DhanDataCache>.Instance, () => new DateOnly(2026, 10, 12), maxBytes: each * 6).TrimNow();
-        Assert.True(File.Exists(scripMaster), "the scrip master is not the cache's to trim");
-        Assert.True(files.Count(File.Exists) <= 6);
-        Assert.False(File.Exists(files[0]), "the day read longest ago goes first");
-        Assert.True(File.Exists(files[^1]));
     }
 
     [Fact]
@@ -576,15 +459,6 @@ public sealed class DhanDataCacheTests : IDisposable
             Assert.Equal(1, JsonDocument.Parse(JsonSerializer.Serialize(ok.Snapshot(0))).RootElement.GetProperty("savedToDisk").GetInt32());
         }
         finally { File.Delete(notADir); }
-    }
-
-    [Fact]
-    public void TheFileName_IsTheRequestsValues()
-    {
-        Assert.Equal("13_IDX_I_INDEX_1", DhanDataCache.LabelOf("""{"securityId":"13","exchangeSegment":"IDX_I","instrument":"INDEX","interval":"1"}"""));
-        Assert.Equal("NSE_FNO_1_13_OPTIDX_WEEK_1_ATMm2_CALL", DhanDataCache.LabelOf(
-            """{"exchangeSegment":"NSE_FNO","interval":"1","securityId":13,"instrument":"OPTIDX","expiryFlag":"WEEK","expiryCode":1,"strike":"ATM-2","drvOptionType":"CALL","requiredData":["open","oi"]}"""));
-        Assert.Equal("55_oi", DhanDataCache.LabelOf("""{"securityId":"55","oi":true}"""));
     }
 
     private const string Overlay = "1061 1004 0:51 / / rw,relatime master:540 - overlay overlay rw,lowerdir=/var/lib/docker/overlay2/l/ABC\n" +

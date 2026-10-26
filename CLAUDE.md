@@ -70,17 +70,13 @@ When adding or changing a strategy:
   The Order Flow page's live engines already run all three indices' near futures all day (`OrderFlowService`).
 - Every PAST day of the Dhan Data API (intraday spot / futures / option candles, the rolling / expired-option chain - NIFTY,
   BANKNIFTY, SENSEX alike) is kept on disk by `DhanDataCache` (`Storage:DhanCachePath`, the persistent volume in
-  docker-compose), ONE CSV FILE PER INSTRUMENT AND DAY (`DhanDayWindow`; `{DhanCachePath}/csv/{endpoint}/{yyyy-MM}/{day}/
-  {request values}-{hash}.csv` - Dhan's arrays as columns, a row a minute, `time_ist` first, the request in its `# ` lines;
-  the older gzip JSON day files are still read and moved to CSV, so nothing kept is asked again; an answer that is not
-  plain number columns stays gzip JSON): any window reads the days kept from disk and asks Dhan
-  for the rest in one call - so a window running into today (the chart backfills) still keeps its past days. A day is kept
+  docker-compose), ONE GZIP JSON FILE PER INSTRUMENT AND DAY (`DhanDayWindow`; gzip only - no CSV): any window reads the
+  days kept from disk and asks Dhan for the rest in one call - so a window running into today (the chart backfills) still keeps its past days. A day is kept
   when it is before today and Dhan sent a full session of it (its own timestamps - a thin option strike's untraded minutes
   come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept) or a later past day
   in the same answer (a holiday is then kept empty, a short session short); today, empty answers and a half LAST day go to
   Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
-  `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow` - the cache's own files only,
-  never the scrip master beside them). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
+  `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
   and failed writes (`LoadProgress`), and at start the folder is checked writable and on a volume kept across a deploy
   (`DhanDataCache.CheckFolder`, `StorageVolume` from /proc/self/mountinfo) - logged, and an admin header tag when not
   ("Dhan cache not writable" / "Dhan cache lost at every deploy"). A new Dhan data call for

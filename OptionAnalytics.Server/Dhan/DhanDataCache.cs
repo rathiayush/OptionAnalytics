@@ -1,9 +1,8 @@
-using System.Globalization;
 using System.IO.Compression;
-using OptionAnalytics.Server.Services;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Dhan;
 
@@ -23,15 +22,12 @@ namespace OptionAnalytics.Server.Dhan;
 /// again; a disk problem is logged and never fails the call.
 ///
 /// The folder is held to Storage:DhanCacheMaxGb (default 10 GB): once over it, the files read least recently go first,
-/// down to 90% of it.
-///
-/// Files: a CSV per instrument and day - {dir}/csv/{kind}/{yyyy-MM}/{yyyy-MM-dd}/{instrument}-{hash}.csv - Dhan's arrays as
-/// columns (open, high, low, close, volume, timestamp; oi, iv, spot, strike for the rolling options), a row a minute,
-/// with the minute in IST first (time_ist) and the request in its "# " header lines; read back into Dhan's own answer.
-/// The hash is of the endpoint, the request without its dates and the day. The older gzip JSON files
-/// ({dir}/v1/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz) are still read - and moved to CSV the first time - so
-/// nothing kept before is asked of Dhan again; the older whole-window files ({dir}/v1/{kind}/{yyyy-MM}/{last day}-{hash}.json.gz)
+/// down to 90% of it. Gzip JSON only. Files: {dir}/v1/{kind}/days/{yyyy-MM}/{dd}/{day}-{hash}.json.gz, the hash of the endpoint, the
+/// request without its dates and the day (a folder a day - a full cache is some hundred thousand files). The older whole-window files ({dir}/v1/{kind}/{yyyy-MM}/{last day}-{hash}.json.gz)
 /// are still read for the very request they hold, and split into days as they are.
+///
+/// Whether it works is shown: each day written counts as "saved to disk" on OI Replay's load panel and a write the disk
+/// refuses as "disk write failed" (LoadProgress); CheckFolder tells at start whether the folder can be written at all.
 /// </summary>
 public sealed class DhanDataCache
 {
@@ -40,7 +36,6 @@ public sealed class DhanDataCache
     /// <summary>A trim goes down to this share of the cap, so it does not run again on the next write.</summary>
     internal const double TrimTo = 0.9;
     private readonly string _dir;
-    private readonly string _csvDir;
     private readonly ILogger<DhanDataCache> _logger;
     private readonly Func<DateOnly> _today;
     private readonly long _maxBytes;
@@ -57,7 +52,6 @@ public sealed class DhanDataCache
     internal DhanDataCache(string directory, ILogger<DhanDataCache> logger, Func<DateOnly>? today = null, long? maxBytes = null)
     {
         _dir = directory;
-        _csvDir = Path.Combine(directory, "csv") + Path.DirectorySeparatorChar;
         _logger = logger;
         _today = today ?? IstClock.Today;
         _maxBytes = maxBytes ?? (long)(DefaultMaxGb * 1024 * 1024 * 1024);
@@ -143,60 +137,12 @@ public sealed class DhanDataCache
         public void Dispose() => ForceRefreshRequested.Value = before;
     }
 
-    /// <summary>The CSV one IST day of a series is kept in (see the class comment).</summary>
-    internal string CsvFileOfDay(string endpoint, object key, DateOnly day)
-    {
-        var request = JsonSerializer.Serialize(key);
-        return Path.Combine(_dir, "csv", KindOf(endpoint), day.ToString("yyyy-MM"), day.ToString("yyyy-MM-dd"),
-            $"{LabelOf(request)}-{Hash($"{endpoint}\n{request}\n{day:yyyy-MM-dd}")}.csv");
-    }
-
-    /// <summary>The request's values as a readable file name part ("13_IDX_I_INDEX_1", "NSE_FNO_1_13_OPTIDX_WEEK_1_ATMp3_CALL"):
-    /// letters, digits and '_' kept, '+' p, '-' m; a true flag by its name; lists left out.</summary>
-    internal static string LabelOf(string requestJson)
-    {
-        var parts = new List<string>();
-        try
-        {
-            using var doc = JsonDocument.Parse(requestJson);
-            if (doc.RootElement.ValueKind == JsonValueKind.Object)
-                foreach (var p in doc.RootElement.EnumerateObject())
-                {
-                    var text = p.Value.ValueKind switch
-                    {
-                        JsonValueKind.String => p.Value.GetString(),
-                        JsonValueKind.Number => p.Value.GetRawText(),
-                        JsonValueKind.True => p.Name,
-                        _ => null,
-                    };
-                    if (string.IsNullOrEmpty(text)) continue;
-                    var sb = new StringBuilder(text.Length);
-                    foreach (var c in text) if (char.IsAsciiLetterOrDigit(c) || c == '_') sb.Append(c); else if (c == '+') sb.Append('p'); else if (c == '-') sb.Append('m');
-                    if (sb.Length > 0) parts.Add(sb.ToString());
-                }
-        }
-        catch (JsonException) { }
-        var label = string.Join('_', parts);
-        return label.Length == 0 ? "series" : label.Length > 90 ? label[..90] : label;
-    }
-
     /// <summary>Whether this day of the series is on disk (not read) - never, for a force fetch.</summary>
-    public bool HasDay(string endpoint, object key, DateOnly day) =>
-        !ForceRefresh && Cacheable(day) && (File.Exists(CsvFileOfDay(endpoint, key, day)) || File.Exists(FileOfDay(endpoint, key, day)));
+    public bool HasDay(string endpoint, object key, DateOnly day) => !ForceRefresh && Cacheable(day) && File.Exists(FileOfDay(endpoint, key, day));
 
-    /// <summary>One day of the series from disk, in Dhan's own response shape (the caller disposes it), else null. A day still
-    /// in the older gzip JSON file is moved to CSV as it is read.</summary>
-    public JsonDocument? TryGetDay(string endpoint, object key, DateOnly day)
-    {
-        if (ForceRefresh || !Cacheable(day)) return null;
-        var csv = CsvFileOfDay(endpoint, key, day);
-        var doc = ReadCsvDay(csv);
-        if (doc is not null) return doc;
-        var legacy = FileOfDay(endpoint, key, day);
-        doc = Read(legacy);
-        if (doc is not null && WriteCsvDay(csv, endpoint, key, day, doc.RootElement, fromDhan: false) == true) TryDelete(legacy);
-        return doc;
-    }
+    /// <summary>One day of the series from disk, in Dhan's own response shape (the caller disposes it), else null.</summary>
+    public JsonDocument? TryGetDay(string endpoint, object key, DateOnly day) =>
+        !ForceRefresh && Cacheable(day) ? Read(FileOfDay(endpoint, key, day)) : null;
 
     /// <summary>Keeps Dhan's response to this request as a whole window - only for a closed window, and only when it
     /// had data (<paramref name="hasData"/>). A disk problem is logged, never thrown.</summary>
@@ -211,182 +157,7 @@ public sealed class DhanDataCache
     public void PutDay(string endpoint, object key, DateOnly day, Action<Utf8JsonWriter> writeResponse)
     {
         if (!Cacheable(day)) return;
-        // Kept as CSV when the day's arrays are plain columns of numbers (Dhan's candle answers are); anything else as gzip JSON.
-        JsonDocument response;
-        using (var buffer = new MemoryStream())
-        {
-            using (var writer = new Utf8JsonWriter(buffer)) writeResponse(writer);
-            response = JsonDocument.Parse(buffer.ToArray());
-        }
-        using (response)
-        {
-            var csv = WriteCsvDay(CsvFileOfDay(endpoint, key, day), endpoint, key, day, response.RootElement);
-            if (csv == true) TryDelete(FileOfDay(endpoint, key, day));
-            if (csv is not null) return; // written, or the disk refused it (said - not tried again as JSON)
-            var root = response.RootElement;
-            Write(FileOfDay(endpoint, key, day), endpoint, new { day = day.ToString("yyyy-MM-dd"), key }, w => root.WriteTo(w));
-        }
-    }
-
-    // ---- The CSV files ----
-
-    /// <summary>The derived first column of a CSV - the minute in IST, for reading the file; not part of Dhan's answer.</summary>
-    internal const string TimeIstColumn = "time_ist";
-
-    /// <summary>Where the day's arrays are in a kept answer: the answer itself (/charts/intraday), or {"data":{"ce"|"pe":{...}}}
-    /// (/charts/rollingoption, kept for one side). Null for any other shape.</summary>
-    internal static (string Path, JsonElement Series)? SeriesOf(JsonElement root)
-    {
-        if (root.ValueKind != JsonValueKind.Object) return null;
-        var props = root.EnumerateObject().ToList();
-        if (props.Count == 0 || props.Any(p => p.Value.ValueKind == JsonValueKind.Array)) return ("", root);
-        if (props.Count == 1 && props[0].Name == "data" && props[0].Value.ValueKind == JsonValueKind.Object)
-        {
-            var sides = props[0].Value.EnumerateObject().ToList();
-            if (sides.Count == 1 && sides[0].Value.ValueKind == JsonValueKind.Object) return ($"data.{sides[0].Name}", sides[0].Value);
-        }
-        return null;
-    }
-
-    /// <summary>Writes one day's answer as CSV: true when written, false when the disk refused it, null (nothing tried) when its
-    /// arrays are not equal-length columns of numbers - then it is kept as gzip JSON.</summary>
-    internal bool? WriteCsvDay(string path, string endpoint, object key, DateOnly day, JsonElement response, bool fromDhan = true)
-    {
-        if (SeriesOf(response) is not { } found) return null;
-        var columns = new List<(string Name, List<string> Cells)>();
-        var scalars = new Dictionary<string, JsonElement>();
-        int? length = null;
-        foreach (var p in found.Series.EnumerateObject())
-        {
-            if (p.Value.ValueKind != JsonValueKind.Array) { scalars[p.Name] = p.Value; continue; }
-            if (p.Name == TimeIstColumn || p.Name.Length == 0 || p.Name.Any(c => c is ',' or '\n' or '\r' or '#')) return null;
-            var cells = new List<string>();
-            foreach (var e in p.Value.EnumerateArray())
-            {
-                if (e.ValueKind == JsonValueKind.Number) cells.Add(e.GetRawText());
-                else if (e.ValueKind == JsonValueKind.Null) cells.Add("");
-                else return null;
-            }
-            if (length is not null && cells.Count != length) return null;
-            length = cells.Count;
-            columns.Add((p.Name, cells));
-        }
-        var stamps = columns.FindIndex(c => c.Name == "timestamp");
-        var sb = new StringBuilder();
-        sb.Append("# endpoint=").Append(endpoint).Append('\n');
-        sb.Append("# request=").Append(JsonSerializer.Serialize(key)).Append('\n');
-        sb.Append("# day=").Append(day.ToString("yyyy-MM-dd")).Append(" (IST)\n");
-        sb.Append("# series=").Append(found.Path).Append('\n');
-        if (scalars.Count > 0) sb.Append("# scalars=").Append(JsonSerializer.Serialize(scalars)).Append('\n');
-        sb.Append("# cached_utc=").Append(DateTimeOffset.UtcNow.ToString("o", CultureInfo.InvariantCulture)).Append('\n');
-        sb.AppendJoin(',', (stamps >= 0 ? new[] { TimeIstColumn } : Array.Empty<string>()).Concat(columns.Select(c => c.Name))).Append('\n');
-        for (var i = 0; i < (length ?? 0); i++)
-        {
-            if (stamps >= 0)
-                sb.Append(double.TryParse(columns[stamps].Cells[i], NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds)
-                    ? DateTimeOffset.FromUnixTimeSeconds((long)seconds).ToOffset(IstClock.Offset).ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : "").Append(',');
-            for (var c = 0; c < columns.Count; c++) { if (c > 0) sb.Append(','); sb.Append(columns[c].Cells[i]); }
-            sb.Append('\n');
-        }
-        return WriteText(path, endpoint, sb.ToString(), fromDhan);
-    }
-
-    /// <summary>A day's CSV back as Dhan's own answer (the caller disposes it); null when there is none. A broken file is deleted
-    /// and the day fetched again.</summary>
-    private JsonDocument? ReadCsvDay(string path)
-    {
-        if (!File.Exists(path)) return null;
-        try
-        {
-            var meta = new Dictionary<string, string>(StringComparer.Ordinal);
-            string[]? header = null;
-            var rows = new List<string[]>();
-            foreach (var raw in File.ReadLines(path, Encoding.UTF8))
-            {
-                var line = raw.TrimEnd('\r');
-                if (line.StartsWith("# ", StringComparison.Ordinal))
-                {
-                    var eq = line.IndexOf('=');
-                    if (eq > 2) meta[line[2..eq]] = line[(eq + 1)..];
-                    continue;
-                }
-                if (header is null) { header = line.Length == 0 ? Array.Empty<string>() : line.Split(','); continue; }
-                if (line.Length == 0) continue;
-                var cells = line.Split(',');
-                if (cells.Length != header.Length) throw new InvalidDataException($"a row has {cells.Length} cells, the header {header.Length}");
-                rows.Add(cells);
-            }
-            if (header is null || !meta.TryGetValue("series", out var seriesPath)) throw new InvalidDataException("no header");
-
-            using var buffer = new MemoryStream();
-            using (var w = new Utf8JsonWriter(buffer))
-            {
-                var wrappers = seriesPath.Length == 0 ? Array.Empty<string>() : seriesPath.Split('.');
-                foreach (var name in wrappers) { w.WriteStartObject(); w.WritePropertyName(name); }
-                w.WriteStartObject();
-                if (meta.TryGetValue("scalars", out var scalars))
-                    using (var kept = JsonDocument.Parse(scalars))
-                        foreach (var p in kept.RootElement.EnumerateObject()) p.WriteTo(w);
-                for (var c = 0; c < header.Length; c++)
-                {
-                    if (header[c] == TimeIstColumn) continue;
-                    w.WritePropertyName(header[c]);
-                    w.WriteStartArray();
-                    foreach (var row in rows) { if (row[c].Length == 0) w.WriteNullValue(); else w.WriteRawValue(row[c]); }
-                    w.WriteEndArray();
-                }
-                w.WriteEndObject();
-                foreach (var _ in wrappers) w.WriteEndObject();
-            }
-            var doc = JsonDocument.Parse(buffer.ToArray());
-            Interlocked.Increment(ref _hits);
-            // Read now: the size cap removes the files read least recently first.
-            try { File.SetLastAccessTimeUtc(path, DateTime.UtcNow); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-            return doc;
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or JsonException or UnauthorizedAccessException or ArgumentException)
-        {
-            _logger.LogWarning("Dhan cache file {Path} could not be read ({Error}) - deleted, it is fetched again.", path, ex.Message);
-            TryDelete(path);
-            return null;
-        }
-    }
-
-    /// <summary>Writes a file whole (a temporary file moved over it) and counts it; false when the disk refused it - logged, and
-    /// shown on the page's load progress, never thrown. `fromDhan`: a day Dhan sent now (counted as saved on the load panel).</summary>
-    private bool WriteText(string path, string endpoint, string content, bool fromDhan)
-    {
-        var tmp = $"{path}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            File.WriteAllText(tmp, content, new UTF8Encoding(false));
-            var added = new FileInfo(tmp).Length - (File.Exists(path) ? new FileInfo(path).Length : 0);
-            File.Move(tmp, path, overwrite: true);
-            Interlocked.Increment(ref _writes);
-            // A day Dhan just sent - not one only moved from an older file - is what the load panel counts as saved.
-            if (fromDhan) LoadProgress.SavedToDisk();
-            Grew(added);
-            return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            WriteFailed(endpoint, path, ex.Message);
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
-            return false;
-        }
-    }
-
-    private void WriteFailed(string endpoint, string path, string error)
-    {
-        Interlocked.Increment(ref _writeErrors);
-        _logger.LogWarning("Dhan response for {Endpoint} not cached at {Path} ({Error}).", endpoint, path, error);
-        LoadProgress.DiskError($"Could not save to the disk cache ({error}) - this day will be asked of Dhan again next time.");
-    }
-
-    private static void TryDelete(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        Write(FileOfDay(endpoint, key, day), endpoint, new { day = day.ToString("yyyy-MM-dd"), key }, writeResponse);
     }
 
     private JsonDocument? Read(string path)
@@ -442,7 +213,9 @@ public sealed class DhanDataCache
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            WriteFailed(endpoint, path, ex.Message);
+            Interlocked.Increment(ref _writeErrors);
+            _logger.LogWarning("Dhan response for {Endpoint} not cached ({Error}).", endpoint, ex.Message);
+            LoadProgress.DiskError($"Could not save to the disk cache ({ex.Message}) - this day will be asked of Dhan again next time.");
             try { if (File.Exists(tmp)) File.Delete(tmp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
         }
     }
@@ -480,8 +253,7 @@ public sealed class DhanDataCache
                     if (DateTime.UtcNow - info.LastWriteTimeUtc > TimeSpan.FromHours(1)) { info.Delete(); deleted += length; }
                     continue;
                 }
-                // The cache's own files only - the scrip master's CSV and the NSE store beside them are not trimmed.
-                if (!path.EndsWith(".json.gz", StringComparison.Ordinal) && !(path.EndsWith(".csv", StringComparison.Ordinal) && path.StartsWith(_csvDir, StringComparison.Ordinal))) continue;
+                if (!path.EndsWith(".json.gz", StringComparison.Ordinal)) continue;
                 total += length;
                 files.Add((info, length, info.LastAccessTimeUtc > info.LastWriteTimeUtc ? info.LastAccessTimeUtc : info.LastWriteTimeUtc));
             }
