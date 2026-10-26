@@ -46,6 +46,18 @@ public sealed class SystemController : ControllerBase
         return new VisitorsReport(geo.Ready, VisitorLog.KeepDays, days, log.Read(days));
     }
 
+    /// <summary>GET /api/system/visitors.csv - the same history as a CSV download (the files the server keeps: one row
+    /// per entry, the time in IST and UTC; never an address).</summary>
+    [HttpGet("visitors.csv")]
+    [Authorize(Roles = AuthRoles.Admin)]
+    public IActionResult VisitorsCsv([FromServices] VisitorLog log, [FromQuery] int days = 1)
+    {
+        days = Math.Clamp(days, 1, VisitorLog.KeepDays);
+        var today = IstClock.Today();
+        var name = days == 1 ? $"visitors-{today:yyyy-MM-dd}.csv" : $"visitors-{today.AddDays(1 - days):yyyy-MM-dd}-to-{today:yyyy-MM-dd}.csv";
+        return File(System.Text.Encoding.UTF8.GetPreamble().Concat(System.Text.Encoding.UTF8.GetBytes(log.Csv(days))).ToArray(), "text/csv; charset=utf-8", name);
+    }
+
     public sealed record DhanCallsByEndpoint(string Category, string Method, string Path, int LastMinute, int Last15Minutes, int Failed);
     public sealed record DhanRepeatedCall(string Context, int Times, int Failed, string? LastError, DateTimeOffset LastAt);
     public sealed record DhanCallsReport(int LastMinute, int Last15Minutes, IReadOnlyList<DhanCallsByEndpoint> Endpoints, IReadOnlyList<DhanRepeatedCall> Repeated);

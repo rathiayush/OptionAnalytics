@@ -113,8 +113,9 @@ When adding or changing a strategy:
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
-  sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one JSON-lines file per IST day
-  under `Storage:VisitorLogPath`, 90 days). NEVER store or show an IP address: `ClientAddress` gives the address only for the
+  sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
+  `{yyyy-MM-dd}.csv`, a header row, formula-safe cells - under `Storage:VisitorLogPath`, 90 days; the page's Download CSV is
+  `GET /api/system/visitors.csv`, admin only). NEVER store or show an IP address: `ClientAddress` gives the address only for the
   lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
   `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
   reaches the file.

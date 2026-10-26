@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Alert, Button, Card, Col, Input, Row, Segmented, Select, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { DownloadOutlined, ReloadOutlined } from '@ant-design/icons'
 import { NavBar, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -113,7 +113,14 @@ export default function VisitorsPage() {
         </Space>
 
         <Card size="small" title="Visitors - who opened which page, when and from where"
-          extra={<Button size="small" icon={<ReloadOutlined />} loading={state.loading} onClick={() => setNonce((n) => n + 1)}>Refresh</Button>}>
+          extra={(
+            <Space size={8}>
+              <Tooltip title="The history the server keeps as CSV (a file per day) - this period, oldest first, time in IST and UTC. Opens in Excel / Google Sheets.">
+                <Button size="small" icon={<DownloadOutlined />} href={`/api/system/visitors.csv?days=${days}`}>Download CSV</Button>
+              </Tooltip>
+              <Button size="small" icon={<ReloadOutlined />} loading={state.loading} onClick={() => setNonce((n) => n + 1)}>Refresh</Button>
+            </Space>
+          )}>
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Space wrap size={12}>
               <Segmented value={days} onChange={setDays} options={PERIODS} aria-label="Period" />
@@ -165,7 +172,7 @@ export default function VisitorsPage() {
         <Text type="secondary" style={{ fontSize: 12 }}>
           Where = the city, region and country of the visitor&apos;s internet connection, worked out on this server (city level - sometimes the
           internet provider&apos;s city, and a VPN shows the VPN&apos;s). IP addresses are not kept. The same person on the same page within a minute
-          counts once; the log keeps {report?.keepDays ?? 90} days.{' '}
+          counts once; the server keeps it as CSV files (one per day) for {report?.keepDays ?? 90} days.{' '}
           <Tooltip title="The free IP-to-city database used for the location, kept on this server and refreshed monthly.">
             <a href="https://db-ip.com" target="_blank" rel="noreferrer">IP Geolocation by DB-IP</a>
           </Tooltip>
