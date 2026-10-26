@@ -1,33 +1,14 @@
-// The ATM straddle (the call + the put at the strike nearest spot) read through the day from a set time - 09:21 by
-// default, after the opening minutes settle. The straddle is what the option market charges for the move, so:
+// The ATM straddle (the call + the put at the strike nearest spot) from a set time - 09:21 by default, after the
+// opening minutes settle - drawn as ONE LINE PER STRIKE, never stitched into one line.
 //
-//  - a RANGE is the straddle's strike ± the move the market priced from there. The straddle itself prices the move to
-//    EXPIRY (a short straddle's breakevens) - days away on most days, far wider than one session. So by default
-//    (`scope: 'day'`) the range is the part of it left for TODAY: the straddle at the ATM IV over the minutes left to
-//    15:30 - 0.8 x spot x IV x sqrt(minutes left / (252 x 375)) (a straddle is worth 0.8 sigma), never more than the
-//    straddle. `scope: 'expiry'` (or no IV) keeps the straddle's own breakevens. The first range starts at the start time;
-//  - spot closing outside the range is a BREAK. A break the market accepts - spot still outside after `acceptMinutes`
-//    (0 = never) - starts a NEW RANGE around the ATM at that minute: the move is done, the question is asked again from
-//    the new level (sideways there, or the trend going on). A break that comes back inside first is a FAILED break and
-//    the range stays. Moves inside a range never move it, so its edges stay put to be faded;
-//  - the ATM straddle each minute (re-centred on the strike nearest spot every minute, so a move does not count as
-//    premium) against its VWAP since the range started (weighted by the two legs' traded volume; the plain average
-//    while no volume is known): under it = premium being sold, over it = premium being bought;
-//  - the CENTRE straddle (the range's own strike all along): below its value at the range start = a seller there is
-//    ahead = the market has moved less than priced;
-//  - ATM IV (the two legs' average): the straddle loses value every minute by time decay alone - IV says whether it is
-//    also being sold (IV falling) or bought (IV rising).
-//
-// SIDEWAYS needs all three over the last `holdMinutes`: spot inside the range, the ATM straddle under its VWAP (80% of
-// those minutes and now), and the centre straddle below its start value. The other reads:
-//      drift       - premium falling but spot drifting off the centre (the centre straddle above its start value);
-//      building    - inside, the ATM straddle over its VWAP: the move is being paid for, a break may come;
-//      trend       - outside, the straddle over its VWAP: the move is bigger than priced;
-//      breakout    - above the range with the straddle no longer falling (an index rally often LOWERS IV);
-//      fake        - outside but the straddle still falling under its VWAP: likely back (a real breakdown lifts the
-//                    straddle - fear raises IV);
-//      new-range   - just re-centred after an accepted break, read for `holdMinutes` before a verdict;
-//      unconfirmed / none - the straddle crossing its VWAP.
+// One line that jumps to the new ATM strike every time spot moves reads as falling all day: the strike nearest spot is
+// always the cheapest straddle on the chain, so each jump throws away the move (the old strike's straddle growing as
+// spot leaves it) and keeps only the decay. So here the straddle of the ATM strike at the start time is a line; when
+// spot moves and another strike becomes the ATM, that strike's straddle starts a NEW line from that minute, and the old
+// line keeps going - it rising while spot runs away from it is the move, it falling while spot sits at it is premium
+// being sold (and time decay, which a seller there earns too). A strike that becomes the ATM again goes on in its own
+// line. A new strike takes over only once spot is `switchBuffer` of a strike step past the midpoint between the two
+// strikes, so spot hovering at the midpoint does not flip the ATM every minute.
 //
 // A minute uses only readings up to that minute (each option point holds its minute's close, as the page shows it, and
 // a leg is read at its last reading within 5 minutes), and nothing after `asOfMs` - the replay clock.
@@ -35,10 +16,9 @@
 const MIN = 60_000
 const IST_MS = 330 * MIN
 const STALE_MINUTES = 5
-const HOLD_SHARE = 0.8
-const IV_MOVE = 0.5
 
 export const STRADDLE_START_DEFAULT = '09:21'
+export const STRADDLE_MAX_LINES = 6
 
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN
 
@@ -50,6 +30,9 @@ export function istClockOn(dayMs, hhmm) {
   return Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), h, m) - IST_MS
 }
 
+/** HH:mm in IST. */
+export const istHhmm = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16)
+
 // Each strike's readings, one per minute (a later point of the same minute is the newer reading - live), in time order.
 function legs(points) {
   const byStrike = new Map()
@@ -59,12 +42,7 @@ function legs(points) {
     if (!Number.isFinite(t)) continue
     let minutes = byStrike.get(p.strike)
     if (!minutes) byStrike.set(p.strike, minutes = new Map())
-    const prev = minutes.get(t)
-    minutes.set(t, {
-      t, price: p.price,
-      volume: Math.max(p.volume ?? 0, prev?.volume ?? 0),
-      iv: p.impliedVolatility > 0 ? p.impliedVolatility : prev?.iv ?? null,
-    })
+    minutes.set(t, { t, price: p.price })
   }
   const out = new Map()
   for (const [strike, minutes] of byStrike) out.set(strike, [...minutes.values()].sort((a, b) => a.t - b.t))
@@ -86,46 +64,26 @@ function readingAt(rows, t) {
 function straddleAt(ce, pe, strike, t) {
   const c = readingAt(ce.get(strike), t)
   const p = readingAt(pe.get(strike), t)
-  if (!c || !p) return null
-  const ivs = [c.iv, p.iv].filter((v) => v > 0)
-  return {
-    strike, value: c.price + p.price, ce: c.price, pe: p.price,
-    // Only a reading OF this minute traded in it.
-    volume: (c.t === t ? c.volume : 0) + (p.t === t ? p.volume : 0),
-    iv: ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : null,
-  }
+  return c && p ? c.price + p.price : null
 }
-
-// The straddle's worth of move left for today: 0.8 sigma (a straddle's value) at the ATM IV (% a year, 252 trading days
-// of 375 minutes) over the minutes left to the close. Null without an IV.
-const ANNUAL_MINUTES = 252 * 375
-function dayMove(spot, iv, msLeft) {
-  if (!(iv > 0) || !(spot > 0)) return null
-  const vol = iv < 3 ? iv : iv / 100   // a fraction or a percent
-  return Math.sqrt(2 / Math.PI) * spot * vol * Math.sqrt(Math.max(msLeft / MIN, 1) / ANNUAL_MINUTES)
-}
-
-/** HH:mm in IST. */
-export const istHhmm = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16)
-const pts = (v) => (Number.isFinite(v) ? v.toFixed(0) : '-')
 
 /**
- * The day's ATM straddle read, as of `asOfMs` (null = every minute given). `cePoints` / `pePoints`: the OI Replay run's
- * option points (strike, time, price, volume, impliedVolatility); `spotBars`: `[{ time (ms), close }]` one per minute.
- * Returns `{ startMs, series, ranges, day, dayBreaks, range, now, position, control, belowShare, change, ivChange, centre,
- * checks, outsideFor, failed, verdict }` - `series` one point per minute from the start time (`{ time, spot, strike,
- * value, vwap, iv, rangeIndex, centre, lower, upper }`), `ranges` the start's range and every accepted move's; the read
- * fields are null until there is a straddle to read.
+ * The day's ATM straddle, one line per strike, as of `asOfMs` (null = every minute given). `cePoints` / `pePoints`: the
+ * OI Replay run's option points (strike, time, price); `spotBars`: `[{ time (ms), close }]` one per minute.
+ * Returns `{ startMs, lines, hidden, shifts, now }`:
+ *  - `lines`: the strikes that were the ATM, in the order they first were - at most `maxLines` (the ones ATM most
+ *    recently; the ATM now always among them), `hidden` the rest. Each `{ strike, order, from, until, atmNow, start,
+ *    value, change, high, low, data: [{ time, value }] }` - from the minute it first became the ATM to the clock;
+ *    `order` its place among every line (for a colour that stays the strike's);
+ *  - `shifts`: each change of the ATM `{ time, from, to, spot }`;
+ *  - `now`: `{ time, spot, strike, value }` the last minute read - null until there is a straddle.
  */
-export function straddleRead(cePoints, pePoints, spotBars, {
-  start = STRADDLE_START_DEFAULT, asOfMs = null, acceptMinutes = 10, holdMinutes = 15, scope = 'day',
+export function straddleLines(cePoints, pePoints, spotBars, {
+  start = STRADDLE_START_DEFAULT, asOfMs = null, maxLines = STRADDLE_MAX_LINES, switchBuffer = 0.1,
 } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
-  const empty = {
-    startMs: null, series: [], ranges: [], day: null, dayBreaks: { up: null, down: null }, range: null, now: null, position: null,
-    control: null, belowShare: null, change: null, ivChange: null, centre: null, checks: null, outsideFor: null, failed: null, verdict: null,
-  }
+  const empty = { startMs: null, lines: [], hidden: 0, shifts: [], now: null }
   if (!spots.length) return empty
   const startMs = istClockOn(spots[0].t, start)
   if (startMs == null) return empty
@@ -133,118 +91,59 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const ce = legs(cePoints)
   const pe = legs(pePoints)
   const strikes = [...ce.keys()].filter((k) => pe.has(k)).sort((a, b) => a - b)
+  const steps = strikes.slice(1).map((k, i) => k - strikes[i]).filter((d) => d > 0)
+  const step = steps.length ? Math.min(...steps) : 0
   const byDistance = (spot) => strikes.slice().sort((a, b) => Math.abs(a - spot) - Math.abs(b - spot) || a - b)
-  const closeMs = istClockOn(spots[0].t, '15:30')
 
-  const series = []
-  const ranges = []
-  let range = null
-  let outside = null   // the break in progress: { side, from, to, accepted }
-  let priceVolume = 0, volume = 0, sum = 0, count = 0
+  const lines = new Map()   // strike -> line
+  const shifts = []
+  let atm = null
+  let now = null
   for (const { t, spot } of spots) {
     if (t < startMs || t > clock) continue
-    let atm = null
-    for (const strike of byDistance(spot)) if ((atm = straddleAt(ce, pe, strike, t))) break
-    if (!atm) continue
-    let reason = 'start'
-    if (range) {
-      const side = spot > range.upper ? 'up' : spot < range.lower ? 'down' : null
-      if (side !== (outside?.side ?? null)) {
-        if (outside) outside.to = t   // back inside (a failed break), or straight through to the other side
-        outside = side ? { side, from: t, to: null, accepted: null } : null
-        if (outside) range.breaks.push(outside)
-      }
-      // Still outside after acceptMinutes: the market accepted the move - a new range around the ATM from here.
-      if (outside && acceptMinutes > 0 && t - outside.from >= (acceptMinutes - 1) * MIN) {
-        outside.accepted = t
-        reason = outside.side
-        range = null
-        outside = null
-      }
+    // The nearest strike with both legs read this minute...
+    let nearest = null, nearestValue = null
+    for (const strike of byDistance(spot)) {
+      const value = straddleAt(ce, pe, strike, t)
+      if (value != null) { nearest = strike; nearestValue = value; break }
     }
-    if (!range) {
-      const today = scope === 'day' ? dayMove(spot, atm.iv, closeMs - t) : null
-      const width = today != null ? Math.min(today, atm.value) : atm.value
-      range = { time: t, strike: atm.strike, value: atm.value, width, today, spot, iv: atm.iv, lower: atm.strike - width, upper: atm.strike + width, reason, breaks: [] }
-      ranges.push(range)
-      priceVolume = 0; volume = 0; sum = 0; count = 0
+    if (nearest == null) continue
+    // ...takes over from the ATM only once spot is clearly past the midpoint between them.
+    const atmValue = atm != null ? straddleAt(ce, pe, atm, t) : null
+    const keep = atmValue != null && nearest !== atm
+      && Math.abs(spot - atm) - Math.abs(spot - nearest) < 2 * switchBuffer * step
+    const strike = keep ? atm : nearest
+    if (strike !== atm) {
+      if (atm != null) shifts.push({ time: t, from: atm, to: strike, spot })
+      atm = strike
+      if (!lines.has(strike)) lines.set(strike, { strike, order: lines.size, from: t, data: [] })
     }
-    count++; sum += atm.value; priceVolume += atm.value * atm.volume; volume += atm.volume
-    const centre = straddleAt(ce, pe, range.strike, t)
-    series.push({
-      time: t, spot, strike: atm.strike, value: atm.value, vwap: volume > 0 ? priceVolume / volume : sum / count, iv: atm.iv,
-      rangeIndex: ranges.length - 1, centre: centre?.value ?? null, lower: range.lower, upper: range.upper,
-    })
+    lines.get(strike).until = t
+    for (const line of lines.values()) {
+      const value = line.strike === strike ? (keep ? atmValue : nearestValue) : straddleAt(ce, pe, line.strike, t)
+      if (value != null) line.data.push({ time: t, value })
+    }
+    now = { time: t, spot, strike, value: keep ? atmValue : nearestValue }
   }
-  if (!series.length) return { ...empty, startMs }
+  if (!now) return { ...empty, startMs }
 
-  const first = ranges[0]
-  const day = { ...first, pct: (first.width / first.spot) * 100 }
-  const dayBreaks = { up: series.find((p) => p.spot > day.upper)?.time ?? null, down: series.find((p) => p.spot < day.lower)?.time ?? null }
-  const current = ranges.at(-1)
-  const now = series.at(-1)
-  const position = now.spot > current.upper ? 'above' : now.spot < current.lower ? 'below' : 'inside'
-  // The last `holdMinutes` of this range: how much of it the straddle spent under its VWAP, and how it and IV moved.
-  const own = series.filter((p) => p.time >= current.time)
-  const window = own.filter((p) => p.time > now.time - holdMinutes * MIN)
-  const belowShare = window.filter((p) => p.value < p.vwap).length / window.length
-  const enough = now.time - current.time >= (holdMinutes - 1) * MIN
-  const control = !enough ? 'early'
-    : belowShare >= HOLD_SHARE && now.value < now.vwap ? 'sellers'
-      : 1 - belowShare >= HOLD_SHARE && now.value > now.vwap ? 'buyers' : 'mixed'
-  const ago = [...own].reverse().find((p) => p.time <= now.time - holdMinutes * MIN) ?? own[0]
-  const change = now.value - ago.value
-  const ivChange = now.iv != null && ago.iv != null ? now.iv - ago.iv : null
-  const centre = { strike: current.strike, time: current.time, value: current.value, now: now.centre, sellerPnl: now.centre != null ? current.value - now.centre : null }
-  const checks = {
-    inside: position === 'inside',
-    premiumFalling: enough ? control === 'sellers' : null,
-    centreBelowStart: centre.sellerPnl == null ? null : centre.sellerPnl > 0,
-    ivSteady: ivChange == null ? null : ivChange < IV_MOVE,
-  }
-  const lastBreak = current.breaks.at(-1) ?? null
-  const outsideFor = lastBreak && lastBreak.to == null ? (now.time - lastBreak.from) / MIN + 1 : null
-  const failed = lastBreak && lastBreak.to != null ? lastBreak : null
-  const verdict = readVerdict({ range: current, now, position, control, change, ivChange, checks, holdMinutes, acceptMinutes, outsideFor, failed })
-  return { startMs, series, ranges, day, dayBreaks, range: current, now, position, control, belowShare, change, ivChange, centre, checks, outsideFor, failed, verdict }
-}
-
-function readVerdict({ range, now, position, control, change, ivChange, checks, holdMinutes, acceptMinutes, outsideFor, failed }) {
-  const edges = `${pts(range.lower)} – ${pts(range.upper)}`
-  const name = range.reason === 'start' ? `the ${istHhmm(range.time)} range (${edges})` : `the new range from ${istHhmm(range.time)} (${edges})`
-  const side = position === 'above' ? 'up' : position === 'below' ? 'down' : null
-  let verdict
-  if (control === 'early' && position === 'inside') {
-    verdict = range.reason === 'start'
-      ? { kind: 'early', side: null, title: 'Reading', detail: `Needs ${holdMinutes} minutes of the straddle from ${istHhmm(range.time)}.` }
-      : { kind: 'new-range', side: range.reason, title: 'New range', detail: `Spot held ${range.reason === 'up' ? 'above' : 'below'} the last range for ${acceptMinutes} min - the move was accepted, so the range is re-centred on ${range.strike} at ${istHhmm(range.time)}: ${edges}. Reading it for ${holdMinutes} min: the straddle falling under its VWAP here = sideways at the new level; spot leaving it = the trend goes on.` }
-  } else if (position === 'inside') {
-    if (checks.premiumFalling && checks.centreBelowStart) {
-      verdict = { kind: 'sideways', side: null, title: 'Sideways', detail: `Spot inside ${name}, the ATM straddle under its VWAP for the last ${holdMinutes} min and the ${range.strike} straddle below its ${istHhmm(range.time)} value - option sellers are in control: fade the edges, keep targets inside the range.` }
-    } else if (checks.premiumFalling) {
-      const drift = now.spot >= range.strike ? 'up' : 'down'
-      verdict = { kind: 'drift', side: drift, title: 'Range, drifting', detail: `Premium is still falling, but spot has drifted ${now.spot >= range.strike ? '+' : '−'}${pts(Math.abs(now.spot - range.strike))} from ${range.strike} and the ${range.strike} straddle is above its ${istHhmm(range.time)} value - sellers at the centre are losing. Still a range; watch the ${drift === 'up' ? 'upper' : 'lower'} edge (${pts(drift === 'up' ? range.upper : range.lower)}).` }
-    } else if (control === 'buyers') {
-      verdict = { kind: 'building', side: null, title: 'Premium being bought', detail: `Spot inside ${name} but the ATM straddle is over its VWAP - the move is being paid for; a break may come.` }
-    } else {
-      verdict = { kind: 'none', side: null, title: 'No clear read', detail: `Spot inside ${name}, the straddle crossing its VWAP.` }
+  const all = [...lines.values()].map((line) => {
+    const values = line.data.map((p) => p.value)
+    const first = line.data[0]?.value ?? null
+    const last = line.data.at(-1)?.value ?? null
+    return {
+      ...line, atmNow: line.strike === now.strike, start: first, value: last,
+      change: first != null && last != null ? last - first : null,
+      high: values.length ? Math.max(...values) : null, low: values.length ? Math.min(...values) : null,
     }
-  } else {
-    const where = `${outsideFor} min ${side === 'up' ? 'above' : 'below'} ${name}${acceptMinutes > 0 ? ` (a new range if it holds ${acceptMinutes} min)` : ''}`
-    if (control === 'buyers') {
-      verdict = { kind: 'trend', side, title: side === 'up' ? 'Trend up' : 'Trend down', detail: `Spot ${where}, the ATM straddle over its VWAP - the move is bigger than priced: trade with it.` }
-    } else if (control === 'sellers' && side === 'up' && change >= 0) {
-      verdict = { kind: 'breakout', side, title: 'Breakout up', detail: `Spot ${where}; the straddle has stopped falling (an index rally often lowers IV) - likely real.` }
-    } else if (control === 'sellers') {
-      verdict = { kind: 'fake', side, title: side === 'up' ? 'Breakout not confirmed' : 'Breakdown not confirmed', detail: `Spot ${where}, but the straddle is still falling under its VWAP - sellers are not worried; likely back into the range.` }
-    } else {
-      verdict = { kind: 'unconfirmed', side, title: side === 'up' ? 'Breakout - wait' : 'Breakdown - wait', detail: `Spot ${where}, the straddle crossing its VWAP - it holding over the VWAP confirms the move, under it says fake.` }
-    }
+  })
+  const keepCount = Math.max(1, maxLines ?? all.length)
+  const shown = new Set([...all].sort((a, b) => (b.atmNow - a.atmNow) || (b.until - a.until)).slice(0, keepCount).map((l) => l.strike))
+  return {
+    startMs,
+    lines: all.filter((l) => shown.has(l.strike)).sort((a, b) => a.from - b.from),
+    hidden: all.length - shown.size,
+    shifts,
+    now,
   }
-  const notes = []
-  if (position === 'inside' && failed) notes.push(`Back inside after a failed break ${failed.side} (${istHhmm(failed.from)} – ${istHhmm(failed.to)}): the move was not accepted.`)
-  // IV takes time decay out of the read.
-  if (ivChange != null && control === 'sellers' && ivChange >= IV_MOVE) notes.push(`ATM IV is up ${ivChange.toFixed(1)} in ${holdMinutes} min - the straddle's fall is time decay, not selling; a break may be coming.`)
-  if (ivChange != null && control === 'buyers' && ivChange <= -IV_MOVE) notes.push(`ATM IV is down ${(-ivChange).toFixed(1)} in ${holdMinutes} min - the straddle's rise is the spot's move, not premium buying.`)
-  return { ...verdict, notes }
 }

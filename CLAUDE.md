@@ -131,15 +131,15 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
-- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:21 by default, "From") the range
-  the options priced - by default ("Range: Today") the ATM strike ± today's share of the straddle (0.8 x spot x ATM IV x
-  sqrt(minutes left to 15:30 / (252 x 375)), never more than the straddle: the straddle itself prices the move to EXPIRY);
-  "To expiry" = strike ± the straddle. The range moves ONLY when a break is accepted - spot still outside
-  after "New range after" minutes - to a new range around the ATM there (VWAP and the centre straddle start again); a break
-  that comes back first is a failed break. Sideways = all three: spot inside, the ATM straddle under its VWAP (80% of "Read
-  over" and now), the centre straddle below its start value; the other reads are drift / premium bought / trend / breakout /
-  not confirmed. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live; the read describes the
-  day, it is not a measured signal and feeds no strategy.
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js` - `straddleLines`): from a set time (09:21 by default,
+  "From") ONE LINE PER STRIKE that was the ATM - the ATM strike's straddle (call + put) then is the first line; when another
+  strike becomes the ATM (spot a tenth of a strike step past the midpoint, `switchBuffer`, so it does not flip every minute)
+  its straddle starts a new line from that minute and the old line goes on (a strike ATM again goes on in its own line).
+  Never one line stitched across strikes: the strike nearest spot is always the cheapest straddle, so that line dropped
+  the move and only ever fell. The ATM now is the thick line, a strike keeps its colour (`order`), "Lines" draws the last
+  3 / 6 / 10 / all strikes ATM most recently; a table gives each strike's ATM time, start, now, change, high / low. No
+  range, sideways check or read any more. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and
+  live; it feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

@@ -5998,15 +5998,15 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
-            {/* The ATM straddle from a set time (09:21 by default): the range the options priced (re-centred only when a
-                break is accepted), the sideways check and the read - up to the replay clock, today live (straddle.js). */}
+            {/* The ATM straddle from a set time (09:21 by default), one line per strike that was the ATM - a new line when
+                the ATM changes, the old one going on - up to the replay clock, today live (straddle.js). */}
             {visibleSections.includes('straddle') && (
               <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('straddle')}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (call + put at the strike nearest spot){isLive ? ' · live' : ''}</Space>}
+                    title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (call + put) - one line per strike{isLive ? ' · live' : ''}</Space>}
                   >
                     <StraddleCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}

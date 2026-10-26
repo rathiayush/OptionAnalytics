@@ -1,38 +1,32 @@
 import { useEffect, useMemo, useRef } from 'react'
-import { Button, Col, Popover, Row, Segmented, Select, Space, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import { Button, Popover, Select, Space, Table, Tag, TimePicker, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
-import { CrosshairMode, LineSeries, LineStyle, LineType, createSeriesMarkers } from 'lightweight-charts'
+import { CrosshairMode, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
-import { STRADDLE_START_DEFAULT, istHhmm, straddleRead } from './straddle.js'
+import { STRADDLE_MAX_LINES, STRADDLE_START_DEFAULT, istHhmm, straddleLines } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
 
 const { Text } = Typography
 
-const STRADDLE_COLOR = '#f5a623'
-const VWAP_COLOR = '#4c9ffe'
-const CENTRE_COLOR = '#9aa4b2'
-const SPOT_COLOR = '#d9d9d9'
-const NEW_RANGE_COLOR = '#ffd54f'
-const DAY_RANGE_COLOR = '#8c8c8c'
-
-const VERDICT_COLORS = {
-  sideways: 'geekblue', drift: 'cyan', building: 'purple', none: 'default', early: 'default', 'new-range': 'gold', unconfirmed: 'gold', fake: 'orange',
-}
-const verdictColor = (v) => (v.kind === 'trend' || v.kind === 'breakout' ? (v.side === 'down' ? 'red' : 'green') : VERDICT_COLORS[v.kind] ?? 'default')
+// One colour per strike, in the order the strikes became the ATM - a strike keeps its colour all day.
+const LINE_COLORS = ['#f5a623', '#4c9ffe', '#b37feb', '#36cfc9', '#ff7875', '#95de64', '#ffd666', '#ff9c6e', '#5cdbd3', '#adc6ff']
+const colorOf = (order) => LINE_COLORS[order % LINE_COLORS.length]
+const SHIFT_COLOR = '#ffd54f'
 
 const hhmm = istHhmm
 const num = (v, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
 const signed = (v, digits = 1) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}` : '-')
+const changeColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 
-// A few lines on one time axis. `lines`: [{ id, title, color, width, style, steps, data: [{ time (ms), value }] }] -
-// the set of ids is fixed for a chart's life (a new set rebuilds it); `markers` go on the first line.
+// A few lines on one time axis. `lines`: [{ id, title, color, width, data: [{ time (ms), value }] }] - a new set of ids
+// rebuilds the chart (and fits it again); each marker goes on its `line` (an id).
 function LinesChart({ lines, markers = [], dayKey, height }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(new Map())
-  const markersRef = useRef(null)
+  const markersRef = useRef(new Map())
   const ids = lines.map((l) => l.id).join('|')
 
   useEffect(() => {
@@ -51,13 +45,12 @@ function LinesChart({ lines, markers = [], dayKey, height }) {
     const series = new Map()
     lines.forEach((l) => {
       series.set(l.id, chart.addSeries(LineSeries, {
-        color: l.color, lineWidth: l.width ?? 2, lineStyle: l.style ?? LineStyle.Solid, lineType: l.steps ? LineType.WithSteps : LineType.Simple,
-        title: l.title ?? '', priceLineVisible: false, lastValueVisible: l.lastValue ?? true,
+        color: l.color, lineWidth: l.width ?? 2, title: l.title ?? '', priceLineVisible: false, lastValueVisible: true,
         priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
       }))
     })
     seriesRef.current = series
-    markersRef.current = lines.length ? createSeriesMarkers(series.get(lines[0].id), []) : null
+    markersRef.current = new Map([...series].map(([id, s]) => [id, createSeriesMarkers(s, [])]))
     const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
     resize.observe(containerRef.current)
     return () => {
@@ -65,76 +58,56 @@ function LinesChart({ lines, markers = [], dayKey, height }) {
       chart.remove()
       chartRef.current = null
       seriesRef.current = new Map()
-      markersRef.current = null
+      markersRef.current = new Map()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [height, ids])
 
   useEffect(() => {
-    for (const l of lines) seriesRef.current.get(l.id)?.setData(sanitizeLine(l.data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
-    markersRef.current?.setMarkers(markers.map((m) => ({ ...m, time: toChartTime(m.time) })))
+    for (const l of lines) {
+      const series = seriesRef.current.get(l.id)
+      series?.setData(sanitizeLine(l.data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
+      series?.applyOptions({ color: l.color, lineWidth: l.width ?? 2, title: l.title ?? '' })
+    }
+    for (const [id, m] of markersRef.current) m.setMarkers(markers.filter((x) => x.line === id).map(({ line: _line, ...x }) => ({ ...x, time: toChartTime(x.time) })))
   }, [lines, markers])
-  useFitContentAsDataGrows(chartRef, lines[0]?.data.length ?? 0, dayKey)
+  useFitContentAsDataGrows(chartRef, lines[0]?.data.length ?? 0, `${dayKey}|${ids}`)
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-// How to read the card - the method in straddle.js, in the order a trader reads it.
 const HOW_TO_READ = (
   <div style={{ maxWidth: 420, fontSize: 12 }}>
-    <p style={{ margin: '0 0 6px' }}><b>1. The range.</b> At the start time the ATM straddle is what the market charges for the move to expiry. Today&apos;s share of it (the straddle at the ATM IV over the hours left) around the strike is the range priced for this session; &quot;To expiry&quot; shows the straddle&apos;s full breakevens. It stays put while spot moves inside it - its edges are the levels to fade.</p>
-    <p style={{ margin: '0 0 6px' }}><b>2. Sideways = all three checks.</b> Spot inside the range; the ATM straddle under its VWAP (premium being sold); the centre straddle (the range&apos;s own strike) below what it was at the start (a seller there is ahead - spot moved less than priced).</p>
-    <p style={{ margin: '0 0 6px' }}><b>3. A break.</b> Spot outside the range. The straddle over its VWAP = buyers paying for the move: trend. Still falling under its VWAP = sellers not worried: likely fake. Upside only needs the straddle to stop falling (an index rally lowers IV).</p>
-    <p style={{ margin: '0 0 6px' }}><b>4. Re-centre.</b> Only when the market accepts the move - spot still outside after the minutes set. Then a new range starts around the ATM there and the questions start again: sideways at the new level, or the trend going on. A break that comes back first is a failed break - the range stays.</p>
-    <p style={{ margin: 0 }}><b>5. IV.</b> The straddle falls every minute by time decay alone. Falling with IV rising: quiet now, but options are being bought - a break may come.</p>
+    <p style={{ margin: '0 0 6px' }}><b>One line per strike.</b> At the start time the ATM strike&apos;s straddle (call + put) is the first line. When spot moves and another strike becomes the ATM, that strike&apos;s straddle starts a new line from that minute - the old one keeps going. The ATM now is the thick line.</p>
+    <p style={{ margin: '0 0 6px' }}><b>Why not one line.</b> The strike nearest spot is always the cheapest straddle, so one line jumping to it each time drops the move and only ever falls.</p>
+    <p style={{ margin: '0 0 6px' }}><b>Reading it.</b> An old strike&apos;s line rising = spot running away from it - the move is bigger than that straddle priced. The ATM line falling while spot sits there = premium being sold (and time decay, which a seller there earns). The ATM line rising with spot at the strike = options being bought.</p>
+    <p style={{ margin: 0 }}><b>Switching.</b> A new strike takes over once spot is a tenth of a strike step past the midpoint, so spot sitting at the midpoint does not flip it every minute. A strike that becomes the ATM again goes on in its own line.</p>
   </div>
 )
 
-const CHECK = { true: '✓', false: '✗', null: '…' }
-const checkColor = (ok) => (ok === true ? UP_COLOR : ok === false ? DOWN_COLOR : AXIS_COLOR)
-
 /**
- * The ATM straddle (call + put at the strike nearest spot) from a set time - straddle.js: the range the options priced,
- * re-centred only when a break is accepted, the sideways check, the straddle against its VWAP, the centre straddle, ATM
- * IV and the read - as of the replay clock (`asOfMs`; null - live - every minute given; 0 - the replay not started), so
- * it runs with OI Replay, replayed or live.
+ * The ATM straddle from a set time, one line per strike that was the ATM (straddle.js) - as of the replay clock
+ * (`asOfMs`; null - live - every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, height = 260 }) {
+export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, height = 300 }) {
   const [start, setStart] = usePersistedState('optionanalytics.oiReplay.straddleStart', STRADDLE_START_DEFAULT)
-  const [acceptMinutes, setAcceptMinutes] = usePersistedState('optionanalytics.oiReplay.straddleAccept', 10)
-  const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
-  const [scope, setScope] = usePersistedState('optionanalytics.oiReplay.straddleScope', 'day')
+  const [maxLines, setMaxLines] = usePersistedState('optionanalytics.oiReplay.straddleLines', STRADDLE_MAX_LINES)
 
   const read = useMemo(
-    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, acceptMinutes, holdMinutes, scope }),
-    [cePoints, pePoints, spotBars, start, asOfMs, acceptMinutes, holdMinutes, scope],
+    () => straddleLines(cePoints, pePoints, spotBars, { start, asOfMs, maxLines: maxLines || null }),
+    [cePoints, pePoints, spotBars, start, asOfMs, maxLines],
   )
-  const charts = useMemo(() => {
-    const s = read.series
-    const line = (pick) => s.filter((p) => Number.isFinite(pick(p))).map((p) => ({ time: p.time, value: pick(p) }))
-    const straddle = [
-      { id: 'straddle', title: 'ATM', color: STRADDLE_COLOR, data: line((p) => p.value) },
-      { id: 'vwap', title: 'VWAP', color: VWAP_COLOR, width: 1, style: LineStyle.Dashed, data: line((p) => p.vwap) },
-      { id: 'centre', title: 'Centre', color: CENTRE_COLOR, width: 1, style: LineStyle.Dotted, data: line((p) => p.centre) },
-    ]
-    const day = read.day
-    const moved = read.ranges.length > 1
-    const spot = [
-      { id: 'spot', title: 'Spot', color: SPOT_COLOR, data: line((p) => p.spot) },
-      { id: 'upper', title: 'Range', color: UP_COLOR, width: 1, steps: true, data: line((p) => p.upper) },
-      { id: 'lower', title: 'Range', color: DOWN_COLOR, width: 1, steps: true, data: line((p) => p.lower) },
-      ...(moved && day ? [
-        { id: 'dayUpper', title: hhmm(day.time), color: DAY_RANGE_COLOR, width: 1, style: LineStyle.Dashed, lastValue: false, data: s.map((p) => ({ time: p.time, value: day.upper })) },
-        { id: 'dayLower', color: DAY_RANGE_COLOR, width: 1, style: LineStyle.Dashed, lastValue: false, data: s.map((p) => ({ time: p.time, value: day.lower })) },
-      ] : []),
-    ]
-    const markers = read.ranges.slice(1).map((r) => ({ time: r.time, position: r.reason === 'down' ? 'belowBar' : 'aboveBar', color: NEW_RANGE_COLOR, shape: 'circle', text: `new range ${r.strike}` }))
-    return { straddle, spot, markers }
-  }, [read])
+  const chart = useMemo(() => ({
+    lines: read.lines.map((l) => ({
+      id: String(l.strike), title: l.atmNow ? `${l.strike} ATM` : String(l.strike), color: colorOf(l.order), width: l.atmNow ? 3 : 1, data: l.data,
+    })),
+    // Each change of the ATM marked where the strike taken over starts (or goes on) its line.
+    markers: read.shifts.map((s) => ({ line: String(s.to), time: s.time, position: s.to < s.from ? 'belowBar' : 'aboveBar', color: SHIFT_COLOR, shape: 'circle', text: `ATM ${s.to}` })),
+  }), [read])
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
-      <Tooltip title="When the straddle is first read - its value then, around its strike, is the range the options priced. 09:21: after the opening minutes settle.">
+      <Tooltip title="When the straddle is first read - the ATM strike then is the first line. 09:21: after the opening minutes settle.">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>From</Text>
           <TimePicker
@@ -148,25 +121,13 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
           />
         </Space>
       </Tooltip>
-      <Tooltip title="Today: the part of the straddle's move left for this session (the straddle at the ATM IV over the minutes left to 15:30) - the straddle itself prices the move to expiry, often days away. To expiry: the straddle's own breakevens (strike ± straddle).">
+      <Tooltip title="How many strikes' lines to draw - the ones that were the ATM most recently (the ATM now always).">
         <Space size={4}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Range</Text>
-          <Segmented size="small" value={scope} onChange={setScope} options={[{ value: 'day', label: 'Today' }, { value: 'expiry', label: 'To expiry' }]} />
-        </Space>
-      </Tooltip>
-      <Tooltip title="A break is accepted when spot is still outside the range after this long: a new range then starts around the ATM there and is read again. A break that comes back inside first is a failed break - the range stays.">
-        <Space size={4}>
-          <Text type="secondary" style={{ fontSize: 12 }}>New range after</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>Lines</Text>
           <Select
-            size="small" value={acceptMinutes} onChange={setAcceptMinutes} style={{ width: 140 }} popupMatchSelectWidth={false}
-            options={[{ value: 0, label: 'never' }, ...[5, 10, 15, 30].map((v) => ({ value: v, label: `${v} min outside` }))]}
+            size="small" value={maxLines} onChange={setMaxLines} style={{ width: 90 }}
+            options={[...[3, 6, 10].map((v) => ({ value: v, label: `last ${v}` })), { value: 0, label: 'all' }]}
           />
-        </Space>
-      </Tooltip>
-      <Tooltip title="How long the straddle must stay under / over its VWAP for the read (80% of these minutes and now).">
-        <Space size={4}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Read over</Text>
-          <Segmented size="small" value={holdMinutes} onChange={setHoldMinutes} options={[10, 15, 30].map((v) => ({ value: v, label: `${v}m` }))} />
         </Space>
       </Tooltip>
       <Popover content={HOW_TO_READ} title="How to read the straddle" trigger="click" placement="bottomLeft">
@@ -175,7 +136,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
     </Space>
   )
 
-  if (!read.series.length) {
+  if (!read.now) {
     const waiting = read.startMs != null && asOfMs != null && asOfMs < read.startMs
     return (
       <>
@@ -188,66 +149,31 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
     )
   }
 
-  const { day, range, now, verdict, centre, checks } = read
-  const passed = [checks.inside, checks.premiumFalling, checks.centreBelowStart].filter((v) => v === true).length
-  const under = now.value < now.vwap
-  const dayBreaks = [read.dayBreaks.up && `broke up ${hhmm(read.dayBreaks.up)}`, read.dayBreaks.down && `broke down ${hhmm(read.dayBreaks.down)}`].filter(Boolean)
-  const newRanges = read.ranges.slice(1)
-  const checkRow = (ok, text) => (
-    <div style={{ fontSize: 12 }}><span style={{ color: checkColor(ok), display: 'inline-block', width: 16, fontWeight: 600 }}>{CHECK[ok]}</span>{text}</div>
-  )
+  const { now, shifts, hidden } = read
+  const first = read.lines.find((l) => l.order === 0)
+  const current = read.lines.find((l) => l.atmNow)
+  const rows = [...read.lines].reverse()
   return (
     <>
       {controls}
-      <div style={{ borderLeft: '3px solid #4c9ffe', padding: '4px 10px', marginBottom: 8 }}>
-        <Tag color={verdictColor(verdict)} style={{ marginRight: 8 }}>{verdict.title}{verdict.side ? (verdict.side === 'up' ? ' ↑' : ' ↓') : ''}</Tag>
-        <Text style={{ fontSize: 12 }}>{verdict.detail}</Text>
-        {verdict.notes.map((n) => <Text key={n} type="warning" style={{ fontSize: 12, display: 'block' }}>{n}</Text>)}
+      <div style={{ fontSize: 12, marginBottom: 8 }}>
+        {first && <>{hhmm(first.from)} ATM {first.strike} straddle {num(first.start)} → now {num(first.value)} (<Text style={{ fontSize: 12, color: changeColor(first.change) }}>{signed(first.change)}</Text>)</>}
+        {current && current !== first && <> · ATM now {current.strike} (since {hhmm(current.from)}) {num(current.start)} → {num(current.value)} (<Text style={{ fontSize: 12, color: changeColor(current.change) }}>{signed(current.change)}</Text>)</>}
+        {' '}· spot {num(now.spot, 1)} at {hhmm(now.time)} · {shifts.length} ATM change{shifts.length === 1 ? '' : 's'}
+        {hidden > 0 && <Text type="secondary" style={{ fontSize: 12 }}> · {hidden} older strike{hidden === 1 ? '' : 's'} not drawn</Text>}
       </div>
-      <Row gutter={[16, 8]} style={{ marginBottom: 8 }}>
-        <Col xs={24} lg={12}>
-          <Text strong style={{ fontSize: 12 }}>Sideways check {passed}/3</Text>
-          {checkRow(checks.inside, <>Spot {num(now.spot, 0)} inside the range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(range.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(range.upper, 0)}</Text> ({range.strike} ± {num(range.width, 0)} from {hhmm(range.time)}){read.outsideFor ? ` - outside ${read.outsideFor} min` : ''}</>)}
-          {checkRow(checks.premiumFalling, <>ATM straddle <Text style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text> under its VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text>: {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min{checks.premiumFalling == null ? ` (needs ${holdMinutes} min of this range)` : `, ${under ? 'under' : 'over'} now`}</>)}
-          {checkRow(checks.centreBelowStart, <>{centre.strike} straddle {num(centre.now)} below its {hhmm(centre.time)} value {num(centre.value)} ({signed(centre.sellerPnl)} for a seller there)</>)}
-          {now.iv != null && checkRow(checks.ivSteady, <>ATM IV {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)} in ${holdMinutes} min)` : ''} - not rising</>)}
-        </Col>
-        <Col xs={24} lg={12}>
-          <Text strong style={{ fontSize: 12 }}>The day</Text>
-          <div style={{ fontSize: 12 }}>
-            {hhmm(day.time)} ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> (to expiry)
-            {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text> (IV {num(day.iv)})</> : ''}
-            {' '}→ range {num(day.lower, 0)} – {num(day.upper, 0)} ({num(day.pct, 2)}% of spot)
-            {dayBreaks.length ? ` · ${dayBreaks.join(' · ')}` : ' · spot inside it so far'}
-          </div>
-          {newRanges.length > 0 && (
-            <div style={{ fontSize: 12 }}>
-              New range{newRanges.length > 1 ? 's' : ''} (break accepted):{' '}
-              {newRanges.map((r) => `${hhmm(r.time)} ${r.reason === 'up' ? '↑' : '↓'} ${r.strike} ± ${num(r.width, 0)}`).join(' · ')}
-            </div>
-          )}
-          {range.breaks.filter((b) => b.to != null).length > 0 && (
-            <div style={{ fontSize: 12 }}>
-              Failed breaks of this range: {range.breaks.filter((b) => b.to != null).map((b) => `${b.side} ${hhmm(b.from)}–${hhmm(b.to)}`).join(' · ')}
-            </div>
-          )}
-          <div style={{ fontSize: 12 }}>
-            {hhmm(now.time)} ATM {now.strike} straddle {num(now.value)} · {signed(read.change)} in {holdMinutes} min
-          </div>
-        </Col>
-      </Row>
-      <Row gutter={[16, 12]}>
-        <Col xs={24} lg={12}>
-          <Text strong style={{ fontSize: 12 }}>ATM straddle &amp; its VWAP</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · ATM: the nearest strike each minute; VWAP and Centre (the range&apos;s strike) start again with each new range</Text>
-          <LinesChart lines={charts.straddle} markers={charts.markers} dayKey={`straddle-${dayKey}-${start}`} height={height} />
-        </Col>
-        <Col xs={24} lg={12}>
-          <Text strong style={{ fontSize: 12 }}>Spot vs the range</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · the range moves only when a break is accepted{newRanges.length ? `; dashed: the ${hhmm(day.time)} range` : ''}</Text>
-          <LinesChart lines={charts.spot} dayKey={`straddle-spot-${dayKey}-${start}-${scope}`} height={height} />
-        </Col>
-      </Row>
+      <LinesChart lines={chart.lines} markers={chart.markers} dayKey={`straddle-${dayKey}-${start}`} height={height} />
+      <Table
+        size="small" pagination={false} style={{ marginTop: 8 }} rowKey="strike" dataSource={rows}
+        columns={[
+          { title: 'Strike', key: 'k', render: (_, l) => <Space size={6}><span style={{ display: 'inline-block', width: 10, height: 10, borderRadius: 2, background: colorOf(l.order) }} />{l.strike}{l.atmNow && <Tag color="gold" style={{ margin: 0 }}>ATM now</Tag>}</Space> },
+          { title: 'ATM', key: 'atm', render: (_, l) => `${hhmm(l.from)} – ${l.atmNow ? 'now' : hhmm(l.until)}` },
+          { title: 'At start', key: 's', align: 'right', render: (_, l) => num(l.start) },
+          { title: 'Now', key: 'v', align: 'right', render: (_, l) => num(l.value) },
+          { title: 'Change', key: 'c', align: 'right', render: (_, l) => <span style={{ color: changeColor(l.change) }}>{signed(l.change)}</span> },
+          { title: 'High / Low', key: 'hl', align: 'right', render: (_, l) => `${num(l.high)} / ${num(l.low)}` },
+        ]}
+      />
     </>
   )
 }
