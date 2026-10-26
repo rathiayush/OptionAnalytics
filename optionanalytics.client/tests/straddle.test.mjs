@@ -1,8 +1,9 @@
-// The OI Replay page's ATM straddle (straddle.js): from a set time, one line per strike that was the ATM - a new line
-// when another strike becomes the ATM, the old one going on - never one line stitched across strikes; no look-ahead.
+// The OI Replay page's ATM straddle read (straddle.js): the straddle from a set time, its VWAP, the priced range, a new
+// range only after an accepted break, the sideways check and the read (sideways / drift / trend / breakout / fake), and
+// no look-ahead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { istClockOn, straddleLines } from '../src/straddle.js'
+import { istClockOn, straddleRead } from '../src/straddle.js'
 
 const MIN = 60_000
 const OPEN = Date.parse('2026-10-20T09:15:00+05:30')
@@ -18,10 +19,9 @@ function cdf(x) {
   return x >= 0 ? 1 - tail : tail
 }
 const callPrice = (s, k, w) => (s - k) * cdf((s - k) / w) + w * phi((s - k) / w)
-const straddle = (s, k, tv) => { const w = tv / phi(0); const c = callPrice(s, k, w); return c + (c - (s - k)) }
 
-// A day minute by minute: spot(m), each leg's time value at the money tv(m).
-function day({ minutes = 200, spot, tv = () => 70, skip = () => false }) {
+// A day minute by minute: spot(m), each leg's time value at the money tv(m), IV iv(m), volume per leg per minute.
+function day({ minutes = 200, spot, tv, iv = () => 12, volume = () => 1000, skip = () => false }) {
   const ce = [], pe = [], spots = []
   for (let m = 0; m < minutes; m++) {
     const time = new Date(OPEN + m * MIN).toISOString()
@@ -30,7 +30,7 @@ function day({ minutes = 200, spot, tv = () => 70, skip = () => false }) {
     spots.push({ time: OPEN + m * MIN, close: s })
     for (const k of STRIKES) {
       const call = callPrice(s, k, w)
-      const point = (price) => ({ time, strike: k, price, volume: 1000, impliedVolatility: 12, openInterest: 1e6 })
+      const point = (price) => ({ time, strike: k, price, volume: volume(m), impliedVolatility: iv(m), openInterest: 1e6 })
       if (!skip('ce', k, m)) ce.push(point(call))
       if (!skip('pe', k, m)) pe.push(point(call - (s - k)))
     }
@@ -38,103 +38,194 @@ function day({ minutes = 200, spot, tv = () => 70, skip = () => false }) {
   return { ce, pe, spots }
 }
 const minuteOfDay = (hhmm) => (at(hhmm) - OPEN) / MIN
-const valueAt = (line, hhmm) => line.data.find((p) => p.time === at(hhmm))?.value
 
-test('the start time is IST on the day of the bars, configurable; the first line is the ATM strike then', () => {
+test('the start time is IST on the day of the bars, and configurable', () => {
   assert.equal(istClockOn(OPEN, '09:21'), at('09:21'))
   assert.equal(istClockOn(OPEN + 5 * 3600_000, '13:05'), at('13:05'))
   assert.equal(istClockOn(OPEN, '9:x'), null)
 
-  const d = day({ spot: () => 25010 })
-  const read = straddleLines(d.ce, d.pe, d.spots)
-  assert.equal(read.lines.length, 1)
-  const [line] = read.lines
-  assert.equal(line.strike, 25000)
-  assert.equal(line.from, at('09:21'))
-  assert.equal(line.data[0].time, at('09:21'))
-  assert.ok(Math.abs(line.start - straddle(25010, 25000, 70)) < 1e-9)
-  assert.deepEqual(read.shifts, [])
+  const d = day({ spot: () => 25010, tv: () => 70 })
+  const read = straddleRead(d.ce, d.pe, d.spots, { start: '09:21' })
+  assert.equal(read.series[0].time, at('09:21'))
+  assert.equal(read.day.strike, 25000)
+  // The straddle at 09:21: the 25000 call + put, spot 10 above the strike.
+  const call = callPrice(25010, 25000, 70 / phi(0))
+  assert.ok(Math.abs(read.day.value - (2 * call - 10)) < 1e-9)
+  assert.ok(Math.abs(read.day.upper - (25000 + read.day.value)) < 1e-9 && Math.abs(read.day.lower - (25000 - read.day.value)) < 1e-9)
 
-  const later = straddleLines(d.ce, d.pe, d.spots, { start: '10:00' })
-  assert.equal(later.lines[0].from, at('10:00'))
+  const later = straddleRead(d.ce, d.pe, d.spots, { start: '10:00' })
+  assert.equal(later.series[0].time, at('10:00'))
+  assert.equal(later.series.length, read.series.length - 39)
 })
 
-test('another strike becoming the ATM starts its own line; the old line goes on and rises as spot leaves it', () => {
-  // Spot at 25000, then up to 25120 from 09:40.
-  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : 25120) })
-  const read = straddleLines(d.ce, d.pe, d.spots)
-  assert.deepEqual(read.lines.map((l) => l.strike), [25000, 25100])
-  assert.deepEqual(read.shifts, [{ time: at('09:40'), from: 25000, to: 25100, spot: 25120 }])
-  const [old, atm] = read.lines
-  assert.equal(atm.from, at('09:40'))
-  assert.equal(atm.data[0].time, at('09:40'))
-  assert.ok(atm.atmNow && !old.atmNow)
-  assert.equal(old.until, at('09:39'))
-  // The old strike's own straddle all along - not the new ATM's: it is worth more now that spot left it.
-  assert.ok(Math.abs(valueAt(old, '09:41') - straddle(25120, 25000, 70)) < 1e-9)
-  assert.ok(valueAt(old, '09:41') > valueAt(old, '09:39') + 30)
-  assert.ok(old.change > 30)
-  assert.ok(Math.abs(valueAt(atm, '09:41') - straddle(25120, 25100, 70)) < 1e-9)
-  // Neither line jumps from one strike to the other.
-  assert.ok(old.data.every((p) => p.time < at('09:40') || Math.abs(p.value - straddle(25120, 25000, 70)) < 1e-9))
-  assert.equal(read.now.strike, 25100)
+test('the ATM straddle follows the strike nearest spot each minute; its VWAP is weighted by the legs\' volume', () => {
+  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : 25120), tv: () => 60, volume: (m) => (m % 2 ? 3000 : 1000) })
+  const read = straddleRead(d.ce, d.pe, d.spots, { acceptMinutes: 0 })
+  assert.equal(read.series.find((p) => p.time === at('09:39')).strike, 25000)
+  const after = read.series.find((p) => p.time === at('09:40'))
+  assert.equal(after.strike, 25100)
+  const ceAt = (k, t) => d.ce.find((p) => p.strike === k && Date.parse(p.time) === t).price
+  const peAt = (k, t) => d.pe.find((p) => p.strike === k && Date.parse(p.time) === t).price
+  assert.equal(after.value, ceAt(25100, at('09:40')) + peAt(25100, at('09:40')))
+  // A move inside the range never moves the range.
+  assert.equal(read.ranges.length, 1)
+  // VWAP = sum(value x (CE + PE volume)) / sum(volume) since the range started.
+  const upTo = read.series.filter((p) => p.time <= at('09:45'))
+  const vols = upTo.map((p) => 2 * ((p.time - OPEN) / MIN % 2 ? 3000 : 1000))
+  const vwap = upTo.reduce((a, p, i) => a + p.value * vols[i], 0) / vols.reduce((a, b) => a + b, 0)
+  assert.ok(Math.abs(read.series.find((p) => p.time === at('09:45')).vwap - vwap) < 1e-9)
+
+  // No volume known (a live minute): the plain average.
+  const quiet = day({ spot: () => 25000, tv: (m) => 80 - m * 0.1, volume: () => 0 })
+  const q = straddleRead(quiet.ce, quiet.pe, quiet.spots)
+  const mean = q.series.slice(0, 10).reduce((a, p) => a + p.value, 0) / 10
+  assert.ok(Math.abs(q.series[9].vwap - mean) < 1e-9)
 })
 
-test('a strike that becomes the ATM again goes on in its own line - no second line for it', () => {
-  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : m < minuteOfDay('10:10') ? 25110 : 25005) })
-  const read = straddleLines(d.ce, d.pe, d.spots)
-  assert.deepEqual(read.lines.map((l) => l.strike), [25000, 25100])
-  assert.deepEqual(read.shifts.map((s) => [s.from, s.to]), [[25000, 25100], [25100, 25000]])
-  const first = read.lines[0]
-  assert.ok(first.atmNow)
-  assert.equal(first.from, at('09:21'))
-  // Its line has every minute from the start, through the time it was not the ATM.
-  assert.equal(first.data.length, read.lines[1].data.length + minuteOfDay('09:40') - minuteOfDay('09:21'))
+test('a break held for the accept minutes starts a new range at the new ATM; one that comes back is a failed break', () => {
+  // The 09:21 range is 25000 ± ~120; spot jumps to 25200 at 10:00 and stays.
+  const held = day({ spot: (m) => (m < minuteOfDay('10:00') ? 25000 : 25200), tv: () => 60 })
+  const read = straddleRead(held.ce, held.pe, held.spots, { acceptMinutes: 10 })
+  assert.deepEqual(read.ranges.map((r) => [r.time, r.strike, r.reason]), [[at('09:21'), 25000, 'start'], [at('10:09'), 25200, 'up']])
+  const [first, second] = read.ranges
+  assert.deepEqual(first.breaks.map((b) => [b.side, b.from, b.accepted]), [['up', at('10:00'), at('10:09')]])
+  assert.ok(Math.abs(second.upper - (25200 + second.value)) < 1e-9)
+  // The VWAP starts again with the new range; the centre straddle is the new range's strike.
+  const p = read.series.find((x) => x.time === at('10:09'))
+  assert.equal(p.vwap, p.value)
+  assert.equal(p.rangeIndex, 1)
+  assert.equal(p.centre, p.value)
+  // The day's range stays the 09:21 one, and says when it broke.
+  assert.equal(read.day.strike, 25000)
+  assert.equal(read.dayBreaks.up, at('10:00'))
+  // Just re-centred: a new range, read before a verdict.
+  const fresh = straddleRead(held.ce, held.pe, held.spots, { acceptMinutes: 10, asOfMs: at('10:15') })
+  assert.equal(fresh.verdict.kind, 'new-range')
+  assert.equal(fresh.verdict.side, 'up')
+
+  // Back inside before 10 minutes: a failed break - no new range, and the read says so.
+  const back = day({ spot: (m) => (m >= minuteOfDay('10:00') && m < minuteOfDay('10:06') ? 25200 : 25000), tv: (m) => 75 - m * 0.08 })
+  const failed = straddleRead(back.ce, back.pe, back.spots, { acceptMinutes: 10, asOfMs: at('11:00') })
+  assert.equal(failed.ranges.length, 1)
+  assert.deepEqual([failed.failed.side, failed.failed.from, failed.failed.to, failed.failed.accepted], ['up', at('10:00'), at('10:06'), null])
+  assert.match(failed.verdict.notes.join(' '), /failed break up \(10:00 – 10:06\)/)
+
+  // Never re-centred.
+  assert.equal(straddleRead(held.ce, held.pe, held.spots, { acceptMinutes: 0 }).ranges.length, 1)
 })
 
-test('spot sitting at the midpoint between two strikes does not flip the ATM every minute', () => {
-  // 25024 / 25026 / 25023 ... around the 25025 midpoint, never a tenth of a step (5) past it.
-  const d = day({ spot: (m) => 25025 + (m % 2 ? 1.5 : -1.5) })
-  const read = straddleLines(d.ce, d.pe, d.spots)
-  assert.equal(read.shifts.length, 0)
-  assert.equal(read.lines.length, 1)
-  // Clearly past it: it switches.
-  const moved = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25020 : 25035) })
-  assert.deepEqual(straddleLines(moved.ce, moved.pe, moved.spots).shifts.map((s) => s.to), [25050])
-  // switchBuffer 0: the nearest strike every minute.
-  assert.ok(straddleLines(d.ce, d.pe, d.spots, { switchBuffer: 0 }).shifts.length > 10)
+test('sideways: spot inside, the straddle under its VWAP and the centre straddle below its start value', () => {
+  const d = day({ spot: (m) => 25000 + 15 * Math.sin(m / 7), tv: (m) => 75 - m * 0.08 })
+  const read = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('11:30') })
+  assert.deepEqual(read.checks, { inside: true, premiumFalling: true, centreBelowStart: true, ivSteady: true })
+  assert.equal(read.verdict.kind, 'sideways')
+  assert.ok(read.centre.sellerPnl > 0)
+  // Too early to read in the first minutes.
+  assert.equal(straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('09:30') }).verdict.kind, 'early')
+  // The straddle fading while IV rises: the fall is time decay, said so.
+  const decay = day({ spot: () => 25000, tv: (m) => 75 - m * 0.08, iv: (m) => 12 + m * 0.05 })
+  const r = straddleRead(decay.ce, decay.pe, decay.spots, { asOfMs: at('11:30') })
+  assert.equal(r.checks.ivSteady, false)
+  assert.match(r.verdict.notes.join(' '), /time decay/)
 })
 
-test('only the strikes ATM most recently are drawn, the ATM now always among them', () => {
-  // Spot stepping up a strike every 10 minutes: 25000, 25050, 25100, ... 25300.
-  const d = day({ spot: (m) => 25000 + 50 * Math.min(6, Math.floor(Math.max(0, m - 6) / 10)) })
-  const all = straddleLines(d.ce, d.pe, d.spots, { maxLines: null })
-  assert.deepEqual(all.lines.map((l) => l.strike), [25000, 25050, 25100, 25150, 25200, 25250, 25300])
-  assert.deepEqual(all.lines.map((l) => l.order), [0, 1, 2, 3, 4, 5, 6])
-  const three = straddleLines(d.ce, d.pe, d.spots, { maxLines: 3 })
-  assert.deepEqual(three.lines.map((l) => l.strike), [25200, 25250, 25300])
-  assert.deepEqual(three.lines.map((l) => l.order), [4, 5, 6]) // colours stay the strikes'
-  assert.equal(three.hidden, 4)
-  assert.ok(three.lines.at(-1).atmNow)
+test('drift: premium still falling but spot walking off the centre - not sideways', () => {
+  // Spot walks from 25000 to 25090 (inside the ±~120 range) while the straddle decays slowly.
+  const d = day({ spot: (m) => 25000 + Math.min(m, 90), tv: (m) => 60 - m * 0.03 })
+  const read = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('11:00') })
+  assert.equal(read.position, 'inside')
+  assert.equal(read.checks.premiumFalling, true)
+  assert.equal(read.checks.centreBelowStart, false)
+  assert.equal(read.verdict.kind, 'drift')
+  assert.equal(read.verdict.side, 'up')
+})
+
+test('trend, then the move accepted, then sideways at the new level', () => {
+  // Quiet until 10:00, a rally to 25300 by 10:30 with the straddle bid up, then flat with the straddle fading.
+  const spot = (m) => (m < minuteOfDay('10:00') ? 25000 : Math.min(25000 + (m - minuteOfDay('10:00')) * 10, 25300))
+  const tv = (m) => (m < minuteOfDay('10:00') ? 60 : m < minuteOfDay('10:30') ? 60 + (m - minuteOfDay('10:00')) * 0.6 : 78 - (m - minuteOfDay('10:30')) * 0.15)
+  const d = day({ minutes: 300, spot, tv })
+  // Not accepted yet (never re-centred): spot beyond the range, the straddle over its VWAP.
+  const trend = straddleRead(d.ce, d.pe, d.spots, { acceptMinutes: 0, asOfMs: at('10:28') })
+  assert.equal(trend.position, 'above')
+  assert.equal(trend.verdict.kind, 'trend')
+  assert.equal(trend.verdict.side, 'up')
+  // Accepted: new ranges along the way, then the last one goes quiet - sideways there.
+  const later = straddleRead(d.ce, d.pe, d.spots, { acceptMinutes: 10, asOfMs: at('12:30') })
+  assert.ok(later.ranges.length >= 2)
+  assert.equal(later.ranges.at(-1).reason, 'up')
+  assert.equal(later.verdict.kind, 'sideways')
+  assert.equal(later.dayBreaks.up != null, true)
+})
+
+test('a break the straddle does not confirm is called fake; an upside break needs only the straddle to stop falling', () => {
+  // Spot jumps over the range while the straddle keeps falling fast: fake.
+  const jump = (m) => (m < minuteOfDay('10:00') ? 25000 : 25200)
+  const fading = day({ spot: jump, tv: (m) => 75 - m * 0.25 })
+  const fake = straddleRead(fading.ce, fading.pe, fading.spots, { acceptMinutes: 0, asOfMs: at('10:30') })
+  assert.equal(fake.position, 'above')
+  assert.equal(fake.verdict.kind, 'fake')
+  assert.equal(fake.outsideFor, 31)
+  // The same below the range: a real breakdown lifts the straddle.
+  const drop = day({ spot: (m) => (m < minuteOfDay('10:00') ? 25000 : 24800), tv: (m) => 75 - m * 0.25 })
+  const down = straddleRead(drop.ce, drop.pe, drop.spots, { acceptMinutes: 0, asOfMs: at('10:30') })
+  assert.equal(down.position, 'below')
+  assert.equal(down.verdict.kind, 'fake')
+  assert.equal(down.verdict.side, 'down')
+
+  // Above the range, the straddle under its VWAP but no longer falling (IV lower on a rally): breakout.
+  const flatAfter = (m) => (m < minuteOfDay('10:00') ? 75 - m * 0.4 : 75 - minuteOfDay('10:00') * 0.4)
+  const settled = day({ spot: jump, tv: flatAfter })
+  const breakout = straddleRead(settled.ce, settled.pe, settled.spots, { acceptMinutes: 0, asOfMs: at('10:45') })
+  assert.equal(breakout.control, 'sellers')
+  assert.equal(breakout.verdict.kind, 'breakout')
+  // ... which below the range is still not a confirmed breakdown.
+  const settledDown = day({ spot: (m) => (m < minuteOfDay('10:00') ? 25000 : 24800), tv: flatAfter })
+  assert.equal(straddleRead(settledDown.ce, settledDown.pe, settledDown.spots, { acceptMinutes: 0, asOfMs: at('10:45') }).verdict.kind, 'fake')
 })
 
 test('nothing after the replay clock is used', () => {
-  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : 25120) })
-  const atClock = straddleLines(d.ce, d.pe, d.spots, { asOfMs: at('09:39') + 30_000 })
-  assert.equal(atClock.lines.length, 1)
-  assert.equal(atClock.now.time, at('09:39'))
-  assert.ok(atClock.lines[0].data.every((p) => p.time <= at('09:39')))
-  // The same minutes read the same with or without the later bars.
-  const cut = { ce: d.ce.filter((p) => Date.parse(p.time) <= at('09:39')), pe: d.pe.filter((p) => Date.parse(p.time) <= at('09:39')), spots: d.spots.filter((b) => b.time <= at('09:39')) }
-  assert.deepEqual(straddleLines(cut.ce, cut.pe, cut.spots).lines, atClock.lines)
-  // Before the start time: nothing yet.
-  assert.equal(straddleLines(d.ce, d.pe, d.spots, { asOfMs: at('09:20') }).now, null)
+  const d = day({ spot: (m) => 25000 + 4 * m, tv: (m) => 70 + 10 * Math.sin(m / 11) })
+  const clock = at('10:37') + 25_000
+  const cut = (points) => points.filter((p) => new Date(p.time).getTime() < at('10:38'))
+  const whole = straddleRead(d.ce, d.pe, d.spots, { asOfMs: clock })
+  const known = straddleRead(cut(d.ce), cut(d.pe), cut(d.spots), { asOfMs: clock })
+  assert.equal(whole.series.at(-1).time, at('10:37'))
+  assert.deepEqual(whole, known)
+  // The replay not started yet (clock 0): nothing.
+  const none = straddleRead(d.ce, d.pe, d.spots, { asOfMs: 0 })
+  assert.equal(none.series.length, 0)
+  assert.equal(none.startMs, at('09:21'))
 })
 
 test('a strike missing a leg for over 5 minutes is skipped for the next nearest', () => {
-  const d = day({ spot: () => 25010, skip: (side, k, m) => side === 'pe' && k === 25000 && m >= 1 })
-  const read = straddleLines(d.ce, d.pe, d.spots)
-  // 09:21: the 25000 put last traded at 09:15 - over 5 minutes old - so 25050 is the nearest with both legs.
-  assert.equal(read.lines[0].strike, 25050)
-  assert.equal(read.lines.length, 1)
+  // The 25000 put stops printing at 10:00.
+  const d = day({ spot: () => 25010, tv: () => 60, skip: (side, k, m) => side === 'pe' && k === 25000 && m >= minuteOfDay('10:00') })
+  const read = straddleRead(d.ce, d.pe, d.spots, { acceptMinutes: 0 })
+  assert.equal(read.series.find((p) => p.time === at('10:04')).strike, 25000)   // its 09:59 reading, 5 minutes old
+  assert.equal(read.series.find((p) => p.time === at('10:05')).strike, 25050)
+})
+
+test('the range is today\'s share of the straddle (ATM IV over the minutes left), not the move to expiry', () => {
+  // A straddle of ~350 (expiry days away) at IV 12: today's priced move from 09:21 is ~150.
+  const d = day({ minutes: 375, spot: () => 25000, tv: () => 175, iv: () => 12 })
+  const today = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('10:00') })
+  const left = (at('15:30') - at('09:21')) / MIN
+  const expected = Math.sqrt(2 / Math.PI) * 25000 * 0.12 * Math.sqrt(left / (252 * 375))
+  assert.ok(today.day.value > 340)
+  assert.ok(Math.abs(today.day.width - expected) < 1e-9)
+  assert.ok(Math.abs(today.day.upper - (25000 + expected)) < 1e-9 && Math.abs(today.day.lower - (25000 - expected)) < 1e-9)
+  // To expiry: the straddle's own breakevens.
+  const expiry = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('10:00'), scope: 'expiry' })
+  assert.equal(expiry.day.width, expiry.day.value)
+  // A range started later in the day prices less time.
+  const late = straddleRead(d.ce, d.pe, d.spots, { start: '14:00' })
+  assert.ok(late.day.width < today.day.width)
+  // Without an IV it falls back to the straddle.
+  const noIv = day({ spot: () => 25000, tv: () => 175, iv: () => null })
+  assert.equal(straddleRead(noIv.ce, noIv.pe, noIv.spots).day.width, straddleRead(noIv.ce, noIv.pe, noIv.spots).day.value)
+  // Never wider than the straddle (expiry day: the straddle IS today's move).
+  const expiryDay = day({ spot: () => 25000, tv: () => 30, iv: () => 40 })
+  const e = straddleRead(expiryDay.ce, expiryDay.pe, expiryDay.spots)
+  assert.equal(e.day.width, e.day.value)
 })
