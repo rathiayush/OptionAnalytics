@@ -79,7 +79,8 @@ When adding or changing a strategy:
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
   and failed writes (`LoadProgress`), and at start the folder is checked writable and on a volume kept across a deploy
   (`DhanDataCache.CheckFolder`, `StorageVolume` from /proc/self/mountinfo) - logged, and an admin header tag when not
-  ("Dhan cache not writable" / "Dhan cache lost at every deploy"). A new Dhan data call for
+  ("Dhan cache not writable" / "Dhan cache lost at every deploy"); what it held at start is counted (`CountKept`) and
+  shown as "Dhan cache ✓ N files" (days saved before the start = kept through the restart) or "Dhan cache started empty". A new Dhan data call for
   past days goes through `DhanHistoricalDataService` / `DhanRollingOptionDataService` so it is cached too
   (`DhanDataCacheTests.cs`). EVERY Dhan REST call goes through `DhanApiClient`'s Polly pipeline (stale-token retry -> chart
   "too many requests" retry, never an order -> rate limiter -> a data call's 20 s timeout from when it is SENT), whose rate

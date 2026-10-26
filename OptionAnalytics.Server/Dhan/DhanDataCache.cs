@@ -96,6 +96,27 @@ public sealed class DhanDataCache
         }
     }
 
+    /// <summary>What the folder holds: the kept files (days), their size, and when the oldest was saved - kept from before the
+    /// server started means it survived the restart (SystemController.CacheSurvivedRestart). Counted once at start.</summary>
+    public (long Files, long Bytes, DateTimeOffset? OldestSavedUtc) CountKept()
+    {
+        long files = 0, bytes = 0;
+        DateTime? oldest = null;
+        if (!System.IO.Directory.Exists(_dir)) return (0, 0, null);
+        foreach (var path in System.IO.Directory.EnumerateFiles(_dir, "*.json.gz", SearchOption.AllDirectories))
+        {
+            try
+            {
+                var info = new FileInfo(path);
+                files++;
+                bytes += info.Length;
+                if (oldest is null || info.LastWriteTimeUtc < oldest) oldest = info.LastWriteTimeUtc;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        return (files, bytes, oldest is { } o ? new DateTimeOffset(DateTime.SpecifyKind(o, DateTimeKind.Utc)) : null);
+    }
+
     /// <summary>Whether a window ending on <paramref name="lastDay"/> (IST) has closed - only those are kept.</summary>
     public bool Cacheable(DateOnly lastDay) => lastDay < _today();
 

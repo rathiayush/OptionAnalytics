@@ -397,6 +397,25 @@ DhanScripMasterFile.Directory = Path.Combine(DhanDataCache.PathOf(app.Environmen
             "Mount a named volume at /app/data (docker-compose does: optionanalytics-data:/app/data; Dokploy Dockerfile deploys: Advanced > Volumes).", cache.Directory);
     else
         app.Logger.LogInformation("Dhan cache folder: {Dir} - writable, kept across deploys: {Kept}.", cache.Directory, kept?.ToString() ?? "unknown");
+    // What it holds - counted in the background (a full cache is many files): a day saved before this start came through it.
+    _ = Task.Run(() =>
+    {
+        try
+        {
+            var held = cache.CountKept();
+            OptionAnalytics.Server.Controllers.SystemController.DhanCacheKeptAtStart = held;
+            var survived = OptionAnalytics.Server.Controllers.SystemController.CacheSurvivedRestart(held.OldestSavedUtc,
+                new DateTimeOffset(System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime()));
+            app.Logger.LogInformation("Dhan cache holds {Files} days ({Mb:0.#} MB), the oldest saved {Oldest:u} - {Survived}.", held.Files, held.Bytes / 1048576d,
+                held.OldestSavedUtc, survived switch
+                {
+                    true => "kept through the restart",
+                    false => "all saved since this start",
+                    null => "empty: a first start, or the last deploy lost the folder (mount a named volume at /app/data)",
+                });
+        }
+        catch (Exception ex) { app.Logger.LogWarning(ex, "Dhan cache could not be counted."); }
+    });
 }
 
 if (app.Environment.IsDevelopment())

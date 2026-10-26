@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptionAnalytics.Server;
+using OptionAnalytics.Server.Controllers;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 
@@ -433,6 +434,34 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Null(error);
         Assert.Single(requests);
         Assert.Equal(bars, again);
+    }
+
+    [Fact]
+    public void TheDaysKept_AreCountedAtStart_AndSaidToHaveComeThroughTheRestart()
+    {
+        var empty = Cache();
+        Assert.Equal((0L, 0L, (DateTimeOffset?)null), empty.CountKept());
+        var none = SystemController.CacheStatus((true, true), empty.CountKept(), 0, 0, 0, DateTimeOffset.UtcNow);
+        Assert.Equal((0L, (bool?)null), (none.DaysAtStart!.Value, none.SurvivedRestart));        // nothing kept: a first start, or the folder was lost
+
+        var cache = Cache();
+        Assert.True(cache.CheckFolder().Writable);                                                 // its check file is not counted
+        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay, w => w.WriteRawValue("""{"close":[1],"timestamp":[1]}"""));
+        cache.PutDay("/charts/intraday", new { s = 1 }, PastDay.AddDays(1), w => w.WriteRawValue("""{"close":[2],"timestamp":[2]}"""));
+        var savedBefore = new DateTime(2026, 10, 1, 4, 0, 0, DateTimeKind.Utc);
+        File.SetLastWriteTimeUtc(Directory.GetFiles(_dir, "*.json.gz", SearchOption.AllDirectories)[0], savedBefore);
+
+        // A new server process over the same folder (a restart / deploy on a kept volume) finds both days.
+        var held = Cache().CountKept();
+        Assert.Equal(2, held.Files);
+        Assert.True(held.Bytes > 0);
+        Assert.Equal(savedBefore, held.OldestSavedUtc!.Value.UtcDateTime);
+        var restarted = SystemController.CacheStatus((true, true), held, 0, 0, 0, new DateTimeOffset(savedBefore).AddDays(3));
+        Assert.Equal((2L, (bool?)true), (restarted.DaysAtStart!.Value, restarted.SurvivedRestart));
+        // Every day saved since this start: nothing came through it.
+        Assert.False(SystemController.CacheStatus((true, true), held, 0, 0, 0, new DateTimeOffset(savedBefore).AddSeconds(-30)).SurvivedRestart);
+        // Not counted yet: unknown.
+        Assert.Null(SystemController.CacheStatus((true, true), null, 0, 0, 0, DateTimeOffset.UtcNow).DaysAtStart);
     }
 
     [Fact]
