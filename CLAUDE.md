@@ -131,48 +131,17 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
-- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:15 by default, "From") the range
-  the options priced - by default ("Range: Today") the ATM strike ± today's share of the straddle (0.8 x spot x ATM IV x
-  sqrt(minutes left to 15:30 / (252 x 375)), never more than the straddle: the straddle itself prices the move to EXPIRY);
-  "To expiry" = strike ± the straddle. The ATM straddle (nearest strike each minute) against its VWAP from the start; the
-  "Held" straddle - the one taken at the start, shifted to the new ATM once spot is "Re-centre after" N strikes from it
-  (default 2), with the range read again from there. The read (sideways / premium bought / trend / breakout / not
-  confirmed) uses the start's range. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live;
-  the read describes the day, it is not a measured signal and feeds no strategy.
-- OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
-  option points - Black-Scholes gamma ON THE FORWARD (d1 from ln(F / K); F = put-call parity at the three strikes nearest
-  spot, call - put = F - K, the middle one, spot when none or > 2% off - `parityForward`, as professional systems do; the
-  carry-less version put a monthly option's gamma ~1.5 strikes low) with each strike's IV WORKED OUT FROM ITS OWN PREMIUM
-  (Black-76 on the forward, the out-of-the-money leg first - `impliedVol`; one IV a strike; Dhan's IV field only where no
-  premium gives one; outside 0.5 - 2x the ATM IV, the ATM IV) - the premium fixes sigma x sqrt(T), all gamma depends on, so
-  Dhan's IV convention and even a time to expiry a day off change no gamma - x the dealers' OI (Dhan's OI is in units - no
-  lot size) x S^2 x 1% = rupees of index per 1% move. Checked against an independent textbook implementation (Black-Scholes
-  with a rate, each option's own IV) on weekly / expiry-day / skewed / monthly chains: net within 0.2%, flip within 0.3
-  points, also with Dhan's IV field 50% off (`tests/gex.test.mjs` holds the forward, the IV and the invariance). The
-  time to expiry runs to 15:30 IST on the options' expiry day, 365-day years: the run's `optionExpiry` /
-  `optionExpirySource` (`OptionExpiryResolver`, filled by `GET /api/oi-replay/{u}/run`): from today on Dhan's listed expiry
-  (holiday moves included); a past one the weekday rule (`ExpiryCalendar.NearestOptionExpiry` / `OptionExpiryWeekday`:
-  NIFTY / BANKNIFTY Tuesday, SENSEX Thursday, BANKNIFTY monthly the last Tuesday - from 1 Sep 2025; NSE Thursday and SENSEX
-  Tuesday (2025) / Friday before) checked against Dhan - a rule day with no spot candles was a holiday, the trading day
-  before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
-  ATM IV (`impliedYears`, Dhan's ATM IV) - kept on each minute too; no warning any more, since the IV from the premiums makes the
-  gamma independent of T. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
-  reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium); both are worked
-  out always and a line says whether their regimes agree (`gexAgreement` - agree = act on it, disagree = unclear; the other
-  sign is worked out with `flips: false`, its flip left out). Levels, as the GEX tools publish them (SpotGamma, MenthorQ,
-  the Indian GEX pages): net GEX; the gamma flip / zero gamma (the spot where the net would cross zero, OI / IV kept -
-  the GEX PROFILE, `gexProfile`, drawn on the card - within +/- 3% of spot AND the strikes loaded, nearest spot;
-  `flipEdge` = within a strike step / 1-sigma move of their edge, "rough"); the CALL WALL = the strike ABOVE spot with
-  the most call gamma x OI (resistance), the PUT WALL = the strike BELOW spot with the most put gamma x OI (support), MAX
-  GAMMA = the most call + put gamma x OI of any strike (the magnet). A level moves to another strike only with 10% more
-  gamma x OI (`WALL_SWITCH` - no flicker between two strikes about level); above / below spot keep a dead zone of a
-  quarter strike step (`WALL_ZONE`): a strike becomes a wall only once spot is that far from it, a wall breaks (rolls on
-  to the next strike) only once spot is that far through it. Only ATM +/- 10 strikes count (partial totals). Every minute
-  uses only readings up to it (`tests/gex.test.mjs`); the day is worked out ONCE on the page for both signs (`useGexDays`,
-  live at most every 5 s) and cut at the replay clock by the GEX card and the entry checklist. It feeds no strategy. The
-  ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
-  negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
-  check was removed on request.)
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
+  (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
+  default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,
+  strike + call - put over the 3 strikes nearest spot), switching from the minute it changes; FIXED - the start's ATM or
+  a strike picked on the card, kept all day and NEVER shifted (an adjustment is the trader's, not the chart's), with what
+  a seller of it has made. The range the options priced at the start: by default ("Range: Today") the ATM strike ±
+  today's share of the straddle (0.8 x spot x ATM IV x sqrt(minutes left to 15:30 / (252 x 375)), never more than the
+  straddle - the straddle prices the move to EXPIRY); "To expiry" = strike ± the straddle. The read (sideways / premium
+  bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
+  replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
+  signal and feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
