@@ -37,8 +37,8 @@ function SideList({ name, color, side }) {
 
 /**
  * Which of a good option-buying entry's usual conditions hold right now (the replay clock, or live) - for a CE buy and a
- * PE buy side by side (entryChecklist.js: direction, writers, wall ahead, option flow, location, IV, time, gamma, room to
- * the GEX wall), with the ATM / 1-ITM strikes and their premiums. `gexDays`: the day's GEX under both signs
+ * PE buy side by side (entryChecklist.js: direction, writers, wall ahead, option flow, location, IV, time, gamma), with
+ * the ATM / 1-ITM strikes and their premiums. `gexDays`: the day's GEX under both signs
  * (`{ standard, buildup }` - gexDay, worked out once on the page for this and the GEX card). Display only: it places and
  * alerts nothing.
  */
