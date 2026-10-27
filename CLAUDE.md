@@ -173,6 +173,14 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
+  Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
+  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX (top row or numpad; the same again or Esc closes,
+  another digit switches; Ctrl + Shift because the browser keeps Ctrl + 1 - 8 for its tabs), or the "Quick view" buttons
+  under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
+  `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alertUnderlying` - so no
+  second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`), live with the page
+  (`tests/quick-views.test.mjs`).
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
