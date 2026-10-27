@@ -15,3 +15,34 @@ export function quickViewForKey(e) {
   if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null
   return QUICK_VIEWS.find((v) => e.code === `Digit${v.digit}` || e.code === `Numpad${v.digit}`) ?? null
 }
+
+// On a phone there is no keyboard: a small round button (QuickViewFab.jsx), dragged anywhere on the screen, whose tap
+// opens the quick views as small icons. Sizes in px.
+export const FAB_SIZE = 40
+export const FAB_ITEM_SIZE = 34
+export const FAB_GAP = 8
+const FAB_MARGIN = 8
+const FAB_DRAG_PX = 6
+
+/** Where the button sits: `pos` ({ x, y } - its top-left) kept inside the screen (`viewport` { width, height }). */
+export function placeFab(pos, viewport) {
+  const maxX = Math.max(FAB_MARGIN, viewport.width - FAB_SIZE - FAB_MARGIN)
+  const maxY = Math.max(FAB_MARGIN, viewport.height - FAB_SIZE - FAB_MARGIN)
+  const x = Number.isFinite(pos?.x) ? pos.x : maxX
+  const y = Number.isFinite(pos?.y) ? pos.y : maxY
+  return { x: Math.min(maxX, Math.max(FAB_MARGIN, x)), y: Math.min(maxY, Math.max(FAB_MARGIN, y)) }
+}
+
+/** Its first place: bottom right, clear of a phone browser's bottom bar. */
+export const fabDefault = (viewport) => ({ x: viewport.width - FAB_SIZE - 16, y: viewport.height - FAB_SIZE - 96 })
+
+/** A press that moved this far is a drag (it moves the button), else a tap (it opens / closes the icons). */
+export const isFabDrag = (dx, dy) => Math.hypot(dx, dy) >= FAB_DRAG_PX
+
+/** Which way `count` icons open from the button at `pos`: up when they fit above it (or there is more room above). */
+export function fabOpensUp(pos, count, viewport) {
+  const need = count * (FAB_ITEM_SIZE + FAB_GAP)
+  const above = pos.y
+  const below = viewport.height - pos.y - FAB_SIZE
+  return above >= need || above > below
+}

@@ -195,7 +195,9 @@ When adding or changing a strategy:
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alertUnderlying` - so no
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`), live with the page
-  (`tests/quick-views.test.mjs`).
+  (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
+  (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
+  opens the six views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
