@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Button, Col, Popover, Row, Segmented, Space, Tag, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
 import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMark
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
-import { gexAgreement, gexDay, gexUpTo } from './gex.js'
+import { gexAgreement, gexDay, gexProfile, gexUpTo } from './gex.js'
 
 const { Text } = Typography
 
@@ -37,6 +37,11 @@ function useThrottled(value, ms, throttle) {
 
 const cr = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v) / CR).toLocaleString('en-IN')} Cr` : '-')
 const num = (v, digits = 0) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
+// ₹ crore, short: thousands of crore as "k".
+const crShort = (v) => {
+  const c = v / CR
+  return Math.abs(c) >= 1000 ? `${c < 0 ? '−' : ''}${(Math.abs(c) / 1000).toFixed(1)}k Cr` : `${c < 0 ? '−' : ''}${Math.round(Math.abs(c))} Cr`
+}
 const EXPIRY_SOURCES = { dhan: 'Dhan', calendar: 'weekday rule', 'calendar-holiday': 'weekday rule, moved for a holiday' }
 // The straddle's own time to expiry is far off the expiry date's: more than half a day and a third apart.
 const disagrees = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > Math.max(0.5, 0.33 * Math.max(a, b))
@@ -129,11 +134,105 @@ function StrikeBars({ minute }) {
   )
 }
 
+// The GEX profile at the clock (gexProfile): the net GEX if spot were at each price across the strikes loaded, that
+// minute's OI and IVs kept - it crosses zero at the flip. Spot, the flip, the walls and the max gamma strike marked; hover
+// for the net at a price.
+function ProfileChart({ minute, height = 200 }) {
+  const ref = useRef(null)
+  const id = useId()
+  const [width, setWidth] = useState(0)
+  const [hover, setHover] = useState(null)
+  useEffect(() => {
+    if (!ref.current) return undefined
+    const resize = new ResizeObserver(() => setWidth(ref.current?.clientWidth ?? 0))
+    resize.observe(ref.current)
+    return () => resize.disconnect()
+  }, [])
+  const points = useMemo(() => gexProfile(minute), [minute])
+  const padL = 58, padR = 10, padT = 40, padB = 20
+  const ready = width > padL + padR + 40 && points.length > 1
+  let chart = null
+  if (ready) {
+    const xMin = points[0].price, xMax = points.at(-1).price
+    const values = points.map((p) => p.net)
+    const top = Math.max(0, ...values), bottom = Math.min(0, ...values)
+    const span = top - bottom || 1
+    const x = (v) => padL + ((v - xMin) / (xMax - xMin)) * (width - padL - padR)
+    const y = (v) => padT + ((top - v) / span) * (height - padT - padB)
+    const zero = y(0)
+    const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(p.price).toFixed(1)},${y(p.net).toFixed(1)}`).join(' ')
+    const area = `${line} L${x(xMax).toFixed(1)},${zero.toFixed(1)} L${x(xMin).toFixed(1)},${zero.toFixed(1)} Z`
+    // A few strikes along the bottom.
+    const strikes = minute.strikes.map((r) => r.strike).filter((k) => k >= xMin && k <= xMax).sort((a, b) => a - b)
+    const every = Math.max(1, Math.ceil(strikes.length / Math.max(2, Math.floor((width - padL - padR) / 70))))
+    const ticks = strikes.filter((_, i) => i % every === 0)
+    // The levels: one line each; labels at (nearly) the same place joined ("PW·MG"), the rest staggered over three rows.
+    const marks = [
+      { v: minute.spot, color: SPOT_COLOR, label: 'Spot', dash: '4 3' },
+      { v: minute.flip, color: FLIP_COLOR, label: 'Flip', dash: '2 2' },
+      { v: minute.callWall, color: UP_COLOR, label: 'CW' },
+      { v: minute.putWall, color: DOWN_COLOR, label: 'PW' },
+      { v: minute.maxGamma, color: MAX_GAMMA_COLOR, label: 'MG', dash: '1 2' },
+    ].filter((m) => Number.isFinite(m.v) && m.v >= xMin && m.v <= xMax).map((m) => ({ ...m, x: x(m.v) })).sort((a, b) => a.x - b.x)
+    const labels = []
+    for (const m of marks) {
+      const last = labels.at(-1)
+      if (last && m.x - last.x < 12) last.text += `·${m.label}`
+      else labels.push({ x: m.x, color: m.color, text: m.label })
+    }
+    labels.forEach((l, i) => { l.row = i > 0 && l.x - labels[i - 1].x < 44 ? (labels[i - 1].row + 1) % 3 : 0 })
+    const hovered = hover != null ? points[hover] : null
+    const onMove = (e) => {
+      const box = e.currentTarget.getBoundingClientRect()
+      const px = e.clientX - box.left
+      const price = xMin + ((px - padL) / (width - padL - padR)) * (xMax - xMin)
+      setHover(Math.max(0, Math.min(points.length - 1, Math.round(((price - xMin) / (xMax - xMin)) * (points.length - 1)))))
+    }
+    chart = (
+      <svg width={width} height={height} style={{ display: 'block' }} onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
+        <defs>
+          <clipPath id={`${id}-up`}><rect x={0} y={0} width={width} height={Math.max(0, zero)} /></clipPath>
+          <clipPath id={`${id}-down`}><rect x={0} y={zero} width={width} height={Math.max(0, height - zero)} /></clipPath>
+        </defs>
+        <line x1={padL} x2={width - padR} y1={zero} y2={zero} stroke={AXIS_COLOR} strokeDasharray="3 3" strokeWidth={1} />
+        <path d={area} fill={UP_COLOR} fillOpacity={0.22} clipPath={`url(#${id}-up)`} />
+        <path d={area} fill={DOWN_COLOR} fillOpacity={0.22} clipPath={`url(#${id}-down)`} />
+        <path d={line} fill="none" stroke={UP_COLOR} strokeWidth={2} clipPath={`url(#${id}-up)`} />
+        <path d={line} fill="none" stroke={DOWN_COLOR} strokeWidth={2} clipPath={`url(#${id}-down)`} />
+        {[top, 0, bottom].filter((v, i, all) => all.indexOf(v) === i).map((v) => (
+          <text key={v} x={padL - 6} y={y(v) + 4} fill={AXIS_COLOR} fontSize={10} textAnchor="end">{crShort(v)}</text>
+        ))}
+        {ticks.map((k) => (
+          <text key={k} x={x(k)} y={height - 5} fill={AXIS_COLOR} fontSize={10} textAnchor="middle">{k}</text>
+        ))}
+        {marks.map((m) => (
+          <line key={m.label} x1={m.x} x2={m.x} y1={padT - 4} y2={height - padB} stroke={m.color} strokeWidth={1} strokeDasharray={m.dash} />
+        ))}
+        {labels.map((l) => (
+          <text key={l.text} x={l.x} y={10 + l.row * 11} fill={l.color} fontSize={10} textAnchor="middle">{l.text}</text>
+        ))}
+        {hovered && (
+          <g>
+            <line x1={x(hovered.price)} x2={x(hovered.price)} y1={padT - 4} y2={height - padB} stroke={AXIS_COLOR} strokeWidth={1} />
+            <circle cx={x(hovered.price)} cy={y(hovered.net)} r={3} fill={gexColor(hovered.net)} />
+            <text x={Math.min(Math.max(x(hovered.price), padL + 70), width - padR - 70)} y={padT + 12} fill="#ffffff" fontSize={11} textAnchor="middle">
+              {`spot ${num(hovered.price)}: ${cr(hovered.net)}`}
+            </text>
+          </g>
+        )}
+      </svg>
+    )
+  }
+  return <div ref={ref} style={{ width: '100%', height }}>{chart}</div>
+}
+
 const HOW_TO_READ = (
   <div style={{ maxWidth: 440, fontSize: 12 }}>
     <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma (Black-Scholes, each option&apos;s IV) × the dealers&apos; OI × spot² × 1%, in ₹ crore. The time to expiry runs to 15:30 on the expiry day (NIFTY Tuesday, SENSEX Thursday, BANKNIFTY the month&apos;s last Tuesday - Dhan&apos;s own date from today on, holidays checked before that).</p>
     <p style={{ margin: '0 0 6px' }}><b>Net GEX positive</b>: dealers are long gamma - they sell rallies and buy dips, so moves are damped: range, pin. <b>Negative</b>: they are short gamma - they buy rallies and sell dips, so moves run: trend, fast days.</p>
-    <p style={{ margin: '0 0 6px' }}><b>Gamma flip</b>: the spot at which the net GEX would cross zero. Above it the market tends to be calmer; below it moves speed up. <b>Call wall (CW)</b> / <b>Put wall (PW)</b>: the most call / put gamma × OI - resistance / support. <b>Max gamma (MG)</b>: the most of both - the magnet, above all on expiry day.</p>
+    <p style={{ margin: '0 0 6px' }}><b>Gamma flip</b> (zero gamma): the spot at which the net GEX would cross zero. Above it the market tends to be calmer; below it moves speed up. &quot;Rough&quot; = it sits near the edge of the strikes loaded, where strikes not loaded weigh in.</p>
+    <p style={{ margin: '0 0 6px' }}><b>Call wall (CW)</b>: the strike above spot with the most call gamma × OI - resistance, the top of the range. <b>Put wall (PW)</b>: the strike below spot with the most put gamma × OI - support, the bottom. <b>Max gamma (MG)</b> (absolute gamma strike): the most call + put gamma × OI of any strike - the magnet / pin, above all on expiry day. A level moves to another strike only when that one is 10% bigger, so two strikes about level do not swap it every minute. A wall breaks only once spot is a quarter of a strike step through it - then it rolls on to the next strike - and a strike becomes a wall only once spot is that far from it: a strike at the money is the magnet, not a wall.</p>
+    <p style={{ margin: '0 0 6px' }}><b>GEX profile</b>: the net GEX if spot were at each price, this minute&apos;s OI and IVs kept. It crosses zero at the flip; deep in green = strong pinning there, deep in red = moves speed up there; a steep curve = the regime changes fast as spot moves.</p>
     <p style={{ margin: '0 0 6px' }}><b>Sign.</b> Who the dealers are is not in the data. Standard: dealers long the calls, short the puts. OI build-up: the OI at the first reading as standard, then each minute&apos;s OI change signed by the premium - added while it fell = written by customers (dealers long), added while it rose = bought (dealers short). The premium also moves with spot, so it is a rough read.</p>
     <p style={{ margin: 0 }}>Only the strikes the page has (ATM ± 10) count: the totals are partial, though gamma is mostly near the money.</p>
   </div>
@@ -149,16 +248,19 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
   // few seconds.
   const inputs = useMemo(() => ({ cePoints, pePoints, spotBars }), [cePoints, pePoints, spotBars])
   const shown = useThrottled(inputs, LIVE_EVERY_MS, asOfMs == null)
-  // Both signs, always: the card shows the one chosen, the line under the read says whether the other agrees.
-  const standardDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'standard', expiry }), [shown, expiry])
-  const buildupDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'buildup', expiry }), [shown, expiry])
-  const minutes = useMemo(() => gexUpTo(sign === 'buildup' ? buildupDay : standardDay, asOfMs), [sign, standardDay, buildupDay, asOfMs])
+  // Both signs, always: the card shows the one chosen; the line under the read says whether the other agrees - it needs
+  // only the other's net, so its flip (the costly part) is left out.
+  const other = sign === 'buildup' ? 'standard' : 'buildup'
+  const day = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign, expiry }), [shown, sign, expiry])
+  const otherDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: other, expiry, flips: false }), [shown, other, expiry])
+  const minutes = useMemo(() => gexUpTo(day, asOfMs), [day, asOfMs])
   const now = minutes.at(-1)
   const both = useMemo(() => {
-    const standardNow = gexUpTo(standardDay, asOfMs).at(-1)
-    const buildupNow = gexUpTo(buildupDay, asOfMs).at(-1)
+    const otherNow = gexUpTo(otherDay, asOfMs).at(-1)
+    const standardNow = sign === 'standard' ? now : otherNow
+    const buildupNow = sign === 'buildup' ? now : otherNow
     return { standardNow, buildupNow, ...gexAgreement(standardNow, buildupNow) }
-  }, [standardDay, buildupDay, asOfMs])
+  }, [otherDay, asOfMs, sign, now])
 
   const charts = useMemo(() => {
     const line = (pick) => minutes.filter((m) => Number.isFinite(pick(m))).map((m) => ({ time: m.time, value: pick(m) }))
@@ -201,7 +303,8 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
 
   const positive = now.net > 0
   const aboveFlip = now.flip != null ? now.spot > now.flip : null
-  const between = now.putWall != null && now.callWall != null && now.spot >= now.putWall && now.spot <= now.callWall
+  // How far a level is from spot, signed.
+  const away = (level) => (Number.isFinite(level) ? ` (${level - now.spot >= 0 ? '+' : '−'}${Math.abs(level - now.spot).toFixed(0)})` : '')
   return (
     <>
       {controls}
@@ -211,8 +314,10 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
           ? 'Dealers long gamma: they sell rallies and buy dips - moves are damped (range, pin).'
           : 'Dealers short gamma: they buy rallies and sell dips - moves run (trend, fast moves).'}
         {aboveFlip != null && <> Spot {num(now.spot, 1)} is {aboveFlip ? 'above' : 'below'} the flip {num(now.flip)} ({aboveFlip ? 'the calmer side' : 'moves speed up below it'}).</>}
-        {aboveFlip == null && <> No flip within ±3% of spot - the net stays {positive ? 'positive' : 'negative'} there.</>}
-        {between && <> Between the put wall {now.putWall} and the call wall {now.callWall}.</>}
+        {aboveFlip == null && <> No flip within ±3% of spot and the strikes loaded - the net stays {positive ? 'positive' : 'negative'} there.</>}
+        {(now.callWall != null || now.putWall != null) && (
+          <> Range: {now.putWall != null ? <>put wall {now.putWall}{away(now.putWall)} below</> : 'no put wall below'} · {now.callWall != null ? <>call wall {now.callWall}{away(now.callWall)} above</> : 'no call wall above'}{now.maxGamma != null ? <>; magnet {now.maxGamma}{away(now.maxGamma)}</> : ''}.</>
+        )}
       </div>
       <div style={{ fontSize: 12, marginBottom: 8 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
@@ -227,10 +332,13 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
       <Row gutter={[16, 4]} style={{ marginBottom: 8, fontSize: 12 }}>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Net GEX </Text><Text strong style={{ fontSize: 12, color: gexColor(now.net) }}>{cr(now.net)}</Text><Text type="secondary" style={{ fontSize: 12 }}> per 1% move</Text></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Calls </Text><span style={{ color: gexColor(now.calls) }}>{cr(now.calls)}</span><Text type="secondary" style={{ fontSize: 12 }}> · Puts </Text><span style={{ color: gexColor(now.puts) }}>{cr(now.puts)}</span></Col>
-        <Col><Text type="secondary" style={{ fontSize: 12 }}>Flip </Text><span style={{ color: FLIP_COLOR }}>{num(now.flip)}</span></Col>
-        <Col><Text type="secondary" style={{ fontSize: 12 }}>Call wall </Text><span style={{ color: UP_COLOR }}>{now.callWall ?? '-'}</span></Col>
-        <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}</span></Col>
-        <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}</span></Col>
+        <Col>
+          <Text type="secondary" style={{ fontSize: 12 }}>Flip </Text><span style={{ color: FLIP_COLOR }}>{num(now.flip)}{away(now.flip)}</span>
+          {now.flipEdge && <Tooltip title="Near the edge of the strikes loaded (ATM ± 10): strikes not loaded weigh in there, so the flip is only rough."><Text type="secondary" style={{ fontSize: 11 }}> rough</Text></Tooltip>}
+        </Col>
+        <Col><Text type="secondary" style={{ fontSize: 12 }}>Call wall </Text><span style={{ color: UP_COLOR }}>{now.callWall ?? '-'}{away(now.callWall)}</span></Col>
+        <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}{away(now.putWall)}</span></Col>
+        <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}{away(now.maxGamma)}</span></Col>
         <Col>
           <Text type="secondary" style={{ fontSize: 12 }}>
             {istHhmm(now.time)} · ATM {now.atm} · IV {num(now.atmIv * 100, 1)} ·{' '}
@@ -250,6 +358,11 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
           <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
           <Text type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
           <StrikeBars minute={now} />
+          <div style={{ marginTop: 10 }}>
+            <Text strong style={{ fontSize: 12 }}>GEX profile</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>
+            <ProfileChart minute={now} />
+          </div>
         </Col>
         <Col xs={24} lg={14}>
           <Text strong style={{ fontSize: 12 }}>Spot, flip and walls</Text>

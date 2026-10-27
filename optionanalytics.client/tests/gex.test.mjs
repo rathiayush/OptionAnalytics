@@ -3,7 +3,7 @@
 // after the minute read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bsGamma, bsStraddle, gexAgreement, gexDay, gexUpTo, impliedYears, netGexAt } from '../src/gex.js'
+import { bsGamma, bsStraddle, gexAgreement, gexDay, gexProfile, gexUpTo, impliedYears, netGexAt } from '../src/gex.js'
 
 const MIN = 60_000
 const OPEN = Date.parse('2026-10-20T09:15:00+05:30')
@@ -22,13 +22,13 @@ const call = (S, K, s, T) => { const v = s * Math.sqrt(T); const d1 = (Math.log(
 
 // A chain minute by minute, priced by Black-Scholes at IV 12% and 3 days to expiry: spot(m), each strike's OI ceOi(k, m)
 // / peOi(k, m), the premium as priced (or price(side, k, m) when given).
-function day({ minutes = 30, spot = () => 25000, ceOi = () => 1e6, peOi = () => 1e6, iv = () => 12, price = null, years = () => YEARS }) {
+function day({ minutes = 30, spot = () => 25000, ceOi = () => 1e6, peOi = () => 1e6, iv = () => 12, price = null, years = () => YEARS, strikes = STRIKES }) {
   const ce = [], pe = [], spots = []
   for (let m = 0; m < minutes; m++) {
     const time = new Date(OPEN + m * MIN).toISOString()
     const S = spot(m)
     spots.push({ time: OPEN + m * MIN, close: S })
-    for (const k of STRIKES) {
+    for (const k of strikes) {
       const c = call(S, k, iv(m) / 100, years(m))
       const p = c - (S - k)
       ce.push({ time, strike: k, price: price?.('ce', k, m) ?? c, openInterest: ceOi(k, m), impliedVolatility: iv(m) })
@@ -180,4 +180,105 @@ test('the two signs side by side: agree on a regime, or say they do not', () => 
   }
   assert.equal(run(-1).buildup, 'positive')
   assert.equal(run(+1).buildup, 'negative')
+})
+
+test('the call wall is at or above spot, the put wall at or below - a big call OI under spot is no resistance', () => {
+  // The biggest call OI sits at 24800 (under spot), the biggest put OI at 25200 (over it).
+  const d = day({ ceOi: (k) => (k === 24800 ? 9e6 : k === 25150 ? 3e6 : 1e6), peOi: (k) => (k === 25200 ? 9e6 : k === 24850 ? 3e6 : 1e6) })
+  const [m] = gexDay(d.ce, d.pe, d.spots)
+  assert.ok(m.callWall >= m.spot, `call wall ${m.callWall}`)
+  assert.ok(m.putWall <= m.spot, `put wall ${m.putWall}`)
+  assert.equal(m.callWall, 25150)
+  assert.equal(m.putWall, 24850)
+  // The max gamma strike may be anywhere - the most call + put gamma x OI.
+  const weight = (k) => bsGamma(25000, k, 0.12, m.years) * ((k === 24800 ? 9e6 : k === 25150 ? 3e6 : 1e6) + (k === 25200 ? 9e6 : k === 24850 ? 3e6 : 1e6))
+  assert.equal(m.maxGamma, [...STRIKES].sort((a, b) => weight(b) - weight(a))[0])
+})
+
+test('a wall moves only to a strike with 10% more gamma x OI - two strikes about level no longer swap it every minute', () => {
+  // 25150 and 25200 calls carry the same gamma x OI, then each minute one is 3% ahead of the other, turn about.
+  const g = (k) => bsGamma(25000, k, 0.12, YEARS)
+  const base = 2e7
+  const oi = (k, m) => {
+    if (k === 25150) return base * (m % 2 ? 1.03 : 0.97)
+    if (k === 25200) return base * (g(25150) / g(25200)) * (m % 2 ? 0.97 : 1.03) * (m >= 12 ? 1.3 : 1)
+    return 1e6
+  }
+  const d = day({ minutes: 20, ceOi: oi })
+  const walls = gexDay(d.ce, d.pe, d.spots).map((m) => m.callWall)
+  // The first minute's leader holds it through the swaps...
+  assert.ok(walls.slice(0, 12).every((w) => w === walls[0]), walls.join(' '))
+  // ...until 25200 is clearly ahead (+30%) - then it moves, at once.
+  assert.equal(walls[12], 25200)
+  assert.ok(walls.slice(12).every((w) => w === 25200))
+  // Without the 10% rule it would have swapped every minute: the raw leader alternates.
+  const leaders = Array.from({ length: 12 }, (_, m) => (g(25150) * oi(25150, m) > g(25200) * oi(25200, m) ? 25150 : 25200))
+  assert.ok(new Set(leaders).size === 2)
+})
+
+test('spot through the call wall rolls it on to the next strike above at once', () => {
+  const d = day({ minutes: 10, spot: (m) => (m < 5 ? 25000 : 25180), ceOi: (k) => (k === 25150 ? 2e7 : k === 25300 ? 1.2e7 : 1e6) })
+  const minutes = gexDay(d.ce, d.pe, d.spots)
+  assert.equal(minutes[4].callWall, 25150)
+  assert.ok(minutes[5].callWall > 25180, `rolled to ${minutes[5].callWall}`)
+  assert.equal(minutes[5].callWall, 25300)
+})
+
+test('the flip stays inside the strikes loaded - a crossing only past them is no flip', () => {
+  // Three strikes only: puts heavy at 24950, calls at 25050. Inside 24950 - 25050 the net stays negative; it turns positive
+  // only past 25050, where strikes not loaded would weigh in.
+  const strikes = [24950, 25000, 25050]
+  const d = day({ minutes: 1, strikes, ceOi: (k) => (k === 25050 ? 8e6 : 1e5), peOi: (k) => (k === 24950 ? 9e6 : 1e5) })
+  const [m] = gexDay(d.ce, d.pe, d.spots)
+  assert.deepEqual(m.band, [24950, 25050])
+  const profile = gexProfile(m)
+  assert.ok(profile.every((p) => p.net < 0), 'negative across the strikes loaded')
+  assert.ok(netGexAt(m.options, 25400, m.years) > 0, 'positive well past them')
+  assert.equal(m.flip, null)
+})
+
+test('the GEX profile crosses zero at the flip; a flip near the edge of the strikes loaded is marked rough', () => {
+  const d = day({ ceOi: (k) => (k >= 25100 ? 6e6 : 5e5), peOi: (k) => (k <= 24900 ? 6e6 : 5e5) })
+  const [m] = gexDay(d.ce, d.pe, d.spots)
+  const profile = gexProfile(m)
+  assert.equal(profile.length, 81)
+  assert.equal(profile[0].price, 24500)
+  assert.equal(profile.at(-1).price, 25500)
+  const i = profile.findIndex((p, j) => j > 0 && Math.sign(p.net) !== Math.sign(profile[j - 1].net) && Math.abs(p.price - m.flip) < 50)
+  assert.ok(i > 0 && m.flip >= profile[i - 1].price && m.flip <= profile[i].price, `flip ${m.flip}`)
+  assert.equal(m.flipEdge, false)
+  // Only three strikes loaded: any flip among them sits within a 1-sigma move of their edge - rough.
+  const narrow = day({ minutes: 1, strikes: [24950, 25000, 25050], ceOi: (k) => (k === 25050 ? 9.3e6 : 1e5), peOi: (k) => (k === 24950 ? 9e6 : 1e5) })
+  const [e] = gexDay(narrow.ce, narrow.pe, narrow.spots)
+  assert.ok(e.flip != null && e.flip > 24950 && e.flip < 25050, `flip ${e.flip}`)
+  assert.equal(e.flipEdge, true)
+})
+
+
+test('spot wiggling across a big strike does not swap the walls; a clear break past it does', () => {
+  // A big strike at 25000 (calls and puts); spot 25000 +/- 8 - inside the quarter-step (12.5) dead zone - then 25040.
+  const ceOi = (k) => (k === 25000 ? 2e7 : k === 25150 ? 6e6 : 1e6)
+  const peOi = (k) => (k === 25000 ? 2e7 : k === 24850 ? 6e6 : 1e6)
+  const d = day({ minutes: 16, spot: (m) => (m < 10 ? 25000 + (m % 2 ? 8 : -8) : 25040), ceOi, peOi })
+  const minutes = gexDay(d.ce, d.pe, d.spots)
+  // At the money the big strike is the magnet, not a wall - and the walls hold while spot wiggles.
+  for (const m of minutes.slice(0, 10)) {
+    assert.equal(m.maxGamma, 25000)
+    assert.equal(m.callWall, 25150)
+    assert.equal(m.putWall, 24850)
+  }
+  // Spot clear above it (25040): 25000 is now support - the put wall - and the call wall holds.
+  for (const m of minutes.slice(10)) {
+    assert.equal(m.putWall, 25000)
+    assert.equal(m.callWall, 25150)
+  }
+})
+
+test('flips: false leaves only the flip out - the net and the levels are the same', () => {
+  const d = day({ minutes: 8, spot: (m) => 25000 + 10 * m, ceOi: (k) => (k >= 25100 ? 6e6 : 5e5), peOi: (k) => (k <= 24900 ? 6e6 : 5e5) })
+  const full = gexDay(d.ce, d.pe, d.spots, { sign: 'buildup' })
+  const lean = gexDay(d.ce, d.pe, d.spots, { sign: 'buildup', flips: false })
+  assert.ok(full.some((m) => m.flip != null))
+  assert.ok(lean.every((m) => m.flip == null && m.flipEdge === false))
+  assert.deepEqual(lean.map((m) => [m.net, m.callWall, m.putWall, m.maxGamma]), full.map((m) => [m.net, m.callWall, m.putWall, m.maxGamma]))
 })

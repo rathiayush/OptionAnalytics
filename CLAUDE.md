@@ -150,9 +150,16 @@ When adding or changing a strategy:
   before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
   ATM IV (`impliedYears`); the implied T is kept each minute as a check - the card warns when the two disagree. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
   reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium); both are worked
-  out always and a line says whether their regimes agree (`gexAgreement` - agree = act on it, disagree = unclear). Levels: net GEX,
-  the gamma flip (the spot where the net would cross zero, OI / IV kept, within +/- 3%, nearest spot), call / put wall
-  (most call / put gamma x OI), max gamma (most of both). Only ATM +/- 10 strikes count (partial totals). Every minute
+  out always and a line says whether their regimes agree (`gexAgreement` - agree = act on it, disagree = unclear; the other
+  sign is worked out with `flips: false`, its flip left out). Levels, as the GEX tools publish them (SpotGamma, MenthorQ,
+  the Indian GEX pages): net GEX; the gamma flip / zero gamma (the spot where the net would cross zero, OI / IV kept -
+  the GEX PROFILE, `gexProfile`, drawn on the card - within +/- 3% of spot AND the strikes loaded, nearest spot;
+  `flipEdge` = within a strike step / 1-sigma move of their edge, "rough"); the CALL WALL = the strike ABOVE spot with
+  the most call gamma x OI (resistance), the PUT WALL = the strike BELOW spot with the most put gamma x OI (support), MAX
+  GAMMA = the most call + put gamma x OI of any strike (the magnet). A level moves to another strike only with 10% more
+  gamma x OI (`WALL_SWITCH` - no flicker between two strikes about level); above / below spot keep a dead zone of a
+  quarter strike step (`WALL_ZONE`): a strike becomes a wall only once spot is that far from it, a wall breaks (rolls on
+  to the next strike) only once spot is that far through it. Only ATM +/- 10 strikes count (partial totals). Every minute
   uses only readings up to it (`tests/gex.test.mjs`); the day is worked out once and cut at the replay clock, live at
   most every 5 s. It feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked

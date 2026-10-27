@@ -20,10 +20,23 @@
 //                   premium rose = writers buying back (the dealers' long goes, -); off while it fell = holders selling
 //                   (the dealers' short goes, +) - i.e. each minute adds -|change in OI| x sign(change in premium).
 //                   The premium also moves with spot, so this is a rough read of who traded.
-//  - Levels: the NET GEX (all strikes); the GAMMA FLIP - the spot at which the net GEX would cross zero, the OI and IVs
-//    kept (looked for within `rangePct` % of spot, the crossing nearest spot; null when there is none there); the CALL
-//    WALL / PUT WALL - the strike with the most call / put gamma x OI (resistance / support); the MAX GAMMA strike - the
-//    most gamma x OI of both (the magnet, above all on expiry day).
+//  - Levels, as the GEX tools publish them (SpotGamma, MenthorQ, the Indian GEX pages):
+//      NET GEX - all strikes added up;
+//      GAMMA FLIP (zero gamma) - the spot at which the net GEX would cross zero: the net worked out again at spots across
+//        the strikes the page has, the OI and IVs kept (the GEX PROFILE - `gexProfile`), the crossing nearest spot within
+//        `rangePct` % of it and never past the strikes loaded (beyond them the profile would only be the strikes missing);
+//        null when it does not cross there. `flipEdge`: it sits within a strike step / a 1-sigma move of the edge of the
+//        strikes loaded, where strikes not loaded weigh in - a rough level;
+//      CALL WALL - the strike ABOVE spot with the most call gamma x OI: resistance, the top of the range;
+//      PUT WALL - the strike BELOW spot with the most put gamma x OI: support, the bottom of the range;
+//      MAX GAMMA (absolute gamma strike) - the most call + put gamma x OI of any strike: the magnet / pin, above all on
+//        expiry day, when gamma piles up at the money.
+//    A level moves to another strike only when that one has WALL_SWITCH (10%) more gamma x OI than the strike holding it
+//    - two strikes about level no longer swap it every minute - or at once when the strike holding it no longer can (no
+//    reading; spot through a wall: it rolls on to the next strike). "Above" / "below" spot keep a dead zone of WALL_ZONE (a
+//    quarter of a strike step) around spot: a strike becomes a wall only once spot is that far away from it, and a wall is
+//    through only once spot is that far past it - spot wiggling across a big strike does not swap the walls every minute
+//    (a strike at the money is the magnet, not a wall).
 //
 // Only the strikes the run has (ATM +/- 10 - Dhan's rolling option data) count, so the totals are partial; gamma fades
 // fast away from the money, so they hold most of it. A minute uses only readings up to that minute (each option point
@@ -32,7 +45,9 @@
 const MIN = 60_000
 const STALE_MINUTES = 5
 const SQRT_2PI = Math.sqrt(2 * Math.PI)
-const FLIP_STEPS = 60       // the flip is looked for on this grid across spot +/- rangePct, then interpolated
+const FLIP_STEPS = 60       // the flip is looked for on this grid across its range, then interpolated
+const WALL_SWITCH = 0.1    // a level moves to a strike with this much more gamma x OI than the one holding it
+const WALL_ZONE = 0.25     // the dead zone around spot for the walls, in strike steps
 const IV_BAND = [0.5, 2]   // an option's own IV is used within this share of the ATM IV, else the ATM IV
 
 export const GEX_RANGE_PCT = 3
@@ -126,10 +141,20 @@ function readingAt(rows, t) {
 // The dealers' OI of one reading (+ = dealers long), call side `+1` / put side `-1` as standard.
 const dealerOi = (row, standard, sign) => (sign === 'buildup' ? standard * row.firstOi + row.change : standard * row.oi)
 
-// The crossing of zero of the net GEX nearest spot, within rangePct % of it; null when there is none there.
-function flipOf(options, spot, years, rangePct) {
-  const lo = spot * (1 - rangePct / 100)
-  const step = (2 * spot * rangePct / 100) / FLIP_STEPS
+// The strike holding a level this minute: the one with the most weight (gamma x OI) among the candidates - unless the
+// one holding it last minute is still a candidate and the leader is not WALL_SWITCH ahead of it.
+function holdLevel(weights, held) {
+  let best = null
+  for (const [strike, weight] of weights) if (best == null || weight > weights.get(best)) best = strike
+  if (best == null) return null
+  if (held != null && held !== best && weights.has(held) && weights.get(best) < weights.get(held) * (1 + WALL_SWITCH)) return held
+  return best
+}
+
+// The crossing of zero of the net GEX nearest spot, looked for across [lo, hi]; null when there is none there.
+function flipOf(options, spot, years, lo, hi) {
+  if (!(hi > lo)) return null
+  const step = (hi - lo) / FLIP_STEPS
   let best = null
   let prevS = lo, prevV = netGexAt(options, lo, years)
   for (let i = 1; i <= FLIP_STEPS; i++) {
@@ -149,15 +174,20 @@ function flipOf(options, spot, years, rangePct) {
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
  * Each minute: `{ time, spot, years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
- * callWall, putWall, maxGamma, strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move;
- * `strikes` high to low). A minute with no ATM straddle and no time to expiry yet is left out.
+ * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, sigma, dealerOi }],
+ * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
+ * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
+ * leaves the flip out (null) - the costly part - for a caller that needs only the net and the walls.
  */
-export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null } = {}) {
+export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
   const ce = sideRows(cePoints)
   const pe = sideRows(pePoints)
   const strikes = [...new Set([...ce.keys(), ...pe.keys()])].sort((a, b) => b - a)
+  const steps = strikes.slice(1).map((k, i) => strikes[i] - k).filter((d) => d > 0)
+  const strikeStep = steps.length ? Math.min(...steps) : 0
+  const held = { call: null, put: null, max: null }   // the strikes holding the levels, minute to minute
   const expiryMs = expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null
   const minutes = []
   let implied = null
@@ -180,7 +210,9 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     const options = []
     const rows = []
     let calls = 0, puts = 0
-    let callWall = null, putWall = null, maxGamma = null
+    const callWeights = new Map(), putWeights = new Map(), gammaWeights = new Map()
+    const zone = WALL_ZONE * strikeStep
+    let lowStrike = Infinity, highStrike = -Infinity
     for (const { strike, c, p } of readings) {
       if (!c && !p) continue
       const cGamma = c ? bsGamma(spot, strike, sigmaOf(c), years) : 0
@@ -192,23 +224,46 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       if (p) options.push({ strike, sigma: sigmaOf(p), dealerOi: dealerOi(p, -1, sign) })
       calls += call ?? 0
       puts += put ?? 0
-      // The walls: the most gamma x OI, whoever holds it.
+      // The levels' weights: gamma x OI, whoever holds it - the call wall from the strikes clear above spot (or the one
+      // holding it, until spot is clear past it), the put wall below the same way, the max gamma any.
       const cWeight = c ? cGamma * c.oi : 0
       const pWeight = p ? pGamma * p.oi : 0
-      if (c && (!callWall || cWeight > callWall.weight)) callWall = { strike, weight: cWeight }
-      if (p && (!putWall || pWeight > putWall.weight)) putWall = { strike, weight: pWeight }
-      if (!maxGamma || cWeight + pWeight > maxGamma.weight) maxGamma = { strike, weight: cWeight + pWeight }
+      if (c && (strike >= spot + zone || (strike === held.call && strike >= spot - zone))) callWeights.set(strike, cWeight)
+      if (p && (strike <= spot - zone || (strike === held.put && strike <= spot + zone))) putWeights.set(strike, pWeight)
+      gammaWeights.set(strike, cWeight + pWeight)
+      lowStrike = Math.min(lowStrike, strike)
+      highStrike = Math.max(highStrike, strike)
       rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi: c?.oi ?? null, peOi: p?.oi ?? null, gamma: (cWeight + pWeight) * unit })
     }
+    held.call = holdLevel(callWeights, held.call)
+    held.put = holdLevel(putWeights, held.put)
+    held.max = holdLevel(gammaWeights, held.max)
+    // The flip: within rangePct % of spot and the strikes loaded; near their edge (a strike step or a 1-sigma move),
+    // the strikes not loaded weigh in.
+    const flip = flips ? flipOf(options, spot, years, Math.max(spot * (1 - rangePct / 100), lowStrike), Math.min(spot * (1 + rangePct / 100), highStrike)) : null
+    const edge = Math.max(strikeStep, atmIv * Math.sqrt(years) * spot)
     minutes.push({
       time: t, spot, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', impliedYears: implied,
       atm: atm.strike, atmIv, net: calls + puts, calls, puts,
-      flip: flipOf(options, spot, years, rangePct),
-      callWall: callWall?.strike ?? null, putWall: putWall?.strike ?? null, maxGamma: maxGamma?.strike ?? null,
-      strikes: rows,
+      flip, flipEdge: flip != null && (flip - lowStrike < edge || highStrike - flip < edge),
+      callWall: held.call, putWall: held.put, maxGamma: held.max,
+      band: [lowStrike, highStrike], options, strikes: rows,
     })
   }
   return minutes
+}
+
+/** The GEX profile of a minute (`gexDay`'s): the net GEX if spot were at each of `steps` + 1 prices across the strikes
+ * loaded, the OI and IVs of that minute kept - `[{ price, net }]`; it crosses zero at the flip. */
+export function gexProfile(minute, steps = 80) {
+  const [lo, hi] = minute?.band ?? []
+  if (!(hi > lo) || !minute.options?.length) return []
+  const out = []
+  for (let i = 0; i <= steps; i++) {
+    const price = lo + ((hi - lo) * i) / steps
+    out.push({ price, net: netGexAt(minute.options, price, minute.years) })
+  }
+  return out
 }
 
 /** The minutes of `day` up to the replay clock `asOfMs` (null = all - live; 0 = none). */
