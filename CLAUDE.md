@@ -131,14 +131,20 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
   the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
-- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:15 by default, "From") the range
-  the options priced - by default ("Range: Today") the ATM strike ± today's share of the straddle (0.8 x spot x ATM IV x
-  sqrt(minutes left to 15:30 / (252 x 375)), never more than the straddle: the straddle itself prices the move to EXPIRY);
-  "To expiry" = strike ± the straddle. The ATM straddle (nearest strike each minute) against its VWAP from the start; the
-  "Held" straddle - the one taken at the start, shifted to the new ATM once spot is "Re-centre after" N strikes from it
-  (default 2), with the range read again from there. The read (sideways / premium bought / trend / breakout / not
-  confirmed) uses the start's range. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live;
-  the read describes the day, it is not a measured signal and feeds no strategy.
+- OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
+  (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
+  default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,
+  strike + call - put over the 3 strikes nearest spot), switching from the minute it changes; FIXED - the start's ATM or
+  a strike picked on the card, kept all day and NEVER shifted (an adjustment is the trader's, not the chart's), with what
+  a seller of it has made. The range the options priced at the start: by default ("Range: Today") the ATM strike ±
+  today's share of the straddle - straddle x sqrt(trading minutes left today / trading minutes left to the expiry, the
+  run's `optionExpiry`; on expiry day the straddle itself - the straddle prices the move to EXPIRY); "To expiry" = strike
+  ± the straddle. It is read from the option PRICES and the expiry date only - no futures data, not the feed's IV (the ATM
+  IV shown is the straddle's own), so a past day replayed and today live are worked out the same way; only without an
+  expiry date does the range fall back to the feed's IV. The read (sideways / premium
+  bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
+  replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
+  signal and feeds no strategy.
 - OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
   option points - Black-Scholes gamma ON THE FORWARD (d1 from ln(F / K); F = put-call parity at the three strikes nearest
   spot, call - put = F - K, the middle one, spot when none or > 2% off - `parityForward`, as professional systems do; the
