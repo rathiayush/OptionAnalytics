@@ -34,6 +34,7 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
+import { QUICK_VIEWS, quickViewForKey } from './quickViews.js'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -4068,9 +4069,24 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
-  // The day's GEX (both signs), worked out once for the GEX card and the entry checklist's gamma checks.
+  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Ctrl + Shift + 1 - 6 open one, the same
+  // again closes it, another switches. Works while typing in a box too (Ctrl + Shift + a digit types nothing).
+  const [quickView, setQuickView] = useState(null)
+  const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
+  useEffect(() => {
+    const onKey = (e) => {
+      const view = quickViewForKey(e)
+      if (!view) return
+      e.preventDefault()
+      setQuickView((open) => (open === view.key ? null : view.key))
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
   const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
-    expiry: result?.optionExpiry ?? null, live: isLive, enabled: visibleSections.includes('gex') || visibleSections.includes('entryChecklist'),
+    expiry: result?.optionExpiry ?? null, live: isLive,
+    enabled: visibleSections.includes('gex') || visibleSections.includes('entryChecklist') || quickView === 'gex',
   })
   // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
   const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
@@ -5425,6 +5441,180 @@ export default function OiReplayPage() {
     </>
   )
 
+  // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 6): the same elements, rendered in both.
+  const dayOiContent = dayOiSummary ? (
+    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Alert
+        type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
+        showIcon
+        message={`Day so far: ${dayOiSummary.dayBias}`}
+        description={dayOiSummary.dayReason}
+      />
+      <Row gutter={[24, 16]}>
+        <Col xs={12} md={6}>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
+          <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? DOWN_COLOR : UP_COLOR }}>
+            {formatOiMillions(dayOiSummary.ceDayChange, { signed: true })}
+          </Text>
+        </Col>
+        <Col xs={12} md={6}>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PE OI since open</Text>
+          <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? UP_COLOR : DOWN_COLOR }}>
+            {formatOiMillions(dayOiSummary.peDayChange, { signed: true })}
+          </Text>
+        </Col>
+        <Col xs={12} md={6}>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI added</Text>
+          {dayOiSummary.added.length === 0
+            ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
+            : dayOiSummary.added.map((m) => (
+              <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
+                <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                {m.strike} <span style={{ color: m.side === 'CE' ? DOWN_COLOR : UP_COLOR }}>{formatOiMillions(m.change, { signed: true })}</span>
+              </div>
+            ))}
+        </Col>
+        <Col xs={12} md={6}>
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI removed</Text>
+          {dayOiSummary.removed.length === 0
+            ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
+            : dayOiSummary.removed.map((m) => (
+              <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
+                <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
+                {m.strike} <span style={{ color: m.side === 'CE' ? UP_COLOR : DOWN_COLOR }}>{formatOiMillions(m.change, { signed: true })}</span>
+              </div>
+            ))}
+        </Col>
+      </Row>
+      <div>
+        <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Total OI lookback</Text>
+          <Select
+            value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
+            options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
+          />
+          <Select
+            mode="tags" size="small" value={totalOiLookbackBars.map(String)}
+            onChange={(vals) => {
+              const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+              setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+            }}
+            style={{ minWidth: 180 }}
+            options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
+          />
+        </Space>
+        <Table
+          size="small"
+          pagination={false}
+          dataSource={totalOiLookbackRows}
+          locale={{ emptyText: 'No OI data yet today.' }}
+          scroll={{ x: 420 }}
+          columns={[
+            { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+            { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
+            { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
+            { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
+            { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
+          ]}
+        />
+      </div>
+      {/* Whole-chain counterpart to the per-strike drill-down's own charts - a switch, not
+          stacked, since the numbers right above already give the current since-open
+          figure; this chart's own job is showing how it got there. */}
+      <div>
+        <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Chain-wide OI</Text>
+          <Segmented
+            size="small"
+            value={dayOiChartMode}
+            onChange={setDayOiChartMode}
+            options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]}
+          />
+          <Text style={{ color: DOWN_COLOR }}>● CE</Text>
+          <Text style={{ color: UP_COLOR }}>● PE</Text>
+        </Space>
+        <ChartErrorBoundary key={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}`}>
+          <StrikeOiDrilldownChart
+            ceSeries={dayOiChartMode === 'total' ? ceTotalOiLine : ceTotalSinceOpenLine}
+            peSeries={dayOiChartMode === 'total' ? peTotalOiLine : peTotalSinceOpenLine}
+            mode={dayOiChartMode}
+            dayKey={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}-${timeframe}`}
+            height={220}
+          />
+        </ChartErrorBoundary>
+      </div>
+    </Space>
+  ) : null
+  const premiumPickers = (
+    <>
+      {/* Both legs at the same moneyness: 2 ITM is CE ATM-2 and PE ATM+2. */}
+      <Text type="secondary" style={{ fontSize: 12 }}>Both CE &amp; PE</Text>
+      <StrikePicker
+        atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false}
+        offset={cePremiumOffset === -pePremiumOffset ? cePremiumOffset : 0}
+        onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(-v) }}
+      />
+      {cePremiumOffset !== -pePremiumOffset && <Tag>Mixed</Tag>}
+    </>
+  )
+  const premiumCharts = (
+    <>
+      <Col xs={24} md={12}>
+        <Card
+          size="small"
+          title={`CE premium ${cePremiumStrike ?? ''} ${moneynessLabel(cePremiumOffset, 'CE')}`}
+          extra={<StrikePicker atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false} offset={cePremiumOffset} onChange={setCePremiumOffset} />}
+        >
+          {oneMinBars.length === 0
+            ? <Empty description="No spot candles for this day." />
+            : !cePremiumRevealed
+              ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
+              : (
+                <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
+                  <PremiumEmaChart
+                    points={cePremiumPoints} asOfMs={asOfMs}
+                    timeframe={cePremiumTimeframe} onTimeframeChange={setCePremiumTimeframe}
+                    ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
+                    ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
+                    dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
+                    showVwap={showVwap}
+                    height={320}
+                  />
+                </ChartErrorBoundary>
+              )}
+        </Card>
+      </Col>
+      <Col xs={24} md={12}>
+        <Card
+          size="small"
+          title={`PE premium ${pePremiumStrike ?? ''} ${moneynessLabel(pePremiumOffset, 'PE')}`}
+          extra={<StrikePicker atmStrike={atmStrike} step={step} side="PE" size="small" showStrike={false} offset={pePremiumOffset} onChange={setPePremiumOffset} />}
+        >
+          {oneMinBars.length === 0
+            ? <Empty description="No spot candles for this day." />
+            : !pePremiumRevealed
+              ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
+              : (
+                <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
+                  <PremiumEmaChart
+                    points={pePremiumPoints} asOfMs={asOfMs}
+                    timeframe={pePremiumTimeframe} onTimeframeChange={setPePremiumTimeframe}
+                    ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
+                    ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
+                    dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
+                    showVwap={showVwap}
+                    height={320}
+                  />
+                </ChartErrorBoundary>
+              )}
+        </Card>
+      </Col>
+    </>
+  )
+
+  const quickViewDef = QUICK_VIEWS.find((v) => v.key === quickView) ?? null
+  const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
+
   return (
     // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
     // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
@@ -5538,6 +5728,18 @@ export default function OiReplayPage() {
                 Show all
               </Button>
             </Space>
+            {result && (
+              <Space align="center" size={6} wrap>
+                <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 6 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
+                  <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Ctrl + Shift + …)</Text>
+                </Tooltip>
+                {QUICK_VIEWS.map((v) => (
+                  <Tooltip key={v.key} title={`${v.title} - Ctrl + Shift + ${v.digit}`}>
+                    <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.digit} · {v.label}</Button>
+                  </Tooltip>
+                ))}
+              </Space>
+            )}
             {isLive && liveExpiryFlag !== 'N1' && (
               <Alert
                 type="info" showIcon
@@ -5691,107 +5893,7 @@ export default function OiReplayPage() {
             {visibleSections.includes('dayOi') && dayOiSummary && (
               <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>} {...orderedDropProps('dayOi')}>
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  <Alert
-                    type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
-                    showIcon
-                    message={`Day so far: ${dayOiSummary.dayBias}`}
-                    description={dayOiSummary.dayReason}
-                  />
-                  <Row gutter={[24, 16]}>
-                    <Col xs={12} md={6}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
-                      <Text style={{ fontSize: 13, color: dayOiSummary.ceDayChange >= 0 ? DOWN_COLOR : UP_COLOR }}>
-                        {formatOiMillions(dayOiSummary.ceDayChange, { signed: true })}
-                      </Text>
-                    </Col>
-                    <Col xs={12} md={6}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>PE OI since open</Text>
-                      <Text style={{ fontSize: 13, color: dayOiSummary.peDayChange >= 0 ? UP_COLOR : DOWN_COLOR }}>
-                        {formatOiMillions(dayOiSummary.peDayChange, { signed: true })}
-                      </Text>
-                    </Col>
-                    <Col xs={12} md={6}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI added</Text>
-                      {dayOiSummary.added.length === 0
-                        ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
-                        : dayOiSummary.added.map((m) => (
-                          <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
-                            <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
-                            {m.strike} <span style={{ color: m.side === 'CE' ? DOWN_COLOR : UP_COLOR }}>{formatOiMillions(m.change, { signed: true })}</span>
-                          </div>
-                        ))}
-                    </Col>
-                    <Col xs={12} md={6}>
-                      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Top 2 OI removed</Text>
-                      {dayOiSummary.removed.length === 0
-                        ? <Text style={{ fontSize: 11, color: AXIS_COLOR }}>None yet</Text>
-                        : dayOiSummary.removed.map((m) => (
-                          <div key={`${m.strike}-${m.side}`} style={{ fontSize: 11 }}>
-                            <Tag color={m.side === 'CE' ? 'error' : 'success'} style={{ fontSize: 10, marginRight: 4 }}>{m.side}</Tag>
-                            {m.strike} <span style={{ color: m.side === 'CE' ? UP_COLOR : DOWN_COLOR }}>{formatOiMillions(m.change, { signed: true })}</span>
-                          </div>
-                        ))}
-                    </Col>
-                  </Row>
-                  <div>
-                    <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Total OI lookback</Text>
-                      <Select
-                        value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
-                        options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
-                      />
-                      <Select
-                        mode="tags" size="small" value={totalOiLookbackBars.map(String)}
-                        onChange={(vals) => {
-                          const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-                          setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
-                        }}
-                        style={{ minWidth: 180 }}
-                        options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
-                      />
-                    </Space>
-                    <Table
-                      size="small"
-                      pagination={false}
-                      dataSource={totalOiLookbackRows}
-                      locale={{ emptyText: 'No OI data yet today.' }}
-                      scroll={{ x: 420 }}
-                      columns={[
-                        { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
-                        { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
-                        { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
-                        { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
-                        { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
-                      ]}
-                    />
-                  </div>
-                  {/* Whole-chain counterpart to the per-strike drill-down's own charts - a switch, not
-                      stacked, since the numbers right above already give the current since-open
-                      figure; this chart's own job is showing how it got there. */}
-                  <div>
-                    <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-                      <Text type="secondary" style={{ fontSize: 12 }}>Chain-wide OI</Text>
-                      <Segmented
-                        size="small"
-                        value={dayOiChartMode}
-                        onChange={setDayOiChartMode}
-                        options={[{ label: 'Total OI', value: 'total' }, { label: 'Since open Δ', value: 'sinceOpen' }]}
-                      />
-                      <Text style={{ color: DOWN_COLOR }}>● CE</Text>
-                      <Text style={{ color: UP_COLOR }}>● PE</Text>
-                    </Space>
-                    <ChartErrorBoundary key={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}`}>
-                      <StrikeOiDrilldownChart
-                        ceSeries={dayOiChartMode === 'total' ? ceTotalOiLine : ceTotalSinceOpenLine}
-                        peSeries={dayOiChartMode === 'total' ? peTotalOiLine : peTotalSinceOpenLine}
-                        mode={dayOiChartMode}
-                        dayKey={`day-oi-${dayOiChartMode}-${underlying}-${result?.date}-${timeframe}`}
-                        height={220}
-                      />
-                    </ChartErrorBoundary>
-                  </div>
-                </Space>
+                {dayOiContent}
               </Card>
               </LiveSection>
             )}
@@ -5915,66 +6017,10 @@ export default function OiReplayPage() {
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
                     <CardDragHandle {...dragHandleProps('optionPremium')} />
-                    {/* Both legs at the same moneyness: 2 ITM is CE ATM-2 and PE ATM+2. */}
-                    <Text type="secondary" style={{ fontSize: 12 }}>Both CE &amp; PE</Text>
-                    <StrikePicker
-                      atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false}
-                      offset={cePremiumOffset === -pePremiumOffset ? cePremiumOffset : 0}
-                      onChange={(v) => { setCePremiumOffset(v); setPePremiumOffset(-v) }}
-                    />
-                    {cePremiumOffset !== -pePremiumOffset && <Tag>Mixed</Tag>}
+                    {premiumPickers}
                   </Space>
                 </Col>
-                <Col xs={24} md={12}>
-                  <Card
-                    size="small"
-                    title={`CE premium ${cePremiumStrike ?? ''} ${moneynessLabel(cePremiumOffset, 'CE')}`}
-                    extra={<StrikePicker atmStrike={atmStrike} step={step} side="CE" size="small" showStrike={false} offset={cePremiumOffset} onChange={setCePremiumOffset} />}
-                  >
-                    {oneMinBars.length === 0
-                      ? <Empty description="No spot candles for this day." />
-                      : !cePremiumRevealed
-                        ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
-                        : (
-                          <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
-                            <PremiumEmaChart
-                              points={cePremiumPoints} asOfMs={asOfMs}
-                              timeframe={cePremiumTimeframe} onTimeframeChange={setCePremiumTimeframe}
-                              ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
-                              ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
-                              dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
-                              showVwap={showVwap}
-                              height={320}
-                            />
-                          </ChartErrorBoundary>
-                        )}
-                  </Card>
-                </Col>
-                <Col xs={24} md={12}>
-                  <Card
-                    size="small"
-                    title={`PE premium ${pePremiumStrike ?? ''} ${moneynessLabel(pePremiumOffset, 'PE')}`}
-                    extra={<StrikePicker atmStrike={atmStrike} step={step} side="PE" size="small" showStrike={false} offset={pePremiumOffset} onChange={setPePremiumOffset} />}
-                  >
-                    {oneMinBars.length === 0
-                      ? <Empty description="No spot candles for this day." />
-                      : !pePremiumRevealed
-                        ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
-                        : (
-                          <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
-                            <PremiumEmaChart
-                              points={pePremiumPoints} asOfMs={asOfMs}
-                              timeframe={pePremiumTimeframe} onTimeframeChange={setPePremiumTimeframe}
-                              ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
-                              ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
-                              dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
-                              showVwap={showVwap}
-                              height={320}
-                            />
-                          </ChartErrorBoundary>
-                        )}
-                  </Card>
-                </Col>
+                {premiumCharts}
               </Row>
               </LiveSection>
             )}
@@ -6365,6 +6411,58 @@ export default function OiReplayPage() {
             )}
           />
         </DraggableFloatingPanel>
+      )}
+
+      {/* Quick views (QUICK_VIEWS) - the cards' own content in a popup; the OI totals charts open their own. */}
+      {result && (
+        <Modal
+          open={quickViewDef != null && quickView !== 'oiCharts'} onCancel={() => setQuickView(null)} footer={null} destroyOnHidden
+          width="96vw" style={{ top: 12, maxWidth: 1800 }}
+          title={(
+            <Space wrap size={[12, 4]}>
+              <span>{quickViewDef?.title ?? ''}</span>
+              <Segmented
+                size="small" value={quickView ?? undefined} onChange={setQuickView}
+                options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
+              />
+              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 6 switches · Esc closes</Text>
+            </Space>
+          )}
+        >
+          {quickView === 'dayOi' && (dayOiContent ?? <Empty description="No OI since the open yet." />)}
+          {quickView === 'oiHeatmap' && (
+            <OiChangeHeatmapSection
+              ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+              lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
+              spotBars={oneMinBars} step={step}
+            />
+          )}
+          {quickView === 'premium' && (
+            <Row gutter={[16, 16]}>
+              <Col span={24}><Space size={12} wrap>{premiumPickers}</Space></Col>
+              {premiumCharts}
+            </Row>
+          )}
+          {quickView === 'straddle' && (
+            <StraddleCard
+              cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
+              asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+            />
+          )}
+          {quickView === 'gex' && (
+            <GexCard
+              days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+              expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+            />
+          )}
+        </Modal>
+      )}
+      {result && (
+        <OiTotalsChartsPopup
+          open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}
+          strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={quickTotalsTimeframe} dayKey={`quick-${underlying}-${result.date}`}
+          extra={<HeatmapBucketSelect value={quickTotalsTimeframe} onChange={setQuickTotalsTimeframe} />}
+        />
       )}
     </div>
   )
