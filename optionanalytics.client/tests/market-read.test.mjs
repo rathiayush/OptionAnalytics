@@ -19,13 +19,6 @@ test('resistance is the most call OI at or above the price, support the most put
   assert.deepEqual(oiWalls(rows, null), { resistance: null, support: null })
 })
 
-test('a stale reading (a strike that left the band) is not a wall', () => {
-  const rows = [row(25300, 9e6, 1e6, { ceStale: true }), row(25250, 3e6, 1e6), row(24800, 1e6, 12e6, { peStale: true }), row(25100, 1e6, 4e6)]
-  const { resistance, support } = oiWalls(rows, 25200)
-  assert.equal(resistance.strike, 25250)
-  assert.equal(support.strike, 25100)
-})
-
 test('the OI build-up near ATM is the change over the window asked, not the last minute', () => {
   const ist = (hhmm) => Date.parse(`2026-10-22T${hhmm}:00+05:30`)
   const pts = (...pairs) => pairs.map(([hhmm, oi]) => ({ time: new Date(ist(hhmm)).toISOString(), openInterest: oi }))

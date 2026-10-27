@@ -156,20 +156,15 @@ test('a long log is folded into a checkpoint that judges the rest exactly as the
   assert.deepEqual(a, b)
 })
 
-test('every open position is squared off at 15:15 - its stop / target first, a No SL one at 15:15 only', () => {
+test('a No SL position is squared off at 15:15; one with levels keeps its stop / target', () => {
   const late = [bar('15:12', 100), bar('15:13', 101), bar('15:14', 99), bar('15:15', 98), bar('15:16', 60, 50, 99)]
   const p = position({ entryTime: ist('15:12'), levelLog: punchLevelLog(levels(20, 30), ist('15:12')) })
-  assert.equal(paperExitHit(late, p, { asOfMs: ist('15:14') }), null)
-  assert.deepEqual(paperExitHit(late, p, { asOfMs: ist('15:15') }), { kind: 'dayEnd', fillPrice: 98 })
-  // The 15:16 crash comes after the square-off: never a stop.
-  assert.deepEqual(paperExitHit(late, p, { asOfMs: ist('15:20') }), { kind: 'dayEnd', fillPrice: 98 })
-  // A stop before 15:15 wins.
-  const hit = [bar('15:12', 100), bar('15:13', 85, 79, 101), bar('15:15', 98)]
-  assert.deepEqual(paperExitHit(hit, p, { asOfMs: ist('15:15') }), { kind: 'sl', fillPrice: 80, at: ist('15:13') })
+  assert.equal(paperExitHit(late, p, { asOfMs: ist('15:15') }), null)
+  assert.deepEqual(paperExitHit(late, p, { asOfMs: ist('15:16') }), { kind: 'sl', fillPrice: 80, at: ist('15:16') })
   const noStop = position({ noStop: true, levelLog: undefined, entryTime: ist('15:12') })
-  assert.equal(paperExitHit(hit, noStop, { asOfMs: ist('15:14') }), null)
-  assert.deepEqual(paperExitHit(hit, noStop, { asOfMs: ist('15:15') }), { kind: 'dayEnd', fillPrice: 98 })
+  assert.equal(paperExitHit(late, noStop, { asOfMs: ist('15:14') }), null)
+  assert.deepEqual(paperExitHit(late, noStop, { asOfMs: ist('15:15') }), { kind: 'dayEnd', fillPrice: 98 })
   // Live / another chain: the clock is given apart from the points.
-  assert.deepEqual(paperExitHit(late.slice(0, 3), p, { asOfMs: null, clockMs: ist('15:15', 20) }), { kind: 'dayEnd', fillPrice: 99 })
+  assert.deepEqual(paperExitHit(late.slice(0, 3), noStop, { asOfMs: null, clockMs: ist('15:15', 20) }), { kind: 'dayEnd', fillPrice: 99 })
   assert.equal(paperExitHit(late, { ...p, status: 'CLOSED' }, { asOfMs: ist('15:20') }), null)
 })

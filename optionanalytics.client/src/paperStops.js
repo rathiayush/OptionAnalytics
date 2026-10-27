@@ -1,5 +1,5 @@
 // The OI Replay trade panel's paper positions: the stop-loss / target / trailing stop on the option's own premium, and
-// the 15:15 square-off (paperExit.js). The rules are the scanner's for its option trades (strategyEngine
+// a No SL position's 15:15 square-off (paperExit.js). The rules are the scanner's for its option trades (strategyEngine
 // optionStopTargetHit), on the page's own premium points:
 //
 // - LEVELS: each position keeps the levels it was punched with (the panel's, or the keyboard ticket's) in `levelLog`
@@ -15,7 +15,7 @@
 // - The stop counts first when one bar touches both; a fill is at the level itself (as the scanner's option trades).
 
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
-import { paperSquareOffMs, squareOffExit } from './paperExit.js'
+import { dayEndExit } from './paperExit.js'
 
 const MIN = 60_000
 // More level changes than this on one position are folded into its checkpoint (the server keeps a position to 4 KB).
@@ -104,12 +104,11 @@ export function paperStopTargetHit(series, position, { asOfMs = null, untilMs = 
   return walk(series, p, log, until).hit ?? null
 }
 
-/** An OPEN position's exit at the clock, if any: its stop-loss / trailing stop / target first (up to 15:15), else the 15:15
+/** An OPEN position's exit at the clock, if any: its stop-loss / trailing stop / target - or, a No SL position, the 15:15
  *  square-off once `clockMs` has reached it. `asOfMs`: the replay clock for the points (null = all of them). */
 export function paperExitHit(series, position, { asOfMs = null, clockMs = asOfMs, fallback = null } = {}) {
   if (position?.status !== 'OPEN' || position.entryTime == null) return null
-  return paperStopTargetHit(series, position, { asOfMs, untilMs: paperSquareOffMs(position.entryTime), fallback })
-    ?? squareOffExit(position, clockMs, series)
+  return position.noStop ? dayEndExit(position, clockMs, series) : paperStopTargetHit(series, position, { asOfMs, fallback })
 }
 
 /**

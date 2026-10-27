@@ -15,15 +15,15 @@ function latestAtOrBefore(series, ms) {
 
 /** The OI walls around `spot` from the ladder's rows (buildLadderRows): resistance = the strike AT or ABOVE spot with the
  *  most call OI, support = the strike AT or BELOW spot with the most put OI - a heavy call strike below the price (or put
- *  strike above it) is writing the market has already gone through, not a wall ahead of it. A stale reading (a strike
- *  that has left the band) does not count. { resistance, support } - rows, or null. */
+ *  strike above it) is writing the market has already gone through, not a wall ahead of it. { resistance, support } -
+ *  rows, or null. */
 export function oiWalls(rows, spot) {
   let resistance = null
   let support = null
   if (!(spot > 0)) return { resistance, support }
   for (const r of rows ?? []) {
-    if (r.strike >= spot && !r.ceStale && r.ceOi > 0 && r.ceOi > (resistance?.ceOi ?? 0)) resistance = r
-    if (r.strike <= spot && !r.peStale && r.peOi > 0 && r.peOi > (support?.peOi ?? 0)) support = r
+    if (r.strike >= spot && r.ceOi > 0 && r.ceOi > (resistance?.ceOi ?? 0)) resistance = r
+    if (r.strike <= spot && r.peOi > 0 && r.peOi > (support?.peOi ?? 0)) support = r
   }
   return { resistance, support }
 }

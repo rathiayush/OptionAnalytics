@@ -2731,7 +2731,7 @@ function PaperTradePanel({
           is caught even if price reverses before the next check. Each position keeps the levels it was
           placed with (hover its Action); a change here reaches this index's open positions from the
           minute it is made, never the minutes already passed, and never loosens a trailing stop already
-          earned. Every open position is squared off at 15:15. Exit all closes every open position
+          earned. Exit all closes every open position
           right now at its current price, without clearing the table the way Clear all does. Today's own
           positions survive a page reload (saved locally in this browser); loading a historical day, a
           different underlying, or clicking Clear all still resets them.
