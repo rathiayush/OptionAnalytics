@@ -5998,8 +5998,8 @@ export default function OiReplayPage() {
               </LiveSection>
             )}
 
-            {/* The ATM straddle from a set time (09:15 by default): the range the options priced (re-centred only when a
-                break is accepted), the sideways check and the read - up to the replay clock, today live (straddle.js). */}
+            {/* The ATM straddle from a set time (09:15 by default): the range the options priced, the straddle against its
+                VWAP, its re-centre after a move and the read - up to the replay clock, today live (straddle.js). */}
             {visibleSections.includes('straddle') && (
               <LiveSection version={sectionVersion}>
               <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('straddle')}>
@@ -6009,7 +6009,7 @@ export default function OiReplayPage() {
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (call + put at the strike nearest spot){isLive ? ' · live' : ''}</Space>}
                   >
                     <StraddleCard
-                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} step={step}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`}
                     />

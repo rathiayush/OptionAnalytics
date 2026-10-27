@@ -134,12 +134,11 @@ When adding or changing a strategy:
 - OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`): from a set time (09:15 by default, "From") the range
   the options priced - by default ("Range: Today") the ATM strike ± today's share of the straddle (0.8 x spot x ATM IV x
   sqrt(minutes left to 15:30 / (252 x 375)), never more than the straddle: the straddle itself prices the move to EXPIRY);
-  "To expiry" = strike ± the straddle. The range moves ONLY when a break is accepted - spot still outside
-  after "New range after" minutes - to a new range around the ATM there (VWAP and the centre straddle start again); a break
-  that comes back first is a failed break. Sideways = all three: spot inside, the ATM straddle under its VWAP (80% of "Read
-  over" and now), the centre straddle below its start value; the other reads are drift / premium bought / trend / breakout /
-  not confirmed. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live; the read describes the
-  day, it is not a measured signal and feeds no strategy.
+  "To expiry" = strike ± the straddle. The ATM straddle (nearest strike each minute) against its VWAP from the start; the
+  "Held" straddle - the one taken at the start, shifted to the new ATM once spot is "Re-centre after" N strikes from it
+  (default 2), with the range read again from there. The read (sideways / premium bought / trend / breakout / not
+  confirmed) uses the start's range. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live;
+  the read describes the day, it is not a measured signal and feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
