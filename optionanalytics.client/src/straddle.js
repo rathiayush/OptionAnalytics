@@ -71,8 +71,12 @@ function legs(points) {
     let minutes = byStrike.get(p.strike)
     if (!minutes) byStrike.set(p.strike, minutes = new Map())
     const prev = minutes.get(t)
+    const high = Math.max(p.high > 0 ? p.high : p.price, p.price)
+    const low = Math.min(p.low > 0 ? p.low : p.price, p.price)
     minutes.set(t, {
       t, price: p.price,
+      // The minute's bar (a live minute's later reading widens it): for a trade's stop / target.
+      open: prev?.open ?? (p.open > 0 ? p.open : p.price), high: Math.max(high, prev?.high ?? high), low: Math.min(low, prev?.low ?? low),
       volume: Math.max(p.volume ?? 0, prev?.volume ?? 0),
       iv: p.impliedVolatility > 0 ? p.impliedVolatility : prev?.iv ?? null,
     })
@@ -139,7 +143,9 @@ function dayMove(spot, iv, msLeft) {
 
 // The ATM straddle at minute `t`: the strike nearest the synthetic futures price of the expiry (strike + call - put - put-call
 // parity - the median over the 3 strikes nearest spot with both legs), as the option tools pick it; `forward` is that price.
-function atmAt(ce, pe, strikes, spot, t) {
+// None when the nearest strike quoted is more than 1.5 strike steps (`step`) away - the chain loaded does not reach the
+// money, and an in-the-money straddle there would read as premium.
+function atmAt(ce, pe, strikes, spot, t, step = null) {
   const byDistance = (x) => strikes.slice().sort((a, b) => Math.abs(a - x) - Math.abs(b - x) || a - b)
   const quotes = []
   for (const strike of byDistance(spot)) {
@@ -152,7 +158,7 @@ function atmAt(ce, pe, strikes, spot, t) {
   const forward = forwards.length % 2 ? forwards[mid] : (forwards[mid - 1] + forwards[mid]) / 2
   for (const strike of byDistance(forward)) {
     const q = straddleAt(ce, pe, strike, t)
-    if (q) return { ...q, forward }
+    if (q) return step > 0 && Math.abs(forward - strike) > 1.5 * step ? null : { ...q, forward }
   }
   return null
 }
@@ -168,12 +174,12 @@ function atmAt(ce, pe, strikes, spot, t) {
  * quoted at the start); null fields until there is a straddle to read.
  */
 export function straddleRead(cePoints, pePoints, spotBars, {
-  start = STRADDLE_START_DEFAULT, asOfMs = null, fixedStrike = null, holdMinutes = 15, scope = 'day', expiry = null,
+  start = STRADDLE_START_DEFAULT, asOfMs = null, fixedStrike = null, holdMinutes = 15, scope = 'day', expiry = null, trade = {},
 } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
   const empty = {
-    startMs: null, series: [], day: null, now: null, fixed: null, fixedChoices: [], position: null, breaks: { up: null, down: null },
+    trades: { list: [], open: null, summary: null }, startMs: null, series: [], day: null, now: null, fixed: null, fixedChoices: [], position: null, breaks: { up: null, down: null },
     control: null, belowShare: null, change: null, ivChange: null, verdict: null,
   }
   if (!spots.length) return empty
@@ -183,6 +189,8 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const ce = legs(cePoints)
   const pe = legs(pePoints)
   const strikes = [...ce.keys()].filter((k) => pe.has(k)).sort((a, b) => a - b)
+  let step = null
+  for (let i = 1; i < strikes.length; i++) if (step == null || strikes[i] - strikes[i - 1] < step) step = strikes[i] - strikes[i - 1]
   const closeMs = istClockOn(spots[0].t, '15:30')
   // The ATM IV: from the ATM straddle itself when the expiry is known (straddle = 0.8 x futures x IV x sqrt(time left), in
   // trading time) - the same on a past day and live; else the feed's.
@@ -203,7 +211,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const vwapOf = (acc) => (acc.count ? (acc.volume > 0 ? acc.pv / acc.volume : acc.sum / acc.count) : null)
   for (const { t, spot } of spots) {
     if (t < startMs || t > clock) continue
-    const atm = atmAt(ce, pe, strikes, spot, t)
+    const atm = atmAt(ce, pe, strikes, spot, t, step)
     if (!atm) continue
     if (!first) {
       // The start: the ATM straddle prices the range; the fixed straddle is taken (the strike asked for, else this ATM).
@@ -229,7 +237,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
     const decay = left != null ? first.value * (atm.forward / first.forward) * Math.sqrt(left / first.toExpiry) : null
     series.push({
       time: t, spot, forward: atm.forward, strike: atm.strike, value: atm.value, vwap: vwapOf(atmVwap), iv: ivOf(atm, t), decay,
-      fixed: fixed?.value ?? null, fixedVwap: fixed ? vwapOf(fixedVwap) : null,
+      fixed: fixed?.value ?? null, fixedVwap: fixed ? vwapOf(fixedVwap) : null, ce: atm.ce, pe: atm.pe,
     })
   }
   if (!series.length) return { ...empty, startMs }
@@ -259,7 +267,81 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const ivChange = now.iv != null && ago.iv != null ? now.iv - ago.iv : null
   const vsDecay = now.decay != null ? now.value - now.decay : null
   const verdict = readVerdict({ position, control, change, ivChange, holdMinutes, start, vsDecay })
-  return { vsDecay, startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
+  const trades = tradeIdeas(series, ce, pe, day, closeMs, { holdMinutes, ...trade })
+  return { trades, vsDecay, startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
+}
+
+// TRADE IDEAS - option buying from the straddle, as the option tools read it: a straddle rising over its VWAP is a buyer's
+// market (premium expanding), and which way is the leg gaining more - the same as the futures moving (call - put =
+// futures - strike). A BUY CE (BUY PE) at minute t needs:
+//   - premium expanding: the Auto ATM straddle over its VWAP for the last `confirm` minutes, and over its decay-only line
+//     (IV up, not a quiet day's decay) when the expiry date is known;
+//   - direction: the synthetic futures up (down) by at least `movePct` % of today's priced half-range over the last
+//     `holdMinutes`, and still moving that way over the last `confirm` minutes;
+//   - from the start + `holdMinutes` to 14:45, one trade at a time, `cooldown` minutes after an exit.
+// It buys the ATM call (put) at that minute's close. From the next minute on its own 1-minute bars: a bar opening through
+// the stop fills at its open, the stop before the target in the same bar, the target at the target; else out at the
+// close when the straddle has been back under its VWAP 2 minutes (the expansion is over), or at 15:10. Nothing after
+// the clock is used - an open trade shows where it stands.
+export const TRADE_DEFAULTS = { slPct: 25, targetPct: 50, confirm: 3, cooldown: 10, movePct: 25 }
+
+function barOf(legs, strike, t) {
+  const r = readingAt(legs.get(strike), t)
+  if (!r) return null
+  return r.t === t ? r : { ...r, open: r.price, high: r.price, low: r.price }   // a stale reading: its last price only
+}
+
+function tradeIdeas(series, ce, pe, day, closeMs, options) {
+  const { holdMinutes, slPct, targetPct, confirm, cooldown, movePct } = { ...TRADE_DEFAULTS, ...options }
+  const lastEntry = closeMs - 45 * MIN          // 14:45
+  const squareOff = closeMs - 20 * MIN          // 15:10
+  const list = []
+  let open = null
+  let nextAllowed = series.length ? series[0].time + (holdMinutes - 1) * MIN : Infinity
+  const need = (movePct / 100) * (day?.width ?? 0)
+  for (let i = 0; i < series.length; i++) {
+    const p = series[i]
+    if (open) {
+      const bar = barOf(open.side === 'CE' ? ce : pe, open.strike, p.time)
+      let exit = null
+      if (bar) {
+        if (bar.open <= open.sl) exit = { price: bar.open, reason: 'stop (opened through it)' }
+        else if (bar.low <= open.sl) exit = { price: open.sl, reason: 'stop' }
+        else if (bar.high >= open.target) exit = { price: open.target, reason: 'target' }
+      }
+      const prev = series[i - 1]
+      if (!exit && p.value < p.vwap && prev && prev.time > open.time && prev.value < prev.vwap) exit = { price: bar?.price ?? open.last, reason: 'straddle back under its VWAP' }
+      if (!exit && p.time >= squareOff) exit = { price: bar?.price ?? open.last, reason: '15:10 square-off' }
+      if (bar) open.last = bar.price
+      if (exit) {
+        list.push({ ...open, exitTime: p.time, exit: exit.price, exitReason: exit.reason, points: exit.price - open.entry, pct: ((exit.price - open.entry) / open.entry) * 100 })
+        open = null
+        nextAllowed = p.time + cooldown * MIN
+      }
+      continue
+    }
+    if (p.time < nextAllowed || p.time > lastEntry || i < confirm - 1 || !(need > 0)) continue
+    const recent = series.slice(i - confirm + 1, i + 1)
+    if (!recent.every((q) => q.value > q.vwap) || (p.decay != null && !(p.value > p.decay))) continue
+    const back = [...series.slice(0, i + 1)].reverse().find((q) => q.time <= p.time - holdMinutes * MIN)
+    if (!back) continue
+    const move = p.forward - back.forward
+    const going = p.forward - recent[0].forward
+    const side = move >= need && going > 0 ? 'CE' : move <= -need && going < 0 ? 'PE' : null
+    if (!side) continue
+    const entry = side === 'CE' ? p.ce : p.pe
+    if (!(entry > 0)) continue
+    open = {
+      side, strike: p.strike, time: p.time, entry, sl: entry * (1 - slPct / 100), target: entry * (1 + targetPct / 100), last: entry,
+      why: `straddle over its VWAP ${confirm} min${p.decay != null ? ' and over its decay-only line' : ''}, futures ${move >= 0 ? '+' : '−'}${Math.abs(move).toFixed(0)} in ${holdMinutes} min`,
+    }
+  }
+  const done = list.filter((t) => t.points != null)
+  const summary = done.length ? {
+    trades: done.length, wins: done.filter((t) => t.points > 0).length,
+    points: done.reduce((a, t) => a + t.points, 0), pct: done.reduce((a, t) => a + t.pct, 0),
+  } : null
+  return { list, open: open ? { ...open, points: open.last - open.entry, pct: ((open.last - open.entry) / open.entry) * 100 } : null, summary }
 }
 
 function readVerdict({ position, control, change, ivChange, holdMinutes, start, vsDecay = null }) {

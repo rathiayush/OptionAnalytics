@@ -145,7 +145,12 @@ When adding or changing a strategy:
   "Decay only" line - the start's straddle with only time passing (start straddle x futures / start futures x sqrt(trading
   minutes left to expiry / those at the start), IV unchanged); the Auto ATM over it = premium bought beyond the decay (IV
   up), under it = sold faster (IV down) - and a "sellers" read whose straddle is not under that line says its fall is
-  time decay, not selling. The read (sideways / premium
+  time decay, not selling. TRADE IDEAS (option buying, `tradeIdeas` / `TRADE_DEFAULTS`): BUY CE (PE) when the premium is
+  expanding - the Auto ATM straddle over its VWAP 3 min and over the decay-only line - and the synthetic futures moved up
+  (down) >= 25% of today's priced half-range over "Read over" minutes and are still going that way; the ATM option at
+  that minute's close, then on its own 1-minute bars: a bar opening through the stop fills at its open, stop before
+  target, else out when the straddle is 2 min back under its VWAP, or 15:10; no entries after 14:45, one at a time, 10 min
+  after an exit; stop / target % on the card. Ideas only - nothing is placed, no strategy or alert is fed. The read (sideways / premium
   bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
   replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
   signal and feeds no strategy.

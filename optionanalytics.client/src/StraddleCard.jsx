@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Col, Row, Segmented, Select, Space, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import { Col, InputNumber, Row, Segmented, Select, Space, Tag, TimePicker, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
 import { CrosshairMode, LineSeries, LineStyle, LineType, createSeriesMarkers } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
-import { STRADDLE_START_DEFAULT, straddleRead } from './straddle.js'
+import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, straddleRead } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
 
 const { Text } = Typography
@@ -93,13 +93,16 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
   const [start, setStart] = usePersistedState('optionanalytics.oiReplay.straddleStart', STRADDLE_START_DEFAULT)
   const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
   const [scope, setScope] = usePersistedState('optionanalytics.oiReplay.straddleScope', 'day')
+  // The trade ideas' stop / target (% of the option's entry premium).
+  const [slPct, setSlPct] = usePersistedState('optionanalytics.oiReplay.straddleTradeSl', TRADE_DEFAULTS.slPct)
+  const [targetPct, setTargetPct] = usePersistedState('optionanalytics.oiReplay.straddleTradeTarget', TRADE_DEFAULTS.targetPct)
   // The fixed strike picked for this day ('atm' = the ATM at the start time) - a new day starts at the ATM again.
   const [pick, setPick] = useState({ dayKey, strike: 'atm' })
   const fixedStrike = pick.dayKey === dayKey && pick.strike !== 'atm' ? pick.strike : null
 
   const read = useMemo(
-    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, fixedStrike, holdMinutes, scope, expiry }),
-    [cePoints, pePoints, spotBars, start, asOfMs, fixedStrike, holdMinutes, scope, expiry],
+    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, fixedStrike, holdMinutes, scope, expiry, trade: { slPct, targetPct } }),
+    [cePoints, pePoints, spotBars, start, asOfMs, fixedStrike, holdMinutes, scope, expiry, slPct, targetPct],
   )
   const charts = useMemo(() => {
     const s = read.series
@@ -118,7 +121,13 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       { id: 'upper', title: day ? `${hhmm(day.time)} +${num(day.width, 0)}` : '', color: UP_COLOR, width: 1, style: LineStyle.Dashed, data: day ? s.map((p) => ({ time: p.time, value: day.upper })) : [] },
       { id: 'lower', title: day ? `${hhmm(day.time)} −${num(day.width, 0)}` : '', color: DOWN_COLOR, width: 1, style: LineStyle.Dashed, data: day ? s.map((p) => ({ time: p.time, value: day.lower })) : [] },
     ]
-    return { straddle, spot }
+    // The trade ideas on the spot chart: an arrow at each entry (up = BUY CE, down = BUY PE), a dot at each exit.
+    const trades = [...read.trades.list, ...(read.trades.open ? [read.trades.open] : [])]
+    const markers = trades.flatMap((t) => [
+      { time: t.time, position: t.side === 'CE' ? 'belowBar' : 'aboveBar', color: t.side === 'CE' ? UP_COLOR : DOWN_COLOR, shape: t.side === 'CE' ? 'arrowUp' : 'arrowDown', text: `BUY ${t.side}` },
+      ...(t.exitTime != null ? [{ time: t.exitTime, position: t.side === 'CE' ? 'aboveBar' : 'belowBar', color: t.points > 0 ? UP_COLOR : DOWN_COLOR, shape: 'circle', text: `${t.points > 0 ? '+' : ''}${num(t.pct, 0)}%` }] : []),
+    ]).sort((a, b) => a.time - b.time)
+    return { straddle, spot, markers }
   }, [read])
 
   const fixedOptions = [
@@ -224,9 +233,50 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Spot vs the priced range</Text>
           <Text type="secondary" style={{ fontSize: 11 }}> · from {hhmm(day.time)}: ATM {day.strike} ± {num(day.width, 0)}</Text>
-          <LinesChart lines={charts.spot} dayKey={`straddle-spot-${dayKey}-${start}-${scope}`} height={height} />
+          <LinesChart lines={charts.spot} markers={charts.markers} dayKey={`straddle-spot-${dayKey}-${start}-${scope}`} height={height} />
         </Col>
       </Row>
+      <TradeIdeas trades={read.trades} slPct={slPct} targetPct={targetPct} setSlPct={setSlPct} setTargetPct={setTargetPct} holdMinutes={holdMinutes} />
     </>
+  )
+}
+
+// The day's trade ideas from the straddle (straddle.js tradeIdeas): each BUY CE / BUY PE with why, its entry, how it ended
+// and the day's total - on the option premiums themselves, nothing after the replay clock. Ideas only: nothing is placed.
+function TradeIdeas({ trades, slPct, targetPct, setSlPct, setTargetPct, holdMinutes }) {
+  const rows = [...trades.list, ...(trades.open ? [{ ...trades.open, open: true }] : [])]
+  const { summary } = trades
+  return (
+    <div style={{ marginTop: 12 }}>
+      <Space wrap size={[12, 4]} style={{ marginBottom: 4 }}>
+        <Text strong style={{ fontSize: 12 }}>Trade ideas - option buying from the straddle</Text>
+        <Tooltip title={`BUY CE (PE) when the premium is expanding - the Auto ATM straddle over its VWAP ${TRADE_DEFAULTS.confirm} min and over its decay-only line - and the futures are rising (falling) by ${TRADE_DEFAULTS.movePct}% of today's priced half-range in ${holdMinutes} min, still going that way. The ATM option at that minute's close; out at the stop / target, when the straddle is back under its VWAP 2 min (the expansion is over), or 15:10. No entries after 14:45, one at a time, ${TRADE_DEFAULTS.cooldown} min after an exit. Ideas only - nothing is placed.`}>
+          <Text type="secondary" style={{ fontSize: 11, textDecoration: 'underline dotted' }}>rules</Text>
+        </Tooltip>
+        <Space size={4}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Stop</Text>
+          <InputNumber size="small" min={5} max={90} step={5} value={slPct} onChange={(v) => v != null && setSlPct(v)} formatter={(v) => `${v}%`} parser={(v) => Number(String(v).replace('%', ''))} style={{ width: 70 }} />
+          <Text type="secondary" style={{ fontSize: 12 }}>Target</Text>
+          <InputNumber size="small" min={5} max={500} step={10} value={targetPct} onChange={(v) => v != null && setTargetPct(v)} formatter={(v) => `${v}%`} parser={(v) => Number(String(v).replace('%', ''))} style={{ width: 76 }} />
+        </Space>
+        {summary && (
+          <Text style={{ fontSize: 12 }}>
+            Day: {summary.trades} trade{summary.trades > 1 ? 's' : ''}, {summary.wins} won · <Text strong style={{ fontSize: 12, color: summary.points >= 0 ? UP_COLOR : DOWN_COLOR }}>{signed(summary.points)} pts</Text> of premium
+          </Text>
+        )}
+      </Space>
+      {rows.length === 0
+        ? <Text type="secondary" style={{ display: 'block', fontSize: 12 }}>None so far - no expansion of premium with the futures moving one way.</Text>
+        : rows.map((t) => (
+          <div key={`${t.side}-${t.time}`} style={{ fontSize: 12 }}>
+            <Tag color={t.side === 'CE' ? 'green' : 'red'} style={{ marginRight: 6 }}>BUY {t.side}</Tag>
+            <Text strong style={{ fontSize: 12 }}>{hhmm(t.time)}</Text> {t.strike} {t.side} @ {num(t.entry)} (stop {num(t.sl)}, target {num(t.target)})
+            {t.open
+              ? <> → open, now {num(t.last)} <Text strong style={{ fontSize: 12, color: t.points >= 0 ? UP_COLOR : DOWN_COLOR }}>({signed(t.points)}, {signed(t.pct, 0)}%)</Text></>
+              : <> → {hhmm(t.exitTime)} {num(t.exit)}, {t.exitReason} <Text strong style={{ fontSize: 12, color: t.points >= 0 ? UP_COLOR : DOWN_COLOR }}>({signed(t.points)}, {signed(t.pct, 0)}%)</Text></>}
+            <Text type="secondary" style={{ fontSize: 11 }}> · {t.why}</Text>
+          </div>
+        ))}
+    </div>
   )
 }

@@ -292,3 +292,107 @@ test('the decay-only line: the start straddle with only time passing - the Auto 
   // No expiry date: no decay line.
   assert.equal(straddleRead(quiet.ce, quiet.pe, quiet.spots).vsDecay, null)
 })
+
+// --- Trade ideas: option buying from the straddle ---------------------------------------------------------------------
+// Tue 20 Oct, the options expire Thu 22 Oct (the decay-only line known). Quiet until 10:00 with the straddle decaying;
+// from 10:00 a move with the straddle bid up (IV rising) - or not.
+const leftAt = (m) => (at('15:30') - (OPEN + m * MIN)) / MIN + 2 * 375
+const decaying = (m) => 60 * Math.sqrt(leftAt(m) / leftAt(0))
+const trend = ({ dir = 1, from = '10:00', perMin = 4, bid = 1.15, minutes = 375 } = {}) => day({
+  minutes,
+  spot: (m) => 25000 + dir * Math.min(Math.max(0, m - minuteOfDay(from)) * perMin, 200),   // a move of up to 200
+  tv: (m) => decaying(m) * (m >= minuteOfDay(from) ? bid : 1),
+})
+const EXP = { expiry: '2026-10-22' }
+const legAt = (points, strike, t) => points.find((p) => p.strike === strike && Date.parse(p.time) === t).price
+
+test('trade idea: premium expanding and the futures rising - BUY the ATM call, out at the target', () => {
+  const d = trend()
+  const read = straddleRead(d.ce, d.pe, d.spots, EXP)
+  const [first] = read.trades.list
+  assert.equal(first.side, 'CE')
+  assert.ok(first.time > at('10:00') && first.time <= at('10:20'), istTime(first.time))
+  assert.equal(first.entry, legAt(d.ce, first.strike, first.time))   // that minute's close of the ATM call
+  assert.equal(first.exitReason, 'target')
+  assert.ok(Math.abs(first.exit - first.entry * 1.5) < 1e-9)
+  assert.ok(Math.abs(first.pct - 50) < 1e-9)
+  assert.match(first.why, /over its VWAP 3 min and over its decay-only line, futures \+\d+ in 15 min/)
+  assert.equal(read.trades.summary.wins, read.trades.summary.trades >= 1 ? read.trades.list.filter((t) => t.points > 0).length : 0)
+})
+
+test('trade idea: the mirror - futures falling with premium expanding - BUY the ATM put', () => {
+  const d = trend({ dir: -1 })
+  const [first] = straddleRead(d.ce, d.pe, d.spots, EXP).trades.list
+  assert.equal(first.side, 'PE')
+  assert.equal(first.entry, legAt(d.pe, first.strike, first.time))
+  assert.equal(first.exitReason, 'target')
+})
+
+test('no trade without premium expanding, or without a direction', () => {
+  // The futures rise but the straddle is sold (IV falling): it stays under its VWAP - no buying.
+  const sold = trend({ bid: 0.8 })
+  assert.deepEqual(straddleRead(sold.ce, sold.pe, sold.spots, EXP).trades.list, [])
+  // Premium bid up but the futures flat: expansion with no side - no trade.
+  const flat = trend({ perMin: 0 })
+  assert.deepEqual(straddleRead(flat.ce, flat.pe, flat.spots, EXP).trades.list, [])
+  // A move too small for today's priced range (under 25% of its half-width in 15 min).
+  const tiny = trend({ perMin: 0.3 })
+  assert.deepEqual(straddleRead(tiny.ce, tiny.pe, tiny.spots, EXP).trades.list, [])
+})
+
+test('exits: straddle back under its VWAP, a stop that the bar opens through or touches, 15:10; no entries after 14:45', () => {
+  // The move stalls at 10:30 and the IV is crushed: the straddle falls back under its VWAP - out (no target / stop).
+  const stall = day({
+    minutes: 375,
+    spot: (m) => 25000 + Math.min(Math.max(0, m - minuteOfDay('10:00')), 30) * 4,
+    tv: (m) => decaying(m) * (m >= minuteOfDay('10:30') ? 0.85 : m >= minuteOfDay('10:00') ? 1.15 : 1),
+  })
+  const out = straddleRead(stall.ce, stall.pe, stall.spots, { ...EXP, trade: { targetPct: 500, slPct: 95 } }).trades.list[0]
+  assert.equal(out.exitReason, 'straddle back under its VWAP')
+  assert.ok(out.exitTime >= at('10:31'))
+  assert.equal(out.exit, legAt(stall.ce, out.strike, out.exitTime))
+
+  // A stop: the bar after the entry opens 40% lower - filled at its open; touched intrabar - filled at the stop.
+  const d = trend()
+  const entry = straddleRead(d.ce, d.pe, d.spots, EXP).trades.list[0]
+  const gap = (open, low) => d.ce.map((p) => (p.strike === entry.strike && Date.parse(p.time) === entry.time + MIN
+    ? { ...p, open, low, high: Math.max(open, p.price), price: Math.max(open, p.price) } : p))
+  const gapped = straddleRead(gap(entry.entry * 0.6, entry.entry * 0.6), d.pe, d.spots, EXP).trades.list[0]
+  assert.equal(gapped.exitReason, 'stop (opened through it)')
+  assert.ok(Math.abs(gapped.exit - entry.entry * 0.6) < 1e-9)
+  const touched = straddleRead(gap(entry.entry, entry.entry * 0.7), d.pe, d.spots, EXP).trades.list[0]
+  assert.equal(touched.exitReason, 'stop')
+  assert.ok(Math.abs(touched.exit - entry.entry * 0.75) < 1e-9)
+
+  // Entered late, still open at 15:10: squared off at that minute's close.
+  const late = trend({ from: '14:30', perMin: 2 })
+  const sq = straddleRead(late.ce, late.pe, late.spots, { ...EXP, trade: { targetPct: 500, slPct: 95 } }).trades.list.at(-1)
+  assert.equal(sq.exitReason, '15:10 square-off')
+  assert.equal(sq.exitTime, at('15:10'))
+  // A move starting after 14:45: no entry.
+  const after = trend({ from: '14:46' })
+  assert.deepEqual(straddleRead(after.ce, after.pe, after.spots, EXP).trades.list, [])
+})
+
+test('trade ideas use nothing after the replay clock - an open trade shows where it stands', () => {
+  const d = trend()
+  const full = straddleRead(d.ce, d.pe, d.spots, EXP).trades.list[0]
+  const clock = full.time + 2 * MIN
+  const cut = (points) => points.filter((p) => new Date(p.time).getTime() <= clock)
+  const known = straddleRead(cut(d.ce), cut(d.pe), cut(d.spots), { ...EXP, asOfMs: clock })
+  assert.deepEqual(straddleRead(d.ce, d.pe, d.spots, { ...EXP, asOfMs: clock }), known)
+  assert.deepEqual(known.trades.list, [])
+  assert.equal(known.trades.open.side, 'CE')
+  assert.equal(known.trades.open.last, legAt(d.ce, full.strike, clock))
+})
+
+const istTime = (ms) => new Date(ms + 330 * MIN).toISOString().slice(11, 16)
+
+test('a minute whose loaded chain does not reach the money is skipped, not read as premium', () => {
+  // Spot runs to 25700, past the last strike loaded (25400): from the minute the nearest strike is over 1.5 steps from
+  // the futures, no Auto ATM - no deep in-the-money straddle read as expansion.
+  const d = day({ minutes: 300, spot: (m) => 25000 + Math.max(0, m - minuteOfDay('10:00')) * 4, tv: () => 60 })
+  const read = straddleRead(d.ce, d.pe, d.spots, EXP)
+  assert.ok(read.series.every((p) => Math.abs(p.forward - p.strike) <= 75))
+  assert.equal(read.series.at(-1).time, at('11:58'))   // spot 25472 - the last minute within 25400 + 75
+})
