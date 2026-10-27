@@ -88,7 +88,7 @@ export function LinesChart({ lines, markers = [], dayKey, height }) {
  * the read (sideways / trend / breakout / fake) - as of the replay clock (`asOfMs`; null - live - every minute given;
  * 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, height = 260 }) {
+export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry = null, height = 260 }) {
   const [start, setStart] = usePersistedState('optionanalytics.oiReplay.straddleStart', STRADDLE_START_DEFAULT)
   const [holdMinutes, setHoldMinutes] = usePersistedState('optionanalytics.oiReplay.straddleHold', 15)
   const [scope, setScope] = usePersistedState('optionanalytics.oiReplay.straddleScope', 'day')
@@ -97,8 +97,8 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
   const fixedStrike = pick.dayKey === dayKey && pick.strike !== 'atm' ? pick.strike : null
 
   const read = useMemo(
-    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, fixedStrike, holdMinutes, scope }),
-    [cePoints, pePoints, spotBars, start, asOfMs, fixedStrike, holdMinutes, scope],
+    () => straddleRead(cePoints, pePoints, spotBars, { start, asOfMs, fixedStrike, holdMinutes, scope, expiry }),
+    [cePoints, pePoints, spotBars, start, asOfMs, fixedStrike, holdMinutes, scope, expiry],
   )
   const charts = useMemo(() => {
     const s = read.series
@@ -139,7 +139,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
           />
         </Space>
       </Tooltip>
-      <Tooltip title="Today: the part of the straddle's move left for this session (the straddle at the ATM IV over the minutes left to 15:30) - the straddle itself prices the move to expiry, often days away. To expiry: the straddle's own breakevens (strike ± straddle).">
+      <Tooltip title="Today: the part of the straddle's move left for this session - straddle x √(trading minutes left today / trading minutes left to the expiry), worked out from the option prices and the expiry date alone, so a past day and today live read the same. The straddle itself prices the move to expiry, often days away. To expiry: the straddle's own breakevens (strike ± straddle).">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>Range</Text>
           <Segmented size="small" value={scope} onChange={setScope} options={[{ value: 'day', label: 'Today' }, { value: 'expiry', label: 'To expiry' }]} />
@@ -190,7 +190,9 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
       <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
         <Text style={{ fontSize: 12 }}>
           <Text strong style={{ fontSize: 12 }}>{hhmm(day.time)}</Text> ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> (to expiry)
-          {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text> (IV {num(day.iv)})</> : ''}
+          {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text>{day.basis === 'expiry'
+            ? ` (${num(day.sessions, 1)} sessions to the ${dayjs(expiry).format('D MMM')} expiry)`
+            : ` (feed IV ${num(day.iv)} - no expiry date)`}</> : ''}
           {' '}→ priced range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(day.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(day.upper, 0)}</Text> ({num(day.pct, 2)}% of spot)
           {breaks.length ? ` · ${breaks.join(' · ')}` : ' · spot inside it so far'}
         </Text>
@@ -198,7 +200,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, hei
           <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> Auto ATM {now.strike} straddle <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
           {' '}· VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text> ({under ? 'under' : 'over'} it; under {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min)
           {' '}· {signed(read.change)} in {holdMinutes} min
-          {now.iv != null && <> · ATM IV {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)})` : ''}</>}
+          {now.iv != null && <> · {read.ivFrom === 'straddle' ? 'IV (from the straddle)' : 'ATM IV (feed)'} {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)})` : ''}</>}
           {' '}· futures ≈ {num(now.forward, 0)}
         </Text>
         <Text style={{ fontSize: 12 }}>

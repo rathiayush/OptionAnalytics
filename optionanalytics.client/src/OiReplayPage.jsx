@@ -6016,7 +6016,7 @@ export default function OiReplayPage() {
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (Auto ATM and a fixed strike, call + put){isLive ? ' · live' : ''}</Space>}
                   >
                     <StraddleCard
-                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`}
                     />

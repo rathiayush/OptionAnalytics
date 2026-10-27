@@ -3,9 +3,14 @@
 //
 //  - the priced range: the straddle at the start time around its strike. The straddle prices the move to EXPIRY (a short
 //    straddle's breakevens) - days away on most days, far wider than one session - so by default (`scope: 'day'`) the
-//    range is today's share of it: 0.8 x spot x ATM IV x sqrt(minutes left to 15:30 / (252 x 375)) (a straddle is worth
-//    0.8 sigma), never more than the straddle; `scope: 'expiry'` (or no IV) keeps strike ± straddle. Spot beyond it =
-//    the move is bigger than the market priced;
+//    range is today's share of it: straddle x sqrt(trading minutes left today / trading minutes left to 15:30 on the
+//    expiry day) - a straddle grows with the square root of the time it covers (on expiry day: the straddle).
+//    `scope: 'expiry'` keeps strike ± straddle. Spot beyond it = the move is bigger than the market priced;
+//  - everything is read from the option PRICES and the expiry date alone - no futures data, and not the IV a data feed
+//    sends (Dhan's past-day IV and the live chain's are different sources and can be missing): the ATM by the synthetic
+//    futures, the IV from the ATM straddle itself (straddle = 0.8 x futures x IV x sqrt(time left)) - so a past day
+//    replayed and today live are worked out the same way. Without an expiry date the range falls back to the feed's IV
+//    (0.8 x spot x IV x sqrt(minutes left today / (252 x 375))), then to the straddle;
 //  - the two straddle charts the option tools draw (Sensibull: "Auto ATM" and a fixed strike), each with the VWAP of its
 //    combined premium from the start time (weighted by the two legs' traded volume; the plain average while no volume
 //    is known):
@@ -100,6 +105,27 @@ function straddleAt(ce, pe, strike, t) {
 // The straddle's worth of move left for today: 0.8 sigma (a straddle's value) at the ATM IV (% a year, 252 trading days
 // of 375 minutes) over the minutes left to the close. Null without an IV.
 const ANNUAL_MINUTES = 252 * 375
+const SESSION_MINUTES = 375
+const DAY_MS = 86_400_000
+const STRADDLE_SIGMA = Math.sqrt(2 / Math.PI)   // an at-the-money straddle is worth 0.8 sigma
+
+// Trading minutes from minute `t` to 15:30 IST on `expiry` (YYYY-MM-DD): what is left of today's session (`closeMs` -
+// today's 15:30) plus a session for every weekday after today up to the expiry day (holidays in between are not known
+// here); null without a date or past it.
+function minutesToExpiry(t, expiry, closeMs) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiry ?? ''))
+  if (!m) return null
+  const expiryDay = Date.UTC(+m[1], +m[2] - 1, +m[3]) / DAY_MS
+  const today = Math.floor((t + IST_MS) / DAY_MS)
+  if (expiryDay < today) return null
+  let minutes = Math.max((closeMs - t) / MIN, 1)
+  for (let d = today + 1; d <= expiryDay; d++) {
+    const weekday = new Date(d * DAY_MS).getUTCDay()
+    if (weekday !== 0 && weekday !== 6) minutes += SESSION_MINUTES
+  }
+  return minutes
+}
+
 function dayMove(spot, iv, msLeft) {
   if (!(iv > 0) || !(spot > 0)) return null
   const vol = iv < 3 ? iv : iv / 100   // a fraction or a percent
@@ -129,14 +155,15 @@ function atmAt(ce, pe, strikes, spot, t) {
 /**
  * The day's straddle read, as of `asOfMs` (null = every minute given). `cePoints` / `pePoints`: the OI Replay run's option
  * points (strike, time, price, volume, impliedVolatility); `spotBars`: `[{ time (ms), close }]` one per minute.
+ * `expiry` (YYYY-MM-DD) is the options' expiry date - the range and the IV come from the straddle with it (see the top).
  * Returns `{ startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange,
- * verdict }` - `series` one point per minute from the start time (`{ time, spot, forward, strike, value, vwap, iv, fixed,
+ * ivFrom, verdict }` - `series` one point per minute from the start time (`{ time, spot, forward, strike, value, vwap, iv, fixed,
  * fixedVwap }`: the Auto ATM straddle and the fixed one), `day` the start's ATM straddle and the range it priced, `fixed`
  * the fixed straddle (`{ strike, time, entry, now, vwap, sellerPnl }`), `fixedChoices` the strikes it can be (both legs
  * quoted at the start); null fields until there is a straddle to read.
  */
 export function straddleRead(cePoints, pePoints, spotBars, {
-  start = STRADDLE_START_DEFAULT, asOfMs = null, fixedStrike = null, holdMinutes = 15, scope = 'day',
+  start = STRADDLE_START_DEFAULT, asOfMs = null, fixedStrike = null, holdMinutes = 15, scope = 'day', expiry = null,
 } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
@@ -152,6 +179,14 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const pe = legs(pePoints)
   const strikes = [...ce.keys()].filter((k) => pe.has(k)).sort((a, b) => a - b)
   const closeMs = istClockOn(spots[0].t, '15:30')
+  // The ATM IV: from the ATM straddle itself when the expiry is known (straddle = 0.8 x futures x IV x sqrt(time left), in
+  // trading time) - the same on a past day and live; else the feed's.
+  const ivFrom = minutesToExpiry(Math.max(startMs, spots[0].t), expiry, closeMs) != null ? 'straddle' : 'feed'
+  const ivOf = (atm, t) => {
+    const toExpiry = minutesToExpiry(t, expiry, closeMs)
+    if (toExpiry == null) return atm.iv
+    return (atm.value / (STRADDLE_SIGMA * atm.forward * Math.sqrt(toExpiry / ANNUAL_MINUTES))) * 100
+  }
 
   const series = []
   let first = null
@@ -167,9 +202,16 @@ export function straddleRead(cePoints, pePoints, spotBars, {
     if (!atm) continue
     if (!first) {
       // The start: the ATM straddle prices the range; the fixed straddle is taken (the strike asked for, else this ATM).
-      const today = scope === 'day' ? dayMove(spot, atm.iv, closeMs - t) : null
+      const toExpiry = minutesToExpiry(t, expiry, closeMs)
+      const today = scope !== 'day' ? null
+        : toExpiry != null ? atm.value * Math.sqrt(Math.max((closeMs - t) / MIN, 1) / toExpiry)
+          : dayMove(spot, atm.iv, closeMs - t)
       const width = today != null ? Math.min(today, atm.value) : atm.value
-      first = { time: t, strike: atm.strike, value: atm.value, width, today, spot, forward: atm.forward, iv: atm.iv, lower: atm.strike - width, upper: atm.strike + width }
+      const basis = today == null ? null : toExpiry != null ? 'expiry' : 'iv'
+      first = {
+        time: t, strike: atm.strike, value: atm.value, width, today, basis, sessions: toExpiry != null ? toExpiry / SESSION_MINUTES : null,
+        spot, forward: atm.forward, iv: ivOf(atm, t), lower: atm.strike - width, upper: atm.strike + width,
+      }
       fixedChoices = strikes.filter((k) => straddleAt(ce, pe, k, t))
       const taken = (fixedStrike != null && fixedChoices.includes(fixedStrike) ? straddleAt(ce, pe, fixedStrike, t) : null) ?? atm
       fixedAt = { strike: taken.strike, time: t, entry: taken.value }
@@ -178,7 +220,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
     const fixed = straddleAt(ce, pe, fixedAt.strike, t)
     if (fixed) add(fixedVwap, fixed)
     series.push({
-      time: t, spot, forward: atm.forward, strike: atm.strike, value: atm.value, vwap: vwapOf(atmVwap), iv: atm.iv,
+      time: t, spot, forward: atm.forward, strike: atm.strike, value: atm.value, vwap: vwapOf(atmVwap), iv: ivOf(atm, t),
       fixed: fixed?.value ?? null, fixedVwap: fixed ? vwapOf(fixedVwap) : null,
     })
   }
@@ -208,7 +250,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const change = now.value - ago.value
   const ivChange = now.iv != null && ago.iv != null ? now.iv - ago.iv : null
   const verdict = readVerdict({ position, control, change, ivChange, holdMinutes, start })
-  return { startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, verdict }
+  return { startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
 }
 
 function readVerdict({ position, control, change, ivChange, holdMinutes, start }) {

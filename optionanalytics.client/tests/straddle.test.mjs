@@ -232,3 +232,39 @@ test('the range is today\'s share of the straddle (ATM IV over the minutes left)
   const e = straddleRead(expiryDay.ce, expiryDay.pe, expiryDay.spots, { step: 50 })
   assert.equal(e.day.width, e.day.value)
 })
+
+test('with the expiry date the range and the IV come from the option prices alone - a past day and live alike', () => {
+  // Tuesday 20 Oct; the options expire Thursday 22 Oct: today's session left + Wednesday + Thursday.
+  const d = day({ minutes: 375, spot: () => 25000, tv: () => 175, iv: () => 12 })
+  const read = straddleRead(d.ce, d.pe, d.spots, { asOfMs: at('10:00'), expiry: '2026-10-22' })
+  const left = (at('15:30') - at('09:21')) / MIN
+  assert.ok(Math.abs(read.day.width - read.day.value * Math.sqrt(left / (left + 2 * 375))) < 1e-9)
+  assert.equal(read.day.basis, 'expiry')
+  assert.ok(Math.abs(read.day.sessions - (left + 750) / 375) < 1e-9)
+  // The IV is the straddle's: straddle = 0.8 x futures x IV x sqrt(trading time left).
+  const toExpiry = (at('15:30') - at('10:00')) / MIN + 750
+  const iv = (read.now.value / (Math.sqrt(2 / Math.PI) * read.now.forward * Math.sqrt(toExpiry / (252 * 375)))) * 100
+  assert.ok(Math.abs(read.now.iv - iv) < 1e-9)
+  assert.equal(read.ivFrom, 'straddle')
+
+  // The feed's IV changes nothing - none at all (a source without it), or a different one (another source's convention).
+  const noIv = day({ minutes: 375, spot: () => 25000, tv: () => 175, iv: () => null })
+  const otherIv = day({ minutes: 375, spot: () => 25000, tv: () => 175, iv: (m) => 30 + m * 0.1 })
+  for (const other of [noIv, otherIv]) {
+    const r = straddleRead(other.ce, other.pe, other.spots, { asOfMs: at('10:00'), expiry: '2026-10-22' })
+    assert.deepEqual([r.day, r.verdict, r.ivChange], [read.day, read.verdict, read.ivChange])
+  }
+
+  // A weekend between: Friday 23 Oct to Tuesday 27 Oct counts Monday and Tuesday only.
+  const fri = day({ minutes: 375, spot: () => 25000, tv: () => 175 })
+  const shift = Date.parse('2026-10-23T09:15:00+05:30') - OPEN
+  const moved = (points) => points.map((p) => ({ ...p, time: typeof p.time === 'number' ? p.time + shift : new Date(Date.parse(p.time) + shift).toISOString() }))
+  const f = readFrom(moved(fri.ce), moved(fri.pe), moved(fri.spots), { start: '09:21', expiry: '2026-10-27' })
+  assert.ok(Math.abs(f.day.sessions - (left + 750) / 375) < 1e-9)
+
+  // Expiry day: the straddle is today's move. Past the expiry date: back to the feed's IV.
+  assert.equal(straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-20' }).day.width, straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-20' }).day.value)
+  const past = straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-13' })
+  assert.equal(past.day.basis, 'iv')
+  assert.equal(past.ivFrom, 'feed')
+})
