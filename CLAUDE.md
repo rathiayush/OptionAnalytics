@@ -139,6 +139,16 @@ When adding or changing a strategy:
   (default 2), with the range read again from there. The read (sideways / premium bought / trend / breakout / not
   confirmed) uses the start's range. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live;
   the read describes the day, it is not a measured signal and feeds no strategy.
+- OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
+  option points - Black-Scholes gamma (no carry, each option's own IV, the ATM IV where it has none or one outside 0.5 -
+  2x the ATM IV) x the dealers' OI (Dhan's OI is in units - no lot size) x S^2 x 1% = rupees of index per 1% move. The
+  time to expiry is IMPLIED each minute from the ATM straddle at the ATM IV (`impliedYears`), so a past day needs no
+  expiry date and it follows Dhan's IV day count. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
+  reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium). Levels: net GEX,
+  the gamma flip (the spot where the net would cross zero, OI / IV kept, within +/- 3%, nearest spot), call / put wall
+  (most call / put gamma x OI), max gamma (most of both). Only ATM +/- 10 strikes count (partial totals). Every minute
+  uses only readings up to it (`tests/gex.test.mjs`); the day is worked out once and cut at the replay clock, live at
+  most every 5 s. It feeds no strategy.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

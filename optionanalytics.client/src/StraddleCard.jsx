@@ -28,7 +28,7 @@ const signed = (v, digits = 1) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ?
 
 // A few lines on one time axis. `lines`: [{ id, title, color, width, style, steps, data: [{ time (ms), value }] }] -
 // the set of ids is fixed for a chart's life (a new set rebuilds it); `markers` go on the first line.
-function LinesChart({ lines, markers = [], dayKey, height }) {
+export function LinesChart({ lines, markers = [], dayKey, height }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(new Map())

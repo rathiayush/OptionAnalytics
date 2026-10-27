@@ -32,6 +32,7 @@ import { tpoRowFor } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
+import { GexCard } from './GexCard.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -718,6 +719,7 @@ const SECTION_OPTIONS = [
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'straddle', label: 'ATM straddle' },
+  { value: 'gex', label: 'GEX (gamma exposure)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -729,7 +731,7 @@ const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -6010,6 +6012,27 @@ export default function OiReplayPage() {
                   >
                     <StraddleCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} step={step}
+                      asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
+                      dayKey={`${underlying}-${result.date}`}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+              </LiveSection>
+            )}
+
+            {/* GEX (gamma exposure) from the day's option OI, IV and premium: net GEX, the gamma flip, the call / put walls
+                and the max gamma strike - up to the replay clock, today live (gex.js). */}
+            {visibleSections.includes('gex') && (
+              <LiveSection version={sectionVersion}>
+              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('gex')}>
+                <Col span={24}>
+                  <Card
+                    size="small"
+                    title={<Space size={4}><CardDragHandle {...dragHandleProps('gex')} />GEX - gamma exposure (net, flip, walls){isLive ? ' · live' : ''}</Space>}
+                  >
+                    <GexCard
+                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`}
                     />
