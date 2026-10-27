@@ -168,8 +168,11 @@ When adding or changing a strategy:
   gamma x OI (`WALL_SWITCH` - no flicker between two strikes about level); above / below spot keep a dead zone of a
   quarter strike step (`WALL_ZONE`): a strike becomes a wall only once spot is that far from it, a wall breaks (rolls on
   to the next strike) only once spot is that far through it. Only ATM +/- 10 strikes count (partial totals). Every minute
-  uses only readings up to it (`tests/gex.test.mjs`); the day is worked out once and cut at the replay clock, live at
-  most every 5 s. It feeds no strategy.
+  uses only readings up to it (`tests/gex.test.mjs`); the day is worked out ONCE on the page for both signs (`useGexDays`,
+  live at most every 5 s) and cut at the replay clock by the GEX card and the entry checklist. It feeds no strategy. The
+  ENTRY CHECKLIST (`entryChecklist.js`, option buying) has two GEX checks from it: gamma - dealers short gamma (net GEX
+  negative) under both signs (disagreeing = unknown) - and room to the GEX wall (call wall above for a CE buy, put wall
+  below for a PE buy, `gexRoomSteps` 2 strikes or more, or none there) - `tests/entry-checklist.test.mjs`.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

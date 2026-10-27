@@ -87,3 +87,39 @@ test('before 09:15 there is nothing to judge: the pre-open prints and yesterday 
   assert.equal(r.spot, 22830)
   assert.equal(r.ce.checks.find((c) => c.key === 'direction').pass, null)
 })
+
+test('gamma: dealers short gamma under both signs passes for either buy; long gamma fails; the signs disagreeing is unknown', () => {
+  const day = bullishDay()
+  const gexOf = (standardNet, buildupNet, walls = {}) => ({ standard: { net: standardNet, ...walls }, buildup: { net: buildupNet, ...walls } })
+  const short = run(day, 25, { gex: gexOf(-5e10, -2e10) })
+  assert.equal(pass(short.ce, 'gamma'), true)
+  assert.equal(pass(short.pe, 'gamma'), true)
+  assert.match(short.ce.checks.find((c) => c.key === 'gamma').detail, /short gamma: moves run/)
+  const long = run(day, 25, { gex: gexOf(4e10, 1e10) })
+  assert.equal(pass(long.ce, 'gamma'), false)
+  assert.match(long.ce.checks.find((c) => c.key === 'gamma').detail, /long gamma/)
+  const split = run(day, 25, { gex: gexOf(4e10, -1e10) })
+  assert.equal(pass(split.ce, 'gamma'), null)
+  assert.match(split.ce.checks.find((c) => c.key === 'gamma').detail, /disagree/)
+  // No GEX given: unknown, never a pass.
+  assert.equal(pass(run(day, 25).ce, 'gamma'), null)
+  assert.equal(pass(run(day, 25).ce, 'gexRoom'), null)
+})
+
+test('room to the GEX wall: two strikes or more to the call wall above (CE buy) / put wall below (PE buy), or none there', () => {
+  const day = bullishDay()   // spot 24025 at 25 minutes
+  const gexWith = (callWall, putWall) => ({ standard: { net: -1, callWall, putWall }, buildup: { net: -1, callWall, putWall } })
+  const roomy = run(day, 25, { gex: gexWith(24150, 23900) })   // +125 above, -125 below (100 wanted)
+  assert.equal(pass(roomy.ce, 'gexRoom'), true)
+  assert.equal(pass(roomy.pe, 'gexRoom'), true)
+  const tight = run(day, 25, { gex: gexWith(24100, 23950) })   // +75 / -75
+  assert.equal(pass(tight.ce, 'gexRoom'), false)
+  assert.equal(pass(tight.pe, 'gexRoom'), false)
+  assert.match(tight.ce.checks.find((c) => c.key === 'gexRoom').detail, /call wall above 24100, 75 pts away/)
+  const none = run(day, 25, { gex: gexWith(null, null) })
+  assert.equal(pass(none.ce, 'gexRoom'), true)
+  assert.match(none.ce.checks.find((c) => c.key === 'gexRoom').detail, /no GEX call wall above/)
+  // With everything else in its favour and both GEX checks passing, the CE buy has all nine.
+  assert.equal(roomy.ce.checks.length, 9)
+  assert.equal(roomy.ce.passed, 9, JSON.stringify(roomy.ce.checks.filter((c) => c.pass !== true)))
+})

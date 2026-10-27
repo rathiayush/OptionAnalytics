@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMark
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
-import { gexAgreement, gexDay, gexProfile, gexUpTo } from './gex.js'
+import { gexAgreement, gexProfile, gexUpTo } from './gex.js'
 
 const { Text } = Typography
 
@@ -19,21 +19,6 @@ const IST_MS = 330 * 60_000
 
 /** HH:mm in IST. */
 const istHhmm = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16)
-
-const LIVE_EVERY_MS = 5000
-
-// `value`, passed on at most every `ms` while `throttle` is on (live: the option points change with every tick, and a
-// day's GEX takes a moment to work out) - at once otherwise.
-function useThrottled(value, ms, throttle) {
-  const [shown, setShown] = useState(value)
-  const lastRef = useRef(0)
-  useEffect(() => {
-    const wait = throttle ? Math.max(0, lastRef.current + ms - Date.now()) : 0
-    const id = setTimeout(() => { lastRef.current = Date.now(); setShown(value) }, wait)
-    return () => clearTimeout(id)
-  }, [value, ms, throttle])
-  return shown
-}
 
 const cr = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v) / CR).toLocaleString('en-IN')} Cr` : '-')
 const num = (v, digits = 0) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
@@ -237,28 +222,19 @@ const HOW_TO_READ = (
 )
 
 /**
- * GEX (gamma exposure) from the day's option OI, IV and premium (gex.js), up to the replay clock (`asOfMs`; null - live -
- * every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
+ * GEX (gamma exposure) from the day's option OI, IV and premium (gex.js - `days`, useGexDays), up to the replay clock
+ * (`asOfMs`; null - live - every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry = null, expirySource = null, height = 260 }) {
+export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260 }) {
   const [sign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
-  // Every minute of the day once (each uses only what was known at it), then cut at the clock - live, again at most every
-  // few seconds.
-  const inputs = useMemo(() => ({ cePoints, pePoints, spotBars }), [cePoints, pePoints, spotBars])
-  const shown = useThrottled(inputs, LIVE_EVERY_MS, asOfMs == null)
-  // Both signs, always: the card shows the one chosen; the line under the read says whether the other agrees - it needs
-  // only the other's net, so its flip (the costly part) is left out.
-  const other = sign === 'buildup' ? 'standard' : 'buildup'
-  const day = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign, expiry }), [shown, sign, expiry])
-  const otherDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: other, expiry, flips: false }), [shown, other, expiry])
-  const minutes = useMemo(() => gexUpTo(day, asOfMs), [day, asOfMs])
+  // Both signs, always: the card shows the one chosen; the line under the read says whether the other agrees.
+  const minutes = useMemo(() => gexUpTo((sign === 'buildup' ? days?.buildup : days?.standard) ?? [], asOfMs), [days, sign, asOfMs])
   const now = minutes.at(-1)
   const both = useMemo(() => {
-    const otherNow = gexUpTo(otherDay, asOfMs).at(-1)
-    const standardNow = sign === 'standard' ? now : otherNow
-    const buildupNow = sign === 'buildup' ? now : otherNow
+    const standardNow = gexUpTo(days?.standard ?? [], asOfMs).at(-1)
+    const buildupNow = gexUpTo(days?.buildup ?? [], asOfMs).at(-1)
     return { standardNow, buildupNow, ...gexAgreement(standardNow, buildupNow) }
-  }, [otherDay, asOfMs, sign, now])
+  }, [days, asOfMs])
 
   const charts = useMemo(() => {
     const line = (pick) => minutes.filter((m) => Number.isFinite(pick(m))).map((m) => ({ time: m.time, value: pick(m) }))

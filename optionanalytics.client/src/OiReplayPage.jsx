@@ -33,6 +33,7 @@ import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
+import { useGexDays } from './useGexDays.js'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -4067,6 +4068,10 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
+  // The day's GEX (both signs), worked out once for the GEX card and the entry checklist's gamma checks.
+  const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
+    expiry: result?.optionExpiry ?? null, live: isLive, enabled: visibleSections.includes('gex') || visibleSections.includes('entryChecklist'),
+  })
   // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
   const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
 
@@ -5677,7 +5682,7 @@ export default function OiReplayPage() {
                 <EntryChecklistCard
                   asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
                   spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
-                  step={step} profile={volumeProfile} dashboardFlow={dashboardFlow}
+                  step={step} profile={volumeProfile} dashboardFlow={dashboardFlow} gexDays={gexDays}
                 />
               </Card>
               </LiveSection>
@@ -6032,7 +6037,7 @@ export default function OiReplayPage() {
                     title={<Space size={4}><CardDragHandle {...dragHandleProps('gex')} />GEX - gamma exposure (net, flip, walls){isLive ? ' · live' : ''}</Space>}
                   >
                     <GexCard
-                      cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
+                      days={gexDays}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`} expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
                     />

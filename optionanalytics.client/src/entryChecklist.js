@@ -12,7 +12,11 @@
 //    entries at a level, not in the middle of nowhere;
 //  - IV not stretched: the ATM option's IV now is at most `ivStretch` x its median so far today (buying after IV has
 //    spiked tends to lose to the IV falling back);
-//  - time: between 09:30 and 14:45 IST (not the opening whipsaw, not the last stretch where theta and the square-off bite).
+//  - time: between 09:30 and 14:45 IST (not the opening whipsaw, not the last stretch where theta and the square-off bite);
+//  - gamma (GEX, gex.js - `gex`: that minute under the Standard and the OI build-up sign): the dealers SHORT gamma - net GEX
+//    negative, moves run instead of being damped and the premium decaying - with both signs agreeing (disagreeing: unknown);
+//  - room to the GEX wall: the call wall (CE buy) / put wall (PE buy) at least `gexRoomSteps` strikes away in the trade's
+//    direction, or none there - the move has room before the biggest hedging flows lean against it.
 //
 // A check without the data to judge it is `null` (shown as unknown), never a pass. Only the session of `asOfMs`'s day
 // counts (09:15 on): before it - the index's pre-open prints, yesterday's VWAP, no option data yet - there is nothing to
@@ -20,6 +24,7 @@
 // nothing.
 
 import { optionFlowSeries } from './optionFlow.js'
+import { gexAgreement } from './gex.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -90,18 +95,21 @@ const median = (values) => {
 }
 
 const fmtM = (n) => `${n >= 0 ? '+' : ''}${(n / 1e6).toFixed(2)}M`
+const fmtCr = (n) => (Number.isFinite(n) ? `${n < 0 ? '−' : ''}₹${Math.round(Math.abs(n) / 1e7).toLocaleString('en-IN')} Cr` : '-')
 
 /**
  * The checklist at `asOfMs`. Inputs: the day's spot (`[{ time, close }]`), session VWAP (`[{ time, value }]`, may be
  * empty), the CE / PE option points (the OI Replay run's - time, strike, openInterest, impliedVolatility, price,
  * open / high / low / volume), the strike step, the previous day's volume profile (`{ poc, vah, val, hvn, lvn }`) and
- * optionally a precomputed `flow` (optionFlowSeries of the same points). Times are ISO strings or epoch ms.
+ * optionally a precomputed `flow` (optionFlowSeries of the same points) and `gex` - the GEX at the clock under both signs
+ * (`{ standard, buildup }`, gexDay minutes; absent = the gamma checks unknown). Times are ISO strings or epoch ms.
  * Returns `{ spot, atm, ce, pe }` - each side `{ checks: [{ key, label, pass, detail }], passed, judged, strikes }` - or
  * `{ waiting: true, opensAt }` before the session's first minute (null without spot or a strike step).
  */
 export function entryChecklist({
   asOfMs, spotBars, vwap = [], cePoints, pePoints, step, profile = null, flow = null,
   ceIndex = null, peIndex = null, windowMin = 15, wallShare = 0.8, wallProminence = 1.5, levelTolerance = 0.0015, ivStretch = 1.1,
+  gex = null, gexRoomSteps = 2,
 }) {
   if (!(step > 0) || !(spotBars?.length)) return null
   const open = sessionOpenMs(asOfMs)
@@ -189,6 +197,25 @@ export function entryChecklist({
   const istMinutes = Math.floor(((asOfMs + IST_OFFSET_MS) % (24 * 60 * MIN)) / MIN)
   const time = { pass: istMinutes >= 9 * 60 + 30 && istMinutes <= 14 * 60 + 45, detail: 'between 09:30 and 14:45' }
 
+  // Gamma: dealers short gamma (net GEX negative) under both signs - the regime option buying wants.
+  const gamma = () => {
+    if (!gex?.standard || !gex?.buildup) return { pass: null, detail: 'no GEX yet' }
+    const read = gexAgreement(gex.standard, gex.buildup)
+    const nets = `net GEX ${fmtCr(gex.standard.net)} Standard, ${fmtCr(gex.buildup.net)} OI build-up`
+    if (!read.agree) return { pass: null, detail: `${nets} - the two signs disagree` }
+    return { pass: read.regime === 'negative', detail: `${nets} - ${read.regime === 'negative' ? 'dealers short gamma: moves run' : 'dealers long gamma: moves damped, premium decays'}` }
+  }
+  // Room to the GEX wall ahead (the walls are the same under both signs).
+  const gexRoom = (name) => {
+    const minute = gex?.standard
+    if (!minute) return { pass: null, detail: 'no GEX yet' }
+    const wall = name === 'CE' ? minute.callWall : minute.putWall
+    const what = name === 'CE' ? 'call wall above' : 'put wall below'
+    if (wall == null) return { pass: true, detail: `no GEX ${what} in the strikes loaded` }
+    const room = name === 'CE' ? wall - spot : spot - wall
+    return { pass: room >= gexRoomSteps * step, detail: `GEX ${what} ${wall}, ${room.toFixed(0)} pts away (${gexRoomSteps * step}+ wanted)` }
+  }
+
   const premiumOf = (index, strike) => lastAtOrBefore(index.get(strike) ?? [], asOfMs)?.price ?? null
   const side = (name) => {
     const d = (fn) => fn(name)
@@ -200,6 +227,8 @@ export function entryChecklist({
       { key: 'location', label: 'At a previous-day level', ...location },
       { key: 'iv', label: 'IV not stretched', ...d(ivCheck) },
       { key: 'time', label: 'Good time of day', ...time },
+      { key: 'gamma', label: 'Gamma lets the move run (dealers short gamma)', ...gamma() },
+      { key: 'gexRoom', label: name === 'CE' ? 'Room to the GEX call wall above' : 'Room to the GEX put wall below', ...d(gexRoom) },
     ]
     const index = name === 'CE' ? ce : pe
     const itm = name === 'CE' ? atm - step : atm + step

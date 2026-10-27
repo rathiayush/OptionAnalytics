@@ -3,13 +3,15 @@ import { Col, Row, Tag, Typography } from 'antd'
 import { CE_COLOR, PE_COLOR } from './shared.jsx'
 import { entryChecklist, indexByStrike } from './entryChecklist.js'
 import { optionFlowSeries } from './optionFlow.js'
+import { gexUpTo } from './gex.js'
 
 const { Text } = Typography
 
 const MARK = { true: { sign: '✓', color: '#3ddc84' }, false: { sign: '✗', color: '#ff5c5c' }, null: { sign: '–', color: '#9aa4b2' } }
 
 function SideList({ name, color, side }) {
-  const tagColor = side.passed >= 6 ? 'green' : side.passed >= 4 ? 'gold' : 'default'
+  const n = side.checks.length
+  const tagColor = side.passed >= n - 1 ? 'green' : side.passed >= Math.round((n * 4) / 7) ? 'gold' : 'default'
   return (
     <div>
       <div style={{ marginBottom: 6 }}>
@@ -35,18 +37,25 @@ function SideList({ name, color, side }) {
 
 /**
  * Which of a good option-buying entry's usual conditions hold right now (the replay clock, or live) - for a CE buy and a
- * PE buy side by side (entryChecklist.js: direction, writers, wall ahead, option flow, location, IV, time), with the
- * ATM / 1-ITM strikes and their premiums. Display only: it places and alerts nothing.
+ * PE buy side by side (entryChecklist.js: direction, writers, wall ahead, option flow, location, IV, time, gamma, room to
+ * the GEX wall), with the ATM / 1-ITM strikes and their premiums. `gexDays`: the day's GEX under both signs
+ * (`{ standard, buildup }` - gexDay, worked out once on the page for this and the GEX card). Display only: it places and
+ * alerts nothing.
  */
-export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, dashboardFlow = null }) {
+export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, dashboardFlow = null, gexDays = null }) {
   const ceIndex = useMemo(() => indexByStrike(cePoints), [cePoints])
   const peIndex = useMemo(() => indexByStrike(pePoints), [pePoints])
   // Live, the option-flow check reads the dashboard's own CDV (the same numbers the CDV / OBV card shows).
   const ownFlow = useMemo(() => (dashboardFlow ? null : optionFlowSeries(cePoints, pePoints, spotBars)), [dashboardFlow, cePoints, pePoints, spotBars])
   const flow = dashboardFlow ?? ownFlow
+  // The GEX at the clock under both signs.
+  const gex = useMemo(() => (asOfMs == null || !gexDays ? null : {
+    standard: gexUpTo(gexDays.standard ?? [], asOfMs).at(-1) ?? null,
+    buildup: gexUpTo(gexDays.buildup ?? [], asOfMs).at(-1) ?? null,
+  }), [asOfMs, gexDays])
   const result = useMemo(
-    () => (asOfMs == null ? null : entryChecklist({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex })),
-    [asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex],
+    () => (asOfMs == null ? null : entryChecklist({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex, gex })),
+    [asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, flow, ceIndex, peIndex, gex],
   )
   if (!result) return <Text type="secondary">Load a day to see the checklist.</Text>
   if (result.waiting) {

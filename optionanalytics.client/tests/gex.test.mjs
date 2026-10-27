@@ -170,7 +170,7 @@ test('the IV is the premium\'s, not Dhan\'s field: an odd premium takes the ATM 
   // A stale print: the 25400 call (the leg out of the money there) at forty times its premium - an IV over twice the ATM
   // one - so the strike takes the ATM IV.
   const premium = 40 * call(25000, 25400, 0.12, YEARS)
-  const stale = day({ minutes: 1, price: (side, k, m) => (side === 'ce' && k === 25400 ? premium : null) })
+  const stale = day({ minutes: 1, price: (side, k) => (side === 'ce' && k === 25400 ? premium : null) })
   const [st] = gexDay(stale.ce, stale.pe, stale.spots)
   assert.ok(impliedVol(premium, st.forward, 25400, st.years, true) > 2 * st.atmIv)
   const row = st.strikes.find((r) => r.strike === 25400)
