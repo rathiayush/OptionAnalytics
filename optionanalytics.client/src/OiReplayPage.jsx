@@ -38,6 +38,7 @@ import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { QUICK_VIEWS, quickViewForKey } from './quickViews.js'
+import { QuickViewFab } from './QuickViewFab.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -6422,10 +6423,13 @@ export default function OiReplayPage() {
           title={(
             <Space wrap size={[12, 4]}>
               <span>{quickViewDef?.title ?? ''}</span>
-              <Segmented
-                size="small" value={quickView ?? undefined} onChange={setQuickView}
-                options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
-              />
+              {/* Scrolls sideways on a phone rather than running off the popup. */}
+              <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
+                <Segmented
+                  size="small" value={quickView ?? undefined} onChange={setQuickView}
+                  options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
+                />
+              </div>
               <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 6 switches · Esc closes</Text>
             </Space>
           )}
@@ -6458,6 +6462,8 @@ export default function OiReplayPage() {
           )}
         </Modal>
       )}
+      {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
+      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} />}
       {result && (
         <OiTotalsChartsPopup
           open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}

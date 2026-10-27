@@ -2,7 +2,7 @@
 // else - Ctrl alone (the browser's tab keys), Alt, Cmd, other keys - opens nothing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { QUICK_VIEWS, quickViewForKey } from '../src/quickViews.js'
+import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, isFabDrag, placeFab, quickViewForKey } from '../src/quickViews.js'
 
 const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, ...mods })
 
@@ -21,4 +21,23 @@ test('nothing else opens one', () => {
   assert.equal(quickViewForKey(key('Digit1', { metaKey: true })), null)
   assert.equal(quickViewForKey(key('Digit7')), null)
   assert.equal(quickViewForKey(key('KeyB')), null)
+})
+
+// The phone's floating quick-view button: dragged anywhere but always kept on the screen; a small move is still a tap.
+test('the floating button stays on the screen, starts bottom right, and opens its icons where they fit', () => {
+  const phone = { width: 390, height: 800 }
+  assert.deepEqual(placeFab(fabDefault(phone), phone), { x: 390 - FAB_SIZE - 16, y: 800 - FAB_SIZE - 96 })
+  assert.deepEqual(placeFab({ x: -50, y: 5000 }, phone), { x: 8, y: 800 - FAB_SIZE - 8 })
+  assert.deepEqual(placeFab({ x: 900, y: -3 }, phone), { x: 390 - FAB_SIZE - 8, y: 8 })
+  // Saved on a wide screen, opened on a phone: pulled back in.
+  assert.deepEqual(placeFab({ x: 1300, y: 700 }, phone), { x: 390 - FAB_SIZE - 8, y: 700 })
+  assert.deepEqual(placeFab(null, phone), { x: 390 - FAB_SIZE - 8, y: 800 - FAB_SIZE - 8 })
+  // A press that moved under 6 px is a tap; 6 px or more a drag.
+  assert.equal(isFabDrag(3, 4), false)
+  assert.equal(isFabDrag(0, 6), true)
+  // Six icons need 6 x (34 + 8) px: up from low on the screen, down from near the top.
+  const need = QUICK_VIEWS.length * (FAB_ITEM_SIZE + FAB_GAP)
+  assert.equal(fabOpensUp({ x: 300, y: 664 }, QUICK_VIEWS.length, phone), true)
+  assert.equal(fabOpensUp({ x: 300, y: 40 }, QUICK_VIEWS.length, phone), false)
+  assert.equal(fabOpensUp({ x: 300, y: need }, QUICK_VIEWS.length, phone), true)
 })
