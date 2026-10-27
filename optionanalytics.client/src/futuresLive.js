@@ -34,3 +34,24 @@ export function mergeFuturesLive(bars, live) {
   }
   return merged
 }
+
+/**
+ * The futures OI at each candle's CLOSE - the moment its close price is from: its last minute's bar, or the latest one up
+ * to `asOfMs` (the clock) in the forming candle. Read at the candle's first minute instead (as the chart's OI line and
+ * regime markers did), the OI lagged the price by the candle's length less a minute - 4 minutes on a 5-minute chart.
+ * `points`: the futures' 1-minute bars (ascending, stamped at the minute's start); `candleStartsMs`: each candle's start;
+ * `minutes`: the candles' size. Returns each candle's OI, or null where there is none yet.
+ */
+export function oiAtCandleCloses(points, candleStartsMs, minutes, asOfMs = null) {
+  const span = (Math.max(1, Math.round(minutes)) - 1) * 60_000
+  let next = 0
+  let oi = null
+  return candleStartsMs.map((start) => {
+    const at = Math.min(start + span, asOfMs ?? Infinity)
+    while (next < (points?.length ?? 0) && msOf(points[next]) <= at) {
+      if (points[next].openInterest != null) oi = points[next].openInterest
+      next++
+    }
+    return oi
+  })
+}

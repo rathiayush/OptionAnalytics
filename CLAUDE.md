@@ -201,6 +201,21 @@ When adding or changing a strategy:
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
   minute, EMA 9). CDV is drawn raw like the dashboard's chart ("Smooth CDV (EMA 9)" checkbox for the Pine look). One fixed
   day is held to the same numbers on both sides (`CdvParityTests.cs`, `tests/option-flow.test.mjs`) - change one, change both.
+- OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
+  panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
+  through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is
+  judged with the last change made in it or before, so the minutes already passed are never judged again. In the minute of
+  the entry or of a change only the point's own price counts - its high / low partly came before it (live, the forming
+  minute's range holds the ticks before the entry). The trailing stop only tightens: what a bar earned is kept through a
+  change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
+  position is squared off at 15:15 (`tests/paper-stops.test.mjs`).
+- Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
+  page's chain chart): the band follows spot, so a strike that joins it after the open counts from its first reading -
+  counted in full, its whole OI showed up as "added since the open" (`tests/chain-oi-totals.test.mjs`). Market Read
+  (`marketRead.js`): resistance = the most call OI AT OR ABOVE spot, support = the most put OI AT OR BELOW it - its
+  Sell suggestion is one of them; the OI build-up is over the same 5 bars as the price move. The futures chart's OI
+  line and regime markers read each candle's OI at its close (`oiAtCandleCloses`). The straddle card's charts
+  (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

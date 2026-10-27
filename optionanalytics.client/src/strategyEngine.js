@@ -440,8 +440,10 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
   const lag = oi?.lag ?? 0
   const firstMinute = Math.ceil(entryMs / MIN) * MIN
   // Trailing (optionTrail.js): the stop in force in a minute comes from the best premium of the minutes
-  // BEFORE it - it moves after each completed minute, only tightening (for one trail setting).
+  // BEFORE it - it moves after each completed minute and only tightens: what a minute earned with the trail
+  // it had is kept (`earned`), so a change of the trail (wider, or off) never loosens it.
   let best = trade.premium
+  let earned = null
   for (const p of series) {
     const start = p.t - lag
     if (start < firstMinute) continue
@@ -456,12 +458,16 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     const stop = sl > 0 ? (sell ? trade.premium + sl : trade.premium - sl) : null
     const target = tgt > 0 ? (sell ? trade.premium - tgt : trade.premium + tgt) : null
     const trailed = tr?.gap > 0 ? optionTrailLevel(trade.action, trade.premium, best, tr.start, tr.gap) : null
-    const inForce = tighterStop(trade.action, stop, trailed)
+    earned = tighterStop(trade.action, earned, trailed)
+    const inForce = tighterStop(trade.action, stop, earned)
     if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
-      return { at: start + MIN, premium: inForce, reason: inForce === trailed && trailed !== stop ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Max SL ${sl} pts hit` }
+      const reason = inForce !== earned || earned === stop ? `Max SL ${sl} pts hit`
+        : inForce === trailed ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Trailing SL hit (the ${inForce.toFixed(1)} it had earned)`
+      return { at: start + MIN, premium: inForce, reason }
     }
     if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${tgt} pts hit` }
     best = sell ? Math.min(best, low) : Math.max(best, high)
+    if (tr?.gap > 0) earned = tighterStop(trade.action, earned, optionTrailLevel(trade.action, trade.premium, best, tr.start, tr.gap))
   }
   return null
 }

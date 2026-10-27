@@ -64,7 +64,7 @@ function ProtectButton({ row, slippage, busy, onProtect }) {
       trigger="click" title={`Stop-loss / target · ${row.tradingSymbol}`}
       content={(
         <Space direction="vertical" size={8} style={{ width: 230 }}>
-          <InputNumber value={sl} onChange={setSl} min={0} step={0.5} style={{ width: '100%' }} addonBefore="Stop-loss" placeholder={row.avgPrice ? `below ${Number(row.ltp ?? row.avgPrice).toFixed(1)}` : 'price'} aria-label="Stop-loss price" />
+          <InputNumber value={sl} onChange={setSl} min={0} step={0.5} style={{ width: '100%' }} addonBefore="Stop-loss" placeholder={row.avgPrice ? `${sells ? 'below' : 'above'} ${Number(row.ltp ?? row.avgPrice).toFixed(1)}` : 'price'} aria-label="Stop-loss price" />
           <InputNumber value={target} onChange={setTarget} min={0} step={0.5} style={{ width: '100%' }} addonBefore="Target" placeholder="price" aria-label="Target price" />
           <Text type="secondary" style={{ fontSize: 11 }}>
             Option prices. {sells ? 'Stop below, target above' : 'Stop above, target below'} the live price{row.ltp ? ` (${Number(row.ltp).toFixed(2)})` : ''}.

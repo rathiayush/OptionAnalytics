@@ -27,21 +27,24 @@ const hhmm = (ms) => new Date(ms + 330 * 60_000).toISOString().slice(11, 16)
 const num = (v, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
 const signed = (v, digits = 1) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}` : '-')
 
-// A few lines on one time axis. `lines`: [{ id, title, color, width, style, steps, scale, data: [{ time (ms), value }] }] -
-// the set of ids is fixed for a chart's life (a new set rebuilds it); `scale: 'left'` puts a line on its own left price
-// scale (one far from the others would flatten them); `markers` go on the first line.
-export function LinesChart({ lines, markers = [], dayKey, height }) {
+// A few lines on one time axis. `lines`: [{ id, title, color, width, style, steps, scale, pane, data: [{ time (ms), value }] }] -
+// the set of ids is fixed for a chart's life (a new set rebuilds it), a line's title follows each render; `scale: 'left'`
+// puts a line on its own left price scale (one far from the others would flatten them); `pane: 1` in its own pane under
+// the others (`paneHeight` px, its own price scale, the same time axis); `markers` go on the first line.
+export function LinesChart({ lines, markers = [], dayKey, height, paneHeight = 150 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(new Map())
   const markersRef = useRef(null)
-  const ids = lines.map((l) => l.id).join('|')
+  const ids = lines.map((l) => `${l.id}:${l.pane ?? 0}`).join('|')
+  const panes = lines.some((l) => (l.pane ?? 0) > 0)
+  const fullHeight = height + (panes ? paneHeight : 0)
 
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: fullHeight,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -57,8 +60,14 @@ export function LinesChart({ lines, markers = [], dayKey, height }) {
         color: l.color, lineWidth: l.width ?? 2, lineStyle: l.style ?? LineStyle.Solid, lineType: l.steps ? LineType.WithSteps : LineType.Simple,
         title: l.title ?? '', priceLineVisible: false, lastValueVisible: l.lastValue ?? true, priceScaleId: l.scale === 'left' ? 'left' : 'right',
         priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
-      }))
+      }, l.pane ?? 0))
     })
+    if (panes) {
+      // The first pane keeps `height`; the lower one takes `paneHeight` of the taller chart.
+      const [top, ...rest] = chart.panes()
+      top?.setStretchFactor(height)
+      for (const pane of rest) pane.setStretchFactor(paneHeight)
+    }
     seriesRef.current = series
     markersRef.current = lines.length ? createSeriesMarkers(series.get(lines[0].id), []) : null
     const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
@@ -71,15 +80,20 @@ export function LinesChart({ lines, markers = [], dayKey, height }) {
       markersRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [height, ids])
+  }, [height, paneHeight, ids])
 
   useEffect(() => {
-    for (const l of lines) seriesRef.current.get(l.id)?.setData(sanitizeLine(l.data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
+    for (const l of lines) {
+      const series = seriesRef.current.get(l.id)
+      // The label follows the line (another fixed strike, another range) - it was only ever the first one's.
+      series?.applyOptions({ title: l.title ?? '' })
+      series?.setData(sanitizeLine(l.data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
+    }
     markersRef.current?.setMarkers(markers.map((m) => ({ ...m, time: toChartTime(m.time) })))
   }, [lines, markers])
   useFitContentAsDataGrows(chartRef, lines[0]?.data.length ?? 0, dayKey)
 
-  return <div ref={containerRef} style={{ width: '100%', height }} />
+  return <div ref={containerRef} style={{ width: '100%', height: fullHeight }} />
 }
 
 /**
@@ -112,8 +126,10 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       { id: 'straddle', title: 'Auto ATM', color: STRADDLE_COLOR, data: line((p) => p.value) },
       { id: 'vwap', title: 'VWAP', color: VWAP_COLOR, width: 1, style: LineStyle.Dashed, data: line((p) => p.vwap) },
       { id: 'decay', title: 'Decay only', color: DECAY_COLOR, width: 1, style: LineStyle.Dotted, data: line((p) => p.decay) },
-      { id: 'fixed', title: fixed ? `Fixed ${fixed.strike}` : 'Fixed', color: FIXED_COLOR, width: 2, scale: 'left', data: line((p) => p.fixed) },
-      { id: 'fixedVwap', title: 'Its VWAP', color: FIXED_VWAP_COLOR, width: 1, style: LineStyle.Dashed, scale: 'left', data: line((p) => p.fixedVwap) },
+      // The fixed straddle in its own pane under the Auto ATM's - on one chart with two price scales its line crossed the
+      // others where nothing crossed.
+      { id: 'fixed', title: fixed ? `Fixed ${fixed.strike}` : 'Fixed', color: FIXED_COLOR, width: 2, pane: 1, data: line((p) => p.fixed) },
+      { id: 'fixedVwap', title: 'Its VWAP', color: FIXED_VWAP_COLOR, width: 1, style: LineStyle.Dashed, pane: 1, data: line((p) => p.fixedVwap) },
     ]
     const day = read.day
     const spot = [
@@ -227,7 +243,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · Auto ATM (right scale): the strike nearest the futures price, switching when it changes · Fixed {fixed.strike} (left scale): one strike all day, never shifted · Decay only (dotted): the {hhmm(day.time)} straddle with only time passing</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
           <LinesChart lines={charts.straddle} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
         </Col>
         <Col xs={24} lg={12}>
