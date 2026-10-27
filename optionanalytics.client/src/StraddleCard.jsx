@@ -11,6 +11,7 @@ import { sanitizeLine } from './chartLine.js'
 const { Text } = Typography
 
 const STRADDLE_COLOR = '#f5a623'
+const DECAY_COLOR = '#ffd591'
 const VWAP_COLOR = '#4c9ffe'
 const FIXED_COLOR = '#b37feb'
 const FIXED_VWAP_COLOR = '#9aa4b2'
@@ -107,6 +108,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
     const straddle = [
       { id: 'straddle', title: 'Auto ATM', color: STRADDLE_COLOR, data: line((p) => p.value) },
       { id: 'vwap', title: 'VWAP', color: VWAP_COLOR, width: 1, style: LineStyle.Dashed, data: line((p) => p.vwap) },
+      { id: 'decay', title: 'Decay only', color: DECAY_COLOR, width: 1, style: LineStyle.Dotted, data: line((p) => p.decay) },
       { id: 'fixed', title: fixed ? `Fixed ${fixed.strike}` : 'Fixed', color: FIXED_COLOR, width: 2, scale: 'left', data: line((p) => p.fixed) },
       { id: 'fixedVwap', title: 'Its VWAP', color: FIXED_VWAP_COLOR, width: 1, style: LineStyle.Dashed, scale: 'left', data: line((p) => p.fixedVwap) },
     ]
@@ -204,6 +206,11 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
           {' '}· futures ≈ {num(now.forward, 0)}
         </Text>
         <Text style={{ fontSize: 12 }}>
+          {read.vsDecay != null
+            ? <>Time decay: with only time passing the {hhmm(day.time)} straddle would be <Text style={{ fontSize: 12, color: DECAY_COLOR }}>{num(now.decay)}</Text> now - the Auto ATM is <Text strong style={{ fontSize: 12, color: read.vsDecay >= 0 ? UP_COLOR : DOWN_COLOR }}>{signed(read.vsDecay)}</Text> {read.vsDecay >= 0 ? 'over it: premium bought beyond the decay (IV up)' : 'under it: sold faster than the decay (IV down)'}</>
+            : <Text type="secondary" style={{ fontSize: 12 }}>Time decay: the decay-only line needs the options&apos; expiry date.</Text>}
+        </Text>
+        <Text style={{ fontSize: 12 }}>
           <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>Fixed {fixed.strike}</Text> straddle: sold at {hhmm(fixed.time)} for {num(fixed.entry)}
           {fixed.now != null ? <> → now <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>{num(fixed.now)}</Text> ({signed(fixed.sellerPnl)} for a seller) · its VWAP {num(fixed.vwap)} ({fixed.now < fixed.vwap ? 'under it - its sellers winning' : 'over it - its sellers losing'})</> : ' → not quoted now'}
         </Text>
@@ -211,7 +218,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · Auto ATM (right scale): the strike nearest the futures price, switching when it changes · Fixed {fixed.strike} (left scale): one strike all day, never shifted</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · Auto ATM (right scale): the strike nearest the futures price, switching when it changes · Fixed {fixed.strike} (left scale): one strike all day, never shifted · Decay only (dotted): the {hhmm(day.time)} straddle with only time passing</Text>
           <LinesChart lines={charts.straddle} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
         </Col>
         <Col xs={24} lg={12}>

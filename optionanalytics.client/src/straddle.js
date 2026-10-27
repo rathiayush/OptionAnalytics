@@ -6,6 +6,11 @@
 //    range is today's share of it: straddle x sqrt(trading minutes left today / trading minutes left to 15:30 on the
 //    expiry day) - a straddle grows with the square root of the time it covers (on expiry day: the straddle).
 //    `scope: 'expiry'` keeps strike ± straddle. Spot beyond it = the move is bigger than the market priced;
+//  - TIME DECAY: every straddle loses value each minute by time alone, so the Auto ATM line falls on a quiet day and sits
+//    under its VWAP. The DECAY-ONLY line shows that fall: the start's straddle as it would be with only time passing
+//    (and the futures level moving - IV unchanged): start straddle x (futures / start futures) x sqrt(trading minutes left
+//    to expiry / those at the start). The Auto ATM over it = premium bought beyond the decay (IV up), under it = sold
+//    faster than the decay (IV down); the gap is exactly the IV change since the start. Needs the expiry date;
 //  - everything is read from the option PRICES and the expiry date alone - no futures data, and not the IV a data feed
 //    sends (Dhan's past-day IV and the live chain's are different sources and can be missing): the ATM by the synthetic
 //    futures, the IV from the ATM straddle itself (straddle = 0.8 x futures x IV x sqrt(time left)) - so a past day
@@ -210,7 +215,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
       const basis = today == null ? null : toExpiry != null ? 'expiry' : 'iv'
       first = {
         time: t, strike: atm.strike, value: atm.value, width, today, basis, sessions: toExpiry != null ? toExpiry / SESSION_MINUTES : null,
-        spot, forward: atm.forward, iv: ivOf(atm, t), lower: atm.strike - width, upper: atm.strike + width,
+        spot, forward: atm.forward, iv: ivOf(atm, t), lower: atm.strike - width, upper: atm.strike + width, toExpiry,
       }
       fixedChoices = strikes.filter((k) => straddleAt(ce, pe, k, t))
       const taken = (fixedStrike != null && fixedChoices.includes(fixedStrike) ? straddleAt(ce, pe, fixedStrike, t) : null) ?? atm
@@ -219,8 +224,11 @@ export function straddleRead(cePoints, pePoints, spotBars, {
     add(atmVwap, atm)
     const fixed = straddleAt(ce, pe, fixedAt.strike, t)
     if (fixed) add(fixedVwap, fixed)
+    // The start's straddle with only time passing (IV unchanged; the futures level as now).
+    const left = first.toExpiry != null ? minutesToExpiry(t, expiry, closeMs) : null
+    const decay = left != null ? first.value * (atm.forward / first.forward) * Math.sqrt(left / first.toExpiry) : null
     series.push({
-      time: t, spot, forward: atm.forward, strike: atm.strike, value: atm.value, vwap: vwapOf(atmVwap), iv: ivOf(atm, t),
+      time: t, spot, forward: atm.forward, strike: atm.strike, value: atm.value, vwap: vwapOf(atmVwap), iv: ivOf(atm, t), decay,
       fixed: fixed?.value ?? null, fixedVwap: fixed ? vwapOf(fixedVwap) : null,
     })
   }
@@ -249,11 +257,12 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const ago = [...series].reverse().find((p) => p.time <= now.time - holdMinutes * MIN) ?? series[0]
   const change = now.value - ago.value
   const ivChange = now.iv != null && ago.iv != null ? now.iv - ago.iv : null
-  const verdict = readVerdict({ position, control, change, ivChange, holdMinutes, start })
-  return { startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
+  const vsDecay = now.decay != null ? now.value - now.decay : null
+  const verdict = readVerdict({ position, control, change, ivChange, holdMinutes, start, vsDecay })
+  return { vsDecay, startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
 }
 
-function readVerdict({ position, control, change, ivChange, holdMinutes, start }) {
+function readVerdict({ position, control, change, ivChange, holdMinutes, start, vsDecay = null }) {
   const range = `the ${start} priced range`
   const side = position === 'above' ? 'up' : position === 'below' ? 'down' : null
   let verdict
@@ -274,8 +283,9 @@ function readVerdict({ position, control, change, ivChange, holdMinutes, start }
   } else {
     verdict = { kind: 'unconfirmed', side, title: side === 'up' ? 'Breakout - wait' : 'Breakdown - wait', detail: `Spot is ${side === 'up' ? 'above' : 'below'} ${range}, the straddle crossing its VWAP - it holding over the VWAP confirms the move, under it says fake.` }
   }
-  // IV takes time decay out of the read.
-  if (ivChange != null && control === 'sellers' && ivChange >= IV_MOVE) verdict.note = `ATM IV is up ${ivChange.toFixed(1)} in ${holdMinutes} min - the straddle's fall is time decay, not selling.`
+  // Time decay taken out of the read: the decay-only line (the whole day), else IV over the window.
+  if (vsDecay != null && control === 'sellers' && vsDecay >= 0) verdict.note = `The straddle is under its VWAP but not under its decay-only line (${vsDecay >= 0 ? '+' : ''}${vsDecay.toFixed(1)}) - its fall is time decay, not selling.`
+  else if (ivChange != null && control === 'sellers' && ivChange >= IV_MOVE) verdict.note = `ATM IV is up ${ivChange.toFixed(1)} in ${holdMinutes} min - the straddle's fall is time decay, not selling.`
   if (ivChange != null && control === 'buyers' && ivChange <= -IV_MOVE) verdict.note = `ATM IV is down ${(-ivChange).toFixed(1)} in ${holdMinutes} min - the straddle's rise is the spot's move, not premium buying.`
   return verdict
 }

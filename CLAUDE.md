@@ -141,7 +141,11 @@ When adding or changing a strategy:
   run's `optionExpiry`; on expiry day the straddle itself - the straddle prices the move to EXPIRY); "To expiry" = strike
   ± the straddle. It is read from the option PRICES and the expiry date only - no futures data, not the feed's IV (the ATM
   IV shown is the straddle's own), so a past day replayed and today live are worked out the same way; only without an
-  expiry date does the range fall back to the feed's IV. The read (sideways / premium
+  expiry date does the range fall back to the feed's IV. TIME DECAY is shown, not taken out of the Auto ATM line: a dotted
+  "Decay only" line - the start's straddle with only time passing (start straddle x futures / start futures x sqrt(trading
+  minutes left to expiry / those at the start), IV unchanged); the Auto ATM over it = premium bought beyond the decay (IV
+  up), under it = sold faster (IV down) - and a "sellers" read whose straddle is not under that line says its fall is
+  time decay, not selling. The read (sideways / premium
   bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
   replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
   signal and feeds no strategy.

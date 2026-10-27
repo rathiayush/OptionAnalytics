@@ -268,3 +268,27 @@ test('with the expiry date the range and the IV come from the option prices alon
   assert.equal(past.day.basis, 'iv')
   assert.equal(past.ivFrom, 'feed')
 })
+
+test('the decay-only line: the start straddle with only time passing - the Auto ATM over it = IV up, under it = IV down', () => {
+  // A quiet day of pure time decay at a steady IV: the straddle follows sqrt(time left), the decay-only line exactly.
+  const left = (m) => (at('15:30') - (OPEN + m * MIN)) / MIN + 2 * 375   // Tue 20 Oct to Thu 22 Oct
+  const quiet = day({ minutes: 300, spot: () => 25000, tv: (m) => 175 * Math.sqrt(left(m) / left(6)) })
+  const read = straddleRead(quiet.ce, quiet.pe, quiet.spots, { asOfMs: at('13:00'), expiry: '2026-10-22' })
+  for (const p of read.series) assert.ok(Math.abs(p.value - p.decay) < 1e-6)
+  assert.ok(Math.abs(read.vsDecay) < 1e-6)
+  // Under its VWAP all day (it only decays) - read as sellers, but the note says it is time decay, not selling.
+  assert.equal(read.control, 'sellers')
+  assert.match(read.verdict.note, /time decay, not selling/)
+
+  // IV bid up 10% over the decay: the Auto ATM sits over the line by about 10%.
+  const bid = day({ minutes: 300, spot: () => 25000, tv: (m) => 175 * Math.sqrt(left(m) / left(6)) * (m >= minuteOfDay('11:00') ? 1.1 : 1) })
+  const up = straddleRead(bid.ce, bid.pe, bid.spots, { asOfMs: at('13:00'), expiry: '2026-10-22' })
+  assert.ok(Math.abs(up.vsDecay / up.now.decay - 0.1) < 1e-6)
+  // Sold 10% under it.
+  const sold = day({ minutes: 300, spot: () => 25000, tv: (m) => 175 * Math.sqrt(left(m) / left(6)) * (m >= minuteOfDay('11:00') ? 0.9 : 1) })
+  const down = straddleRead(sold.ce, sold.pe, sold.spots, { asOfMs: at('13:00'), expiry: '2026-10-22' })
+  assert.ok(Math.abs(down.vsDecay / down.now.decay + 0.1) < 1e-6)
+  assert.equal(down.verdict.note, undefined)
+  // No expiry date: no decay line.
+  assert.equal(straddleRead(quiet.ce, quiet.pe, quiet.spots).vsDecay, null)
+})
