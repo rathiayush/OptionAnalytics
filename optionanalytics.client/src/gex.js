@@ -2,8 +2,17 @@
 // moves, worked out minute by minute from the OI Replay run's option points (each strike's CE / PE open interest, IV
 // and premium) and spot.
 //
-//  - Gamma (Black-Scholes, no carry): G = phi(d1) / (S x sigma x sqrt(T)), d1 = (ln(S / K) + sigma^2 T / 2) / (sigma sqrt(T)),
-//    sigma = that option's own IV (Dhan sends it per minute, in %; the ATM IV where a strike has none or one far off it).
+//  - Gamma (Black-Scholes with carry): G = phi(d1) / (S x sigma x sqrt(T)), d1 = (ln(F / K) + sigma^2 T / 2) / (sigma sqrt(T)),
+//    sigma = the strike's IV worked out from its own premium (see below), F = the FORWARD - what the options price the index at expiry: spot plus the carry (interest less dividends) to it.
+//    It is read from the options themselves each minute, by put-call parity (call - put = forward - strike) at the three
+//    strikes nearest spot (the middle one of the three), as professional systems do - no rate to guess; spot when it
+//    cannot be read or is more than 2% off. Without it gamma centres on spot, not the forward: a monthly option two
+//    weeks out (BANKNIFTY) had its gamma ~1.5 strikes too low and the net GEX far off.
+//  - Each strike's IV is worked out from its own premium (Black-76 on the forward, the out-of-the-money leg: the call at or
+//    above the forward, the put below - one IV a strike, as professional systems do), not taken from Dhan's IV field: the
+//    premium fixes sigma x sqrt(T), and gamma depends on nothing else, so it follows the prices traded whatever day count or
+//    rate Dhan's IV was worked out with - and even a time to expiry a day off changes no gamma. Dhan's IV is the fallback
+//    where a premium gives none; an IV outside 0.5 - 2x the ATM one (a stale print) is replaced by the ATM IV.
 //  - T, the time to expiry: from the minute to 15:30 IST on the options' expiry day (`expiry` - the server's
 //    OptionExpiryResolver: Dhan's listed expiry from today on, the weekday rule checked for holidays before that), in
 //    years of 365 days. Without an expiry date (or past it) T is IMPLIED: the T at which the ATM straddle priced at the ATM
@@ -63,39 +72,71 @@ function cdf(x) {
 /** Dhan's IV is a percent (12.5); a fraction (0.125) is taken as it is. */
 export const ivFraction = (iv) => (iv > 3 ? iv / 100 : iv)
 
-/** Black-Scholes gamma (no carry) per point of spot; 0 when it cannot be worked out. */
-export function bsGamma(S, K, sigma, T) {
-  if (!(S > 0 && K > 0 && sigma > 0 && T > 0)) return 0
+/** Black-Scholes gamma per point of spot `S`, the strike's d1 taken from the forward `F` (spot plus the carry to expiry;
+ * spot itself when not given); 0 when it cannot be worked out. */
+export function bsGamma(S, K, sigma, T, F = S) {
+  if (!(S > 0 && K > 0 && sigma > 0 && T > 0 && F > 0)) return 0
   const v = sigma * Math.sqrt(T)
-  const d1 = (Math.log(S / K) + v * v / 2) / v
+  const d1 = (Math.log(F / K) + v * v / 2) / v
   return pdf(d1) / (S * v)
 }
 
-/** Black-Scholes call + put at one strike (no carry). */
-export function bsStraddle(S, K, sigma, T) {
-  if (!(T > 0 && sigma > 0)) return Math.abs(S - K)
+/** Black-Scholes call + put at one strike, on the forward `F` (undiscounted - the discount over days is negligible). */
+export function bsStraddle(F, K, sigma, T) {
+  if (!(T > 0 && sigma > 0)) return Math.abs(F - K)
   const v = sigma * Math.sqrt(T)
-  const d1 = (Math.log(S / K) + v * v / 2) / v
-  const call = S * cdf(d1) - K * cdf(d1 - v)
-  return 2 * call - (S - K)
+  const d1 = (Math.log(F / K) + v * v / 2) / v
+  const call = F * cdf(d1) - K * cdf(d1 - v)
+  return 2 * call - (F - K)
 }
 
-/** The time to expiry (years) at which the straddle priced at `sigma` is `straddle`; null when none fits. */
-export function impliedYears(straddle, S, K, sigma) {
-  if (!(straddle > 0 && S > 0 && K > 0 && sigma > 0)) return null
+/** The time to expiry (years) at which the straddle priced at `sigma` on the forward `F` is `straddle`; null when none fits. */
+export function impliedYears(straddle, F, K, sigma) {
+  if (!(straddle > 0 && F > 0 && K > 0 && sigma > 0)) return null
   let lo = 1e-8, hi = 2
-  if (straddle <= bsStraddle(S, K, sigma, lo) || straddle >= bsStraddle(S, K, sigma, hi)) return null
+  if (straddle <= bsStraddle(F, K, sigma, lo) || straddle >= bsStraddle(F, K, sigma, hi)) return null
   for (let i = 0; i < 80; i++) {
     const mid = (lo + hi) / 2
-    if (bsStraddle(S, K, sigma, mid) < straddle) lo = mid; else hi = mid
+    if (bsStraddle(F, K, sigma, mid) < straddle) lo = mid; else hi = mid
   }
   return (lo + hi) / 2
 }
 
-/** The net GEX (rupees per 1% move) if spot were `S`: `options` [{ strike, sigma, dealerOi }], `years` the time to expiry. */
-export function netGexAt(options, S, years) {
+/** The Black-76 (undiscounted) implied volatility of an option at strike `K` on the forward `F`, `T` years out, from its
+ * `premium` (`isCall` - a call, else a put); null when the premium is outside what any volatility gives. */
+export function impliedVol(premium, F, K, T, isCall) {
+  if (!(premium > 0 && F > 0 && K > 0 && T > 0)) return null
+  const price = (sigma) => {
+    const v = sigma * Math.sqrt(T)
+    const d1 = (Math.log(F / K) + v * v / 2) / v
+    const call = F * cdf(d1) - K * cdf(d1 - v)
+    return isCall ? call : call - (F - K)
+  }
+  let lo = 0.005, hi = 5
+  if (premium <= price(lo) || premium >= price(hi)) return null
+  for (let i = 0; i < 40; i++) {   // to a millionth of a vol point and finer
+    const mid = (lo + hi) / 2
+    if (price(mid) < premium) lo = mid; else hi = mid
+  }
+  return (lo + hi) / 2
+}
+
+/** The forward from put-call parity at the strikes nearest spot (call - put = forward - strike): the middle of the three
+ * nearest with both legs; spot when there is none or it is more than 2% off. `pairs`: [{ strike, call, put }] (premiums). */
+export function parityForward(pairs, spot) {
+  const forwards = [...(pairs ?? [])].filter((p) => p.call > 0 && p.put > 0)
+    .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || a.strike - b.strike).slice(0, 3)
+    .map((p) => p.strike + p.call - p.put).sort((a, b) => a - b)
+  if (!forwards.length) return spot
+  const mid = forwards.length % 2 ? forwards[(forwards.length - 1) / 2] : (forwards[forwards.length / 2 - 1] + forwards[forwards.length / 2]) / 2
+  return Math.abs(mid / spot - 1) <= 0.02 ? mid : spot
+}
+
+/** The net GEX (rupees per 1% move) if spot were `S`: `options` [{ strike, sigma, dealerOi }], `years` the time to expiry,
+ * `carry` the forward / spot (kept as spot moves). */
+export function netGexAt(options, S, years, carry = 1) {
   let net = 0
-  for (const o of options) net += bsGamma(S, o.strike, o.sigma, years) * o.dealerOi * S * S * 0.01
+  for (const o of options) net += bsGamma(S, o.strike, o.sigma, years, S * carry) * o.dealerOi * S * S * 0.01
   return net
 }
 
@@ -152,14 +193,14 @@ function holdLevel(weights, held) {
 }
 
 // The crossing of zero of the net GEX nearest spot, looked for across [lo, hi]; null when there is none there.
-function flipOf(options, spot, years, lo, hi) {
+function flipOf(options, spot, years, lo, hi, carry) {
   if (!(hi > lo)) return null
   const step = (hi - lo) / FLIP_STEPS
   let best = null
-  let prevS = lo, prevV = netGexAt(options, lo, years)
+  let prevS = lo, prevV = netGexAt(options, lo, years, carry)
   for (let i = 1; i <= FLIP_STEPS; i++) {
     const s = lo + i * step
-    const v = netGexAt(options, s, years)
+    const v = netGexAt(options, s, years, carry)
     if ((prevV < 0 && v >= 0) || (prevV > 0 && v <= 0)) {
       const at = prevS + (s - prevS) * (prevV / (prevV - v))
       if (best == null || Math.abs(at - spot) < Math.abs(best - spot)) best = at
@@ -173,7 +214,7 @@ function flipOf(options, spot, years, lo, hi) {
  * The day's GEX, one entry per minute of spot (every minute given - pick the replay clock's with `gexAt`).
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
- * Each minute: `{ time, spot, years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
+ * Each minute: `{ time, spot, forward, carry (forward / spot), years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
  * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, sigma, dealerOi }],
  * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
  * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
@@ -196,15 +237,31 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     // The ATM: the strike nearest spot with both legs read - its straddle and IV give the time to expiry.
     const atm = readings.filter((r) => r.c && r.p).sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || a.strike - b.strike)[0]
     if (!atm) continue
-    const ivs = [atm.c.iv, atm.p.iv].filter((v) => v > 0).map(ivFraction)
-    const atmIv = ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : null
-    if (atmIv == null) continue
-    implied = impliedYears(atm.c.price + atm.p.price, spot, atm.strike, atmIv) ?? implied
+    // The forward, from put-call parity at the strikes nearest spot (spot itself when it cannot be read).
+    const forward = parityForward(readings.filter((r) => r.c && r.p).map((r) => ({ strike: r.strike, call: r.c.price, put: r.p.price })), spot)
+    const carry = forward / spot
+    // Dhan's ATM IV: the time to expiry implied from it (the fallback with no expiry date, and kept as a check).
+    const dhanIvs = [atm.c.iv, atm.p.iv].filter((v) => v > 0).map(ivFraction)
+    const dhanAtmIv = dhanIvs.length ? dhanIvs.reduce((a, b) => a + b, 0) / dhanIvs.length : null
+    if (dhanAtmIv != null) implied = impliedYears(atm.c.price + atm.p.price, forward, atm.strike, dhanAtmIv) ?? implied
     const toExpiry = Number.isFinite(expiryMs) && expiryMs > t ? (expiryMs - t) / YEAR_MS : null
     const years = toExpiry ?? implied
     if (years == null) continue
-    const sigmaOf = (row) => {
-      const own = row.iv > 0 ? ivFraction(row.iv) : null
+    // Each strike's IV from its own premium - the out-of-the-money leg first, then the other - Dhan's IV where neither
+    // gives one; outside 0.5 - 2x the ATM IV (a stale print), the ATM IV.
+    const strikeIv = new Map()
+    for (const { strike, c, p } of readings) {
+      const above = strike >= forward
+      const otm = above ? c : p, itm = above ? p : c
+      const own = (otm ? impliedVol(otm.price, forward, strike, years, above) : null) ?? (itm ? impliedVol(itm.price, forward, strike, years, !above) : null)
+      const dhan = [otm?.iv, itm?.iv].find((v) => v > 0)
+      const iv = own ?? (dhan > 0 ? ivFraction(dhan) : null)
+      if (iv != null) strikeIv.set(strike, iv)
+    }
+    const atmIv = strikeIv.get(atm.strike) ?? dhanAtmIv
+    if (atmIv == null) continue
+    const sigmaAt = (strike) => {
+      const own = strikeIv.get(strike)
       return own != null && own >= IV_BAND[0] * atmIv && own <= IV_BAND[1] * atmIv ? own : atmIv
     }
     const options = []
@@ -215,13 +272,14 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     let lowStrike = Infinity, highStrike = -Infinity
     for (const { strike, c, p } of readings) {
       if (!c && !p) continue
-      const cGamma = c ? bsGamma(spot, strike, sigmaOf(c), years) : 0
-      const pGamma = p ? bsGamma(spot, strike, sigmaOf(p), years) : 0
+      const sigma = sigmaAt(strike)
+      const cGamma = c ? bsGamma(spot, strike, sigma, years, forward) : 0
+      const pGamma = p ? bsGamma(spot, strike, sigma, years, forward) : 0
       const unit = spot * spot * 0.01
       const call = c ? cGamma * dealerOi(c, 1, sign) * unit : null
       const put = p ? pGamma * dealerOi(p, -1, sign) * unit : null
-      if (c) options.push({ strike, sigma: sigmaOf(c), dealerOi: dealerOi(c, 1, sign) })
-      if (p) options.push({ strike, sigma: sigmaOf(p), dealerOi: dealerOi(p, -1, sign) })
+      if (c) options.push({ strike, sigma, dealerOi: dealerOi(c, 1, sign) })
+      if (p) options.push({ strike, sigma, dealerOi: dealerOi(p, -1, sign) })
       calls += call ?? 0
       puts += put ?? 0
       // The levels' weights: gamma x OI, whoever holds it - the call wall from the strikes clear above spot (or the one
@@ -240,10 +298,10 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     held.max = holdLevel(gammaWeights, held.max)
     // The flip: within rangePct % of spot and the strikes loaded; near their edge (a strike step or a 1-sigma move),
     // the strikes not loaded weigh in.
-    const flip = flips ? flipOf(options, spot, years, Math.max(spot * (1 - rangePct / 100), lowStrike), Math.min(spot * (1 + rangePct / 100), highStrike)) : null
+    const flip = flips ? flipOf(options, spot, years, Math.max(spot * (1 - rangePct / 100), lowStrike), Math.min(spot * (1 + rangePct / 100), highStrike), carry) : null
     const edge = Math.max(strikeStep, atmIv * Math.sqrt(years) * spot)
     minutes.push({
-      time: t, spot, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', impliedYears: implied,
+      time: t, spot, forward, carry, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', impliedYears: implied,
       atm: atm.strike, atmIv, net: calls + puts, calls, puts,
       flip, flipEdge: flip != null && (flip - lowStrike < edge || highStrike - flip < edge),
       callWall: held.call, putWall: held.put, maxGamma: held.max,
@@ -261,7 +319,7 @@ export function gexProfile(minute, steps = 80) {
   const out = []
   for (let i = 0; i <= steps; i++) {
     const price = lo + ((hi - lo) * i) / steps
-    out.push({ price, net: netGexAt(minute.options, price, minute.years) })
+    out.push({ price, net: netGexAt(minute.options, price, minute.years, minute.carry ?? 1) })
   }
   return out
 }

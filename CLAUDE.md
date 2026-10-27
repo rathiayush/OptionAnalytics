@@ -140,15 +140,23 @@ When adding or changing a strategy:
   confirmed) uses the start's range. It runs on the replay clock (nothing after it - `tests/straddle.test.mjs`) and live;
   the read describes the day, it is not a measured signal and feeds no strategy.
 - OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
-  option points - Black-Scholes gamma (no carry, each option's own IV, the ATM IV where it has none or one outside 0.5 -
-  2x the ATM IV) x the dealers' OI (Dhan's OI is in units - no lot size) x S^2 x 1% = rupees of index per 1% move. The
+  option points - Black-Scholes gamma ON THE FORWARD (d1 from ln(F / K); F = put-call parity at the three strikes nearest
+  spot, call - put = F - K, the middle one, spot when none or > 2% off - `parityForward`, as professional systems do; the
+  carry-less version put a monthly option's gamma ~1.5 strikes low) with each strike's IV WORKED OUT FROM ITS OWN PREMIUM
+  (Black-76 on the forward, the out-of-the-money leg first - `impliedVol`; one IV a strike; Dhan's IV field only where no
+  premium gives one; outside 0.5 - 2x the ATM IV, the ATM IV) - the premium fixes sigma x sqrt(T), all gamma depends on, so
+  Dhan's IV convention and even a time to expiry a day off change no gamma - x the dealers' OI (Dhan's OI is in units - no
+  lot size) x S^2 x 1% = rupees of index per 1% move. Checked against an independent textbook implementation (Black-Scholes
+  with a rate, each option's own IV) on weekly / expiry-day / skewed / monthly chains: net within 0.2%, flip within 0.3
+  points, also with Dhan's IV field 50% off (`tests/gex.test.mjs` holds the forward, the IV and the invariance). The
   time to expiry runs to 15:30 IST on the options' expiry day, 365-day years: the run's `optionExpiry` /
   `optionExpirySource` (`OptionExpiryResolver`, filled by `GET /api/oi-replay/{u}/run`): from today on Dhan's listed expiry
   (holiday moves included); a past one the weekday rule (`ExpiryCalendar.NearestOptionExpiry` / `OptionExpiryWeekday`:
   NIFTY / BANKNIFTY Tuesday, SENSEX Thursday, BANKNIFTY monthly the last Tuesday - from 1 Sep 2025; NSE Thursday and SENSEX
   Tuesday (2025) / Friday before) checked against Dhan - a rule day with no spot candles was a holiday, the trading day
   before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
-  ATM IV (`impliedYears`); the implied T is kept each minute as a check - the card warns when the two disagree. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
+  ATM IV (`impliedYears`, Dhan's ATM IV) - kept on each minute too; no warning any more, since the IV from the premiums makes the
+  gamma independent of T. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
   reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium); both are worked
   out always and a line says whether their regimes agree (`gexAgreement` - agree = act on it, disagree = unclear; the other
   sign is worked out with `flips: false`, its flip left out). Levels, as the GEX tools publish them (SpotGamma, MenthorQ,

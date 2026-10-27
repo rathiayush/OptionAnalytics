@@ -43,8 +43,6 @@ const crShort = (v) => {
   return Math.abs(c) >= 1000 ? `${c < 0 ? '−' : ''}${(Math.abs(c) / 1000).toFixed(1)}k Cr` : `${c < 0 ? '−' : ''}${Math.round(Math.abs(c))} Cr`
 }
 const EXPIRY_SOURCES = { dhan: 'Dhan', calendar: 'weekday rule', 'calendar-holiday': 'weekday rule, moved for a holiday' }
-// The straddle's own time to expiry is far off the expiry date's: more than half a day and a third apart.
-const disagrees = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > Math.max(0.5, 0.33 * Math.max(a, b))
 
 const gexColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : AXIS_COLOR)
 
@@ -228,7 +226,7 @@ function ProfileChart({ minute, height = 200 }) {
 
 const HOW_TO_READ = (
   <div style={{ maxWidth: 440, fontSize: 12 }}>
-    <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma (Black-Scholes, each option&apos;s IV) × the dealers&apos; OI × spot² × 1%, in ₹ crore. The time to expiry runs to 15:30 on the expiry day (NIFTY Tuesday, SENSEX Thursday, BANKNIFTY the month&apos;s last Tuesday - Dhan&apos;s own date from today on, holidays checked before that).</p>
+    <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma × the dealers&apos; OI × spot² × 1%, in ₹ crore. Gamma is Black-Scholes on the forward (spot plus the carry to expiry, read from the call and put premiums by put-call parity), with each strike&apos;s IV worked out from its own premium - so it follows the prices traded, not how Dhan works out its IV. The time to expiry runs to 15:30 on the expiry day (NIFTY Tuesday, SENSEX Thursday, BANKNIFTY the month&apos;s last Tuesday - Dhan&apos;s own date from today on, holidays checked before that).</p>
     <p style={{ margin: '0 0 6px' }}><b>Net GEX positive</b>: dealers are long gamma - they sell rallies and buy dips, so moves are damped: range, pin. <b>Negative</b>: they are short gamma - they buy rallies and sell dips, so moves run: trend, fast days.</p>
     <p style={{ margin: '0 0 6px' }}><b>Gamma flip</b> (zero gamma): the spot at which the net GEX would cross zero. Above it the market tends to be calmer; below it moves speed up. &quot;Rough&quot; = it sits near the edge of the strikes loaded, where strikes not loaded weigh in.</p>
     <p style={{ margin: '0 0 6px' }}><b>Call wall (CW)</b>: the strike above spot with the most call gamma × OI - resistance, the top of the range. <b>Put wall (PW)</b>: the strike below spot with the most put gamma × OI - support, the bottom. <b>Max gamma (MG)</b> (absolute gamma strike): the most call + put gamma × OI of any strike - the magnet / pin, above all on expiry day. A level moves to another strike only when that one is 10% bigger, so two strikes about level do not swap it every minute. A wall breaks only once spot is a quarter of a strike step through it - then it rolls on to the next strike - and a strike becomes a wall only once spot is that far from it: a strike at the money is the magnet, not a wall.</p>
@@ -341,18 +339,13 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}{away(now.maxGamma)}</span></Col>
         <Col>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {istHhmm(now.time)} · ATM {now.atm} · IV {num(now.atmIv * 100, 1)} ·{' '}
+            {istHhmm(now.time)} · ATM {now.atm} · ATM IV {num(now.atmIv * 100, 1)} (from the premiums) · forward {num(now.forward, 1)} ({now.forward >= now.spot ? '+' : '−'}{num(Math.abs(now.forward - now.spot), 1)} carry) ·{' '}
             {now.yearsFrom === 'expiry'
               ? <>expiry {dayjs(expiry).format('ddd D MMM')} ({EXPIRY_SOURCES[expirySource] ?? 'weekday rule'}) - {num(now.years * 365, 2)} days left</>
               : <>≈ {num(now.years * 365, 1)} days to expiry (implied from the ATM straddle{expiry ? ' - past the expiry date' : ' - no expiry date'})</>}
           </Text>
         </Col>
       </Row>
-      {now.yearsFrom === 'expiry' && disagrees(now.years * 365, now.impliedYears * 365) && (
-        <Text type="warning" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-          The ATM straddle at Dhan&apos;s IV prices ≈ {num(now.impliedYears * 365, 1)} days, not {num(now.years * 365, 1)} - the IVs or the expiry date may be off; read the levels with care.
-        </Text>
-      )}
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={10}>
           <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
