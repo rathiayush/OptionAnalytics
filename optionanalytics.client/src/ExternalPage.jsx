@@ -9,6 +9,7 @@ import {
 import { applyOrderFlowPush, orderFlowFromSnapshot } from './liveFeeds.js'
 import { autoBigLots } from './orderFlowMath.js'
 import { inMarketSession } from './marketSession.js'
+import { chainOiTotalsAt } from './chainOiTotals.js'
 import { DOWN_COLOR, TIMEFRAME_OPTIONS, UP_COLOR, fromChartTime, toBar, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 
 const { Title, Text } = Typography
@@ -209,8 +210,11 @@ export default function ExternalPage() {
     // OI Replay's chain-wide history: one point per minute (its completed minutes), then the latest totals now.
     const minutes = [...new Set([...ceByStrike.values(), ...peByStrike.values()].flatMap((list) => list.map((p) => Math.floor(toChartTime(p.time) / 60) * 60)))].sort((a, b) => a - b)
     const history = chainOiTotalsHistory(ceByStrike, peByStrike, minutes.map((time) => ({ time })), minutes.length)
-    const latest = (byS) => [...byS.values()].reduce((sum, list) => sum + (list.at(-1)?.openInterest ?? 0), 0)
-    if (minutes.length) history.push({ time: minutes.at(-1), ceTotal: latest(ceByStrike), peTotal: latest(peByStrike) })
+    if (minutes.length) {
+      // The latest totals, counted the same way (a strike that joined the band later: its change since its first reading).
+      const [latest] = chainOiTotalsAt(ceByStrike, peByStrike, fromChartTime(minutes[0]) * 1000, [Number.MAX_SAFE_INTEGER])
+      history.push({ time: minutes.at(-1), ceTotal: latest.ce, peTotal: latest.pe })
+    }
     const ceTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.ceTotal })), 1)
     const peTotal = aggregateLinePoints(history.map((p) => ({ time: p.time, value: p.peTotal })), 1)
     return { ceTotal, peTotal, ceSince: toSinceOpenSeries(ceTotal), peSince: toSinceOpenSeries(peTotal) }

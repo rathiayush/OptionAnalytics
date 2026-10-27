@@ -18,12 +18,15 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
-import { mergeFuturesLive } from './futuresLive.js'
+import { mergeFuturesLive, oiAtCandleCloses } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
 import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
 import { readoutPlacement } from './readoutPlacement.js'
 import { usePaperPositionsSync } from './paperSync.js'
-import { dayEndExit, paperExitReason } from './paperExit.js'
+import { paperExitReason } from './paperExit.js'
+import { paperExitHit, paperLevelsNow, punchLevelLog, withPaperLevelChange } from './paperStops.js'
+import { chainOiDay, chainOiTotalsAt } from './chainOiTotals.js'
+import { nearAtmOiChange, oiWalls } from './marketRead.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
@@ -39,7 +42,6 @@ import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
 import { newLoadProgressId, useLoadProgress } from './loadProgress.js'
-import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { PremiumEmaChart, DraggableFloatingPanel, useFitContentAsDataGrows, useChartUserControl, CANDLE_SCALE_MARGINS } from './oiShared.jsx'
 import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
@@ -1137,31 +1139,13 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
 }
 
 // Chain-wide CE / PE OI as of each of the first `revealed` - 1 one-minute bars' times (the Day OI chart's and the Total OI
-// lookback table's history) - see completedOiHistory below. Also the External page's chain-wide chart.
+// lookback table's history) - see completedOiHistory below. Also the External page's chain-wide chart. A strike that joins
+// the band after the first bar counts from its first reading (chainOiTotals.js) - its OI was not written then.
 export function chainOiTotalsHistory(ceByStrike, peByStrike, oneMinBars, revealed) {
   if (revealed < 2) return []
-  const strikes = [...new Set([...ceByStrike.keys(), ...peByStrike.keys()])]
-  // One forward sweep per series (bars and points are both time-ascending), each cursor only ever
-  // moving forward - linear in the day's data, where a lookup per bar per strike grew with the
-  // square of it and froze the page for over a second each minute by the afternoon.
-  const cursorsFor = (byStrike) => strikes.map((s) => ({ series: byStrike.get(s) ?? [], next: 0, oi: 0 }))
-  const ceCursors = cursorsFor(ceByStrike)
-  const peCursors = cursorsFor(peByStrike)
-  const totalAt = (cursors, barMs) => {
-    let total = 0
-    for (const c of cursors) {
-      while (c.next < c.series.length && pointMs(c.series[c.next]) <= barMs) c.oi = c.series[c.next++].openInterest ?? 0
-      total += c.oi
-    }
-    return total
-  }
-  const history = []
-  for (let i = 0; i < revealed - 1; i++) {
-    const bar = oneMinBars[i]
-    const barMs = fromChartTime(bar.time) * 1000
-    history.push({ time: bar.time, ceTotal: totalAt(ceCursors, barMs), peTotal: totalAt(peCursors, barMs) })
-  }
-  return history
+  const bars = oneMinBars.slice(0, revealed - 1)
+  const totals = chainOiTotalsAt(ceByStrike, peByStrike, fromChartTime(oneMinBars[0].time) * 1000, bars.map((bar) => fromChartTime(bar.time) * 1000))
+  return bars.map((bar, i) => ({ time: bar.time, ceTotal: totals[i].ce, peTotal: totals[i].pe }))
 }
 
 // The strike drill-down popup's own chart - CE and PE as two series, either both LineSeries (mode
@@ -2448,51 +2432,20 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
 // DraggableFloatingPanel itself now lives in oiShared.jsx only (was a byte-identical duplicate
 // here) - imported below, alongside PremiumEmaChart.
 
-// Scans every REVEALED point strictly after entry (bounded by asOfMs, so the replay never "sees" a
-// bar it hasn't played yet) to find whether a stop-loss or target was actually TOUCHED at any point
-// since entry - not merely whether the LATEST point has crossed it, which would miss an intra-minute
-// spike that reversed before the next check. Each point's own high/low (a real historical minute bar
-// - see OiReplayPoint's own doc comment on the backend) is used when present; a live tick (a genuine
-// single point in time, with no range of its own) falls back to its own price for both - the most
-// accurate check that kind of data supports. Returns { kind: 'sl' | 'target', fillPrice } for the
-// FIRST point where either level was touched (fillPrice is the configured level itself, not the
-// bar's own high/low - a paper stop/limit order is assumed to fill exactly at its own level, not
-// with extra favorable slippage), or null if neither has been touched yet. If a single bar's own
-// range spans BOTH levels at once (a large bar engulfing both), the stop-loss is assumed to have
-// been touched first - the standard, conservative convention, since OHLC alone can't say which one
-// price actually reached first.
-function computeStopTargetHit(series, entryTimeMs, asOfMs, entryPrice, direction, slPoints, targetPoints, trailStart = 0, trailGap = 0) {
-  const hasSl = slPoints > 0
-  const hasTarget = targetPoints > 0
-  const hasTrail = trailGap > 0
-  if ((!hasSl && !hasTarget && !hasTrail) || !series) return null
-  const slLevel = hasSl ? (direction === 'SELL' ? entryPrice + slPoints : entryPrice - slPoints) : null
-  const targetLevel = direction === 'SELL' ? entryPrice - targetPoints : entryPrice + targetPoints
-  // Trailing (optionTrail.js): the stop in force in a bar comes from the best premium of the bars BEFORE
-  // it - it moves after each bar, only tightening.
-  let best = entryPrice
-  for (const p of series) {
-    const t = new Date(p.time).getTime()
-    if (t <= entryTimeMs) continue
-    if (asOfMs != null && t > asOfMs) break
-    const high = p.high ?? p.price
-    const low = p.low ?? p.price
-    if (high == null || low == null) continue
-    const trailed = hasTrail ? optionTrailLevel(direction, entryPrice, best, trailStart, trailGap) : null
-    const stop = tighterStop(direction, slLevel, trailed)
-    const slHit = stop != null && (direction === 'SELL' ? high >= stop : low <= stop)
-    const targetHit = hasTarget && (direction === 'SELL' ? low <= targetLevel : high >= targetLevel)
-    if (slHit) return { kind: stop === trailed && trailed !== slLevel ? 'trail' : 'sl', fillPrice: stop }
-    if (targetHit) return { kind: 'target', fillPrice: targetLevel }
-    best = direction === 'SELL' ? Math.min(best, low) : Math.max(best, high)
-  }
-  return null
-}
-
 // SEBI periodically revises each index's own lot size - update this if it changes. This feature is
 // paper trading only (no real order is ever placed - see PaperTradePanel's own doc comment), so a
 // stale value here only skews the SIMULATED PnL's scale, not anything real.
 const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }
+// A change of the panel's SL / target / trail reaches the open positions once it has stayed this long (the typing stopped).
+const LEVEL_CHANGE_SETTLE_MS = 1000
+
+// A paper position's levels in words: "SL 20 pts · target 30 pts · trailing 5 pts behind the best after +10".
+function paperLevelsText(levels) {
+  if (!levels) return 'no SL / target'
+  const parts = [levels.sl > 0 ? `SL ${levels.sl} pts` : 'no SL', levels.target > 0 ? `target ${levels.target} pts` : 'no target']
+  if (levels.trailGap > 0) parts.push(`trailing ${levels.trailGap} pts behind the best${levels.trailStart > 0 ? ` after +${levels.trailStart}` : ''}`)
+  return parts.join(' · ')
+}
 
 // Survives a page reload for TODAY's own live session only - a historical replay day's positions
 // still reset on every load() the same as before (see PaperTradePanel's own doc comment: "a paper
@@ -2629,7 +2582,7 @@ function PaperTradePanel({
       title: 'Action', dataIndex: 'direction', key: 'direction', width: 60,
       render: (d, r) => (
         <Space size={2} wrap>
-          <Tag color={d === 'BUY' ? 'success' : 'error'}>{d} {r.side}</Tag>
+          <Tooltip title={r.levelsText ? `Its levels: ${r.levelsText}` : null}><Tag color={d === 'BUY' ? 'success' : 'error'}>{d} {r.side}</Tag></Tooltip>
           {r.noStop && <Tooltip title="No stop-loss / target - squared off at 15:15"><Tag color="warning" style={{ fontSize: 10, paddingInline: 3 }}>No SL</Tag></Tooltip>}
           {r.noTrail && <Tooltip title="Its stop-loss stays where it started - no trailing"><Tag style={{ fontSize: 10, paddingInline: 3 }}>No trail</Tag></Tooltip>}
         </Space>
@@ -2647,7 +2600,7 @@ function PaperTradePanel({
       title: '', key: 'action', width: 70,
       render: (_, r) => (r.status === 'OPEN'
         ? <Button size="small" onClick={() => onExit(r.id)}>Exit</Button>
-        : <Tag color={r.exitReason === 'SL' ? 'error' : r.exitReason === 'Target' ? 'success' : 'default'}>{r.exitReason ?? 'Closed'}</Tag>),
+        : <Tag color={r.exitReason === 'SL' ? 'error' : r.exitReason === 'Target' ? 'success' : r.exitReason === 'Trailing SL' ? 'warning' : 'default'}>{r.exitReason ?? 'Closed'}</Tag>),
     },
   ]
 
@@ -2773,9 +2726,12 @@ function PaperTradePanel({
           Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
           then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
           open position once its own premium has moved that many points against/in its favor (0 disables
-          either), checked against every revealed minute bar's own high-low since entry (or each live
+          either), checked against every revealed minute bar's own high-low after the entry (or each live
           tick, once today's live feed is ticking) - not just the latest price - so a real intra-bar touch
-          is caught even if price reverses before the next check. Exit all closes every open position
+          is caught even if price reverses before the next check. Each position keeps the levels it was
+          placed with (hover its Action); a change here reaches this index's open positions from the
+          minute it is made, never the minutes already passed, and never loosens a trailing stop already
+          earned. Every open position is squared off at 15:15. Exit all closes every open position
           right now at its current price, without clearing the table the way Clear all does. Today's own
           positions survive a page reload (saved locally in this browser); loading a historical day, a
           different underlying, or clicking Clear all still resets them.
@@ -3231,7 +3187,8 @@ function ReviewFootprint({ state, asOfMs, isLive }) {
   const shown = useMemo(() => {
     if (!day) return null
     // Up to the clock only (a replay must not show minutes after it); the live day is shown as it stands.
-    const minuteBars = isLive || asOfMs == null ? day.bars : day.bars.filter((b) => new Date(b.time).getTime() < asOfMs)
+    // The minute the replay shows is a finished one (its bar holds its close), so its footprint bar is shown too.
+    const minuteBars = isLive || asOfMs == null ? day.bars : day.bars.filter((b) => new Date(b.time).getTime() <= asOfMs)
     const analysed = analyzeBars(aggregateFootprintBars(minuteBars, timeframe), { rowSize: day.rowSize, minVolume: lotSize, estimated })
     const withCvd = withBackfill(analysed, day.backfill, timeframe)
     return { all: withCvd.bars, last: withCvd.bars.slice(-REVIEW_FOOTPRINT_BARS) }
@@ -3585,10 +3542,50 @@ export default function OiReplayPage() {
     setPaperTrailStartState(levels.trailStart)
     setPaperTrailGapState(levels.trailGap)
   }, [underlying])
-  // The levels are one global setting per underlying: a change made on another page / tab lands here too.
+  const [paperPositions, setPaperPositions] = useState([])
+  // A change of the SL / target / trail reaches THIS index's open paper positions from the moment it is made - never the
+  // bars already passed (paperStops.js) - once it has stayed a moment: typing 25 passes through 2, which must not stop a
+  // trade out. Otherwise each position keeps the levels it was punched with (the panel's, or the ticket's).
+  const paperLevelsRef = useRef(null)
+  paperLevelsRef.current = { underlying, sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap }
+  const paperClockRef = useRef(null) // the page's clock (asOfMs) - set where it is worked out, below
+  const paperSeriesRef = useRef(null) // each position's premium points (seriesOf) - set below
+  const levelChangeRef = useRef(null)
+  const applyLevelChange = useCallback(() => {
+    const q = levelChangeRef.current
+    if (!q) return
+    clearTimeout(q.timer)
+    levelChangeRef.current = null
+    setPaperPositions((prev) => withPaperLevelChange(prev, q.underlying, q.patch, q.at, { fallback: () => q.before, seriesOf: (p) => paperSeriesRef.current?.(p) ?? [] }))
+  }, [])
+  const queueLevelChange = (patch, u = paperLevelsRef.current.underlying, before = null) => {
+    if (levelChangeRef.current && levelChangeRef.current.underlying !== u) applyLevelChange()
+    const q = levelChangeRef.current
+    clearTimeout(q?.timer)
+    const now = paperLevelsRef.current
+    levelChangeRef.current = {
+      underlying: u,
+      // The levels before the change - for a position saved before positions kept their own.
+      before: q?.before ?? before ?? (now.underlying === u ? { sl: now.sl, target: now.target, trailStart: now.trailStart, trailGap: now.trailGap } : null),
+      patch: { ...q?.patch, ...patch },
+      at: paperClockRef.current ?? Date.now(),
+      timer: setTimeout(applyLevelChange, LEVEL_CHANGE_SETTLE_MS),
+    }
+  }
+  const queueLevelChangeRef = useRef(queueLevelChange)
+  queueLevelChangeRef.current = queueLevelChange
+  useEffect(() => () => clearTimeout(levelChangeRef.current?.timer), [])
+  // The levels are one global setting per underlying: a change made on another page / tab lands here too - and reaches
+  // this index's open positions like one typed here.
   useEffect(() => {
+    let last = null
     const readAll = () => {
       const d = loadTradeDefaults(underlying)
+      if (last) {
+        const patch = Object.fromEntries(['sl', 'target', 'trailStart', 'trailGap'].filter((key) => d[key] !== last[key]).map((key) => [key, d[key]]))
+        if (Object.keys(patch).length) queueLevelChangeRef.current(patch, underlying, last)
+      }
+      last = d
       setPaperSlPointsState(d.sl)
       setPaperTargetPointsState(d.target)
       setPaperTrailStartState(d.trailStart)
@@ -3599,11 +3596,10 @@ export default function OiReplayPage() {
     readAll()
     return subscribeTradeLevels(readAll)
   }, [underlying])
-  const setPaperTrailStart = (v) => { setPaperTrailStartState(v); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
-  const setPaperTrailGap = (v) => { setPaperTrailGapState(v); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
-  const setPaperSlPoints = (v) => { setPaperSlPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
-  const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); saveTradeLevels('oiReplay', underlying, { sl: paperSlPoints, target: v }) }
-  const [paperPositions, setPaperPositions] = useState([])
+  const setPaperTrailStart = (v) => { setPaperTrailStartState(v); queueLevelChange({ trailStart: v }); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
+  const setPaperTrailGap = (v) => { setPaperTrailGapState(v); queueLevelChange({ trailGap: v }); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
+  const setPaperSlPoints = (v) => { setPaperSlPointsState(v); queueLevelChange({ sl: v }); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
+  const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); queueLevelChange({ target: v }); saveTradeLevels('oiReplay', underlying, { sl: paperSlPoints, target: v }) }
   // Toggled by the trigger button/tag and the panel's own close button only - never by clicking
   // elsewhere (it's a portal-rendered DraggableFloatingPanel, not an antd Popover, so there is no
   // click-outside-to-dismiss behavior to fight in the first place). Position lives here, not inside
@@ -4346,6 +4342,7 @@ export default function OiReplayPage() {
   // server's receive time, so a plain Date.now() cutoff would hide the newest ones until this
   // device's clock caught up.
   const asOfMs = isLive ? Math.max(Date.now(), latestLiveMs) : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
+  paperClockRef.current = asOfMs
 
   // Purely for the ladder's OWN "stale" flag below (ceStale/peStale) - NOT used for asOfMs itself,
   // which must keep tracking real wall-clock time for every other read on this page (paper-trade
@@ -4501,15 +4498,18 @@ export default function OiReplayPage() {
   // close, so the line reveals in step with the candles rather than at a different resolution.
   // Plotted value is OI/1e6 (not the raw count) so the left axis itself reads in clean millions,
   // same "show all the tags in million" convention as every other OI figure on this page.
+  // Each candle's OI is read at its close (its last minute, or the clock in the forming one) - the moment its close price
+  // is from (futuresLive.js oiAtCandleCloses).
+  const futuresCandleOi = useMemo(
+    () => oiAtCandleCloses(futuresPointsRaw, displayFuturesBars.map((bar) => fromChartTime(bar.time) * 1000), futuresTimeframe, asOfMs),
+    [futuresPointsRaw, displayFuturesBars, futuresTimeframe, asOfMs],
+  )
   const futuresOiLine = useMemo(() => {
     if (!result?.futuresOiAvailable) return []
     return displayFuturesBars
-      .map((bar) => {
-        const point = latestAtOrBefore(futuresPointsRaw, fromChartTime(bar.time) * 1000)
-        return point?.openInterest != null ? { time: bar.time, value: point.openInterest / 1_000_000 } : null
-      })
+      .map((bar, i) => (futuresCandleOi[i] != null ? { time: bar.time, value: futuresCandleOi[i] / 1_000_000 } : null))
       .filter(Boolean)
-  }, [displayFuturesBars, futuresPointsRaw, result])
+  }, [displayFuturesBars, futuresCandleOi, result])
 
   // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
@@ -4613,6 +4613,7 @@ export default function OiReplayPage() {
   const seriesOf = useCallback((p) => (ownChainOf(p)
     ? (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike) ?? []
     : (foreignPoints[`${p.underlying}:${p.expiryFlag}:${p.side}`] ?? []).filter((pt) => pt.strike === p.strike)), [ownChainOf, ceByStrike, peByStrike, foreignPoints])
+  paperSeriesRef.current = seriesOf
   const markOf = useCallback((p) => {
     const at = ownChainOf(p) ? asOfMs : Number.MAX_SAFE_INTEGER
     return at == null ? null : latestAtOrBefore(seriesOf(p), at)?.price ?? null
@@ -4624,14 +4625,16 @@ export default function OiReplayPage() {
     const entryPrice = premiumOf(t.side, t.strike)
     if (t.strike == null || entryPrice == null) return
     const text = paperTradeText({ direction: t.direction, strike: t.strike, side: t.side, qtyLots: t.lots }, entryPrice)
-    const levels = t.noStop ? ' · no SL / target - held until the 15:15 square-off' : `${t.sl > 0 ? ` · SL ${t.sl} pts` : ''}${t.target > 0 ? ` · target ${t.target} pts` : ''}${t.noTrail ? ' · no trailing' : ''}`
-    notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${levels}`,
+    // The position keeps these levels (the ticket's, else the panel's) - the panel's later changes reach it from their minute on.
+    const levelLog = punchLevelLog({ sl: t.sl, target: t.target, trailStart: paperTrailStart, trailGap: paperTrailGap, noStop: t.noStop, noTrail: t.noTrail }, asOfMs)
+    notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${t.noStop ? ' · no SL / target - held until the 15:15 square-off' : ` · ${paperLevelsText(levelLog[0])}${t.noTrail ? ' · no trailing' : ''}`}`,
       telegramText: isLive ? `Paper ${text}${t.noStop ? ' (no SL)' : ''}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
       side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots, underlying, expiryFlag: isLive ? liveExpiryFlag : null,
       lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
       entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null, ...(t.noStop ? { noStop: true } : t.noTrail ? { noTrail: true } : {}),
+      ...(levelLog ? { levelLog } : {}),
     }])
   }
 
@@ -4641,7 +4644,7 @@ export default function OiReplayPage() {
     const text = `${paperTradeText(p, p.entryPrice)} -> ${Number(exitPrice).toFixed(1)} = ${points >= 0 ? '+' : ''}${points.toFixed(1)} pts (Rs ${Math.round(rupees).toLocaleString('en-IN')})`
     const kind = reason === 'SL' ? 'stopLoss' : reason === 'Target' ? 'target' : 'exit'
     notifyTrade({ kind, good: points >= 0, key: `paper-exit-${p.id}`, title: reason === 'SL' ? 'Paper stop-loss hit' : reason === 'Target' ? 'Paper target hit' : reason === 'Trailing SL' ? 'Paper trailing SL hit' : reason === 'Day end' ? 'Paper position squared off (15:15)' : 'Paper position exited',
-      text, telegramText: isLive ? `Paper ${reason === 'SL' ? 'SL hit' : reason === 'Target' ? 'target hit' : 'exit'}: ${text}` : null })
+      text, telegramText: isLive ? `Paper ${reason === 'SL' ? 'SL hit' : reason === 'Target' ? 'target hit' : reason === 'Trailing SL' ? 'trailing SL hit' : reason === 'Day end' ? 'squared off at 15:15' : 'exit'}: ${text}` : null })
   }
   const handlePaperExit = (id) => {
     const open = paperPositions.find((p) => p.id === id && p.status === 'OPEN')
@@ -4802,7 +4805,7 @@ export default function OiReplayPage() {
     const ltp = p.status === 'OPEN' ? (mark ?? p.lastPrice ?? p.entryPrice) : p.exitPrice
     const priceDelta = p.direction === 'SELL' ? p.entryPrice - ltp : ltp - p.entryPrice
     // stale: open with no price of its own chain yet (another index's position before its first tick).
-    return { ...p, underlying: p.underlying ?? underlying, ltp, mark, stale: p.status === 'OPEN' && mark == null, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize }
+    return { ...p, underlying: p.underlying ?? underlying, ltp, mark, stale: p.status === 'OPEN' && mark == null, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize, levelsText: p.noStop ? null : paperLevelsText(paperLevelsNow(p)) }
   }), [paperPositions, markOf, underlying])
   // Before the page leaves this index / expiry, the open positions it prices keep their last price.
   useEffect(() => {
@@ -4814,28 +4817,27 @@ export default function OiReplayPage() {
   const paperOpenCount = enrichedPaperPositions.filter((p) => p.status === 'OPEN').length
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
 
-  // Auto stop-loss/target: scans every revealed minute bar's own high/low (or each live tick, once
-  // today's live feed is ticking) since entry, up to but never past asOfMs, via computeStopTargetHit
-  // - so an intra-bar touch that reverses before the next check still gets caught, and the replay
-  // never "sees" a bar it hasn't played yet. The user's own "are you actually calculating SL... with
-  // high low" correction - the stored rolling_option_bars_1m data genuinely has OHLC per minute, not
-  // just a close, so a real touch-check is possible for historical days, not just live ticks.
+  // A position's levels when it has none of its own (saved before positions kept them): its index's on the panel now.
+  const fallbackLevelsOf = useCallback((p) => ((p.underlying ?? underlying) === underlying
+    ? { sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap }
+    : loadTradeLevels('oiReplay', p.underlying)), [underlying, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
+  // Such a position takes them as its own, so a later change on the panel reaches it from its minute on, like any other.
+  useEffect(() => {
+    const unkept = (p) => p.status === 'OPEN' && !p.noStop && p.entryTime != null && !(p.levelLog?.length > 0)
+    if (!paperPositions.some(unkept)) return
+    setPaperPositions((prev) => prev.map((p) => (unkept(p) ? { ...p, levelLog: punchLevelLog({ ...fallbackLevelsOf(p), noTrail: p.noTrail }, p.entryTime) } : p)))
+  }, [paperPositions, fallbackLevelsOf])
+
+  // Auto exit (paperStops.js): each open position's own stop-loss / trailing stop / target on its premium's 1-minute bars
+  // (their high / low; live, the forming minute's too) since the entry, up to but never past asOfMs - so a touch that
+  // reversed is still caught and the replay never "sees" a bar it hasn't played yet - then the 15:15 square-off.
   const paperAnnouncedRef = useRef(new Set())
   useEffect(() => {
-    const anyLevels = paperSlPoints > 0 || paperTargetPoints > 0 || paperTrailGap > 0
     const hits = new Map()
     for (const p of paperPositions) {
       if (p.status !== 'OPEN' || p.entryTime == null) continue
-      // A "No SL" position has no stop-loss / target: it is squared off at 15:15 of its day, at that minute's price.
-      if (p.noStop) {
-        const hit = dayEndExit(p, ownChainOf(p) ? asOfMs : Date.now(), seriesOf(p))
-        if (hit) hits.set(p.id, hit)
-        continue
-      }
-      if (!anyLevels) continue
-      // A "No trailing" position keeps its stop where it started.
-      const hit = computeStopTargetHit(seriesOf(p), p.entryTime, ownChainOf(p) ? asOfMs : null, p.entryPrice, p.direction, paperSlPoints, paperTargetPoints,
-        p.noTrail ? 0 : paperTrailStart, p.noTrail ? 0 : paperTrailGap)
+      const own = ownChainOf(p)
+      const hit = paperExitHit(seriesOf(p), p, { asOfMs: own ? asOfMs : null, clockMs: own ? asOfMs : Date.now(), fallback: fallbackLevelsOf(p) })
       if (hit) hits.set(p.id, hit)
     }
     if (hits.size === 0) return
@@ -4850,7 +4852,7 @@ export default function OiReplayPage() {
       return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: paperExitReason(hit.kind) } : p
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paperPositions, seriesOf, ownChainOf, asOfMs, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
+  }, [paperPositions, seriesOf, ownChainOf, asOfMs, fallbackLevelsOf])
 
   // Regime-change markers stamped on the exact candle where a Long Buildup/Short Buildup/Short
   // Covering/Long Unwinding stretch actually started - "show me when what happened" on the chart
@@ -4864,11 +4866,11 @@ export default function OiReplayPage() {
     const markers = []
     let prevRegime = 'Neutral'
     let prevClose = displayFuturesBars[0].close
-    let prevOi = latestAtOrBefore(futuresPointsRaw, fromChartTime(displayFuturesBars[0].time) * 1000)?.openInterest ?? null
+    let prevOi = futuresCandleOi[0] ?? null
 
     for (let i = 1; i < displayFuturesBars.length; i++) {
       const bar = displayFuturesBars[i]
-      const oi = latestAtOrBefore(futuresPointsRaw, fromChartTime(bar.time) * 1000)?.openInterest ?? null
+      const oi = futuresCandleOi[i] ?? null
       if (oi == null || prevOi == null) { prevClose = bar.close; prevOi = oi; continue }
 
       const regime = classifyFuturesRegime(bar.close - prevClose, oi - prevOi, priceThreshold, FUTURES_REGIME_OI_THRESHOLD)
@@ -4888,7 +4890,7 @@ export default function OiReplayPage() {
       prevOi = oi
     }
     return markers
-  }, [displayFuturesBars, futuresPointsRaw, step, result])
+  }, [displayFuturesBars, futuresCandleOi, step, result])
 
   // The single "as of right now" verdict for the table/read box - same 4-quadrant classification
   // as the chart markers, just measured since the DAY'S OPEN rather than the previous candle, so
@@ -4935,25 +4937,20 @@ export default function OiReplayPage() {
   // across the whole fetched band - "continuously" read as "net change since the open", not a
   // strict every-single-minute streak (this app has no per-minute streak tracker, and a streak that
   // reverses for one minute then resumes is still the same real accumulation story).
+  // The chain's totals now and since the open, a strike that joined the band later counted by its change since it did
+  // (chainOiTotals.js) - the full OI of every strike the band reached on the way was never "added since the open".
+  const chainDay = useMemo(() => chainOiDay(ceByStrike, peByStrike, dayStartMs, asOfMs), [ceByStrike, peByStrike, dayStartMs, asOfMs])
   const dayOiSummary = useMemo(() => {
-    if (!currentBar || oneMinBars.length === 0 || dayStartByStrike.size === 0) return null
+    if (!currentBar || oneMinBars.length === 0 || dayStartByStrike.size === 0 || !chainDay) return null
 
-    let ceStartTotal = 0
-    let peStartTotal = 0
     const movers = []
     for (const row of ladderRows) {
       const start = dayStartByStrike.get(row.strike)
-      if (row.ceOi != null && start?.ceOi != null) {
-        ceStartTotal += start.ceOi
-        movers.push({ strike: row.strike, side: 'CE', change: row.ceOi - start.ceOi })
-      }
-      if (row.peOi != null && start?.peOi != null) {
-        peStartTotal += start.peOi
-        movers.push({ strike: row.strike, side: 'PE', change: row.peOi - start.peOi })
-      }
+      if (row.ceOi != null && start?.ceOi != null) movers.push({ strike: row.strike, side: 'CE', change: row.ceOi - start.ceOi })
+      if (row.peOi != null && start?.peOi != null) movers.push({ strike: row.strike, side: 'PE', change: row.peOi - start.peOi })
     }
-    const ceDayChange = totalCeOi - ceStartTotal
-    const peDayChange = totalPeOi - peStartTotal
+    const ceDayChange = chainDay.change.ce
+    const peDayChange = chainDay.change.pe
     const dayPriceChange = currentBar.close - oneMinBars[0].open
 
     let dayBias = 'Neutral'
@@ -4967,7 +4964,7 @@ export default function OiReplayPage() {
     const removed = [...movers].filter((m) => m.change < 0).sort((a, b) => a.change - b.change).slice(0, 2)
 
     return { dayBias, dayReason, ceDayChange, peDayChange, added, removed }
-  }, [currentBar, oneMinBars, ladderRows, dayStartByStrike, totalCeOi, totalPeOi])
+  }, [currentBar, oneMinBars, ladderRows, dayStartByStrike, chainDay])
 
   // One point per REVEALED 1-min bar, for the Total OI Lookback Table AND the Day OI Accumulation
   // card's own chain-wide chart below - total (chain-wide) CE/PE OI as of that bar's own close,
@@ -5001,9 +4998,9 @@ export default function OiReplayPage() {
   // end of the day even mid-replay; currentBar is already exactly "the last REVEALED bar" (see its
   // own derivation above, oneMinBars[visibleCount - 1]).
   const totalOiHistory = useMemo(() => {
-    if (!currentBar) return completedOiHistory
-    return [...completedOiHistory, { time: currentBar.time, ceTotal: totalCeOi, peTotal: totalPeOi }]
-  }, [completedOiHistory, currentBar, totalCeOi, totalPeOi])
+    if (!currentBar || !chainDay) return completedOiHistory
+    return [...completedOiHistory, { time: currentBar.time, ceTotal: chainDay.now.ce, peTotal: chainDay.now.pe }]
+  }, [completedOiHistory, currentBar, chainDay])
 
   const ceTotalOiLine = useMemo(
     () => aggregateLinePoints(totalOiHistory.map((p) => ({ time: p.time, value: p.ceTotal })), totalOiLookbackTimeframe),
@@ -5076,8 +5073,8 @@ export default function OiReplayPage() {
     // a validated signal.
     const pcrBias = pcr == null ? 'Neutral' : pcr > 1.2 ? 'Bullish' : pcr < 0.8 ? 'Bearish' : 'Neutral'
 
-    const resistance = ladderRows.reduce((best, r) => ((r.ceOi ?? 0) > (best?.ceOi ?? -1) ? r : best), null)
-    const support = ladderRows.reduce((best, r) => ((r.peOi ?? 0) > (best?.peOi ?? -1) ? r : best), null)
+    // The walls ahead of the price: the most call OI at or above it, the most put OI at or below it (marketRead.js).
+    const { resistance, support } = oiWalls(ladderRows, currentBar.close)
 
     // OI buildup near ATM (+-2 steps), combined with the spot move over the last 5 revealed bars -
     // the classic "Price + OI" combination read: rising price + rising Put OI = fresh put WRITING
@@ -5085,10 +5082,12 @@ export default function OiReplayPage() {
     // (bearish, resistance being defended); the two unwind variants are the same move without fresh
     // OI backing it - weaker, "covering" rather than a defended level.
     const nearAtm = ladderRows.filter((r) => Math.abs(r.strike - atmStrike) <= step * 2)
-    const ceChangeSum = nearAtm.reduce((s, r) => s + (r.ceOiChange ?? 0), 0)
-    const peChangeSum = nearAtm.reduce((s, r) => s + (r.peOiChange ?? 0), 0)
     const priorBar = oneMinBars[Math.max(0, visibleCount - 6)]
     const priceChange = priorBar ? currentBar.close - priorBar.close : 0
+    // The OI change over the SAME 5 bars as the price's - not the last minute's against a 5-minute move.
+    const oiChange = priorBar && asOfMs != null ? nearAtmOiChange(ceByStrike, peByStrike, atmStrike, step * 2, fromChartTime(priorBar.time) * 1000, asOfMs) : { ce: 0, pe: 0 }
+    const ceChangeSum = oiChange.ce
+    const peChangeSum = oiChange.pe
 
     let oiBuildup = 'No clear buildup pattern near ATM yet'
     let oiBias = 'Neutral'
@@ -5151,7 +5150,7 @@ export default function OiReplayPage() {
       buySide, buyStrike, sellSide, sellStrike,
       safetyOk, safetyReason,
     }
-  }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike])
+  }, [currentBar, ladderRows, pcr, atmStrike, step, oneMinBars, visibleCount, dayStartByStrike, ceByStrike, peByStrike, asOfMs])
 
   // ---- Sync with the Order Flow replay (another tab) - see replaySync.jsx. This replay moves a minute
   // bar at a time, so its clock is the END of the newest revealed minute (asOfMs + 1 minute), and its
@@ -5523,7 +5522,9 @@ export default function OiReplayPage() {
           figure; this chart's own job is showing how it got there. */}
       <div>
         <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Chain-wide OI</Text>
+          <Tooltip title="Every strike in the band, the open's strikes in full. The band follows spot, so a strike that joins it later in the day counts from its first reading - its OI was not added then.">
+            <Text type="secondary" style={{ fontSize: 12 }}>Chain-wide OI</Text>
+          </Tooltip>
           <Segmented
             size="small"
             value={dayOiChartMode}

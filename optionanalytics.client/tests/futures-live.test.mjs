@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mergeFuturesLive } from '../src/futuresLive.js'
+import { mergeFuturesLive, oiAtCandleCloses } from '../src/futuresLive.js'
 
 // The run's bars (server, +05:30) and the live feed's minutes (UTC) for 10:58 - 11:00 IST.
 const bar = (hhmm, o, h, l, c, v) => ({ time: `2026-10-21T${hhmm}:00+05:30`, open: o, high: h, low: l, close: c, volume: v, openInterest: 100 })
@@ -30,4 +30,17 @@ test('no bars: the live minutes alone; no live minutes: the bars in time order',
   assert.equal(mergeFuturesLive([], [live('05:30', 1, 2, 1, 2, 5)]).length, 1)
   const bars = [bar('11:00', 3, 3, 3, 3, 1), bar('10:59', 2, 2, 2, 2, 1)]
   assert.deepEqual(mergeFuturesLive(bars, []).map((p) => p.close), [2, 3])
+})
+
+test('the OI of a candle is read at its close - its last minute, or the clock in the forming one', () => {
+  const at = (hhmm) => Date.parse(`2026-10-22T${hhmm}:00+05:30`)
+  const minutes = ['09:15', '09:16', '09:17', '09:18', '09:19', '09:20', '09:21', '09:22']
+  const points = minutes.map((m, i) => ({ time: new Date(at(m)).toISOString(), openInterest: 1_000_000 + i * 10_000 }))
+  // 5-minute candles: 09:15 closes with 09:19's OI (not 09:15's), the forming 09:20 one with the clock's minute.
+  assert.deepEqual(oiAtCandleCloses(points, [at('09:15'), at('09:20')], 5, at('09:21')), [1_040_000, 1_060_000])
+  assert.deepEqual(oiAtCandleCloses(points, [at('09:15'), at('09:20')], 5, null), [1_040_000, 1_070_000])
+  // 1-minute candles: each its own minute.
+  assert.deepEqual(oiAtCandleCloses(points, [at('09:15'), at('09:16')], 1, at('09:22')), [1_000_000, 1_010_000])
+  // No OI yet: null; a minute without OI keeps the last one.
+  assert.deepEqual(oiAtCandleCloses([{ time: new Date(at('09:16')).toISOString(), openInterest: null }], [at('09:15')], 5, at('09:20')), [null])
 })

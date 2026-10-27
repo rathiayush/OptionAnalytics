@@ -1,5 +1,6 @@
-// A "No SL" paper position (the trade panel's No SL box) has no stop-loss / target: it stays open until it is exited,
-// and is squared off at 15:15 IST of its day - like a broker's intraday square-off - at that minute's price.
+// Every open paper position on the trade panel is squared off at 15:15 IST of its day - like a broker's intraday
+// square-off (a live super order is INTRADAY) - at that minute's price. A "No SL" one (the panel's No SL box) has no
+// stop-loss / target, so that is its only exit; one with levels is closed by them first (paperStops.js).
 
 const IST_MS = 330 * 60_000
 const DAY_MS = 24 * 60 * 60_000
@@ -11,12 +12,12 @@ export function paperSquareOffMs(ms) {
 }
 
 /**
- * The square-off of an open No SL position once the clock `atMs` reaches 15:15 of its entry day: `{ kind: 'dayEnd',
- * fillPrice }` - the price of the last point of `series` (the option's points, ascending, `{ time, price }`) at or
- * before 15:15, else its last known price, else its entry - or null (not a No SL position, closed, or before 15:15).
+ * The square-off of an open position once the clock `atMs` reaches 15:15 of its entry day: `{ kind: 'dayEnd', fillPrice }` -
+ * the price of the last point of `series` (the option's points, ascending, `{ time, price }`) at or before 15:15, else its
+ * last known price, else its entry - or null (closed, or before 15:15).
  */
-export function dayEndExit(position, atMs, series) {
-  if (!position?.noStop || position.status !== 'OPEN' || position.entryTime == null || atMs == null) return null
+export function squareOffExit(position, atMs, series) {
+  if (position?.status !== 'OPEN' || position.entryTime == null || atMs == null) return null
   const squareOff = paperSquareOffMs(position.entryTime)
   if (atMs < squareOff) return null
   let price = null
@@ -26,6 +27,11 @@ export function dayEndExit(position, atMs, series) {
     if (p.price != null) price = p.price
   }
   return { kind: 'dayEnd', fillPrice: price ?? position.lastPrice ?? position.entryPrice }
+}
+
+/** The same for an open No SL position only (null for any other). */
+export function dayEndExit(position, atMs, series) {
+  return position?.noStop ? squareOffExit(position, atMs, series) : null
 }
 
 /** The reason a paper exit shows, from the kind of hit. */
