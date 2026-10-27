@@ -3,7 +3,7 @@
 // after the minute read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { bsGamma, bsStraddle, gexDay, gexUpTo, impliedYears, netGexAt } from '../src/gex.js'
+import { bsGamma, bsStraddle, gexAgreement, gexDay, gexUpTo, impliedYears, netGexAt } from '../src/gex.js'
 
 const MIN = 60_000
 const OPEN = Date.parse('2026-10-20T09:15:00+05:30')
@@ -166,4 +166,18 @@ test('a minute with no IV for the ATM is left out until there is one; a strike w
   const [m] = gexDay(odd.ce, odd.pe, odd.spots)
   const row = m.strikes.find((r) => r.strike === 25400)
   assert.ok(close(row.call, bsGamma(25000, 25400, 0.12, m.years) * 1e6 * 25000 * 25000 * 0.01, 1))
+})
+
+test('the two signs side by side: agree on a regime, or say they do not', () => {
+  assert.deepEqual(gexAgreement({ net: 5 }, { net: 1 }), { standard: 'positive', buildup: 'positive', agree: true, regime: 'positive' })
+  assert.deepEqual(gexAgreement({ net: -5 }, { net: -1 }), { standard: 'negative', buildup: 'negative', agree: true, regime: 'negative' })
+  assert.deepEqual(gexAgreement({ net: 5 }, { net: -1 }), { standard: 'positive', buildup: 'negative', agree: false, regime: null })
+  assert.deepEqual(gexAgreement(undefined, { net: 1 }), { standard: null, buildup: 'positive', agree: false, regime: null })
+  // On a day: OI written all day (premiums falling) - both signs positive; bought all day - they part.
+  const run = (dir) => {
+    const d = day({ minutes: 20, ceOi: (k, m) => 1e6 + 4e5 * m, peOi: (k, m) => 1e6 + 4e5 * m, price: (side, k, m) => 40 + 80 * Math.exp(-(((k - 25000) / 150) ** 2)) + dir * m })
+    return gexAgreement(gexDay(d.ce, d.pe, d.spots).at(-1), gexDay(d.ce, d.pe, d.spots, { sign: 'buildup' }).at(-1))
+  }
+  assert.equal(run(-1).buildup, 'positive')
+  assert.equal(run(+1).buildup, 'negative')
 })

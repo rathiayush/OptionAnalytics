@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMark
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
-import { gexDay, gexUpTo } from './gex.js'
+import { gexAgreement, gexDay, gexUpTo } from './gex.js'
 
 const { Text } = Typography
 
@@ -149,9 +149,16 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
   // few seconds.
   const inputs = useMemo(() => ({ cePoints, pePoints, spotBars }), [cePoints, pePoints, spotBars])
   const shown = useThrottled(inputs, LIVE_EVERY_MS, asOfMs == null)
-  const day = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign, expiry }), [shown, sign, expiry])
-  const minutes = useMemo(() => gexUpTo(day, asOfMs), [day, asOfMs])
+  // Both signs, always: the card shows the one chosen, the line under the read says whether the other agrees.
+  const standardDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'standard', expiry }), [shown, expiry])
+  const buildupDay = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'buildup', expiry }), [shown, expiry])
+  const minutes = useMemo(() => gexUpTo(sign === 'buildup' ? buildupDay : standardDay, asOfMs), [sign, standardDay, buildupDay, asOfMs])
   const now = minutes.at(-1)
+  const both = useMemo(() => {
+    const standardNow = gexUpTo(standardDay, asOfMs).at(-1)
+    const buildupNow = gexUpTo(buildupDay, asOfMs).at(-1)
+    return { standardNow, buildupNow, ...gexAgreement(standardNow, buildupNow) }
+  }, [standardDay, buildupDay, asOfMs])
 
   const charts = useMemo(() => {
     const line = (pick) => minutes.filter((m) => Number.isFinite(pick(m))).map((m) => ({ time: m.time, value: pick(m) }))
@@ -206,6 +213,16 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry =
         {aboveFlip != null && <> Spot {num(now.spot, 1)} is {aboveFlip ? 'above' : 'below'} the flip {num(now.flip)} ({aboveFlip ? 'the calmer side' : 'moves speed up below it'}).</>}
         {aboveFlip == null && <> No flip within ±3% of spot - the net stays {positive ? 'positive' : 'negative'} there.</>}
         {between && <> Between the put wall {now.putWall} and the call wall {now.callWall}.</>}
+      </div>
+      <div style={{ fontSize: 12, marginBottom: 8 }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
+        <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)} ({both.standard ?? '-'})</span>
+        <Text type="secondary" style={{ fontSize: 12 }}> · OI build-up </Text>
+        <span style={{ color: gexColor(both.buildupNow?.net) }}>{cr(both.buildupNow?.net)} ({both.buildup ?? '-'})</span>
+        {' → '}
+        {both.agree
+          ? <><Tag color={both.regime === 'positive' ? 'green' : 'red'} style={{ margin: '0 6px 0 0' }}>agree</Tag>{both.regime === 'positive' ? 'range / pin day - fade the walls, aim at the max gamma strike.' : 'trend / fast day - trade with the break, do not fade it.'}</>
+          : <><Tag color="gold" style={{ margin: '0 6px 0 0' }}>disagree</Tag>regime unclear - do not lean on the flip; trade the walls and spot structure.</>}
       </div>
       <Row gutter={[16, 4]} style={{ marginBottom: 8, fontSize: 12 }}>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Net GEX </Text><Text strong style={{ fontSize: 12, color: gexColor(now.net) }}>{cr(now.net)}</Text><Text type="secondary" style={{ fontSize: 12 }}> per 1% move</Text></Col>

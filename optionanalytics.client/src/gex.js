@@ -219,3 +219,13 @@ export function gexUpTo(day, asOfMs) {
   while (n < day.length && day[n].time <= clock) n++
   return day.slice(0, n)
 }
+
+/** The two signs' regimes at one minute, side by side: `{ standard, buildup, agree, regime }` - each 'positive' /
+ * 'negative' (null without a reading); `regime` the one they agree on, else null. */
+export function gexAgreement(standardMinute, buildupMinute) {
+  const regimeOf = (m) => (m && Number.isFinite(m.net) ? (m.net >= 0 ? 'positive' : 'negative') : null)
+  const standard = regimeOf(standardMinute)
+  const buildup = regimeOf(buildupMinute)
+  const agree = standard != null && standard === buildup
+  return { standard, buildup, agree, regime: agree ? standard : null }
+}

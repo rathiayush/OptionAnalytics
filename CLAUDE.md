@@ -149,7 +149,8 @@ When adding or changing a strategy:
   Tuesday (2025) / Friday before) checked against Dhan - a rule day with no spot candles was a holiday, the trading day
   before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
   ATM IV (`impliedYears`); the implied T is kept each minute as a check - the card warns when the two disagree. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
-  reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium). Levels: net GEX,
+  reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium); both are worked
+  out always and a line says whether their regimes agree (`gexAgreement` - agree = act on it, disagree = unclear). Levels: net GEX,
   the gamma flip (the spot where the net would cross zero, OI / IV kept, within +/- 3%, nearest spot), call / put wall
   (most call / put gamma x OI), max gamma (most of both). Only ATM +/- 10 strikes count (partial totals). Every minute
   uses only readings up to it (`tests/gex.test.mjs`); the day is worked out once and cut at the replay clock, live at
