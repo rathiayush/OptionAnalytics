@@ -157,6 +157,7 @@ builder.Services.AddSingleton<StoredSpotDataService>();
 // Backs the OI Replay page - stored-data-first for spot/options, with a live Dhan fallback outside
 // local development, and futures ALWAYS a live Dhan call (see its own doc comment for all three).
 builder.Services.AddSingleton<OiReplayService>();
+builder.Services.AddSingleton<OptionExpiryResolver>();
 // Backs the Strike Data page's own OI/IV columns - stored-only (NiftyDataCollectorTimescale), no
 // live Dhan fallback, and unavailable for SENSEX - see its own doc comment for why.
 builder.Services.AddSingleton<StrikeOiIvHistoryService>();

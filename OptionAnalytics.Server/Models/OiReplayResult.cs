@@ -132,6 +132,13 @@ public sealed record OiReplayResult(
     /// feed's own bars are shown instead (from when the server's feed started). Says why, for the page to show.</summary>
     public string? SpotNote { get; init; }
 
+    /// <summary>The expiry date of the options shown (OptionExpiryResolver - Dhan's list from today on, the weekday rule
+    /// checked for holidays before that) - the GEX card's time to expiry. Null when not resolved.</summary>
+    public DateOnly? OptionExpiry { get; init; }
+
+    /// <summary>Where OptionExpiry came from: "dhan", "calendar" or "calendar-holiday" (the rule moved back for a holiday).</summary>
+    public string? OptionExpirySource { get; init; }
+
     public static OiReplayResult Failed(string underlying, DateOnly date, int timeframeMinutes, string error) =>
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);

@@ -124,6 +124,24 @@ test('OI build-up sign: OI written (premium falling) adds to the dealers, OI bou
   assert.ok(close(covered.call, g(last) * (5e6 - 2e6), 1)) // 5M standard, 2M covered
 })
 
+test('with the expiry date, the time to expiry runs to 15:30 IST on that day; the straddle\'s is kept as a check', () => {
+  const d = day({ minutes: 3 })
+  const [m] = gexDay(d.ce, d.pe, d.spots, { expiry: '2026-10-22' })
+  // 09:15 on Tuesday 20 Oct to 15:30 on Thursday 22 Oct: 2 days 6 h 15 min.
+  assert.equal(m.yearsFrom, 'expiry')
+  assert.ok(close(m.years * 365, 2 + 6.25 / 24, 1e-9))
+  assert.ok(close(m.impliedYears * 365, 3, 1e-4)) // the chain was priced at 3 days - the check says so
+  const row = m.strikes.find((r) => r.strike === 25100)
+  assert.ok(close(row.call, bsGamma(25000, 25100, 0.12, m.years) * 1e6 * 25000 * 25000 * 0.01, 1))
+  // A minute later, a minute less.
+  const [, next] = gexDay(d.ce, d.pe, d.spots, { expiry: '2026-10-22' })
+  assert.ok(close((m.years - next.years) * 365 * 24 * 60, 1, 1e-6))
+  // Past the expiry (or none): implied from the straddle.
+  const [past] = gexDay(d.ce, d.pe, d.spots, { expiry: '2026-10-19' })
+  assert.equal(past.yearsFrom, 'straddle')
+  assert.ok(close(past.years * 365, 3, 1e-4))
+})
+
 test('nothing after the minute read is used; the replay clock picks the minutes', () => {
   const d = day({ minutes: 40, spot: (m) => 25000 + 4 * m, ceOi: (k, m) => 1e6 + 1e4 * m })
   const all = gexDay(d.ce, d.pe, d.spots, { sign: 'buildup' })

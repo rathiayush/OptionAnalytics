@@ -6034,7 +6034,7 @@ export default function OiReplayPage() {
                     <GexCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
-                      dayKey={`${underlying}-${result.date}`}
+                      dayKey={`${underlying}-${result.date}`} expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
                     />
                   </Card>
                 </Col>

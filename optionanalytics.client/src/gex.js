@@ -4,9 +4,11 @@
 //
 //  - Gamma (Black-Scholes, no carry): G = phi(d1) / (S x sigma x sqrt(T)), d1 = (ln(S / K) + sigma^2 T / 2) / (sigma sqrt(T)),
 //    sigma = that option's own IV (Dhan sends it per minute, in %; the ATM IV where a strike has none or one far off it).
-//  - T, the time to expiry, is IMPLIED each minute: the T at which the ATM straddle priced at the ATM IV equals the ATM
-//    straddle traded - so it follows whatever day count Dhan's IV was worked out with, and a past day needs no expiry
-//    calendar. A minute where it cannot be implied keeps the last one.
+//  - T, the time to expiry: from the minute to 15:30 IST on the options' expiry day (`expiry` - the server's
+//    OptionExpiryResolver: Dhan's listed expiry from today on, the weekday rule checked for holidays before that), in
+//    years of 365 days. Without an expiry date (or past it) T is IMPLIED: the T at which the ATM straddle priced at the ATM
+//    IV equals the straddle traded (a minute where it cannot be implied keeps the last). The implied T is worked out every
+//    minute anyway (`impliedYears` on each minute) - far off the expiry's, the IVs and the expiry do not agree.
 //  - GEX of a strike's call or put = G x the dealers' OI x S^2 x 1%: the rupees of index the dealers trade for a 1% move.
 //    Dhan's OI is in units (shares), so no lot size. Positive = dealers LONG gamma: they sell rallies and buy dips -
 //    moves are damped (range, pin). Negative = dealers SHORT gamma: they buy rallies and sell dips - moves run (trend).
@@ -34,6 +36,7 @@ const FLIP_STEPS = 60       // the flip is looked for on this grid across spot +
 const IV_BAND = [0.5, 2]   // an option's own IV is used within this share of the ATM IV, else the ATM IV
 
 export const GEX_RANGE_PCT = 3
+const YEAR_MS = 365 * 24 * 3600_000
 
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN
 const pdf = (x) => Math.exp(-x * x / 2) / SQRT_2PI
@@ -144,18 +147,20 @@ function flipOf(options, spot, years, rangePct) {
 /**
  * The day's GEX, one entry per minute of spot (every minute given - pick the replay clock's with `gexAt`).
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
- * `spotBars`: `[{ time (ms), close }]` one per minute. Each minute: `{ time, spot, years, atm, atmIv, net, calls, puts,
- * flip, callWall, putWall, maxGamma, strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1%
- * move; `strikes` high to low). A minute with no ATM straddle and no time to expiry yet is left out.
+ * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
+ * Each minute: `{ time, spot, years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
+ * callWall, putWall, maxGamma, strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move;
+ * `strikes` high to low). A minute with no ATM straddle and no time to expiry yet is left out.
  */
-export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT } = {}) {
+export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
   const ce = sideRows(cePoints)
   const pe = sideRows(pePoints)
   const strikes = [...new Set([...ce.keys(), ...pe.keys()])].sort((a, b) => b - a)
+  const expiryMs = expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null
   const minutes = []
-  let years = null
+  let implied = null
   for (const { t, spot } of spots) {
     const readings = strikes.map((strike) => ({ strike, c: readingAt(ce.get(strike), t), p: readingAt(pe.get(strike), t) }))
     // The ATM: the strike nearest spot with both legs read - its straddle and IV give the time to expiry.
@@ -164,7 +169,9 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     const ivs = [atm.c.iv, atm.p.iv].filter((v) => v > 0).map(ivFraction)
     const atmIv = ivs.length ? ivs.reduce((a, b) => a + b, 0) / ivs.length : null
     if (atmIv == null) continue
-    years = impliedYears(atm.c.price + atm.p.price, spot, atm.strike, atmIv) ?? years
+    implied = impliedYears(atm.c.price + atm.p.price, spot, atm.strike, atmIv) ?? implied
+    const toExpiry = Number.isFinite(expiryMs) && expiryMs > t ? (expiryMs - t) / YEAR_MS : null
+    const years = toExpiry ?? implied
     if (years == null) continue
     const sigmaOf = (row) => {
       const own = row.iv > 0 ? ivFraction(row.iv) : null
@@ -194,7 +201,8 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi: c?.oi ?? null, peOi: p?.oi ?? null, gamma: (cWeight + pWeight) * unit })
     }
     minutes.push({
-      time: t, spot, years, atm: atm.strike, atmIv, net: calls + puts, calls, puts,
+      time: t, spot, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', impliedYears: implied,
+      atm: atm.strike, atmIv, net: calls + puts, calls, puts,
       flip: flipOf(options, spot, years, rangePct),
       callWall: callWall?.strike ?? null, putWall: putWall?.strike ?? null, maxGamma: maxGamma?.strike ?? null,
       strikes: rows,

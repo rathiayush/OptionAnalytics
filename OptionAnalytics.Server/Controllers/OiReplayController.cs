@@ -16,12 +16,24 @@ public sealed class OiReplayController : ControllerBase
     private readonly LiveOptionLegStore? _legs;
     private readonly LoadProgressStore? _progress;
 
-    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, LiveOptionLegStore? legs = null, LoadProgressStore? progress = null)
+    public OiReplayController(OiReplayService service, DhanOptionChainMaster optionChainMaster, LiveOptionLegStore? legs = null, LoadProgressStore? progress = null,
+        OptionExpiryResolver? expiries = null)
     {
         _service = service;
         _optionChainMaster = optionChainMaster;
         _legs = legs;
         _progress = progress;
+        _expiries = expiries;
+    }
+
+    private readonly OptionExpiryResolver? _expiries;
+
+    // The options' expiry date for the GEX card - never a reason for the day's load to fail.
+    private async Task<(DateOnly Date, string Source)?> ExpiryOrNullAsync(string underlying, DateOnly date, string expiryFlag, CancellationToken cancellationToken)
+    {
+        if (_expiries is null) return null;
+        try { return await _expiries.ResolveAsync(underlying, date, expiryFlag, cancellationToken); }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested) { return null; }
     }
 
     /// <summary>What a day load started with ?progressId= is doing - the page polls this while it waits: series done of
@@ -68,7 +80,10 @@ public sealed class OiReplayController : ControllerBase
         if (refresh) _service.RefreshToday(underlying);
         try
         {
+            // The options' expiry (GEX's time to expiry) is looked up alongside the day.
+            var expiry = ExpiryOrNullAsync(underlying, date, expiryFlag, cancellationToken);
             var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive, forceFetch);
+            if (result.Success && await expiry is { } found) result = result with { OptionExpiry = found.Date, OptionExpirySource = found.Source };
             progress?.Finish(result.Success ? null : result.Error);
             return Ok(result);
         }

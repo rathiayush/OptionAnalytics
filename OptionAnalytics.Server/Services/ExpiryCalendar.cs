@@ -69,6 +69,37 @@ public static class ExpiryCalendar
         return result;
     }
 
+    /// <summary>When NSE moved its index options to Tuesday and BSE moved SENSEX to Thursday (contracts expiring from then).</summary>
+    internal static readonly DateOnly TuesdayThursdayFrom = new(2025, 9, 1);
+
+    /// <summary>When BSE moved SENSEX's weekly expiry from Friday to Tuesday.</summary>
+    internal static readonly DateOnly SensexTuesdayFrom = new(2025, 1, 1);
+
+    /// <summary>The weekday an index option expiring on or around <paramref name="expiry"/> expires on: from 1 Sep 2025
+    /// NIFTY / BANKNIFTY (NSE) on Tuesday and SENSEX (BSE) on Thursday; before that NSE on Thursday, SENSEX on Tuesday (2025)
+    /// or Friday (before 2025). No holiday calendar here - a holiday moves an expiry to the trading day before
+    /// (OptionExpiryResolver checks that against Dhan).</summary>
+    public static DayOfWeek OptionExpiryWeekday(string underlying, DateOnly expiry)
+    {
+        var bse = string.Equals(underlying, "SENSEX", StringComparison.OrdinalIgnoreCase) || string.Equals(underlying, "BANKEX", StringComparison.OrdinalIgnoreCase);
+        if (expiry >= TuesdayThursdayFrom) return bse ? DayOfWeek.Thursday : DayOfWeek.Tuesday;
+        if (bse) return expiry >= SensexTuesdayFrom ? DayOfWeek.Tuesday : DayOfWeek.Friday;
+        return DayOfWeek.Thursday;
+    }
+
+    /// <summary>The nearest option expiry on or after <paramref name="date"/> by the weekday rule (OptionExpiryWeekday):
+    /// "WEEK" the next expiry weekday, "MONTH" the last expiry weekday of its month - before any holiday move.</summary>
+    public static DateOnly? NearestOptionExpiry(string underlying, DateOnly date, string expiryFlag)
+    {
+        var monthly = string.Equals(expiryFlag, "MONTH", StringComparison.OrdinalIgnoreCase);
+        for (var d = date; d <= date.AddDays(45); d = d.AddDays(1))
+        {
+            if (d.DayOfWeek != OptionExpiryWeekday(underlying, d)) continue;
+            if (!monthly || d.AddDays(7).Month != d.Month) return d;
+        }
+        return null;
+    }
+
     private static DateOnly FirstOnOrAfter(DateOnly date, DayOfWeek weekday)
     {
         var diff = ((int)weekday - (int)date.DayOfWeek + 7) % 7;

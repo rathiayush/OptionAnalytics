@@ -142,8 +142,13 @@ When adding or changing a strategy:
 - OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
   option points - Black-Scholes gamma (no carry, each option's own IV, the ATM IV where it has none or one outside 0.5 -
   2x the ATM IV) x the dealers' OI (Dhan's OI is in units - no lot size) x S^2 x 1% = rupees of index per 1% move. The
-  time to expiry is IMPLIED each minute from the ATM straddle at the ATM IV (`impliedYears`), so a past day needs no
-  expiry date and it follows Dhan's IV day count. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
+  time to expiry runs to 15:30 IST on the options' expiry day, 365-day years: the run's `optionExpiry` /
+  `optionExpirySource` (`OptionExpiryResolver`, filled by `GET /api/oi-replay/{u}/run`): from today on Dhan's listed expiry
+  (holiday moves included); a past one the weekday rule (`ExpiryCalendar.NearestOptionExpiry` / `OptionExpiryWeekday`:
+  NIFTY / BANKNIFTY Tuesday, SENSEX Thursday, BANKNIFTY monthly the last Tuesday - from 1 Sep 2025; NSE Thursday and SENSEX
+  Tuesday (2025) / Friday before) checked against Dhan - a rule day with no spot candles was a holiday, the trading day
+  before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
+  ATM IV (`impliedYears`); the implied T is kept each minute as a check - the card warns when the two disagree. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
   reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium). Levels: net GEX,
   the gamma flip (the spot where the net would cross zero, OI / IV kept, within +/- 3%, nearest spot), call / put wall
   (most call / put gamma x OI), max gamma (most of both). Only ATM +/- 10 strikes count (partial totals). Every minute

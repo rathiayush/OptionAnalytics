@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Col, Popover, Row, Segmented, Space, Tag, Tooltip, Typography } from 'antd'
+import dayjs from 'dayjs'
 import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
@@ -36,6 +37,10 @@ function useThrottled(value, ms, throttle) {
 
 const cr = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v) / CR).toLocaleString('en-IN')} Cr` : '-')
 const num = (v, digits = 0) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
+const EXPIRY_SOURCES = { dhan: 'Dhan', calendar: 'weekday rule', 'calendar-holiday': 'weekday rule, moved for a holiday' }
+// The straddle's own time to expiry is far off the expiry date's: more than half a day and a third apart.
+const disagrees = (a, b) => Number.isFinite(a) && Number.isFinite(b) && Math.abs(a - b) > Math.max(0.5, 0.33 * Math.max(a, b))
+
 const gexColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : AXIS_COLOR)
 
 // The net GEX through the day around zero: green above (dealers long gamma), red below (short gamma).
@@ -126,7 +131,7 @@ function StrikeBars({ minute }) {
 
 const HOW_TO_READ = (
   <div style={{ maxWidth: 440, fontSize: 12 }}>
-    <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma (Black-Scholes, each option&apos;s IV) × the dealers&apos; OI × spot² × 1%, in ₹ crore. The time to expiry is implied from the ATM straddle and IV each minute.</p>
+    <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma (Black-Scholes, each option&apos;s IV) × the dealers&apos; OI × spot² × 1%, in ₹ crore. The time to expiry runs to 15:30 on the expiry day (NIFTY Tuesday, SENSEX Thursday, BANKNIFTY the month&apos;s last Tuesday - Dhan&apos;s own date from today on, holidays checked before that).</p>
     <p style={{ margin: '0 0 6px' }}><b>Net GEX positive</b>: dealers are long gamma - they sell rallies and buy dips, so moves are damped: range, pin. <b>Negative</b>: they are short gamma - they buy rallies and sell dips, so moves run: trend, fast days.</p>
     <p style={{ margin: '0 0 6px' }}><b>Gamma flip</b>: the spot at which the net GEX would cross zero. Above it the market tends to be calmer; below it moves speed up. <b>Call wall (CW)</b> / <b>Put wall (PW)</b>: the most call / put gamma × OI - resistance / support. <b>Max gamma (MG)</b>: the most of both - the magnet, above all on expiry day.</p>
     <p style={{ margin: '0 0 6px' }}><b>Sign.</b> Who the dealers are is not in the data. Standard: dealers long the calls, short the puts. OI build-up: the OI at the first reading as standard, then each minute&apos;s OI change signed by the premium - added while it fell = written by customers (dealers long), added while it rose = bought (dealers short). The premium also moves with spot, so it is a rough read.</p>
@@ -138,13 +143,13 @@ const HOW_TO_READ = (
  * GEX (gamma exposure) from the day's option OI, IV and premium (gex.js), up to the replay clock (`asOfMs`; null - live -
  * every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, height = 260 }) {
+export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, expiry = null, expirySource = null, height = 260 }) {
   const [sign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
   // Every minute of the day once (each uses only what was known at it), then cut at the clock - live, again at most every
   // few seconds.
   const inputs = useMemo(() => ({ cePoints, pePoints, spotBars }), [cePoints, pePoints, spotBars])
   const shown = useThrottled(inputs, LIVE_EVERY_MS, asOfMs == null)
-  const day = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign }), [shown, sign])
+  const day = useMemo(() => gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign, expiry }), [shown, sign, expiry])
   const minutes = useMemo(() => gexUpTo(day, asOfMs), [day, asOfMs])
   const now = minutes.at(-1)
 
@@ -209,8 +214,20 @@ export function GexCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, height =
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Call wall </Text><span style={{ color: UP_COLOR }}>{now.callWall ?? '-'}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}</span></Col>
-        <Col><Text type="secondary" style={{ fontSize: 12 }}>{istHhmm(now.time)} · ATM {now.atm} · IV {num(now.atmIv * 100, 1)} · ≈ {num(now.years * 365, 1)} days to expiry (implied)</Text></Col>
+        <Col>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {istHhmm(now.time)} · ATM {now.atm} · IV {num(now.atmIv * 100, 1)} ·{' '}
+            {now.yearsFrom === 'expiry'
+              ? <>expiry {dayjs(expiry).format('ddd D MMM')} ({EXPIRY_SOURCES[expirySource] ?? 'weekday rule'}) - {num(now.years * 365, 2)} days left</>
+              : <>≈ {num(now.years * 365, 1)} days to expiry (implied from the ATM straddle{expiry ? ' - past the expiry date' : ' - no expiry date'})</>}
+          </Text>
+        </Col>
       </Row>
+      {now.yearsFrom === 'expiry' && disagrees(now.years * 365, now.impliedYears * 365) && (
+        <Text type="warning" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
+          The ATM straddle at Dhan&apos;s IV prices ≈ {num(now.impliedYears * 365, 1)} days, not {num(now.years * 365, 1)} - the IVs or the expiry date may be off; read the levels with care.
+        </Text>
+      )}
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={10}>
           <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
