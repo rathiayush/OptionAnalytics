@@ -5559,6 +5559,9 @@ export default function OiReplayPage() {
       {cePremiumOffset !== -pePremiumOffset && <Tag>Mixed</Tag>}
     </>
   )
+  // Built on every render, like spotChart above, so it must not assume a loaded day: live candles and premiums keep
+  // arriving while today's fetch is still running or has failed (result null), and reading result.date then crashed
+  // the whole page.
   const premiumCharts = (
     <>
       <Col xs={24} md={12}>
@@ -5572,13 +5575,13 @@ export default function OiReplayPage() {
             : !cePremiumRevealed
               ? <Empty description={`No CE ${cePremiumStrike ?? ''} premium data yet today.`} />
               : (
-                <ChartErrorBoundary key={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}>
+                <ChartErrorBoundary key={`premium-ce-${underlying}-${result?.date}-${cePremiumOffset}`}>
                   <PremiumEmaChart
                     points={cePremiumPoints} asOfMs={asOfMs}
                     timeframe={cePremiumTimeframe} onTimeframeChange={setCePremiumTimeframe}
                     ema1Period={cePremiumEma1} onEma1PeriodChange={setCePremiumEma1}
                     ema2Period={cePremiumEma2} onEma2PeriodChange={setCePremiumEma2}
-                    dayKey={`premium-ce-${underlying}-${result.date}-${cePremiumOffset}`}
+                    dayKey={`premium-ce-${underlying}-${result?.date}-${cePremiumOffset}`}
                     showVwap={showVwap}
                     height={320}
                   />
@@ -5597,13 +5600,13 @@ export default function OiReplayPage() {
             : !pePremiumRevealed
               ? <Empty description={`No PE ${pePremiumStrike ?? ''} premium data yet today.`} />
               : (
-                <ChartErrorBoundary key={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}>
+                <ChartErrorBoundary key={`premium-pe-${underlying}-${result?.date}-${pePremiumOffset}`}>
                   <PremiumEmaChart
                     points={pePremiumPoints} asOfMs={asOfMs}
                     timeframe={pePremiumTimeframe} onTimeframeChange={setPePremiumTimeframe}
                     ema1Period={pePremiumEma1} onEma1PeriodChange={setPePremiumEma1}
                     ema2Period={pePremiumEma2} onEma2PeriodChange={setPePremiumEma2}
-                    dayKey={`premium-pe-${underlying}-${result.date}-${pePremiumOffset}`}
+                    dayKey={`premium-pe-${underlying}-${result?.date}-${pePremiumOffset}`}
                     showVwap={showVwap}
                     height={320}
                   />
