@@ -242,7 +242,11 @@ When adding or changing a strategy:
   line and regime markers read each candle's OI at its close (`oiAtCandleCloses`). The straddle card's charts
   (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's. The previous
   day's volume profile is drawn as HORIZONTAL BARS behind the candles on the spot and both entry charts as well as the
-  futures chart (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
+  futures chart, and the futures chart's own HVN / LVN are read by `profiles.histogramNodes` - the SAME rule the server
+  uses for the spot profile (a strict local peak / trough of the raw rows, a run of equal rows counted once), NOT the
+  stricter `profileNodes` the strategies read (`lvnRun`): that one smooths, wants 1.3x / 0.6x the mean and a trough
+  BETWEEN the peaks, which on a profile built by spreading each minute's volume over its range finds no LVN at all on
+  a real day. (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
   POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
   "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and

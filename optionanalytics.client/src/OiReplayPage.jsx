@@ -32,7 +32,7 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
-import { tpoRowFor, profileNodes, binsProfile } from './profiles.js'
+import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
@@ -4560,11 +4560,12 @@ export default function OiReplayPage() {
     return () => { cancelled = true }
   }, [futuresProfileOn, prevFuturesKey])
   const prevFuturesShown = futuresProfileOn && prevFutures?.key === prevFuturesKey ? prevFutures : null
-  // With its one HVN and one LVN (profileNodes - the same rule as the entry charts' spot profile).
+  // With its one HVN and one LVN, read the same way the entry charts' spot levels are (histogramNodes = the
+  // server's own rule) - so the two charts' levels mean the same thing side by side.
   const futuresProfile = useMemo(() => {
     if (!prevFuturesShown?.bars?.length) return null
     const profile = volumeProfileFromCandles(prevFuturesShown.bars, futuresProfileRow)
-    return { ...profile, ...profileNodes(profile) }
+    return { ...profile, ...histogramNodes(profile) }
   }, [prevFuturesShown, futuresProfileRow])
   const futuresProfileLabel = prevFuturesShown?.date ? ` (${fmtDateOnly(prevFuturesShown.date)})` : ''
   const futuresProfileOtherContract = prevFuturesShown?.expiry && result?.futuresExpiry

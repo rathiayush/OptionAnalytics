@@ -244,6 +244,48 @@ export async function fetchPreviousSession(underlying, date, rowSize, expiryQuer
   return null
 }
 
+/** The high / low volume nodes of a histogram by THE SAME RULE THE SERVER USES for the previous day's SPOT
+ *  profile (OiReplayService.ComputeVolumeProfile): a strict local peak / trough of the raw rows - higher (or
+ *  lower) than both its neighbours - the two biggest peaks besides the POC as HVN, the two thinnest troughs as
+ *  LVN, the histogram's own two edges left out (no second neighbour to compare against).
+ *
+ *  Why not profileNodes: that one smooths over three rows, asks a peak to be 1.3x the mean and a trough 0.6x,
+ *  and only counts a trough BETWEEN the POC and the peaks - a tight rule tuned to the footprint profile the
+ *  strategies read (`lvnRun` among them), which on a profile built by spreading each minute's volume over its
+ *  range is strict enough to find no LVN at all on a real day. The futures chart draws its levels beside the
+ *  spot chart's, so it reads them the same way the spot chart's come out rather than more strictly.
+ *  `{ hvn, lvn, hvnTop, lvnTop }`, lowest price first in the lists; the tops are the strongest of each. */
+export function histogramNodes(profile) {
+  const rows = profile?.rows ?? []
+  if (rows.length < 3) return { hvn: [], lvn: [], hvnTop: null, lvnTop: null }
+  const peaks = []
+  const troughs = []
+  // A run of rows at the SAME volume counts once, compared against the nearest different row each side: a
+  // profile built by spreading each minute's volume over its range flattens into little plateaus, and a
+  // strictly-greater-than-both-neighbours test walks straight past every one of them.
+  for (let i = 1; i < rows.length - 1;) {
+    let j = i
+    while (j + 1 < rows.length - 1 && rows[j + 1].total === rows[i].total) j++
+    const before = rows[i - 1].total
+    const after = rows[j + 1].total
+    const at = rows[Math.floor((i + j) / 2)]
+    if (at.price !== profile.poc) {
+      if (rows[i].total > before && rows[i].total > after) peaks.push(at)
+      else if (rows[i].total < before && rows[i].total < after) troughs.push(at)
+    }
+    i = j + 1
+  }
+  const biggest = peaks.sort((a, b) => b.total - a.total).slice(0, 2)
+  const thinnest = troughs.sort((a, b) => a.total - b.total).slice(0, 2)
+  const prices = (list) => list.map((r) => r.price).sort((a, b) => a - b)
+  return {
+    hvn: prices(biggest),
+    lvn: prices(thinnest),
+    hvnTop: biggest[0]?.price ?? null,
+    lvnTop: thinnest[0]?.price ?? null,
+  }
+}
+
 /** The SERVER's previous-day spot volume profile (`bins` of each bin's MIDDLE price and volume, with its own
  *  poc / vah / val) as the shape VolumeProfilePrimitive draws - rows at each bin's BOTTOM price, `rowSize` tall,
  *  with no buy / sell split (the bins carry none, so they are drawn in one neutral colour) and the levels moved

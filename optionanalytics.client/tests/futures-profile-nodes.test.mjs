@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { volumeProfileFromCandles } from '../src/orderFlowMath.js'
-import { profileNodes, sessionVolumeProfile } from '../src/profiles.js'
+import { histogramNodes, profileNodes, sessionVolumeProfile } from '../src/profiles.js'
 import { setProfileLines } from '../src/volumeProfilePrimitive.js'
 import { PREV_PROFILE } from '../src/profileColors.js'
 
@@ -36,12 +36,46 @@ test('sessionVolumeProfile keeps its nodes (the same rule, now shared)', () => {
   assert.deepEqual([vp.hvn, vp.lvn, vp.hvnTop, vp.lvnTop], [[], [], null, null])
 })
 
+// The futures chart reads its nodes the way the SPOT one does (the server's rule), not the stricter rule the
+// strategies read - a profile built by spreading each minute's volume over its range is smooth enough that the
+// strict rule finds no LVN on a real day, and the two charts' levels sit side by side.
+test('the futures nodes are a strict local peak / trough of the raw rows, the POC and the edges left out', () => {
+  const rows = [
+    { price: 100, total: 10 }, { price: 101, total: 90 }, { price: 102, total: 40 },
+    { price: 103, total: 70 }, { price: 104, total: 20 }, { price: 105, total: 55 }, { price: 106, total: 5 },
+  ]
+  const n = histogramNodes({ rows, poc: 101 })
+  assert.deepEqual(n.hvn, [103, 105])      // 90 is the POC's own row; 103 and 105 are the other peaks
+  assert.equal(n.hvnTop, 103)              // the bigger of them
+  assert.deepEqual(n.lvn, [102, 104])      // the troughs between them
+  assert.equal(n.lvnTop, 104)              // the thinner of them
+})
+
+test('a smooth, single-peaked day still gets its nodes where the strict rule gives none', () => {
+  // One hump: the strict rule (profileNodes) wants a peak 1.3x the mean and a trough BETWEEN the peaks.
+  const rows = [10, 30, 70, 120, 70, 30, 10].map((total, i) => ({ price: 100 + i, total }))
+  const profile = { rows, poc: 103 }
+  assert.equal(profileNodes(profile).lvnTop, null)
+  // ...and the server's rule gives none either - there is no interior trough at all. Nothing is invented.
+  assert.equal(histogramNodes(profile).lvnTop, null)
+  // Two humps with a dip between them: the futures rule finds it, the strict one does not (the dip is not
+  // under 0.6x the mean once the humps are close).
+  const twoHumps = [10, 60, 100, 70, 100, 60, 10].map((total, i) => ({ price: 100 + i, total }))
+  assert.equal(histogramNodes({ rows: twoHumps, poc: 102 }).lvnTop, 103)
+})
+
+test('too few rows, or none, is no nodes rather than a crash', () => {
+  assert.deepEqual(histogramNodes({ rows: [], poc: null }), { hvn: [], lvn: [], hvnTop: null, lvnTop: null })
+  assert.deepEqual(histogramNodes(null), { hvn: [], lvn: [], hvnTop: null, lvnTop: null })
+  assert.deepEqual(histogramNodes({ rows: [{ price: 1, total: 1 }, { price: 2, total: 2 }] }).hvn, [])
+})
+
 test('the futures chart draws POC, VAH, VAL, HVN and LVN in the previous session\'s colours', () => {
   const created = []
   const removed = []
   const series = { createPriceLine: (o) => { created.push(o); return o }, removePriceLine: (l) => removed.push(l) }
   const profile = { ...volumeProfileFromCandles(twoAreaDay(), 2) }
-  Object.assign(profile, profileNodes(profile))
+  Object.assign(profile, histogramNodes(profile))
   const lines = setProfileLines(series, ['old'], profile, 2, ' (27 Oct)')
   assert.deepEqual(removed, ['old'])
   const byTitle = Object.fromEntries(lines.map((l) => [l.title, l]))
@@ -57,7 +91,7 @@ test('the futures chart draws POC, VAH, VAL, HVN and LVN in the previous session
 test('a profile without nodes draws just POC / VAH / VAL', () => {
   const series = { createPriceLine: (o) => o, removePriceLine: () => {} }
   const profile = volumeProfileFromCandles([{ open: 100, close: 102, high: 102, low: 100, volume: 1000 }], 2)
-  const titles = setProfileLines(series, [], { ...profile, ...profileNodes(profile) }, 2).map((l) => l.title).sort()
+  const titles = setProfileLines(series, [], { ...profile, ...histogramNodes(profile) }, 2).map((l) => l.title).sort()
   assert.deepEqual(titles, ['POC', 'VAH', 'VAL'])
 })
 
