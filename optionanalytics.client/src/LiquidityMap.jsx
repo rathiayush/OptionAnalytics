@@ -1,6 +1,7 @@
 import { Empty, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { suddenWallText } from './suddenOi.js'
+import { FoldText } from './FoldText.jsx'
 
 const { Text } = Typography
 
@@ -93,11 +94,13 @@ export function LiquidityMapCard({ map, sudden = [], basis = null, estimated }) 
           </Tooltip>
         ))}
       </div>
-      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-        Read off the last {map.windowMin} min of the heatmap: walls that stay (3x+ the book&apos;s median, in 60%+ of the snapshots), zones of
-        high / low resting liquidity, and what lines up at each wall (OI walls, sudden OI walls, POC / value area / HVN, VWAP, the previous
-        day&apos;s high / low, icebergs). The read at the top comes from the wall price is at and the last 3 minutes&apos; footprints.
-      </Text>
+      <FoldText id="liquidityMap.note" label="how the map is read" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          Read off the last {map.windowMin} min of the heatmap: walls that stay (3x+ the book&apos;s median, in 60%+ of the snapshots), zones of
+          high / low resting liquidity, and what lines up at each wall (OI walls, sudden OI walls, POC / value area / HVN, VWAP, the previous
+          day&apos;s high / low, icebergs). The read at the top comes from the wall price is at and the last 3 minutes&apos; footprints.
+        </Text>
+      </FoldText>
     </Space>
   )
 }

@@ -4,6 +4,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR } from './shared.jsx'
 import { formatVolume } from './OrderFlowCharts.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
+import { FoldText } from './FoldText.jsx'
 
 const { Text } = Typography
 const fmt = (v) => (v == null ? '-' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }))
@@ -98,11 +99,13 @@ export function ProfilesCard({ prevDate, prevVp, todayVp, prevTpo, todayTpo, las
           <MarketProfileChart prevTpo={prevTpo} todayTpo={todayTpo} range={range} lastPrice={lastPrice} nav={nav} hoverPrice={hoverPrice} onHover={setHoverPrice} height={height} />
         </Col>
       </Row>
-      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-        Both charts share the price axis - wheel to zoom, drag to pan, double-click to fit. TPO letters = 30-minute periods (A = 09:15) ·{' '}
-        <span style={{ color: UP_COLOR }}>A B</span> = initial balance · <span style={{ color: POC }}>yellow</span> = POC · bright = value area ·{' '}
-        <span style={{ color: DOWN_COLOR }}>◂</span> = single print · <span style={{ color: PRICE }}>blue</span> = last price.
-      </Text>
+      <FoldText id="profiles.note" label="the charts' key" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          Both charts share the price axis - wheel to zoom, drag to pan, double-click to fit. TPO letters = 30-minute periods (A = 09:15) ·{' '}
+          <span style={{ color: UP_COLOR }}>A B</span> = initial balance · <span style={{ color: POC }}>yellow</span> = POC · bright = value area ·{' '}
+          <span style={{ color: DOWN_COLOR }}>◂</span> = single print · <span style={{ color: PRICE }}>blue</span> = last price.
+        </Text>
+      </FoldText>
     </Card>
   )
 }

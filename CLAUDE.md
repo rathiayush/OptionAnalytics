@@ -284,6 +284,15 @@ When adding or changing a strategy:
   to count as typing, so after ticking VWAP or picking a timeframe B / S did nothing (`tests/quick-views.test.mjs`).
 - OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
   its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
+- The cards' TEXT BLOCKS fold to one line and open again (`FoldText.jsx` - a ▸ / ▾ button, the folded line its `summary`
+  or its own text cut with an ellipsis, a click on it opens it; `useFold.js`; `foldText.js` the pure rules): the reads
+  (straddle read and numbers, GEX regime and the two signs' verdict, the checklist's reasons, the live-order note) start
+  OPEN, the explanations (heatmap, ladder, futures chart notes, liquidity map, profiles, footprint, Market Read, paper
+  trades, the page intro, the chart captions) start FOLDED. Each block keeps its own click (`optionanalytics.fold.<id>` -
+  an account preference like every other, `prefsSync.js`); the controls card's "Text: Fold all / Open all" sets
+  `optionanalytics.foldAll` and drops every block's own click, so blocks not on the page follow too. An explanation keeps
+  the `oa-note` class on its FoldText, so "Compact" still hides it whole. A new block of text on a card: wrap it in
+  `FoldText` with its own id (`tests/fold-text.test.mjs`).
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

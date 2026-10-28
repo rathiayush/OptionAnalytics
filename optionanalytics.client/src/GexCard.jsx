@@ -9,6 +9,7 @@ import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
 import { CardFitBox, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { gexAgreement, gexProfile, gexUpTo } from './gex.js'
+import { FoldText } from './FoldText.jsx'
 
 const { Text } = Typography
 
@@ -291,27 +292,32 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   return (
     <>
       {controls}
-      <div style={{ borderLeft: `3px solid ${gexColor(now.net)}`, padding: '4px 10px', marginBottom: 8, fontSize: 12 }}>
-        <Tag color={positive ? 'green' : 'red'} style={{ marginRight: 8 }}>{positive ? 'Positive gamma' : 'Negative gamma'}</Tag>
-        {positive
-          ? 'Dealers long gamma: they sell rallies and buy dips - moves are damped (range, pin).'
-          : 'Dealers short gamma: they buy rallies and sell dips - moves run (trend, fast moves).'}
-        {aboveFlip != null && <> Spot {num(now.spot, 1)} is {aboveFlip ? 'above' : 'below'} the flip {num(now.flip)} ({aboveFlip ? 'the calmer side' : 'moves speed up below it'}).</>}
-        {aboveFlip == null && <> No flip within ±3% of spot and the strikes loaded - the net stays {positive ? 'positive' : 'negative'} there.</>}
-        {(now.callWall != null || now.putWall != null) && (
-          <> Range: {now.putWall != null ? <>put wall {now.putWall}{away(now.putWall)} below</> : 'no put wall below'} · {now.callWall != null ? <>call wall {now.callWall}{away(now.callWall)} above</> : 'no call wall above'}{now.maxGamma != null ? <>; magnet {now.maxGamma}{away(now.maxGamma)}</> : ''}.</>
-        )}
-      </div>
-      <div style={{ fontSize: 12, marginBottom: 8 }}>
-        <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
-        <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)} ({both.standard ?? '-'})</span>
-        <Text type="secondary" style={{ fontSize: 12 }}> · OI build-up </Text>
-        <span style={{ color: gexColor(both.buildupNow?.net) }}>{cr(both.buildupNow?.net)} ({both.buildup ?? '-'})</span>
-        {' → '}
-        {both.agree
-          ? <><Tag color={both.regime === 'positive' ? 'green' : 'red'} style={{ margin: '0 6px 0 0' }}>agree</Tag>{both.regime === 'positive' ? 'range / pin day - fade the walls, aim at the max gamma strike.' : 'trend / fast day - trade with the break, do not fade it.'}</>
-          : <><Tag color="gold" style={{ margin: '0 6px 0 0' }}>disagree</Tag>regime unclear - do not lean on the flip; trade the walls and spot structure.</>}
-      </div>
+      {/* The read, the two signs' verdict and the notes each fold to one line (FoldText - remembered, "Fold all" on the page). */}
+      <FoldText id="gex.read" label="the read" defaultOpen style={{ marginBottom: 8 }}>
+        <div style={{ borderLeft: `3px solid ${gexColor(now.net)}`, padding: '4px 10px', fontSize: 12 }}>
+          <Tag color={positive ? 'green' : 'red'} style={{ marginRight: 8 }}>{positive ? 'Positive gamma' : 'Negative gamma'}</Tag>
+          {positive
+            ? 'Dealers long gamma: they sell rallies and buy dips - moves are damped (range, pin).'
+            : 'Dealers short gamma: they buy rallies and sell dips - moves run (trend, fast moves).'}
+          {aboveFlip != null && <> Spot {num(now.spot, 1)} is {aboveFlip ? 'above' : 'below'} the flip {num(now.flip)} ({aboveFlip ? 'the calmer side' : 'moves speed up below it'}).</>}
+          {aboveFlip == null && <> No flip within ±3% of spot and the strikes loaded - the net stays {positive ? 'positive' : 'negative'} there.</>}
+          {(now.callWall != null || now.putWall != null) && (
+            <> Range: {now.putWall != null ? <>put wall {now.putWall}{away(now.putWall)} below</> : 'no put wall below'} · {now.callWall != null ? <>call wall {now.callWall}{away(now.callWall)} above</> : 'no call wall above'}{now.maxGamma != null ? <>; magnet {now.maxGamma}{away(now.maxGamma)}</> : ''}.</>
+          )}
+        </div>
+      </FoldText>
+      <FoldText id="gex.agreement" label="the two signs' verdict" defaultOpen style={{ marginBottom: 8 }}>
+        <div style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
+          <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)} ({both.standard ?? '-'})</span>
+          <Text type="secondary" style={{ fontSize: 12 }}> · OI build-up </Text>
+          <span style={{ color: gexColor(both.buildupNow?.net) }}>{cr(both.buildupNow?.net)} ({both.buildup ?? '-'})</span>
+          {' → '}
+          {both.agree
+            ? <><Tag color={both.regime === 'positive' ? 'green' : 'red'} style={{ margin: '0 6px 0 0' }}>agree</Tag>{both.regime === 'positive' ? 'range / pin day - fade the walls, aim at the max gamma strike.' : 'trend / fast day - trade with the break, do not fade it.'}</>
+            : <><Tag color="gold" style={{ margin: '0 6px 0 0' }}>disagree</Tag>regime unclear - do not lean on the flip; trade the walls and spot structure.</>}
+        </div>
+      </FoldText>
       <Row gutter={[16, 4]} style={{ marginBottom: 8, fontSize: 12 }}>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Net GEX </Text><Text strong style={{ fontSize: 12, color: gexColor(now.net) }}>{cr(now.net)}</Text><Text type="secondary" style={{ fontSize: 12 }}> per 1% move</Text></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Calls </Text><span style={{ color: gexColor(now.calls) }}>{cr(now.calls)}</span><Text type="secondary" style={{ fontSize: 12 }}> · Puts </Text><span style={{ color: gexColor(now.puts) }}>{cr(now.puts)}</span></Col>
@@ -322,26 +328,32 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Call wall </Text><span style={{ color: UP_COLOR }}>{now.callWall ?? '-'}{away(now.callWall)}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}{away(now.putWall)}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}{away(now.maxGamma)}</span></Col>
-        <Col>
-          <Text className="oa-note" type="secondary" style={{ fontSize: 12 }}>
-            {istHhmm(now.time)} · ATM {now.atm} · ATM IV {num(now.atmIv * 100, 1)} (from the premiums) · forward {num(now.forward, 1)} ({now.forward >= now.spot ? '+' : '−'}{num(Math.abs(now.forward - now.spot), 1)} carry) ·{' '}
-            {now.yearsFrom === 'expiry'
-              ? <>expiry {dayjs(expiry).format('ddd D MMM')} ({EXPIRY_SOURCES[expirySource] ?? 'weekday rule'}) - {num(now.years * 365, 2)} days left</>
-              : <>≈ {num(now.years * 365, 1)} days to expiry (implied from the ATM straddle{expiry ? ' - past the expiry date' : ' - no expiry date'})</>}
-          </Text>
+        <Col flex="1 1 320px" style={{ minWidth: 0 }}>
+          <FoldText id="gex.basis" label="how it is worked out" className="oa-note">
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {istHhmm(now.time)} · ATM {now.atm} · ATM IV {num(now.atmIv * 100, 1)} (from the premiums) · forward {num(now.forward, 1)} ({now.forward >= now.spot ? '+' : '−'}{num(Math.abs(now.forward - now.spot), 1)} carry) ·{' '}
+              {now.yearsFrom === 'expiry'
+                ? <>expiry {dayjs(expiry).format('ddd D MMM')} ({EXPIRY_SOURCES[expirySource] ?? 'weekday rule'}) - {num(now.years * 365, 2)} days left</>
+                : <>≈ {num(now.years * 365, 1)} days to expiry (implied from the ATM straddle{expiry ? ' - past the expiry date' : ' - no expiry date'})</>}
+            </Text>
+          </FoldText>
         </Col>
       </Row>
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={10}>
-          <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
-          <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
+          <FoldText id="gex.strikeNote" label="the table's note">
+            <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
+          </FoldText>
           {/* In a card the trader sized, the table takes its share of the card and scrolls inside it (CardFitBox). */}
           <CardFitBox min={100}>
             <StrikeBars minute={now} />
           </CardFitBox>
           <div style={{ marginTop: 10 }}>
-            <Text strong style={{ fontSize: 12 }}>GEX profile</Text>
-            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>
+            <FoldText id="gex.profileNote" label="the profile's note">
+              <Text strong style={{ fontSize: 12 }}>GEX profile</Text>
+              <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>
+            </FoldText>
             <ProfileChart minute={now} />
           </div>
         </Col>
