@@ -35,6 +35,8 @@ services:
       Storage__ScannerLogPath: /app/data/scanner-log
       # OI Replay's paper positions per account and day, the same in every browser (PaperPositionStore).
       Storage__PaperPositionsPath: /app/data/paper-positions
+      # Each account's page preferences - layouts, cards, timeframes, switches - kept through deploys (UserPreferencesStore).
+      Storage__PreferencesPath: /app/data/preferences
       # Live trades the server closes itself at the scanner's time stop / 15:10 (LiveTimeExitStore).
       Storage__LiveTimeExitsPath: /app/data/live-time-exits.json
       # Who opens which page, when and from where (the admin Visitors page - VisitorLog), 90 days; and the

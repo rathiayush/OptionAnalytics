@@ -1721,8 +1721,9 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
 export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null, spotBars = null, step = null }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
-  // timeframe picker on the page.
-  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card - whose
+  // alerts read it - the quick view, the External page's tabs).
+  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = usePersistedState(`optionanalytics.oiReplay.bucket.${show}`, 1)
   // The totals (CE / PE / net) as numbers (default) or as a heatmap - remembered.
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
@@ -3520,7 +3521,7 @@ export default function OiReplayPage() {
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
   // Only meaningful for a HISTORICAL (non-today) day - Dhan's rolling-option REST endpoint (what a
   // past day's CE/PE data ultimately comes from) only ever accepts these two literal flags.
-  const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  const [expiryFlag, setExpiryFlag] = usePersistedState('optionanalytics.oiReplay.expiryFlag', 'WEEK')
   // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall, only meaningful
   // while isLive (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
   // user's own explicit "it's going to next expiry, add an expiry filter" ask for the live page this
@@ -3533,7 +3534,7 @@ export default function OiReplayPage() {
   // the real calendar date "Weekly"/"Monthly" resolve to, shown as a tag on the matching option.
   const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null, expiries: [] })
   const [date, setDate] = useState(null)
-  const [speedMs, setSpeedMs] = useState(500)
+  const [speedMs, setSpeedMs] = usePersistedState('optionanalytics.oiReplay.speedMs', 500)
 
   // Two EmaChart instances, running SIDE BY SIDE alongside the main (typically 15-min) chart - the
   // user's own "I need basically three charts... 15, 3 and 1 min... according to their tick" ask:
@@ -3542,18 +3543,18 @@ export default function OiReplayPage() {
   // own timeframe/EMA controls (see EmaChart itself), so either can still be retuned to something
   // else entirely if wanted. Deliberately NOT persisted the way the main timeframe is - a quick
   // per-session tuning knob, not a durable preference.
-  const [chartBTimeframe, setChartBTimeframe] = useState(3)
-  const [chartBEma1, setChartBEma1] = useState(9)
-  const [chartBEma2, setChartBEma2] = useState(15)
+  const [chartBTimeframe, setChartBTimeframe] = usePersistedState('optionanalytics.oiReplay.chartB.timeframe', 3)
+  const [chartBEma1, setChartBEma1] = usePersistedState('optionanalytics.oiReplay.chartB.ema1', 9)
+  const [chartBEma2, setChartBEma2] = usePersistedState('optionanalytics.oiReplay.chartB.ema2', 15)
   // ATM OI change over the last N bars of chart B's OWN timeframe - shown as a small overlay
   // directly on chart B's own Card (not a separate panel) - the replay clock (asOfMs) keeps this
   // from ever revealing more than the rest of the page has "played" up to.
-  const [oiLookbackBars, setOiLookbackBars] = useState(3)
+  const [oiLookbackBars, setOiLookbackBars] = usePersistedState('optionanalytics.oiReplay.chartB.oiLookbackBars', 3)
   // Total OI Lookback Table's own state (Day OI Accumulation card, below) - deliberately separate
   // from chart B's own oiLookbackBars above: several bar counts at once, against the WHOLE chain's
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
-  const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
-  const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
+  const [totalOiLookbackBars, setTotalOiLookbackBars] = usePersistedState('optionanalytics.oiReplay.dayOi.lookbackBars', DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+  const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = usePersistedState('optionanalytics.oiReplay.dayOi.lookbackTimeframe', 1)
   // The Day OI card's day read and its lookback table each fold to one line - remembered.
   const [dayReadOpen, setDayReadOpen] = usePersistedState(STORED_DAY_READ_OPEN, true)
   const [lookbackOpen, setLookbackOpen] = usePersistedState(STORED_LOOKBACK_OPEN, true)
@@ -3573,21 +3574,21 @@ export default function OiReplayPage() {
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
   // right above the chart already give the CURRENT since-open figure - the chart's own job here is
   // showing its TRAJECTORY, one view at a time, not re-deriving the same number again).
-  const [dayOiChartMode, setDayOiChartMode] = useState('total')
-  const [chartCTimeframe, setChartCTimeframe] = useState(1)
-  const [chartCEma1, setChartCEma1] = useState(9)
-  const [chartCEma2, setChartCEma2] = useState(15)
+  const [dayOiChartMode, setDayOiChartMode] = usePersistedState('optionanalytics.oiReplay.dayOi.chartMode', 'total')
+  const [chartCTimeframe, setChartCTimeframe] = usePersistedState('optionanalytics.oiReplay.chartC.timeframe', 1)
+  const [chartCEma1, setChartCEma1] = usePersistedState('optionanalytics.oiReplay.chartC.ema1', 9)
+  const [chartCEma2, setChartCEma2] = usePersistedState('optionanalytics.oiReplay.chartC.ema2', 15)
 
   // Option premium chart's own CE/PE strike pickers - offsets from ATM (see StrikePicker.jsx),
   // independently selectable, both defaulting to ATM itself.
-  const [cePremiumOffset, setCePremiumOffset] = useState(0)
-  const [pePremiumOffset, setPePremiumOffset] = useState(0)
-  const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
-  const [cePremiumEma1, setCePremiumEma1] = useState(9)
-  const [cePremiumEma2, setCePremiumEma2] = useState(15)
-  const [pePremiumTimeframe, setPePremiumTimeframe] = useState(1)
-  const [pePremiumEma1, setPePremiumEma1] = useState(9)
-  const [pePremiumEma2, setPePremiumEma2] = useState(15)
+  const [cePremiumOffset, setCePremiumOffset] = usePersistedState('optionanalytics.oiReplay.cePremium.offset', 0)
+  const [pePremiumOffset, setPePremiumOffset] = usePersistedState('optionanalytics.oiReplay.pePremium.offset', 0)
+  const [cePremiumTimeframe, setCePremiumTimeframe] = usePersistedState('optionanalytics.oiReplay.cePremium.timeframe', 1)
+  const [cePremiumEma1, setCePremiumEma1] = usePersistedState('optionanalytics.oiReplay.cePremium.ema1', 9)
+  const [cePremiumEma2, setCePremiumEma2] = usePersistedState('optionanalytics.oiReplay.cePremium.ema2', 15)
+  const [pePremiumTimeframe, setPePremiumTimeframe] = usePersistedState('optionanalytics.oiReplay.pePremium.timeframe', 1)
+  const [pePremiumEma1, setPePremiumEma1] = usePersistedState('optionanalytics.oiReplay.pePremium.ema1', 9)
+  const [pePremiumEma2, setPePremiumEma2] = usePersistedState('optionanalytics.oiReplay.pePremium.ema2', 15)
 
   // Saved, like where the cards sit and how big they are - the whole structure comes back on a reload.
   migrateSavedDashboard()
@@ -5271,12 +5272,12 @@ export default function OiReplayPage() {
   // actually watches tick to tick, not the whole +-10 band the ladder shows). Checked once PER
   // REPLAY TICK (native 1-minute), not once per render, so it beeps at most once per real minute
   // rather than repeatedly while a breach's own row re-renders for unrelated reasons.
-  const [alertThreshold, setAlertThreshold] = useState(1_000_000)
-  const [soundEnabled, setSoundEnabled] = useState(true)
+  const [alertThreshold, setAlertThreshold] = usePersistedState('optionanalytics.oiReplay.alertThreshold', 1_000_000)
+  const [soundEnabled, setSoundEnabled] = usePersistedState('optionanalytics.oiReplay.alertSound', true)
   // Defaults to top-5-only (the chart's original, carefully-tuned-for-readability behavior) - the
   // user's own "switch ... if true show top 5 else all wall" ask, off shows every real wall in the
   // whole fetched band instead (see ReplayChart's own top5Only doc comment).
-  const [top5WallsOnly, setTop5WallsOnly] = useState(true)
+  const [top5WallsOnly, setTop5WallsOnly] = usePersistedState('optionanalytics.oiReplay.top5WallsOnly', true)
   // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
   // the candles. On by default; unticked shows the full labels. Remembered in this browser.
   const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, true)

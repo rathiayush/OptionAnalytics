@@ -190,6 +190,21 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
+  `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and
+  User only - the External account never reaches it, `ExternalAccessTests`): every `optionanalytics.*` localStorage key a
+  page writes (layouts, cards shown, folds, timeframes, EMAs, tabs, switches) so a refresh, a restart / deploy, another
+  browser or computer opens the pages as they were left. `prefsSync.js` does it with no page code: it watches
+  localStorage's `setItem` / `removeItem` and sends changes (gathered ~0.8 s, at once when the tab is hidden or closed,
+  retried when they fail), and `loadPreferences()` puts the server's values into localStorage BEFORE any page draws (on a
+  page load already signed in and on login - `App.jsx`); the first time (nothing saved for the account) this browser's
+  own preferences go up instead. A load that fails sends nothing for that page's life - a fresh browser's defaults never
+  overwrite what was saved. NOT kept (`LOCAL_ONLY`): caches and records (the live day cache, the scanner's history /
+  paper / fired / trail logs, sent-Telegram keys), the visitor id, the paper positions and trade levels (the server
+  keeps those itself) and the scanner's Paper / Live choice - live trading is never switched from another browser. A new
+  setting only has to use `usePersistedState` (or localStorage) with an `optionanalytics.` key; one that must stay in
+  this browser goes in `LOCAL_ONLY` (`tests/prefs-sync.test.mjs`, `UserPreferencesStoreTests.cs`). A new `Storage:*` path
+  goes in BOTH `docker-compose.yml` and the `Dockerfile`'s `ENV` (the Dockerfile's list was missing four).
 - The site NAVIGATION (`NavBar` in `shared.jsx`, `.oa-sidenav-*` in `index.css`): over 768 px a SIDEBAR down the left - the
   name, the menu (an icon a page), the server's status tags, the email and Log out - portalled to <body> and fixed; the
   page makes room with `body.oa-sidenav`'s padding (NavBar sets the class while it is mounted), and the page's own
