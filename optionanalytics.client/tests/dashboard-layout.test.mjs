@@ -1,92 +1,95 @@
-// OI Replay's dashboard layout (dashboardLayout.js): how wide and how tall each card is laid out, what a
-// drag of its grip lands on, and that a narrow screen keeps its one full-width column whatever was saved.
+// OI Replay's dashboard layout (dashboardLayout.js): the grid model react-grid-layout reads and writes -
+// what the page starts with, what a saved layout reconciles to, the presets, and the height a chart filling
+// a card gets. The dragging and resizing themselves are react-grid-layout's; these are the rules around it.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  DEFAULT_ENTRY, LAYOUT_COLUMNS, MAX_CARD_HEIGHT, MIN_CARD_HEIGHT, MIN_SPAN,
-  cardStyle, contentHeight, heightFromDrag, isDefaultLayout, layoutEntry, presetLayout, reconcileLayout, spanFromDrag,
+  GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
+  contentHeight, defaultLayout, defaultRows, gridItem, isDefaultLayout, presetLayout, pxToRows, reconcileGridLayout, rowsToPx,
 } from '../src/dashboardLayout.js'
 
-const IDS = ['topStats', 'spotAndEntry', 'gex']
+const IDS = ['topStats', 'marketRead', 'gex']
 
-test('a card with nothing saved is full width and its own height', () => {
-  assert.deepEqual(layoutEntry(undefined), DEFAULT_ENTRY)
-  assert.deepEqual(layoutEntry(null), { span: LAYOUT_COLUMNS, h: null })
-  assert.deepEqual(layoutEntry({}), { span: LAYOUT_COLUMNS, h: null })
+test('a card is as many rows tall as it covers, with the margins between them', () => {
+  assert.equal(rowsToPx(1), GRID_ROW_HEIGHT)
+  assert.equal(rowsToPx(2), GRID_ROW_HEIGHT * 2 + GRID_MARGIN)
+  assert.equal(rowsToPx(10), GRID_ROW_HEIGHT * 10 + GRID_MARGIN * 9)
+  // ...and back again
+  assert.equal(pxToRows(rowsToPx(10)), 10)
+  assert.equal(pxToRows(rowsToPx(7)), 7)
+  assert.equal(pxToRows(0), MIN_H)      // never under the minimum
 })
 
-test('a saved entry is read back within its limits, and nonsense falls back', () => {
-  assert.deepEqual(layoutEntry({ span: 6, h: 400 }), { span: 6, h: 400 })
-  assert.deepEqual(layoutEntry({ span: 99, h: 99999 }), { span: LAYOUT_COLUMNS, h: MAX_CARD_HEIGHT })
-  assert.deepEqual(layoutEntry({ span: 0, h: 10 }), { span: MIN_SPAN, h: MIN_CARD_HEIGHT })
-  assert.deepEqual(layoutEntry({ span: 'half', h: 'tall' }), { span: LAYOUT_COLUMNS, h: null })
+test('the page starts with every card full width, stacked in its own order', () => {
+  const layout = defaultLayout(IDS)
+  assert.deepEqual(layout.map((it) => it.i), IDS)
+  assert.ok(layout.every((it) => it.x === 0 && it.w === GRID_COLS))
+  assert.equal(layout[0].y, 0)
+  assert.equal(layout[1].y, defaultRows('topStats'))
+  assert.equal(layout[2].y, defaultRows('topStats') + defaultRows('marketRead'))
 })
 
-test('a saved layout is reconciled with the cards the page has now', () => {
-  const layout = reconcileLayout({ topStats: { span: 4 }, gone: { span: 6 } }, IDS)
-  assert.deepEqual(Object.keys(layout), IDS)                 // the card that no longer exists is dropped
-  assert.equal(layout.topStats.span, 4)
-  assert.deepEqual(layout.gex, DEFAULT_ENTRY)                // a card added since is the default
-  assert.deepEqual(reconcileLayout(null, IDS).spotAndEntry, DEFAULT_ENTRY)
-  assert.deepEqual(reconcileLayout({}, []), {})
+test('a card order saved before the grid existed still seeds the order', () => {
+  const layout = defaultLayout(IDS, ['gex', 'topStats', 'marketRead'])
+  assert.deepEqual(layout.map((it) => it.i), ['gex', 'topStats', 'marketRead'])
+  assert.equal(layout[0].y, 0)
+  // An id the order has never heard of goes last, not first.
+  assert.deepEqual(defaultLayout(IDS, ['gex']).map((it) => it.i), ['gex', 'topStats', 'marketRead'])
 })
 
-test('all defaults = nothing to reset', () => {
-  assert.equal(isDefaultLayout(reconcileLayout({}, IDS)), true)
-  assert.equal(isDefaultLayout(reconcileLayout({ gex: { span: 6 } }, IDS)), false)
-  assert.equal(isDefaultLayout(reconcileLayout({ gex: { h: 300 } }, IDS)), false)
+test('one item is read back inside the grid, whatever was saved', () => {
+  assert.deepEqual(gridItem({ x: 3, y: 4, w: 6, h: 9 }, 'gex'), { i: 'gex', x: 3, y: 4, w: 6, h: 9 })
+  assert.deepEqual(gridItem({ x: 99, y: -5, w: 99, h: 1 }, 'gex'), { i: 'gex', x: 0, y: 0, w: GRID_COLS, h: MIN_H })
+  assert.equal(gridItem({ w: 1 }, 'gex').w, MIN_W)
+  // A card cannot start past the right edge: x is held to what its own width leaves.
+  assert.equal(gridItem({ x: 11, w: 6 }, 'gex').x, GRID_COLS - 6)
+  assert.deepEqual(gridItem(undefined, 'gex'), { i: 'gex', x: 0, y: 0, w: GRID_COLS, h: defaultRows('gex') })
 })
 
-test('dragging sideways moves the width a twelfth at a time, within its limits', () => {
-  const row = 1200   // 100 px a twelfth
-  assert.equal(spanFromDrag(12, 0, row), 12)
-  assert.equal(spanFromDrag(12, -600, row), 6)      // half the row back = half the width
-  assert.equal(spanFromDrag(6, 200, row), 8)
-  assert.equal(spanFromDrag(6, -40, row), 6)        // under half a twelfth: no change
-  assert.equal(spanFromDrag(6, -9000, row), MIN_SPAN)
-  assert.equal(spanFromDrag(6, 9000, row), LAYOUT_COLUMNS)
-  assert.equal(spanFromDrag(6, 100, 0), 6)          // a row of no width cannot be read
+test('a saved layout keeps its cards where they are; a new card goes to the bottom', () => {
+  const saved = [{ i: 'gex', x: 6, y: 0, w: 6, h: 10 }, { i: 'topStats', x: 0, y: 0, w: 6, h: 5 }, { i: 'gone', x: 0, y: 9, w: 6, h: 5 }]
+  const layout = reconcileGridLayout(saved, IDS)
+  assert.deepEqual(layout.map((it) => it.i), IDS)                       // back in the page's order
+  assert.deepEqual(layout.find((it) => it.i === 'gex'), { i: 'gex', x: 6, y: 0, w: 6, h: 10 })
+  assert.equal(layout.some((it) => it.i === 'gone'), false)              // a card the page no longer has
+  const added = layout.find((it) => it.i === 'marketRead')               // a card added since it was saved
+  assert.deepEqual(added, { i: 'marketRead', x: 0, y: 10, w: GRID_COLS, h: defaultRows('marketRead') })
 })
 
-test('dragging down sets the height, from whatever the card is laid out at', () => {
-  assert.equal(heightFromDrag(400, 120, 999), 520)
-  assert.equal(heightFromDrag(null, 50, 300), 350)        // not sized yet: from its measured height
-  assert.equal(heightFromDrag(null, -9000, 300), MIN_CARD_HEIGHT)
-  assert.equal(heightFromDrag(400, 9000, 300), MAX_CARD_HEIGHT)
-  assert.equal(heightFromDrag(null, 50, null), null)      // nothing to measure
+test('nothing saved - or nonsense saved - is the layout the page starts with', () => {
+  assert.deepEqual(reconcileGridLayout(null, IDS), defaultLayout(IDS))
+  assert.deepEqual(reconcileGridLayout([], IDS), defaultLayout(IDS))
+  assert.deepEqual(reconcileGridLayout(['nope', { nope: 1 }], IDS), defaultLayout(IDS))
+  assert.deepEqual(reconcileGridLayout(null, IDS, ['gex']), defaultLayout(IDS, ['gex']))
 })
 
-test('the presets put the same number of cards in every row', () => {
+test('still the layout it started with = nothing to reset', () => {
+  assert.equal(isDefaultLayout(defaultLayout(IDS), IDS), true)
+  assert.equal(isDefaultLayout(defaultLayout(IDS, ['gex']), IDS, ['gex']), true)
+  assert.equal(isDefaultLayout(presetLayout(IDS, 2), IDS), false)
+  assert.equal(isDefaultLayout([], IDS), false)
+  assert.equal(isDefaultLayout(null, IDS), false)
+})
+
+test('the presets put the same number of cards in every row, left to right', () => {
   const two = presetLayout(IDS, 2)
-  assert.deepEqual(Object.values(two).map((e) => e.span), [6, 6, 6])
-  assert.deepEqual(Object.values(presetLayout(IDS, 3)).map((e) => e.span), [4, 4, 4])
-  assert.deepEqual(Object.values(presetLayout(IDS, 4)).map((e) => e.span), [3, 3, 3])
-  assert.deepEqual(Object.values(presetLayout(IDS, 1)).map((e) => e.span), [12, 12, 12])
-  // Heights the cards were given stay - a preset is about the widths.
-  assert.equal(presetLayout(IDS, 2, { gex: { span: 12, h: 500 } }).gex.h, 500)
+  assert.deepEqual(two.find((it) => it.i === 'topStats'), { i: 'topStats', x: 0, y: 0, w: 6, h: defaultRows('topStats') })
+  assert.deepEqual(two.find((it) => it.i === 'marketRead'), { i: 'marketRead', x: 6, y: 0, w: 6, h: defaultRows('marketRead') })
+  // The second row starts below the TALLEST card of the first, so nothing overlaps.
+  assert.equal(two.find((it) => it.i === 'gex').y, Math.max(defaultRows('topStats'), defaultRows('marketRead')))
+  assert.deepEqual(presetLayout(IDS, 3).map((it) => it.x), [0, 4, 8])
+  assert.deepEqual(presetLayout(IDS, 4).map((it) => it.w), [3, 3, 3])
+  assert.deepEqual(presetLayout(IDS, 1).map((it) => it.w), [12, 12, 12])
 })
 
-test('a card is laid out at its share of the row, in its place in the order', () => {
-  const half = cardStyle({ span: 6, h: 420 }, { wide: true, order: 3 })
-  assert.equal(half.order, 3)
-  assert.equal(half.maxWidth, '50%')
-  assert.equal(half.flex, '0 0 50%')
-  assert.equal(half.height, 420)
-  assert.equal(cardStyle({ span: 4 }, { wide: true }).maxWidth, `${(4 / 12) * 100}%`)
+test('a preset keeps the heights the cards were given', () => {
+  const layout = [{ i: 'gex', x: 0, y: 0, w: 12, h: 25 }]
+  assert.equal(presetLayout(IDS, 2, { layout }).find((it) => it.i === 'gex').h, 25)
 })
 
-test('a narrow screen keeps one full-width column, whatever was saved', () => {
-  const narrow = cardStyle({ span: 3, h: 200 }, { wide: false, order: 1 })
-  assert.equal(narrow.maxWidth, '100%')
-  assert.equal(narrow.flex, '0 0 100%')
-  assert.equal(narrow.height, undefined)        // and its own height, not a 200px sliver
-  assert.equal(narrow.order, 1)                 // the order is still the page's
-})
-
-test('a chart filling a sized card gets the card less its title bar; otherwise its own height', () => {
-  assert.equal(contentHeight({ span: 6, h: 500 }, { wide: true, chromePx: 86, fallback: 320 }), 414)
-  assert.equal(contentHeight({ span: 6, h: null }, { wide: true, fallback: 320 }), 320)
-  assert.equal(contentHeight({ span: 6, h: 500 }, { wide: false, fallback: 320 }), 320)
-  // Never negative, however short the card is.
-  assert.ok(contentHeight({ span: 6, h: MIN_CARD_HEIGHT }, { wide: true, chromePx: 400, fallback: 320 }) > 0)
+test('a chart filling a card gets the card less its title bar, and never a sliver', () => {
+  assert.equal(contentHeight(10, { chromePx: 86 }), rowsToPx(10) - 86)
+  assert.equal(contentHeight(null), null)          // no grid height: the chart keeps its own
+  assert.equal(contentHeight(undefined), null)
+  assert.ok(contentHeight(MIN_H, { chromePx: 400 }) >= 90)
 })

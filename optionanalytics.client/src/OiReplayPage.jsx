@@ -53,7 +53,11 @@ import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { DashboardCard, useCardContentHeight } from './DashboardCard.jsx'
-import { STORED_COMPACT, STORED_LAYOUT, STORED_QUICK_FAB, WIDE_LAYOUT_PX, isDefaultLayout, presetLayout, reconcileLayout } from './dashboardLayout.js'
+import { DashboardGrid } from './DashboardGrid.jsx'
+import {
+  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, WIDE_LAYOUT_PX,
+  isDefaultLayout, presetLayout, reconcileGridLayout,
+} from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
 
@@ -3469,32 +3473,33 @@ export default function OiReplayPage() {
   const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
   const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
-  // Drag-to-reorder the page's own top-level blocks - see OI_REPLAY_CARD_IDS' own doc comment.
-  const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.oiReplayCardOrder', OI_REPLAY_CARD_IDS)
-  // ---- The dashboard: how wide and how tall each card is (dashboardLayout.js), beside WHICH cards are
-  // shown (visibleSections) and in what ORDER they come (cardOrder). Saved per browser; a narrow screen
-  // ignores it and keeps the single full-width column it has always had.
+  // Only the ORDER is still read from here: it seeds the dashboard's default layout, so a page reordered
+  // before the grid existed still starts out that way round. Dragging is the grid's now (DashboardGrid).
+  const { order: cardOrder } = useCardOrder('optionanalytics.oiReplayCardOrder', OI_REPLAY_CARD_IDS)
+  // ---- The dashboard: where each card SITS and how big it is (dashboardLayout.js), beside WHICH cards are
+  // shown (visibleSections). Saved per browser; a narrow screen ignores it and keeps the single full-width
+  // column it has always had.
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
-  const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, {})
-  const layout = useMemo(() => reconcileLayout(storedLayout, OI_REPLAY_CARD_IDS), [storedLayout])
+  const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
+  const gridLayout = useMemo(
+    () => reconcileGridLayout(storedLayout, OI_REPLAY_CARD_IDS, cardOrder),
+    [storedLayout, cardOrder],
+  )
+  const setGridLayout = useCallback((next) => {
+    // react-grid-layout hands back every item on every drag; only the five fields are worth keeping.
+    setStoredLayout(next.map(({ i, x, y, w, h }) => ({ i, x, y, w, h })))
+  }, [setStoredLayout])
   const [layoutEditing, setLayoutEditing] = useState(false)
   // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
   // every reading is worked out, which is worth reading once and in the way after that.
   const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
   // The quick views' floating button, on every screen now - see QuickViewFab.
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
-  const setCardLayout = useCallback((id, entry) => setStoredLayout((prev) => ({ ...prev, [id]: entry })), [setStoredLayout])
-  // Everything one card needs to take its place in the row: its size, where it comes, and the drag-to-reorder
-  // drop target (dropTargetProps brings its own highlight style, which cardStyle is merged into).
-  const dash = (id) => ({
-    id,
-    entry: layout[id],
-    order: cardOrder.indexOf(id),
-    wide: wideLayout,
-    editing: layoutEditing,
-    onChange: setCardLayout,
-    dropProps: dropTargetProps(id),
-  })
+  // Packed upwards, or a card left exactly where it is dropped (DashboardGrid).
+  const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
+  // All a card needs to know is how tall it is, for the charts that fill it (useCardContentHeight).
+  const rowsById = useMemo(() => new Map(gridLayout.map((it) => [it.i, it.h])), [gridLayout])
+  const dash = (id) => ({ id, rows: wideLayout ? rowsById.get(id) ?? null : null })
   // See LiveSection - off-screen sections still re-render when this changes (layout, not data).
   const sectionVersion = `${cardOrder.join(',')}|${visibleSections.join(',')}|${JSON.stringify(storedLayout)}`
 
@@ -5963,19 +5968,22 @@ export default function OiReplayPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Layout</Text>
                 {wideLayout ? (
                   <>
-                    <Tooltip title="Shows a blue grip at each card's bottom-right corner: drag it sideways for the card's width, down for its height. Double-click a grip to give that card its own height back. Saved in this browser.">
+                    <Tooltip title="Drag any card by its ⠿ grip to anywhere on the page, and resize it from the handle at its bottom-right corner. Both work whether this is on or not - it just outlines the grid while you arrange. Saved in this browser.">
                       <Button size="small" type={layoutEditing ? 'primary' : 'default'} onClick={() => setLayoutEditing((v) => !v)}>
-                        {layoutEditing ? 'Done adjusting' : 'Adjust layout'}
+                        {layoutEditing ? 'Done arranging' : 'Arrange'}
                       </Button>
                     </Tooltip>
                     <Text type="secondary" style={{ fontSize: 12 }}>Cards a row:</Text>
                     {[1, 2, 3, 4].map((n) => (
-                      <Button key={n} size="small" onClick={() => setStoredLayout((prev) => presetLayout(OI_REPLAY_CARD_IDS, n, prev))}>{n}</Button>
+                      <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(OI_REPLAY_CARD_IDS, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
                     ))}
-                    <Button size="small" onClick={() => setStoredLayout({})} disabled={isDefaultLayout(layout)}>Reset sizes</Button>
+                    <Button size="small" onClick={() => setStoredLayout(null)} disabled={isDefaultLayout(gridLayout, OI_REPLAY_CARD_IDS, cardOrder)}>Reset</Button>
+                    <Tooltip title="Off: the cards pack upwards, so moving one never leaves a hole above it. On: a card stays exactly where you drop it, gaps and all.">
+                      <Checkbox checked={freePlacement} onChange={(e) => setFreePlacement(e.target.checked)}>Free placement</Checkbox>
+                    </Tooltip>
                   </>
                 ) : (
-                  <Text type="secondary" style={{ fontSize: 12 }}>One column on this screen - widen the window past {WIDE_LAYOUT_PX}px to lay the cards out side by side.</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>One column on this screen - widen the window past {WIDE_LAYOUT_PX}px to arrange the cards.</Text>
                 )}
                 <Tooltip title="Hides the long explanatory paragraphs under the cards - the ones that explain how each reading is worked out. Every number, chart and control stays.">
                   <Checkbox checked={compact} onChange={(e) => setCompact(e.target.checked)}>Compact</Checkbox>
@@ -6040,11 +6048,14 @@ export default function OiReplayPage() {
         </Card>
 
         {result && (
-          <div className={`oi-dash-row${layoutEditing ? ' oi-dash-row--editing' : ''}`}>
+          <DashboardGrid
+            wide={wideLayout} cardIds={OI_REPLAY_CARD_IDS} order={cardOrder} layout={gridLayout}
+            onLayoutChange={setGridLayout} editing={layoutEditing} freePlacement={freePlacement}
+          >
             {visibleSections.includes('topStats') && (
-              <DashboardCard {...dash('topStats')}>
+              <DashboardCard key="topStats" {...dash('topStats')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('topStats')} />Snapshot</Space>}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Snapshot</Space>}>
                 <Row gutter={24}>
                   <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
                   <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
@@ -6060,9 +6071,9 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('marketRead') && marketRead && (
-              <DashboardCard {...dash('marketRead')}>
+              <DashboardCard key="marketRead" {...dash('marketRead')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('marketRead')} />Market Read</Space>}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Market Read</Space>}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
                     type={marketRead.safetyOk ? 'success' : 'warning'}
@@ -6125,9 +6136,9 @@ export default function OiReplayPage() {
 
             {/* Which of a good option-buying entry's usual conditions hold at the replay clock (or now, live) - CE and PE. */}
             {visibleSections.includes('entryChecklist') && (
-              <DashboardCard {...dash('entryChecklist')}>
+              <DashboardCard key="entryChecklist" {...dash('entryChecklist')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('entryChecklist')} />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>}>
                 <EntryChecklistCard
                   asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
                   spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
@@ -6139,9 +6150,9 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('dayOi') && dayOiSummary && (
-              <DashboardCard {...dash('dayOi')}>
+              <DashboardCard key="dayOi" {...dash('dayOi')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Day OI Accumulation (since today's open)</Space>}>
                 {dayOiContent}
               </Card>
               </LiveSection>
@@ -6149,9 +6160,9 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('oiHeatmap') && (
-              <DashboardCard {...dash('oiHeatmap')}>
+              <DashboardCard key="oiHeatmap" {...dash('oiHeatmap')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI change heatmap (all strikes)</Space>}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                   lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
@@ -6162,11 +6173,11 @@ export default function OiReplayPage() {
               </DashboardCard>
             )}
 
-            <DashboardCard {...dash('spotAndEntry')}>
+            <DashboardCard key="spotAndEntry" {...dash('spotAndEntry')}>
             <LiveSection version={sectionVersion}>
             <div>
               <Space size={4} style={{ marginBottom: 4 }}>
-                <CardDragHandle {...dragHandleProps('spotAndEntry')} />
+                <CardDragHandle className="oa-dash-grip" />
                 <Text type="secondary" style={{ fontSize: 12 }}>Spot &amp; entry charts</Text>
               </Space>
               <Row gutter={[16, 16]}>
@@ -6266,12 +6277,12 @@ export default function OiReplayPage() {
             </DashboardCard>
 
             {visibleSections.includes('optionPremium') && (
-              <DashboardCard {...dash('optionPremium')}>
+              <DashboardCard key="optionPremium" {...dash('optionPremium')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={[16, 16]}>
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
-                    <CardDragHandle {...dragHandleProps('optionPremium')} />
+                    <CardDragHandle className="oa-dash-grip" />
                     {premiumPickers}
                   </Space>
                 </Col>
@@ -6284,13 +6295,13 @@ export default function OiReplayPage() {
             {/* The dashboard's option CDV / OBV - worked out from the day's own option bars: a replayed day up to the
                 replay clock, today live (the backfill plus every live tick's minute, ticking). */}
             {visibleSections.includes('optionFlow') && (
-              <DashboardCard {...dash('optionFlow')}>
+              <DashboardCard key="optionFlow" {...dash('optionFlow')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title={<Space size={4}><CardDragHandle {...dragHandleProps('optionFlow')} />Option CDV &amp; OBV (ATM±{flowBand}, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}
+                    title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Option CDV &amp; OBV (ATM±{flowBand}, CE vs PE - as on the dashboard){isLive ? ' · live' : ''}</Space>}
                     extra={(
                       <Tooltip title="Chart timeframe: one point per step (its last value), as the dashboard's charts">
                         <Segmented size="small" value={flowTimeframe} onChange={setFlowTimeframe} options={FLOW_TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
@@ -6312,13 +6323,13 @@ export default function OiReplayPage() {
             {/* The straddle from a set time (09:15 by default): the Auto ATM straddle and a fixed one (never shifted), each
                 against its VWAP, the range the options priced and the read - up to the replay clock, today live (straddle.js). */}
             {visibleSections.includes('straddle') && (
-              <DashboardCard {...dash('straddle')}>
+              <DashboardCard key="straddle" {...dash('straddle')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title={<Space size={4}><CardDragHandle {...dragHandleProps('straddle')} />ATM straddle (Auto ATM and a fixed strike, call + put){isLive ? ' · live' : ''}</Space>}
+                    title={<Space size={4}><CardDragHandle className="oa-dash-grip" />ATM straddle (Auto ATM and a fixed strike, call + put){isLive ? ' · live' : ''}</Space>}
                   >
                     <StraddleCard
                       cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
@@ -6335,13 +6346,13 @@ export default function OiReplayPage() {
             {/* GEX (gamma exposure) from the day's option OI, IV and premium: net GEX, the gamma flip, the call / put walls
                 and the max gamma strike - up to the replay clock, today live (gex.js). */}
             {visibleSections.includes('gex') && (
-              <DashboardCard {...dash('gex')}>
+              <DashboardCard key="gex" {...dash('gex')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title={<Space size={4}><CardDragHandle {...dragHandleProps('gex')} />GEX - gamma exposure (net, flip, walls){isLive ? ' · live' : ''}</Space>}
+                    title={<Space size={4}><CardDragHandle className="oa-dash-grip" />GEX - gamma exposure (net, flip, walls){isLive ? ' · live' : ''}</Space>}
                   >
                     <GexCard
                       days={gexDays}
@@ -6355,12 +6366,12 @@ export default function OiReplayPage() {
               </DashboardCard>
             )}
 
-            <DashboardCard {...dash('ladder')}>
+            <DashboardCard key="ladder" {...dash('ladder')}>
             <Row gutter={16}>
               <Col span={24}>
                 <Card
                   size="small"
-                  title={<Space size={4}><CardDragHandle {...dragHandleProps('ladder')} />OI / IV ladder (nearest expiry, as of the current candle)</Space>}
+                  title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI / IV ladder (nearest expiry, as of the current candle)</Space>}
                   bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}
                 >
                   <OiLadder rows={ladderRows} atmStrike={atmStrike} sudden={suddenWalls} />
@@ -6370,11 +6381,11 @@ export default function OiReplayPage() {
             </DashboardCard>
 
             {visibleSections.includes('liquidityMap') && (
-              <DashboardCard {...dash('liquidityMap')}>
+              <DashboardCard key="liquidityMap" {...dash('liquidityMap')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={16}>
                 <Col span={24}>
-                  <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('liquidityMap')} />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
+                  <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
                     <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
                   </Card>
                 </Col>
@@ -6384,13 +6395,13 @@ export default function OiReplayPage() {
             )}
 
             {visibleSections.includes('futures') && (
-              <DashboardCard {...dash('futures')}>
+              <DashboardCard key="futures" {...dash('futures')}>
               <LiveSection version={sectionVersion}>
               <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
-                    title={<Space size={4}><CardDragHandle {...dragHandleProps('futures')} />Futures (nearest listed contract - always live from Dhan, never stored)</Space>}
+                    title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Futures (nearest listed contract - always live from Dhan, never stored)</Space>}
                     extra={
                       <Space size={8} wrap>
                         <Tooltip title="Depth of market: the futures' full 200-level book in a side panel">
@@ -6407,7 +6418,7 @@ export default function OiReplayPage() {
               </LiveSection>
               </DashboardCard>
             )}
-          </div>
+          </DashboardGrid>
         )}
 
         {!result && !loading && (

@@ -188,18 +188,22 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
-- OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardCard.jsx`, the `.oi-dash-row` rules in `oiMobile.css`): the
-  cards TILE into rows instead of stacking. Three separate things, each saved on its own: which cards are shown
-  (`SECTION_OPTIONS` / "Sections shown"), the order they come in (`useCardOrder`, the ⠿ handle), and how wide and how
-  tall each one is - `{ span (twelfths), h (px, null = its own height) }` a card, `STORED_LAYOUT`. "Adjust layout" puts a
-  grip at each card's bottom-right: dragged sideways for the width, down for the height (double-click = its own height
-  back); the size follows the pointer and is saved when it is let go, so a drag is ONE change. "Cards a row" 1 - 4
-  (`presetLayout`) and "Reset sizes" are the one-click versions. UNDER `WIDE_LAYOUT_PX` (1100) THE LAYOUT IS IGNORED -
-  a phone keeps its one full-width column, whatever a monitor saved (`cardStyle`, `tests/dashboard-layout.test.mjs`).
-  A card given a height scrolls inside it (`.oa-dash-card--sized`); the charts already follow their container's WIDTH
-  (every one has a ResizeObserver), and the spot / entry charts follow the card's HEIGHT too - `useCardContentHeight`,
-  which hands down the height as GIVEN, never the one under the pointer mid-drag (a chart that rebuilds on a new height
-  would be torn down on every pixel). "Compact" hides the cards' long explanatory paragraphs (the `oa-note` class).
+- OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardGrid.jsx`, `DashboardCard.jsx`, the `.oi-dash-*` rules in
+  `oiMobile.css`): on a wide screen the cards are a FREE 12-COLUMN GRID (`react-grid-layout`, its legacy API) - any card
+  dragged by its ⠿ grip to any place, resized from its bottom-right corner. Each is `{ i, x, y, w, h }`, h in grid ROWS
+  (`GRID_ROW_HEIGHT` + `GRID_MARGIN` each - `rowsToPx`), saved whole in `STORED_LAYOUT`. The model is all pure functions
+  (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `contentHeight`,
+  `tests/dashboard-layout.test.mjs`); the dragging, collisions and packing are the library's. Dragging starts ONLY from
+  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. "Cards a row" 1 - 4, "Reset",
+  and "Free placement" (`compactType` null + `preventCollision`: a card stays exactly where it is dropped, gaps and all;
+  off, the cards pack upwards). "Arrange" only outlines the grid - dragging works either way.
+  UNDER `WIDE_LAYOUT_PX` (1100) THERE IS NO GRID AT ALL: `DashboardGrid` stacks the cards full width at their own height,
+  as the page always did, so a layout dragged out on a monitor can never leave a phone with a sliver of a chart.
+  In the grid EVERY card has a height and scrolls inside it (`.react-grid-item.oa-dash-card { overflow: auto }`); the
+  charts already follow their container's WIDTH (each has a ResizeObserver), and the spot / entry charts follow the
+  card's HEIGHT too - `useCardContentHeight`. `useCardOrder` is still read on this page, but only to SEED the default
+  layout's order - nothing drags through it any more. "Compact" hides the cards' long explanatory paragraphs (the
+  `oa-note` class).
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
