@@ -36,3 +36,49 @@
 .oi-mobile-page .ant-btn {
   font-size: clamp(11px, 2.8vw, 14px);
 }
+
+/* ---- The dashboard (dashboardLayout.js / DashboardGrid.jsx / DashboardCard.jsx) ----
+   On a wide screen the cards are a 12-column grid any of them can be dragged around and resized in
+   (react-grid-layout, which sets each card's own position and pixel size inline). Under WIDE_LAYOUT_PX
+   there is no grid at all: the cards stack full width at their own height, as the page always did. */
+.oi-dash-stack { display: flex; flex-direction: column; gap: 20px; width: 100%; }
+.oi-dash-stack > .oa-dash-card { width: 100%; }
+
+.oa-dash-card { min-width: 0; }
+.oa-dash-card > .ant-card { width: 100%; }
+/* In the grid every card has a height of its own, so its content scrolls inside it rather than the page
+   growing. On the wrapper, not the card: the cards sit inside a display:contents wrapper (LiveSection),
+   so a child selector would never reach them and a descendant one would also catch a card inside a card. */
+.react-grid-item.oa-dash-card { overflow: auto; }
+
+/* The ⠿ grip is what a drag starts from (DashboardGrid's draggableHandle) - make it say so. */
+.oa-dash-grip { cursor: grab; }
+.react-grid-item.react-draggable-dragging .oa-dash-grip { cursor: grabbing; }
+.react-grid-item.react-draggable-dragging { opacity: 0.9; }
+/* Where the card will land. */
+.react-grid-item.react-grid-placeholder {
+  background: #1677ff;
+  opacity: 0.18;
+  border-radius: 8px;
+}
+/* The resize corner: out of the way until the pointer is on the card, and always visible while arranging. */
+.react-grid-item > .react-resizable-handle {
+  opacity: 0;
+  transition: opacity 120ms;
+  z-index: 3;
+}
+.react-grid-item:hover > .react-resizable-handle,
+.oi-dash-grid--editing .react-grid-item > .react-resizable-handle { opacity: 0.85; }
+.react-grid-item > .react-resizable-handle::after {
+  border-right: 2px solid #1677ff;
+  border-bottom: 2px solid #1677ff;
+  width: 9px;
+  height: 9px;
+}
+/* While arranging, every card shows its edge - otherwise an empty-ish card gives no hint where its
+   corner (and so its resize handle) actually is. */
+.oi-dash-grid--editing .react-grid-item { outline: 1px dashed #1677ff66; outline-offset: -1px; border-radius: 8px; }
+
+/* "Compact" - the long explanatory paragraphs under the cards are for learning the page, not for
+   trading it; one class hides every one of them at once (they carry it, see the oa-note class). */
+.oi-dash-compact .oa-note { display: none; }

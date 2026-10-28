@@ -3,26 +3,14 @@ import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, F
 import { usePersistedState } from './shared.jsx'
 import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
-// The quick views on a phone (no keyboard for Ctrl + Shift + 1 - 7, and scrolling to each card is slow): a small round
-// button that floats over the page and can be dragged anywhere (where it was left is remembered); a tap opens the views as
-// small icons with their names, a tap on one opens its popup, a tap elsewhere closes them. Phones / touch screens only.
+// The quick views as a small round button that floats over the page and can be dragged anywhere (where it was left is
+// remembered): a tap opens the views as small icons with their names, a tap on one opens its popup, a tap elsewhere closes
+// them. On a phone it is the only way in (no keyboard for Ctrl + Shift + 1 - 7, and scrolling to each card is slow); on a
+// monitor it saves the same scroll, so it shows there too - `enabled` (the page's "Quick button" tick) turns it off.
 const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
-const MOBILE_QUERY = '(pointer: coarse), (max-width: 900px)'
 // Over the floating panels (900+), under the popups (1000).
 const FAB_Z = 960
 const ACCENT = '#1677ff'
-
-function useMobile() {
-  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && Boolean(window.matchMedia?.(MOBILE_QUERY).matches))
-  useEffect(() => {
-    const media = window.matchMedia?.(MOBILE_QUERY)
-    if (!media) return undefined
-    const onChange = () => setMobile(media.matches)
-    media.addEventListener('change', onChange)
-    return () => media.removeEventListener('change', onChange)
-  }, [])
-  return mobile
-}
 
 function useViewport() {
   const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
@@ -34,15 +22,14 @@ function useViewport() {
   return viewport
 }
 
-export function QuickViewFab({ views, active = null, onOpen }) {
-  const mobile = useMobile()
+export function QuickViewFab({ views, active = null, onOpen, enabled = true }) {
   const viewport = useViewport()
   const [saved, setSaved] = usePersistedState('optionanalytics.oiReplay.quickFab', null)
   const [dragPos, setDragPos] = useState(null)
   const [open, setOpen] = useState(false)
   const drag = useRef(null)
   const dragged = useRef(false)
-  if (!mobile) return null
+  if (!enabled) return null
 
   const pos = placeFab(dragPos ?? saved ?? fabDefault(viewport), viewport)
   const up = fabOpensUp(pos, views.length, viewport)

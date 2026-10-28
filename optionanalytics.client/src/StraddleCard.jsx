@@ -195,7 +195,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
     return (
       <>
         {controls}
-        <Text type="secondary" style={{ display: 'block' }}>
+        <Text className="oa-note" type="secondary" style={{ display: 'block' }}>
           {waiting ? `The straddle is read from ${start}${asOfMs > 0 ? ` - the replay is at ${hhmm(asOfMs)}` : ''}.`
             : 'No straddle yet - it needs the call and the put of the ATM strike from the start time.'}
         </Text>
@@ -243,7 +243,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
+          <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
           <LinesChart lines={charts.straddle} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
         </Col>
         <Col xs={24} lg={12}>

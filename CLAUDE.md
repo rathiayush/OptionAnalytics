@@ -188,6 +188,25 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardGrid.jsx`, `DashboardCard.jsx`, the `.oi-dash-*` rules in
+  `oiMobile.css`): on a wide screen the cards are a FREE 12-COLUMN GRID (`react-grid-layout`, its legacy API) - any card
+  dragged by its ⠿ grip to any place, resized from its bottom-right corner. Each is `{ i, x, y, w, h }`, h in grid ROWS
+  (`GRID_ROW_HEIGHT` + `GRID_MARGIN` each - `rowsToPx`), saved whole in `STORED_LAYOUT`. The model is all pure functions
+  (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `contentHeight`,
+  `tests/dashboard-layout.test.mjs`); the dragging, collisions and packing are the library's. Dragging starts ONLY from
+  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. "Cards a row" 1 - 4, "Reset",
+  and "Free placement" (`compactType` null + `preventCollision`: a card stays exactly where it is dropped, gaps and all;
+  off, the cards pack upwards). "Arrange" only outlines the grid - dragging works either way.
+  UNDER `WIDE_LAYOUT_PX` (1100) THERE IS NO GRID AT ALL: `DashboardGrid` stacks the cards full width at their own height,
+  as the page always did, so a layout dragged out on a monitor can never leave a phone with a sliver of a chart.
+  In the grid EVERY card has a height and scrolls inside it (`.react-grid-item.oa-dash-card { overflow: auto }`); the
+  charts already follow their container's WIDTH (each has a ResizeObserver), and the spot / entry charts follow the
+  card's HEIGHT too - `useCardContentHeight`. `useCardOrder` is still read on this page, but only to SEED the default
+  layout's order - nothing drags through it any more. "Compact" hides the cards' long explanatory paragraphs (the
+  `oa-note` class). The WHOLE structure is saved, not just the grid: which cards are shown too (`STORED_SECTIONS`,
+  `reconcileSections` - anything saved that no longer exists is dropped, and an empty set falls back rather than
+  leaving a blank page), and the page starts on `DEFAULT_SECTION_VALUES` - every card but Snapshot and Market Read,
+  whose numbers all appear on the cards below them; both are one tick away in "Sections shown".
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
@@ -198,7 +217,8 @@ When adding or changing a strategy:
   its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
-  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup.
+  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
+  EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
@@ -220,7 +240,11 @@ When adding or changing a strategy:
   (`marketRead.js`): resistance = the most call OI AT OR ABOVE spot, support = the most put OI AT OR BELOW it - its
   Sell suggestion is one of them; the OI build-up is over the same 5 bars as the price move. The futures chart's OI
   line and regime markers read each candle's OI at its close (`oiAtCandleCloses`). The straddle card's charts
-  (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's.
+  (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's. The previous
+  day's volume profile is drawn as HORIZONTAL BARS behind the candles on the spot and both entry charts as well as the
+  futures chart (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
+  POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
+  "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

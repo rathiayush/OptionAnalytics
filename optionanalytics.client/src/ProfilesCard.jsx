@@ -98,7 +98,7 @@ export function ProfilesCard({ prevDate, prevVp, todayVp, prevTpo, todayTpo, las
           <MarketProfileChart prevTpo={prevTpo} todayTpo={todayTpo} range={range} lastPrice={lastPrice} nav={nav} hoverPrice={hoverPrice} onHover={setHoverPrice} height={height} />
         </Col>
       </Row>
-      <Text type="secondary" style={{ fontSize: 11 }}>
+      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
         Both charts share the price axis - wheel to zoom, drag to pan, double-click to fit. TPO letters = 30-minute periods (A = 09:15) ·{' '}
         <span style={{ color: UP_COLOR }}>A B</span> = initial balance · <span style={{ color: POC }}>yellow</span> = POC · bright = value area ·{' '}
         <span style={{ color: DOWN_COLOR }}>◂</span> = single print · <span style={{ color: PRICE }}>blue</span> = last price.
