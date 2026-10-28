@@ -55,7 +55,8 @@ import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitiv
 import { DashboardCard, useCardContentHeight } from './DashboardCard.jsx'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, WIDE_LAYOUT_PX,
+  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
+  STORED_LAYOUT_VERSION, LAYOUT_VERSION, fitLayoutHeights, isStackedLayout, WIDE_LAYOUT_PX,
   isDefaultLayout, presetLayout, reconcileGridLayout, reconcileSections,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -748,6 +749,29 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
 const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
+
+// The dashboard first shipped with every card full width - a single column that looked exactly like the
+// page before it, gave no hint that a card could be dragged, and left a card nowhere sideways to go when
+// one was. The page writes the layout back on its first render, so that stack is also what is SAVED for
+// anyone who never arranged anything; this drops it once so the real default takes over, and only once,
+// so "Cards a row: 1" still sticks for anyone who actually wants the column back.
+//
+// Run from the component body rather than an effect: the saved layout is read by usePersistedState's own
+// first render, which is already too late for an effect to have cleared it.
+let layoutMigrated = false
+function migrateStackedLayout() {
+  if (layoutMigrated) return
+  layoutMigrated = true
+  try {
+    if (window.localStorage.getItem(STORED_LAYOUT_VERSION) === JSON.stringify(LAYOUT_VERSION)) return
+    window.localStorage.setItem(STORED_LAYOUT_VERSION, JSON.stringify(LAYOUT_VERSION))
+    const saved = JSON.parse(window.localStorage.getItem(STORED_LAYOUT) ?? 'null')
+    if (isStackedLayout(saved, OI_REPLAY_CARD_IDS)) window.localStorage.removeItem(STORED_LAYOUT)
+  } catch {
+    // Remembering a layout is a convenience, never a requirement - a browser that refuses storage
+    // simply starts on the default every time.
+  }
+}
 
 // How many strikes on EACH side get an actual line drawn on the chart - the ladder already shows
 // every strike; the chart would just be noise at that density, so only the strongest few (by OI)
@@ -3489,15 +3513,29 @@ export default function OiReplayPage() {
   // shown (visibleSections). Saved per browser; a narrow screen ignores it and keeps the single full-width
   // column it has always had.
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
+  migrateStackedLayout()
   const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
+  // Which cards have been given a height of their own by dragging a corner. Everything else follows its
+  // own content, so the page opens with no card scrolling inside itself (fitLayoutHeights).
+  const [sizedCards, setSizedCards] = usePersistedState(STORED_SIZED, EMPTY_ARRAY)
+  const sized = useMemo(() => new Set(Array.isArray(sizedCards) ? sizedCards : []), [sizedCards])
+  const [measured, setMeasured] = useState(() => new Map())
+  const onMeasure = useCallback((id, px) => {
+    setMeasured((m) => (m.get(id) === px ? m : new Map(m).set(id, px)))
+  }, [])
   const gridLayout = useMemo(
-    () => reconcileGridLayout(storedLayout, OI_REPLAY_CARD_IDS, cardOrder),
-    [storedLayout, cardOrder],
+    () => fitLayoutHeights(reconcileGridLayout(storedLayout, OI_REPLAY_CARD_IDS, cardOrder), measured, sized),
+    [storedLayout, cardOrder, measured, sized],
   )
   const setGridLayout = useCallback((next) => {
     // react-grid-layout hands back every item on every drag; only the five fields are worth keeping.
     setStoredLayout(next.map(({ i, x, y, w, h }) => ({ i, x, y, w, h })))
   }, [setStoredLayout])
+  const onResizeCard = useCallback((id) => {
+    setSizedCards((ids) => (ids?.includes(id) ? ids : [...(ids ?? []), id]))
+  }, [setSizedCards])
+  // Back to every card at its content's own height - the one button that clears every scrollbar at once.
+  const fitAllHeights = useCallback(() => setSizedCards(EMPTY_ARRAY), [setSizedCards])
   const [layoutEditing, setLayoutEditing] = useState(false)
   // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
   // every reading is worked out, which is worth reading once and in the way after that.
@@ -3508,7 +3546,14 @@ export default function OiReplayPage() {
   const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
   // All a card needs to know is how tall it is, for the charts that fill it (useCardContentHeight).
   const rowsById = useMemo(() => new Map(gridLayout.map((it) => [it.i, it.h])), [gridLayout])
-  const dash = (id) => ({ id, rows: wideLayout ? rowsById.get(id) ?? null : null })
+  const dash = (id) => ({
+    id,
+    rows: wideLayout ? rowsById.get(id) ?? null : null,
+    // A card nobody has sized follows its content and is measured; one that has been sized keeps that
+    // height and scrolls inside it. See DashboardCard for why the two modes cannot chase each other.
+    auto: wideLayout && !sized.has(id),
+    onMeasure: wideLayout ? onMeasure : undefined,
+  })
   // See LiveSection - off-screen sections still re-render when this changes (layout, not data).
   const sectionVersion = `${cardOrder.join(',')}|${visibleSections.join(',')}|${JSON.stringify(storedLayout)}`
 
