@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined } from '@ant-design/icons'
+import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
 import { usePersistedState } from './shared.jsx'
 import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
-// The quick views on a phone (no keyboard for Ctrl + Shift + 1 - 6, and scrolling to each card is slow): a small round
+// The quick views on a phone (no keyboard for Ctrl + Shift + 1 - 7, and scrolling to each card is slow): a small round
 // button that floats over the page and can be dragged anywhere (where it was left is remembered); a tap opens the views as
 // small icons with their names, a tap on one opens its popup, a tap elsewhere closes them. Phones / touch screens only.
-const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined }
+const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
 const MOBILE_QUERY = '(pointer: coarse), (max-width: 900px)'
 // Over the floating panels (900+), under the popups (1000).
 const FAB_Z = 960

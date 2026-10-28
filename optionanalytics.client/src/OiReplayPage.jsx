@@ -4082,7 +4082,7 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
-  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Ctrl + Shift + 1 - 6 open one, the same
+  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Ctrl + Shift + 1 - 7 open one, the same
   // again closes it, another switches. Works while typing in a box too (Ctrl + Shift + a digit types nothing).
   const [quickView, setQuickView] = useState(null)
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
@@ -5461,7 +5461,7 @@ export default function OiReplayPage() {
     </>
   )
 
-  // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 6): the same elements, rendered in both.
+  // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 7): the same elements, rendered in both.
   const dayOiContent = dayOiSummary ? (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       <Alert
@@ -5637,6 +5637,122 @@ export default function OiReplayPage() {
     </>
   )
 
+  // The futures card's controls (but the DOM button - its side panel would open under a popup) and content, shared by
+  // the card and its quick view (Ctrl + Shift + 7). Only with a loaded day - the content reads result.
+  const futuresControls = result ? (
+    <>
+      <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
+      <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta, in their own pane under the candles - exact for the minutes the order flow server saw live, else estimated from 1-minute candles">
+        <Space size={4}><Switch size="small" checked={futuresDeltaOn} onChange={setFuturesDeltaOn} /><Text style={{ fontSize: 12 }}>Δ / ΣΔ</Text></Space>
+      </Tooltip>
+      <Tooltip title={`The previous trading day's volume profile of this futures contract (${futuresProfileRow}-pt rows) with its POC and 70% value area (VAH/VAL) - fixed levels for the day`}>
+        <Space size={4}><Switch size="small" checked={futuresProfileOn} onChange={setFuturesProfileOn} /><Text style={{ fontSize: 12 }}>Profile</Text></Space>
+      </Tooltip>
+      {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
+        <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
+      )}
+      {result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+    </>
+  ) : null
+  const futuresContent = result ? (
+    <>
+      {result.futuresError && (
+        <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
+      )}
+      {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message="Dhan did not return an Open Interest series for this futures contract - the OI figures and Long/Short read below are unavailable, not zero/neutral." />
+      )}
+      {displayFuturesBars.length > 0 ? (
+        <>
+          {futuresRegimeSinceOpen && (
+            <Alert
+              style={{ marginBottom: 12 }}
+              type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
+              showIcon
+              message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
+              description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatFuturesOi(futuresRegimeSinceOpen.oiDelta, futuresOiUnit, { signed: true })} since today's open.`}
+            />
+          )}
+          <Row gutter={24} style={{ marginBottom: 12 }}>
+            <Col>
+              <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
+            </Col>
+            <Col>
+              <Statistic
+                title="Basis (Fut - Spot)"
+                value={futuresBasis != null ? `${futuresBasis >= 0 ? '+' : ''}${futuresBasis.toFixed(2)}` : '—'}
+                valueStyle={{ color: futuresBasis == null ? undefined : futuresBasis >= 0 ? UP_COLOR : DOWN_COLOR }}
+              />
+            </Col>
+            <Col>
+              <Statistic title={`Futures OI (${futuresOiUnit})`} value={result.futuresOiAvailable ? formatFuturesOi(currentFutures?.openInterest, futuresOiUnit, { withUnit: false }) : 'N/A'} />
+            </Col>
+            <Col>
+              <Statistic
+                title="OI since open"
+                value={result.futuresOiAvailable ? formatFuturesOi(futuresOiSinceOpen, futuresOiUnit, { signed: true }) : 'N/A'}
+                valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
+              />
+            </Col>
+            <Col>
+              <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
+            </Col>
+            <Col>
+              <Statistic
+                title="Regime (since open)"
+                value={result.futuresOiAvailable ? (futuresRegimeSinceOpen?.regime ?? '—') : 'N/A'}
+                valueStyle={{ fontSize: 16, color: futuresRegimeSinceOpen?.color }}
+              />
+            </Col>
+          </Row>
+          <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${futuresTimeframe}`}>
+            <FuturesChart
+              bars={displayFuturesBars}
+              vwap={futuresVwap}
+              oiLine={futuresOiLine} oiUnit={futuresOiUnit}
+              markers={futuresRegimeMarkers}
+              dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
+              height={320}
+              profile={futuresProfile} profileRowSize={futuresProfileRow} profileLabel={futuresProfileLabel}
+              deltaBars={futuresDeltaBars}
+            />
+          </ChartErrorBoundary>
+          {futuresDeltaBars?.length > 0 && (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
+              {futuresFlow?.source === 'estimated'
+                ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
+                : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
+                  ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
+                  : ' - from the live tick feed'}.
+            </Text>
+          )}
+          {futuresProfile?.poc != null && (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
+              {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
+              {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
+              {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
+            </Text>
+          )}
+          {prevFuturesShown?.error && (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
+          )}
+          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+            The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
+          </Text>
+          {result.futuresOiAvailable && (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
+            </Text>
+          )}
+        </>
+      ) : (
+        <Empty description={result.futuresError || 'No futures data for this day.'} />
+      )}
+    </>
+  ) : null
   const quickViewDef = QUICK_VIEWS.find((v) => v.key === quickView) ?? null
   const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
 
@@ -5755,7 +5871,7 @@ export default function OiReplayPage() {
             </Space>
             {result && (
               <Space align="center" size={6} wrap>
-                <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 6 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
+                <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 7 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
                   <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Ctrl + Shift + …)</Text>
                 </Tooltip>
                 {QUICK_VIEWS.map((v) => (
@@ -6154,115 +6270,11 @@ export default function OiReplayPage() {
                         <Tooltip title="Depth of market: the futures' full 200-level book in a side panel">
                           <Button size="small" onClick={() => setDomOpen(true)}>DOM</Button>
                         </Tooltip>
-                        <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
-                        <Tooltip title="Delta (buy - sell volume) per candle and cumulative delta, in their own pane under the candles - exact for the minutes the order flow server saw live, else estimated from 1-minute candles">
-                          <Space size={4}><Switch size="small" checked={futuresDeltaOn} onChange={setFuturesDeltaOn} /><Text style={{ fontSize: 12 }}>Δ / ΣΔ</Text></Space>
-                        </Tooltip>
-                        <Tooltip title={`The previous trading day's volume profile of this futures contract (${futuresProfileRow}-pt rows) with its POC and 70% value area (VAH/VAL) - fixed levels for the day`}>
-                          <Space size={4}><Switch size="small" checked={futuresProfileOn} onChange={setFuturesProfileOn} /><Text style={{ fontSize: 12 }}>Profile</Text></Space>
-                        </Tooltip>
-                        {futuresRegimeSinceOpen && futuresRegimeSinceOpen.regime !== 'Neutral' && (
-                          <Tag color={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : 'error'}>{futuresRegimeSinceOpen.regime}</Tag>
-                        )}
-                        {result.futuresExpiry ? <Tag>{result.futuresExpiry} expiry</Tag> : null}
+                        {futuresControls}
                       </Space>
                     }
                   >
-                    {result.futuresError && (
-                      <Alert type="warning" showIcon style={{ marginBottom: 12 }} message={result.futuresError} />
-                    )}
-                    {!result.futuresOiAvailable && result.futuresBars?.length > 0 && (
-                      <Alert type="info" showIcon style={{ marginBottom: 12 }}
-                        message="Dhan did not return an Open Interest series for this futures contract - the OI figures and Long/Short read below are unavailable, not zero/neutral." />
-                    )}
-                    {displayFuturesBars.length > 0 ? (
-                      <>
-                        {futuresRegimeSinceOpen && (
-                          <Alert
-                            style={{ marginBottom: 12 }}
-                            type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
-                            showIcon
-                            message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
-                            description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatFuturesOi(futuresRegimeSinceOpen.oiDelta, futuresOiUnit, { signed: true })} since today's open.`}
-                          />
-                        )}
-                        <Row gutter={24} style={{ marginBottom: 12 }}>
-                          <Col>
-                            <Statistic title="Futures LTP" value={currentFutures?.close ?? '—'} precision={currentFutures?.close != null ? 2 : undefined} />
-                          </Col>
-                          <Col>
-                            <Statistic
-                              title="Basis (Fut - Spot)"
-                              value={futuresBasis != null ? `${futuresBasis >= 0 ? '+' : ''}${futuresBasis.toFixed(2)}` : '—'}
-                              valueStyle={{ color: futuresBasis == null ? undefined : futuresBasis >= 0 ? UP_COLOR : DOWN_COLOR }}
-                            />
-                          </Col>
-                          <Col>
-                            <Statistic title={`Futures OI (${futuresOiUnit})`} value={result.futuresOiAvailable ? formatFuturesOi(currentFutures?.openInterest, futuresOiUnit, { withUnit: false }) : 'N/A'} />
-                          </Col>
-                          <Col>
-                            <Statistic
-                              title="OI since open"
-                              value={result.futuresOiAvailable ? formatFuturesOi(futuresOiSinceOpen, futuresOiUnit, { signed: true }) : 'N/A'}
-                              valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
-                            />
-                          </Col>
-                          <Col>
-                            <Statistic title="Volume so far" value={futuresVolumeSoFar != null ? futuresVolumeSoFar.toLocaleString() : '—'} />
-                          </Col>
-                          <Col>
-                            <Statistic
-                              title="Regime (since open)"
-                              value={result.futuresOiAvailable ? (futuresRegimeSinceOpen?.regime ?? '—') : 'N/A'}
-                              valueStyle={{ fontSize: 16, color: futuresRegimeSinceOpen?.color }}
-                            />
-                          </Col>
-                        </Row>
-                        <ChartErrorBoundary key={`futures-${underlying}-${result.date}-${futuresTimeframe}`}>
-                          <FuturesChart
-                            bars={displayFuturesBars}
-                            vwap={futuresVwap}
-                            oiLine={futuresOiLine} oiUnit={futuresOiUnit}
-                            markers={futuresRegimeMarkers}
-                            dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
-                            height={320}
-                            profile={futuresProfile} profileRowSize={futuresProfileRow} profileLabel={futuresProfileLabel}
-                            deltaBars={futuresDeltaBars}
-                          />
-                        </ChartErrorBoundary>
-                        {futuresDeltaBars?.length > 0 && (
-                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                            Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
-                            {futuresFlow?.source === 'estimated'
-                              ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
-                              : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
-                                ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
-                                : ' - from the live tick feed'}.
-                          </Text>
-                        )}
-                        {futuresProfile?.poc != null && (
-                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                            Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
-                            {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
-                            {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
-                            {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
-                          </Text>
-                        )}
-                        {prevFuturesShown?.error && (
-                          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
-                        )}
-                        <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-                          The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
-                        </Text>
-                        {result.futuresOiAvailable && (
-                          <Text type="secondary" style={{ fontSize: 11 }}>
-                            Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
-                          </Text>
-                        )}
-                      </>
-                    ) : (
-                      <Empty description={result.futuresError || 'No futures data for this day.'} />
-                    )}
+                    {futuresContent}
                   </Card>
                 </Col>
               </Row>
@@ -6457,7 +6469,7 @@ export default function OiReplayPage() {
                   options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
                 />
               </div>
-              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 6 switches · Esc closes</Text>
+              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
             </Space>
           )}
         >
@@ -6480,6 +6492,12 @@ export default function OiReplayPage() {
               cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
               asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
             />
+          )}
+          {quickView === 'futures' && (
+            <Space direction="vertical" size={8} style={{ width: '100%' }}>
+              <Space size={8} wrap>{futuresControls}</Space>
+              {futuresContent}
+            </Space>
           )}
           {quickView === 'gex' && (
             <GexCard

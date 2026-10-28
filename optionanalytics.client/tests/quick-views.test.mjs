@@ -1,4 +1,4 @@
-// The OI Replay quick views (quickViews.js): Ctrl + Shift + 1 - 6 (top row or numpad) open the six popups; anything
+// The OI Replay quick views (quickViews.js): Ctrl + Shift + 1 - 7 (top row or numpad) open the seven popups; anything
 // else - Ctrl alone (the browser's tab keys), Alt, Cmd, other keys - opens nothing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -6,8 +6,8 @@ import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, 
 
 const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, ...mods })
 
-test('Ctrl + Shift + 1 - 6 open the six quick views in order', () => {
-  assert.deepEqual(QUICK_VIEWS.map((v) => v.key), ['dayOi', 'oiCharts', 'oiHeatmap', 'premium', 'straddle', 'gex'])
+test('Ctrl + Shift + 1 - 7 open the seven quick views in order', () => {
+  assert.deepEqual(QUICK_VIEWS.map((v) => v.key), ['dayOi', 'oiCharts', 'oiHeatmap', 'premium', 'straddle', 'gex', 'futures'])
   for (const v of QUICK_VIEWS) {
     assert.equal(quickViewForKey(key(`Digit${v.digit}`)).key, v.key)
     assert.equal(quickViewForKey(key(`Numpad${v.digit}`)).key, v.key)
@@ -19,7 +19,7 @@ test('nothing else opens one', () => {
   assert.equal(quickViewForKey(key('Digit1', { ctrlKey: false })), null)
   assert.equal(quickViewForKey(key('Digit1', { altKey: true })), null)
   assert.equal(quickViewForKey(key('Digit1', { metaKey: true })), null)
-  assert.equal(quickViewForKey(key('Digit7')), null)
+  assert.equal(quickViewForKey(key('Digit8')), null)
   assert.equal(quickViewForKey(key('KeyB')), null)
 })
 
@@ -35,7 +35,7 @@ test('the floating button stays on the screen, starts bottom right, and opens it
   // A press that moved under 6 px is a tap; 6 px or more a drag.
   assert.equal(isFabDrag(3, 4), false)
   assert.equal(isFabDrag(0, 6), true)
-  // Six icons need 6 x (34 + 8) px: up from low on the screen, down from near the top.
+  // Seven icons need 7 x (34 + 8) px: up from low on the screen, down from near the top.
   const need = QUICK_VIEWS.length * (FAB_ITEM_SIZE + FAB_GAP)
   assert.equal(fabOpensUp({ x: 300, y: 664 }, QUICK_VIEWS.length, phone), true)
   assert.equal(fabOpensUp({ x: 300, y: 40 }, QUICK_VIEWS.length, phone), false)

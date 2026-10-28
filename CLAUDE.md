@@ -190,14 +190,15 @@ When adding or changing a strategy:
   check was removed on request.)
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
-  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX (top row or numpad; the same again or Esc closes,
+  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
   another digit switches; Ctrl + Shift because the browser keeps Ctrl + 1 - 8 for its tabs), or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alertUnderlying` - so no
-  second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`), live with the page
+  second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
+  its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
-  opens the six views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup.
+  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
