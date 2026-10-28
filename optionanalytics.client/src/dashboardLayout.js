@@ -7,8 +7,8 @@
 // plain function so the rules can be tested without a browser.
 //
 // h is in GRID ROWS, not pixels: a row is GRID_ROW_HEIGHT px plus the margin between rows, so a card's
-// real height is rowsToPx(h). Every card therefore has a height, and one whose content is taller scrolls
-// inside it - that is what a dashboard is.
+// real height is rowsToPx(h). A card nobody has sized is exactly as tall as its content (fitLayoutHeights -
+// nothing to scroll); one whose corner was dragged keeps that height and scrolls inside it if it must.
 //
 // NARROW SCREENS NEVER USE IT: under WIDE_LAYOUT_PX the page stacks the cards full width at their own
 // height, exactly as it always has. A layout dragged out on a monitor cannot leave a phone with a sliver
@@ -31,6 +31,11 @@ export const rowsToPx = (rows, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN
 /** The nearest whole number of rows to `px` - how a pixel height a card wants becomes a grid height. */
 export const pxToRows = (px, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN) =>
   Math.max(MIN_H, Math.round((px + margin) / (rowHeight + margin)))
+
+/** The fewest rows that hold `px` whole - a card fitted to its content is never a few pixels short of it
+ *  (the card clips what it does not hold, so the nearest row could cut off its last line). */
+export const rowsToHold = (px, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN) =>
+  Math.max(MIN_H, Math.ceil((px + margin) / (rowHeight + margin)))
 
 // How tall each card starts out, in grid rows - roughly what it is worth on the page today, so the first
 // sight of the dashboard looks like the page the layout replaced. A card not named here gets DEFAULT_ROWS.
@@ -149,6 +154,29 @@ export function isDefaultLayout(layout, cardIds, order = null) {
   })
 }
 
+/** Whether a layout is still ARRANGED as the page starts - every card in its default column and width, and in
+ *  its default order down each column - whatever heights the cards have. isDefaultLayout compares heights too,
+ *  and a card nobody sized follows its content (fitLayoutHeights), so that never matches once a card has been
+ *  measured; this is the "anything to reset?" question the page actually asks. Packing a column upwards
+ *  never reorders it, so the order down a column survives the heights changing. `shown`: only these cards
+ *  count - the grid saves just the cards on the page, so a hidden one always comes back elsewhere. */
+export function isDefaultArrangement(layout, cardIds, order = null, shown = null) {
+  if (!Array.isArray(layout)) return false
+  const showing = shown ? new Set(shown) : null
+  const base = defaultLayout(cardIds, order).filter((b) => !showing || showing.has(b.i))
+  const byId = new Map(layout.map((it) => [it?.i, it]))
+  if (!base.every((b) => byId.has(b.i))) return false
+  if (!base.every((b) => byId.get(b.i)?.x === b.x && byId.get(b.i)?.w === b.w)) return false
+  const lanes = (items) => {
+    const out = new Map()
+    for (const it of [...items].sort((a, b) => a.y - b.y)) out.set(it.x, [...(out.get(it.x) ?? []), it.i])
+    return out
+  }
+  const want = lanes(base)
+  const have = lanes(base.map((b) => byId.get(b.i)))
+  return [...want].every(([x, ids]) => (have.get(x) ?? []).join('|') === ids.join('|'))
+}
+
 /** Every card the same width, `columns` of them a row, left to right in the page's order - the one-click
  *  presets. Each card keeps the height it has; a row starts below the tallest card of the row above. */
 export function presetLayout(cardIds, columns, { order = null, layout = null } = {}) {
@@ -185,7 +213,7 @@ export function fitLayoutHeights(layout, measured, sized = null) {
     if (sized?.has(it.i)) return it
     const px = measured.get(it.i)
     if (!Number.isFinite(px) || px <= 0) return it
-    const h = pxToRows(px)
+    const h = rowsToHold(px)
     if (h === it.h) return it
     changed = true
     return { ...it, h }

@@ -57,7 +57,7 @@ import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
   STORED_LAYOUT_VERSION, LAYOUT_VERSION, fitLayoutHeights, isStackedLayout, WIDE_LAYOUT_PX,
-  isDefaultLayout, presetLayout, reconcileGridLayout, reconcileSections,
+  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -749,6 +749,8 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
 const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
+// The cards on the page whatever "Sections shown" says.
+const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
 // The dashboard first shipped with every card full width - a single column that looked exactly like the
 // page before it, gave no hint that a card could be dragged, and left a card nowhere sideways to go when
@@ -3544,6 +3546,8 @@ export default function OiReplayPage() {
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
   // Packed upwards, or a card left exactly where it is dropped (DashboardGrid).
   const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
+  // The cards on the page now - the spot / entry charts and the ladder always, the rest as "Sections shown" says.
+  const shownCardIds = useMemo(() => OI_REPLAY_CARD_IDS.filter((id) => ALWAYS_SHOWN_CARDS.has(id) || visibleSections.includes(id)), [visibleSections])
   // All a card needs to know is how tall it is, for the charts that fill it (useCardContentHeight).
   const rowsById = useMemo(() => new Map(gridLayout.map((it) => [it.i, it.h])), [gridLayout])
   const dash = (id) => ({
@@ -6032,7 +6036,17 @@ export default function OiReplayPage() {
                     {[1, 2, 3, 4].map((n) => (
                       <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(OI_REPLAY_CARD_IDS, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
                     ))}
-                    <Button size="small" onClick={() => setStoredLayout(null)} disabled={isDefaultLayout(gridLayout, OI_REPLAY_CARD_IDS, cardOrder)}>Reset</Button>
+                    <Tooltip title="Every card back to exactly the height its own content needs - nothing scrolls inside a card. A card whose corner you drag keeps the height you gave it (and scrolls inside it if its content is taller) until this.">
+                      <Button size="small" onClick={fitAllHeights} disabled={!sized.size}>Fit heights</Button>
+                    </Tooltip>
+                    <Tooltip title="The layout the page starts with: every card back to its default place and width, and to its content's height.">
+                      <Button
+                        size="small" onClick={() => { setStoredLayout(null); fitAllHeights() }}
+                        disabled={isDefaultArrangement(gridLayout, OI_REPLAY_CARD_IDS, cardOrder, shownCardIds) && !sized.size}
+                      >
+                        Reset
+                      </Button>
+                    </Tooltip>
                     <Tooltip title="Off: the cards pack upwards, so moving one never leaves a hole above it. On: a card stays exactly where you drop it, gaps and all.">
                       <Checkbox checked={freePlacement} onChange={(e) => setFreePlacement(e.target.checked)}>Free placement</Checkbox>
                     </Tooltip>
@@ -6105,7 +6119,7 @@ export default function OiReplayPage() {
         {result && (
           <DashboardGrid
             wide={wideLayout} cardIds={OI_REPLAY_CARD_IDS} order={cardOrder} layout={gridLayout}
-            onLayoutChange={setGridLayout} editing={layoutEditing} freePlacement={freePlacement}
+            onLayoutChange={setGridLayout} onResizeCard={onResizeCard} editing={layoutEditing} freePlacement={freePlacement}
           >
             {visibleSections.includes('topStats') && (
               <DashboardCard key="topStats" {...dash('topStats')}>

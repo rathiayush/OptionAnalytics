@@ -5,8 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
-  contentHeight, defaultLayout, defaultRows, gridItem, isDefaultLayout, presetLayout, pxToRows,
-  reconcileGridLayout, reconcileSections, rowsToPx,
+  contentHeight, defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
+  isStackedLayout, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -21,13 +21,25 @@ test('a card is as many rows tall as it covers, with the margins between them', 
   assert.equal(pxToRows(0), MIN_H)      // never under the minimum
 })
 
-test('the page starts with every card full width, stacked in its own order', () => {
+test('the page starts as a dashboard: each card at its own width, left to right, wrapping to a new row', () => {
   const layout = defaultLayout(IDS)
   assert.deepEqual(layout.map((it) => it.i), IDS)
-  assert.ok(layout.every((it) => it.x === 0 && it.w === GRID_COLS))
-  assert.equal(layout[0].y, 0)
-  assert.equal(layout[1].y, defaultRows('topStats'))
-  assert.equal(layout[2].y, defaultRows('topStats') + defaultRows('marketRead'))
+  // The snapshot is full width; the two reads after it sit side by side under it.
+  assert.deepEqual(layout[0], { i: 'topStats', x: 0, y: 0, w: GRID_COLS, h: defaultRows('topStats') })
+  assert.deepEqual(layout[1], { i: 'marketRead', x: 0, y: defaultRows('topStats'), w: defaultSpan('marketRead'), h: defaultRows('marketRead') })
+  assert.deepEqual(layout[2], { i: 'gex', x: defaultSpan('marketRead'), y: defaultRows('topStats'), w: defaultSpan('gex'), h: defaultRows('gex') })
+  // A row starts under the TALLEST card of the row above, so nothing overlaps.
+  const three = defaultLayout(['marketRead', 'gex', 'straddle'])
+  assert.equal(three[2].y, Math.max(defaultRows('marketRead'), defaultRows('gex')))
+  assert.equal(three[2].x, 0)
+})
+
+test('the old saved one-column stack is told apart from a real arrangement', () => {
+  const stacked = IDS.map((i, n) => ({ i, x: 0, y: n * 10, w: GRID_COLS, h: 10 }))
+  assert.equal(isStackedLayout(stacked, IDS), true)
+  assert.equal(isStackedLayout(defaultLayout(IDS), IDS), false)
+  assert.equal(isStackedLayout(stacked.slice(0, 2), IDS), false)     // not the whole page: someone's own
+  assert.equal(isStackedLayout(null, IDS), false)
 })
 
 test('a card order saved before the grid existed still seeds the order', () => {
@@ -104,4 +116,46 @@ test('the cards to show are reconciled too, and never leave an empty page', () =
   assert.deepEqual(reconcileSections([], all, fallback), fallback)                // and never nothing at all
   assert.deepEqual(reconcileSections(['gone'], all, fallback), fallback)
   assert.notEqual(reconcileSections(null, all, fallback), fallback)               // a copy, not the array itself
+})
+
+test('a card fitted to its content holds all of it - the fewest rows, never a row short', () => {
+  for (const px of [1, 100, 582, 705, 1135, 1200]) {
+    const rows = rowsToHold(px)
+    assert.ok(rows === MIN_H || rowsToPx(rows) >= px, `${px} px in ${rows} rows = ${rowsToPx(rows)} px`)
+    assert.ok(rows === MIN_H || rowsToPx(rows - 1) < px, `${rows} rows is the fewest for ${px} px`)
+  }
+  // The nearest row (pxToRows) can be shorter than the content; rowsToHold never is.
+  assert.ok(rowsToPx(pxToRows(690)) < 690 && rowsToPx(rowsToHold(690)) >= 690)   // 674 px vs 720
+})
+
+test('a card nobody sized follows its content; one dragged to a height keeps it', () => {
+  const layout = [{ i: 'gex', x: 0, y: 0, w: 6, h: 19 }, { i: 'straddle', x: 6, y: 0, w: 6, h: 19 }]
+  const measured = new Map([['gex', 1135], ['straddle', 400]])
+  const fitted = fitLayoutHeights(layout, measured, new Set(['straddle']))
+  assert.equal(fitted[0].h, rowsToHold(1135))
+  assert.equal(fitted[1], layout[1])                                       // sized: untouched
+  // Nothing new to fit: the same array back, so measuring the same page again costs no render.
+  assert.equal(fitLayoutHeights(fitted, measured, new Set(['straddle'])), fitted)
+  assert.equal(fitLayoutHeights(layout, new Map()), layout)
+  assert.equal(fitLayoutHeights(layout, new Map([['gex', 0]])), layout)    // not measured yet
+})
+
+test('"anything to reset?" asks about the arrangement - not the heights the cards fitted to', () => {
+  const base = defaultLayout(IDS)
+  assert.equal(isDefaultArrangement(base, IDS), true)
+  // Every card fitted to its content and packed up again: still the page's own arrangement.
+  const fitted = base.map((it) => ({ ...it, h: it.h + 3, y: it.y === 0 ? 0 : it.y + 3 }))
+  assert.equal(isDefaultArrangement(fitted, IDS), true)
+  assert.equal(isDefaultLayout(fitted, IDS), false)
+  // A card moved to another column, made wider, or put above another in its column: arranged.
+  assert.equal(isDefaultArrangement(base.map((it) => (it.i === 'gex' ? { ...it, x: 3 } : it)), IDS), false)
+  assert.equal(isDefaultArrangement(base.map((it) => (it.i === 'gex' ? { ...it, w: 8 } : it)), IDS), false)
+  assert.equal(isDefaultArrangement(base.map((it) => (it.i === 'marketRead' ? { ...it, y: -1 } : it.i === 'topStats' ? { ...it, y: 40 } : it)), IDS), false)
+  assert.equal(isDefaultArrangement(presetLayout(IDS, 2), IDS), false)
+  assert.equal(isDefaultArrangement(null, IDS), false)
+  // Only the cards on the page count: a hidden one comes back wherever the grid put it.
+  const hiddenMoved = base.map((it) => (it.i === 'topStats' ? { ...it, x: 0, w: 6, y: 90 } : it))
+  assert.equal(isDefaultArrangement(hiddenMoved, IDS), false)
+  assert.equal(isDefaultArrangement(hiddenMoved, IDS, null, ['marketRead', 'gex']), true)
+  assert.equal(isDefaultArrangement(base.filter((it) => it.i !== 'gex'), IDS, null, ['marketRead', 'gex']), false)
 })

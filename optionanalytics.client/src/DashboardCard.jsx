@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef } from 'react'
+import { createContext, isValidElement, useContext, useEffect, useRef } from 'react'
 import { contentHeight } from './dashboardLayout.js'
 
 // One card on the OI Replay dashboard. Thin on purpose: react-grid-layout owns where the card is and how
@@ -53,6 +53,10 @@ export function DashboardCard({
     return () => { cancelAnimationFrame(frame); observer.disconnect() }
   }, [auto, onMeasure, id])
 
+  // react-resizable hands its resize corner in WITH the children (keyed "resizableHandle-se"): it goes on the card
+  // itself, beside the body - inside the body it sat under a sized card's scrollbar again.
+  const parts = Array.isArray(children) ? children : [children]
+  const isHandle = (child) => isValidElement(child) && String(child.key ?? '').includes('resizableHandle-')
   return (
     <div
       {...rest}
@@ -62,9 +66,10 @@ export function DashboardCard({
     >
       <div ref={bodyRef} className={`oa-dash-body${auto ? ' oa-dash-body--auto' : ''}`}>
         <CardHeightContext.Provider value={auto ? null : contentHeight(rows, { chromePx })}>
-          {children}
+          {parts.filter((child) => !isHandle(child))}
         </CardHeightContext.Provider>
       </div>
+      {parts.filter(isHandle)}
     </div>
   )
 }
