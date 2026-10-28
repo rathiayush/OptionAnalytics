@@ -250,15 +250,18 @@ export async function fetchPreviousSession(underlying, date, rowSize, expiryQuer
  *  to the same bottom-of-row space. Null when there are not two bins to read a row size from. */
 export function binsProfile(profile) {
   const bins = (profile?.bins ?? [])
-    .filter((b) => Number.isFinite(b?.price) && Number.isFinite(b?.volume) && b.volume > 0)
+    .filter((b) => Number.isFinite(b?.price) && Number.isFinite(b?.volume))
     .sort((a, b) => a.price - b.price)
   if (bins.length < 2) return null
+  // The row size comes from ALL the bins, the empty ones included: the server bins by each bar's close, so a
+  // real day leaves plenty at zero volume, and measuring the step between only the bins that traded would
+  // read a gap of three empty bins as the row size and draw every bar three times too tall.
   const steps = bins.slice(1).map((b, i) => b.price - bins[i].price).filter((d) => d > 0)
   if (!steps.length) return null
   const rowSize = Math.min(...steps)
   const half = rowSize / 2
-  const rows = bins.map((b) => ({ price: round2(b.price - half), buy: 0, sell: 0, total: b.volume }))
-  const maxRow = Math.max(...rows.map((r) => r.total))
+  const rows = bins.filter((b) => b.volume > 0).map((b) => ({ price: round2(b.price - half), buy: 0, sell: 0, total: b.volume }))
+  const maxRow = rows.length ? Math.max(...rows.map((r) => r.total)) : 0
   if (!(maxRow > 0)) return null
   const bottom = (v) => (Number.isFinite(v) ? round2(v - half) : null)
   return { rows, rowSize, maxRow, poc: bottom(profile.poc), vah: bottom(profile.vah), val: bottom(profile.val) }

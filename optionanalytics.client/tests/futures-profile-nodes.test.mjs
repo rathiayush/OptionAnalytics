@@ -60,3 +60,36 @@ test('a profile without nodes draws just POC / VAH / VAL', () => {
   const titles = setProfileLines(series, [], { ...profile, ...profileNodes(profile) }, 2).map((l) => l.title).sort()
   assert.deepEqual(titles, ['POC', 'VAH', 'VAL'])
 })
+
+// ---- The spot / entry charts' volume-profile BARS (profiles.binsProfile -> VolumeProfilePrimitive) ----
+// The server bins the previous day by each bar's CLOSE, so a real day's histogram is sparse: plenty of bins
+// never traded. The row size has to come from the bins themselves, not only the ones that did.
+function serverBins({ low = 22600, high = 22800, count = 60, traded = (i) => i % 3 === 0 } = {}) {
+  const size = (high - low) / count
+  return Array.from({ length: count }, (_, i) => ({
+    price: Math.round((low + (i + 0.5) * size) * 100) / 100,
+    volume: traded(i) ? 1000 * (i + 1) : 0,
+  }))
+}
+
+test('the bars are a row per traded bin, one bin tall, at the bin BOTTOM price', async () => {
+  const { binsProfile } = await import('../src/profiles.js')
+  const bins = serverBins()
+  const p = binsProfile({ bins, poc: bins[30].price, vah: bins[40].price, val: bins[20].price })
+  const binSize = bins[1].price - bins[0].price
+  assert.ok(Math.abs(p.rowSize - binSize) < 0.01, `row = one bin (${p.rowSize} vs ${binSize})`)
+  assert.equal(p.rows.length, bins.filter((b) => b.volume > 0).length)   // only the bins that traded are drawn
+  assert.ok(p.rows.every((r) => r.buy === 0 && r.sell === 0 && r.total > 0))  // no side of their own: one neutral bar
+  assert.equal(p.maxRow, Math.max(...bins.map((b) => b.volume)))
+  // Rows and levels are both at the bin's BOTTOM, so the value-area shading lines up with the VAH / VAL lines.
+  assert.ok(Math.abs(p.rows[0].price - (bins[0].price - binSize / 2)) < 0.01)
+  assert.ok(Math.abs(p.poc - (bins[30].price - binSize / 2)) < 0.01)
+})
+
+test('a day with one traded bin, or none, draws no bars at all', async () => {
+  const { binsProfile } = await import('../src/profiles.js')
+  assert.equal(binsProfile({ bins: serverBins({ traded: () => false }) }), null)
+  assert.equal(binsProfile({ bins: [{ price: 100, volume: 5 }] }), null)
+  assert.equal(binsProfile({ bins: [] }), null)
+  assert.equal(binsProfile(null), null)
+})
