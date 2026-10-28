@@ -5,7 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
-  contentHeight, defaultLayout, defaultRows, gridItem, isDefaultLayout, presetLayout, pxToRows, reconcileGridLayout, rowsToPx,
+  contentHeight, defaultLayout, defaultRows, gridItem, isDefaultLayout, presetLayout, pxToRows,
+  reconcileGridLayout, reconcileSections, rowsToPx,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -92,4 +93,15 @@ test('a chart filling a card gets the card less its title bar, and never a slive
   assert.equal(contentHeight(null), null)          // no grid height: the chart keeps its own
   assert.equal(contentHeight(undefined), null)
   assert.ok(contentHeight(MIN_H, { chromePx: 400 }) >= 90)
+})
+
+test('the cards to show are reconciled too, and never leave an empty page', () => {
+  const all = ['a', 'b', 'c']
+  const fallback = ['b', 'c']
+  assert.deepEqual(reconcileSections(['a', 'c'], all, fallback), ['a', 'c'])
+  assert.deepEqual(reconcileSections(['a', 'gone', 'a'], all, fallback), ['a'])   // unknown and duplicates dropped
+  assert.deepEqual(reconcileSections(null, all, fallback), fallback)              // nothing saved: the default set
+  assert.deepEqual(reconcileSections([], all, fallback), fallback)                // and never nothing at all
+  assert.deepEqual(reconcileSections(['gone'], all, fallback), fallback)
+  assert.notEqual(reconcileSections(null, all, fallback), fallback)               // a copy, not the array itself
 })

@@ -145,8 +145,19 @@ export function contentHeight(rows, { chromePx = 86, rowHeight = GRID_ROW_HEIGHT
   return Math.max(MIN_CONTENT_HEIGHT, rowsToPx(rows, rowHeight, margin) - chromePx)
 }
 
+/** The cards to show, reconciled with the ones the page has now: anything saved that no longer exists is
+ *  dropped, and nothing saved at all means `fallback` (the page's own default set). */
+export function reconcileSections(stored, allValues, fallback) {
+  if (!Array.isArray(stored)) return [...fallback]
+  const known = new Set(allValues)
+  const out = stored.filter((v, i) => known.has(v) && stored.indexOf(v) === i)
+  // An empty page is never what someone meant to save - it would look broken with no way back but "Show all".
+  return out.length ? out : [...fallback]
+}
+
 // Where the page keeps its dashboard in this browser.
 export const STORED_LAYOUT = 'optionanalytics.oiReplay.gridLayout'
 export const STORED_COMPACT = 'optionanalytics.oiReplay.compact'
 export const STORED_QUICK_FAB = 'optionanalytics.oiReplay.quickFabOn'
 export const STORED_FREE_PLACEMENT = 'optionanalytics.oiReplay.freePlacement'
+export const STORED_SECTIONS = 'optionanalytics.oiReplay.sections'

@@ -203,7 +203,10 @@ When adding or changing a strategy:
   charts already follow their container's WIDTH (each has a ResizeObserver), and the spot / entry charts follow the
   card's HEIGHT too - `useCardContentHeight`. `useCardOrder` is still read on this page, but only to SEED the default
   layout's order - nothing drags through it any more. "Compact" hides the cards' long explanatory paragraphs (the
-  `oa-note` class).
+  `oa-note` class). The WHOLE structure is saved, not just the grid: which cards are shown too (`STORED_SECTIONS`,
+  `reconcileSections` - anything saved that no longer exists is dropped, and an empty set falls back rather than
+  leaving a blank page), and the page starts on `DEFAULT_SECTION_VALUES` - every card but Snapshot and Market Read,
+  whose numbers all appear on the cards below them; both are one tick away in "Sections shown".
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,

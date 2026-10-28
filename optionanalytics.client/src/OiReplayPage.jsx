@@ -55,8 +55,8 @@ import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitiv
 import { DashboardCard, useCardContentHeight } from './DashboardCard.jsx'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, WIDE_LAYOUT_PX,
-  isDefaultLayout, presetLayout, reconcileGridLayout,
+  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, WIDE_LAYOUT_PX,
+  isDefaultLayout, presetLayout, reconcileGridLayout, reconcileSections,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -736,6 +736,10 @@ const SECTION_OPTIONS = [
   { value: 'futures', label: 'Futures' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
+// What the page shows before anyone picks: everything but the two reads whose numbers are all on the cards
+// below them anyway - the Snapshot's figures and Market Read's PCR / OI / IV votes. Both are one tick away in
+// "Sections shown", and the choice is saved (STORED_SECTIONS) like the rest of the dashboard.
+const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats' && v !== 'marketRead')
 
 // The page's own top-level draggable blocks, in DEFAULT order - see useCardOrder's own doc comment
 // for why the actual render order comes from that hook, not this literal order, once the user has
@@ -3472,7 +3476,12 @@ export default function OiReplayPage() {
   const [pePremiumEma1, setPePremiumEma1] = useState(9)
   const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
-  const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
+  // Saved, like where the cards sit and how big they are - the whole structure comes back on a reload.
+  const [storedSections, setVisibleSections] = usePersistedState(STORED_SECTIONS, DEFAULT_SECTION_VALUES)
+  const visibleSections = useMemo(
+    () => reconcileSections(storedSections, ALL_SECTION_VALUES, DEFAULT_SECTION_VALUES),
+    [storedSections],
+  )
   // Only the ORDER is still read from here: it seeds the dashboard's default layout, so a page reordered
   // before the grid existed still starts out that way round. Dragging is the grid's now (DashboardGrid).
   const { order: cardOrder } = useCardOrder('optionanalytics.oiReplayCardOrder', OI_REPLAY_CARD_IDS)
