@@ -12,7 +12,7 @@ export function paperSquareOffMs(ms) {
 
 /**
  * The square-off of an open No SL position once the clock `atMs` reaches 15:15 of its entry day: `{ kind: 'dayEnd',
- * fillPrice }` - the price of the last point of `series` (the option's points, ascending, `{ time, price }`) at or
+ * fillPrice, at }` (at = 15:15) - the price of the last point of `series` (the option's points, ascending, `{ time, price }`) at or
  * before 15:15, else its last known price, else its entry - or null (not a No SL position, closed, or before 15:15).
  */
 export function dayEndExit(position, atMs, series) {
@@ -25,8 +25,15 @@ export function dayEndExit(position, atMs, series) {
     if (t > squareOff) break
     if (p.price != null) price = p.price
   }
-  return { kind: 'dayEnd', fillPrice: price ?? position.lastPrice ?? position.entryPrice }
+  return { kind: 'dayEnd', fillPrice: price ?? position.lastPrice ?? position.entryPrice, at: squareOff }
 }
 
 /** The reason a paper exit shows, from the kind of hit. */
 export const paperExitReason = (kind) => (kind === 'sl' ? 'SL' : kind === 'trail' ? 'Trailing SL' : kind === 'dayEnd' ? 'Day end' : 'Target')
+
+/** When an auto exit happened, for its exitTime: the minute it hit in (`hitAt`) when that is an earlier bar - a replay, or a
+ *  page opened after it - else the clock: live, the second it was seen. */
+export function paperExitTime(hitAt, clockMs) {
+  if (clockMs == null) return hitAt ?? null
+  return hitAt != null && clockMs - hitAt >= 60_000 ? hitAt : clockMs
+}

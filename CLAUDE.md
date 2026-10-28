@@ -211,7 +211,9 @@ When adding or changing a strategy:
   the entry or of a change only the point's own price counts - its high / low partly came before it (live, the forming
   minute's range holds the ticks before the entry). The trailing stop only tightens: what a bar earned is kept through a
   change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
-  position is squared off at 15:15 (`tests/paper-stops.test.mjs`).
+  position is squared off at 15:15 (`tests/paper-stops.test.mjs`). Each position keeps its entry and exit time (`entryTime` /
+  `exitTime`, shown HH:MM:SS under its prices): the clock at a punch or a manual exit (live, to the second); an auto exit's
+  the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`).
 - Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
   page's chain chart): the band follows spot, so a strike that joins it after the open counts from its first reading -
   counted in full, its whole OI showed up as "added since the open" (`tests/chain-oi-totals.test.mjs`). Market Read

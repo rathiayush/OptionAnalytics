@@ -23,7 +23,7 @@ import { inMarketSession } from './marketSession.js'
 import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
 import { readoutPlacement } from './readoutPlacement.js'
 import { usePaperPositionsSync } from './paperSync.js'
-import { paperExitReason } from './paperExit.js'
+import { paperExitReason, paperExitTime } from './paperExit.js'
 import { paperExitHit, paperLevelsNow, punchLevelLog, withPaperLevelChange } from './paperStops.js'
 import { chainOiDay, chainOiTotalsAt } from './chainOiTotals.js'
 import { nearAtmOiChange, oiWalls } from './marketRead.js'
@@ -2579,6 +2579,12 @@ function clearLiveDayCache() {
 // - see LiveTrading.jsx / LiveTradingService. A Super Order priced off the live ask (buy) or bid
 // (sell) plus `liveSlippage`, with this panel's SL/target as its legs; the paper table gives way to
 // the account's real positions and P&L.
+// A paper position's entry / exit time under its price: HH:MM:SS IST (live entries and exits carry the second; a replay's
+// are its minute, :00). Nothing for a position saved before exits were timed.
+const paperTimeLine = (ms) => (Number.isFinite(ms)
+  ? <div style={{ fontSize: 11, color: AXIS_COLOR, fontVariantNumeric: 'tabular-nums' }}>{new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour12: false })}</div>
+  : null)
+
 function PaperTradePanel({
   atmStrike, step, side, onSideChange, direction, onDirectionChange, strikeOffset, onStrikeOffsetChange,
   qtyLots, onQtyLotsChange, slPoints, onSlPointsChange, targetPoints, onTargetPointsChange,
@@ -2607,8 +2613,16 @@ function PaperTradePanel({
     },
     { title: 'Strike', dataIndex: 'strike', key: 'strike', width: 105, render: (s, r) => <span>{r.underlying && r.underlying !== underlying && <Tag style={{ fontSize: 10, marginRight: 4, paddingInline: 3 }}>{r.underlying}</Tag>}{s}</span> },
     { title: 'Qty', dataIndex: 'qtyLots', key: 'qtyLots', width: 60, render: (q, r) => `${q}×${r.lotSize}` },
-    { title: 'Entry', dataIndex: 'entryPrice', key: 'entryPrice', width: 65, render: (v) => v.toFixed(2) },
-    { title: 'LTP', dataIndex: 'ltp', key: 'ltp', width: 65, render: (v, r) => (r.stale ? <Tooltip title="No live price of this option yet - its last price on screen (or its entry). It updates when its own index's ticks arrive."><Text type="secondary">{v.toFixed(2)}*</Text></Tooltip> : v.toFixed(2)) },
+    { title: 'Entry', dataIndex: 'entryPrice', key: 'entryPrice', width: 72, render: (v, r) => <>{v.toFixed(2)}{paperTimeLine(r.entryTime)}</> },
+    {
+      title: 'LTP / Exit', dataIndex: 'ltp', key: 'ltp', width: 72,
+      render: (v, r) => (
+        <>
+          {r.stale ? <Tooltip title="No live price of this option yet - its last price on screen (or its entry). It updates when its own index's ticks arrive."><Text type="secondary">{v.toFixed(2)}*</Text></Tooltip> : v.toFixed(2)}
+          {r.status !== 'OPEN' && paperTimeLine(r.exitTime)}
+        </>
+      ),
+    },
     {
       title: 'PnL', dataIndex: 'pnl', key: 'pnl', width: 85,
       render: (v) => <Text strong style={{ color: v >= 0 ? UP_COLOR : DOWN_COLOR, fontSize: 12 }}>{v >= 0 ? '+' : ''}{v.toFixed(0)}</Text>,
@@ -2719,7 +2733,7 @@ function PaperTradePanel({
             {/* scroll.x - the panel itself is capped to fit a phone's viewport width (see
                 DraggableFloatingPanel below), narrower than these columns' own combined width, so
                 the table needs to scroll horizontally within the panel rather than overflow it. */}
-            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 510, y: 220 }} />
+            <Table dataSource={positions} columns={columns} rowKey="id" size="small" pagination={false} scroll={{ x: 530, y: 220 }} />
             <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
               <Text strong style={{ color: totalPnl >= 0 ? UP_COLOR : DOWN_COLOR }}>
                 Total PnL: {totalPnl >= 0 ? '+' : ''}{totalPnl.toFixed(0)}
@@ -4640,6 +4654,9 @@ export default function OiReplayPage() {
     return at == null ? null : latestAtOrBefore(seriesOf(p), at)?.price ?? null
   }, [ownChainOf, seriesOf, asOfMs])
   const exitPriceOf = (p) => markOf(p) ?? p.lastPrice ?? p.entryPrice
+  // When a position closes (exitTime, ms - seconds shown live): its own chain's clock (the replay's, live now), another
+  // index's position now.
+  const exitClockOf = (p) => (ownChainOf(p) ? asOfMs : Date.now())
   const premiumOf = (side, strike) => (strike == null || asOfMs == null ? null : latestAtOrBefore((side === 'CE' ? ceByStrike : peByStrike).get(strike) ?? [], asOfMs)?.price ?? null)
   const handlePaperPunch = (overrides) => {
     const t = tradeOf(overrides)
@@ -4670,7 +4687,7 @@ export default function OiReplayPage() {
   const handlePaperExit = (id) => {
     const open = paperPositions.find((p) => p.id === id && p.status === 'OPEN')
     if (open) announcePaperExit(open, exitPriceOf(open), 'Manual')
-    setPaperPositions((prev) => prev.map((p) => (p.id !== id || p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual' })))
+    setPaperPositions((prev) => prev.map((p) => (p.id !== id || p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual', exitTime: exitClockOf(p) })))
   }
 
   const handlePaperClearAll = () => setPaperPositions([])
@@ -4813,7 +4830,7 @@ export default function OiReplayPage() {
   // the table afterward, distinct from Clear all's "wipe the list" ask.
   const handlePaperExitAll = () => {
     for (const p of paperPositions) if (p.status === 'OPEN') announcePaperExit(p, exitPriceOf(p), 'Manual')
-    setPaperPositions((prev) => prev.map((p) => (p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual' })))
+    setPaperPositions((prev) => prev.map((p) => (p.status !== 'OPEN' ? p : { ...p, status: 'CLOSED', exitPrice: exitPriceOf(p), exitReason: 'Manual', exitTime: exitClockOf(p) })))
   }
 
   // Live PnL for every position, OPEN or CLOSED - an OPEN one is marked to the replay's CURRENT
@@ -4858,8 +4875,9 @@ export default function OiReplayPage() {
     for (const p of paperPositions) {
       if (p.status !== 'OPEN' || p.entryTime == null) continue
       const own = ownChainOf(p)
-      const hit = paperExitHit(seriesOf(p), p, { asOfMs: own ? asOfMs : null, clockMs: own ? asOfMs : Date.now(), fallback: fallbackLevelsOf(p) })
-      if (hit) hits.set(p.id, hit)
+      const clockMs = own ? asOfMs : Date.now()
+      const hit = paperExitHit(seriesOf(p), p, { asOfMs: own ? asOfMs : null, clockMs, fallback: fallbackLevelsOf(p) })
+      if (hit) hits.set(p.id, { ...hit, exitTime: paperExitTime(hit.at, clockMs) })
     }
     if (hits.size === 0) return
     for (const p of paperPositions) {
@@ -4870,7 +4888,7 @@ export default function OiReplayPage() {
     }
     setPaperPositions((prev) => prev.map((p) => {
       const hit = hits.get(p.id)
-      return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: paperExitReason(hit.kind) } : p
+      return hit && p.status === 'OPEN' ? { ...p, status: 'CLOSED', exitPrice: hit.fillPrice, exitReason: paperExitReason(hit.kind), exitTime: hit.exitTime } : p
     }))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paperPositions, seriesOf, ownChainOf, asOfMs, fallbackLevelsOf])

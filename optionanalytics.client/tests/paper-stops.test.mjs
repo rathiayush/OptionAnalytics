@@ -163,8 +163,8 @@ test('a No SL position is squared off at 15:15; one with levels keeps its stop /
   assert.deepEqual(paperExitHit(late, p, { asOfMs: ist('15:16') }), { kind: 'sl', fillPrice: 80, at: ist('15:16') })
   const noStop = position({ noStop: true, levelLog: undefined, entryTime: ist('15:12') })
   assert.equal(paperExitHit(late, noStop, { asOfMs: ist('15:14') }), null)
-  assert.deepEqual(paperExitHit(late, noStop, { asOfMs: ist('15:15') }), { kind: 'dayEnd', fillPrice: 98 })
+  assert.deepEqual(paperExitHit(late, noStop, { asOfMs: ist('15:15') }), { kind: 'dayEnd', fillPrice: 98, at: ist('15:15') })
   // Live / another chain: the clock is given apart from the points.
-  assert.deepEqual(paperExitHit(late.slice(0, 3), noStop, { asOfMs: null, clockMs: ist('15:15', 20) }), { kind: 'dayEnd', fillPrice: 99 })
+  assert.deepEqual(paperExitHit(late.slice(0, 3), noStop, { asOfMs: null, clockMs: ist('15:15', 20) }), { kind: 'dayEnd', fillPrice: 99, at: ist('15:15') })
   assert.equal(paperExitHit(late, { ...p, status: 'CLOSED' }, { asOfMs: ist('15:20') }), null)
 })
