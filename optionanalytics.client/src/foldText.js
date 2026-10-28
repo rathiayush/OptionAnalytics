@@ -1,7 +1,8 @@
 // Which of the pages' text blocks are folded (FoldText.jsx): the explanations under the charts, the checklist's reasons,
 // the straddle / GEX reads. Each block remembers its own choice once it is clicked (optionanalytics.fold.<id> - kept for
 // the account like every page preference, prefsSync.js); until then it follows "Fold all" / "Open all"
-// (optionanalytics.foldAll), and without that its own default: the reads open, the explanations folded to one line.
+// (optionanalytics.foldAll), and without that its own default: folded to one line - the charts are the cards' main
+// part, the text is there when wanted.
 
 export const FOLD_PREFIX = 'optionanalytics.fold.'
 export const STORED_FOLD_ALL = 'optionanalytics.foldAll'
@@ -20,7 +21,7 @@ const parse = (text) => {
 }
 
 /** Whether block `id` is open: its own choice, else "Fold all" / "Open all", else `defaultOpen`. `read(key)` -> text. */
-export function isFoldOpen(read, id, defaultOpen = true) {
+export function isFoldOpen(read, id, defaultOpen = false) {
   const own = parse(read(foldKey(id)))
   if (typeof own === 'boolean') return own
   const all = parse(read(STORED_FOLD_ALL))

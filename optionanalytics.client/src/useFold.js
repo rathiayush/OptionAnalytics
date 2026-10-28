@@ -31,7 +31,7 @@ const subscribe = (onChange) => {
 }
 
 /** [open, setOpen] for block `id` - remembered, and follows "Fold all" / "Open all" until clicked. */
-export function useFold(id, defaultOpen = true) {
+export function useFold(id, defaultOpen = false) {
   const open = useSyncExternalStore(subscribe, () => isFoldOpen(read, id, defaultOpen), () => defaultOpen)
   const setOpen = useCallback((next) => write((storage) => setFoldOpen(storage, id, typeof next === 'function' ? next(isFoldOpen(read, id, defaultOpen)) : next)), [id, defaultOpen])
   return [open, setOpen]

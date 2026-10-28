@@ -17,10 +17,11 @@ function fakeStorage(entries = {}) {
   }
 }
 
-test('a block follows its own default until it is clicked', () => {
+test('a block follows its own default until it is clicked - folded unless said: the charts are the main part', () => {
   const storage = fakeStorage()
-  assert.equal(isFoldOpen(storage.getItem, 'straddle.read', true), true)     // a read: open
-  assert.equal(isFoldOpen(storage.getItem, 'oiHeatmap.note', false), false)  // an explanation: folded
+  assert.equal(isFoldOpen(storage.getItem, 'gex.read'), false)
+  assert.equal(isFoldOpen(storage.getItem, 'straddle.read', true), true)     // one that asks to start open
+  assert.equal(isFoldOpen(storage.getItem, 'oiHeatmap.note', false), false)
   setFoldOpen(storage, 'oiHeatmap.note', true)
   assert.equal(isFoldOpen(storage.getItem, 'oiHeatmap.note', false), true)
   assert.equal(storage.getItem(foldKey('oiHeatmap.note')), 'true')

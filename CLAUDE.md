@@ -285,10 +285,11 @@ When adding or changing a strategy:
 - OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
   its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
 - The cards' TEXT BLOCKS fold to one line and open again (`FoldText.jsx` - a ▸ / ▾ button, the folded line its `summary`
-  or its own text cut with an ellipsis, a click on it opens it; `useFold.js`; `foldText.js` the pure rules): the reads
-  (straddle read and numbers, GEX regime and the two signs' verdict, the checklist's reasons, the live-order note) start
-  OPEN, the explanations (heatmap, ladder, futures chart notes, liquidity map, profiles, footprint, Market Read, paper
-  trades, the page intro, the chart captions) start FOLDED. Each block keeps its own click (`optionanalytics.fold.<id>` -
+  or its own text cut with an ellipsis, a click on it opens it; `useFold.js`; `foldText.js` the pure rules). The CHARTS
+  are the cards' main part, so EVERY block starts FOLDED - the reads (straddle read and numbers, GEX regime and the two
+  signs' verdict, the checklist's reasons, the live-order note) and the explanations (heatmap, ladder, futures chart
+  notes, liquidity map, profiles, footprint, Market Read, paper trades, the page intro, the chart captions) alike; the
+  GEX number row is not a text block and always shows. Each block keeps its own click (`optionanalytics.fold.<id>` -
   an account preference like every other, `prefsSync.js`); the controls card's "Text: Fold all / Open all" sets
   `optionanalytics.foldAll` and drops every block's own click, so blocks not on the page follow too. An explanation keeps
   the `oa-note` class on its FoldText, so "Compact" still hides it whole. A new block of text on a card: wrap it in

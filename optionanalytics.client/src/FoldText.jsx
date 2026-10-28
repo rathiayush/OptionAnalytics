@@ -20,7 +20,8 @@ export function FoldButton({ open, onToggle, label, style }) {
 
 /**
  * A block of text that folds to one line. `id` names it (its fold is remembered for the account); `summary` is what
- * the folded line says (default: the block's own text, cut); `defaultOpen` - the reads open, the explanations not.
+ * the folded line says (default: the block's own text, cut); `defaultOpen` - folded unless said: the charts are what a
+ * card is for.
  * `className` / `style` go on the block (an explanation keeps the `oa-note` class: Compact still hides it whole).
  */
 export function FoldText({ id, summary, defaultOpen = false, label, className, style, children }) {

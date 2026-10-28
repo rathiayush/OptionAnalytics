@@ -2841,7 +2841,7 @@ function PaperTradePanel({
           </>
         )}
         {isLiveMode ? (
-          <FoldText id="tradePanel.liveNote" label="how live orders work" defaultOpen>
+          <FoldText id="tradePanel.liveNote" label="how live orders work">
             <Text type="secondary" style={{ fontSize: 10 }}>
               Live: each order is a Dhan Super Order (INTRADAY) - a LIMIT entry at the live ask (buy) or bid (sell)
               plus the slippage above, with the SL and target measured from that ask/bid as its exit legs, which

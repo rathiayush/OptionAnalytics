@@ -50,7 +50,7 @@ function SideList({ name, color, side, reasonsOpen, setReasonsOpen }) {
  * alerts nothing.
  */
 export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, dashboardFlow = null, gexDays = null }) {
-  const [reasonsOpen, setReasonsOpen] = useFold('entryChecklist.reasons', true)
+  const [reasonsOpen, setReasonsOpen] = useFold('entryChecklist.reasons', false)
   const ceIndex = useMemo(() => indexByStrike(cePoints), [cePoints])
   const peIndex = useMemo(() => indexByStrike(pePoints), [pePoints])
   // Live, the option-flow check reads the dashboard's own CDV (the same numbers the CDV / OBV card shows).

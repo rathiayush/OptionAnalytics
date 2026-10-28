@@ -293,7 +293,7 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
     <>
       {controls}
       {/* The read, the two signs' verdict and the notes each fold to one line (FoldText - remembered, "Fold all" on the page). */}
-      <FoldText id="gex.read" label="the read" defaultOpen style={{ marginBottom: 8 }}>
+      <FoldText id="gex.read" label="the read" style={{ marginBottom: 4 }}>
         <div style={{ borderLeft: `3px solid ${gexColor(now.net)}`, padding: '4px 10px', fontSize: 12 }}>
           <Tag color={positive ? 'green' : 'red'} style={{ marginRight: 8 }}>{positive ? 'Positive gamma' : 'Negative gamma'}</Tag>
           {positive
@@ -306,7 +306,7 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
           )}
         </div>
       </FoldText>
-      <FoldText id="gex.agreement" label="the two signs' verdict" defaultOpen style={{ marginBottom: 8 }}>
+      <FoldText id="gex.agreement" label="the two signs' verdict" style={{ marginBottom: 8 }}>
         <div style={{ fontSize: 12 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
           <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)} ({both.standard ?? '-'})</span>

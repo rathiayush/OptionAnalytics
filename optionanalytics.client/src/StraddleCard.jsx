@@ -222,7 +222,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
     <>
       {controls}
       {/* The read and the numbers under it each fold to one line (FoldText - remembered, "Fold all" on the page). */}
-      <FoldText id="straddle.read" label="the read" defaultOpen style={{ marginBottom: 8 }}>
+      <FoldText id="straddle.read" label="the read" style={{ marginBottom: 4 }}>
         <div style={{ borderLeft: '3px solid #4c9ffe', padding: '4px 10px' }}>
           <Tag color={verdictColor(verdict)} style={{ marginRight: 8 }}>{verdict.title}{verdict.side && verdict.kind !== 'early' ? (verdict.side === 'up' ? ' ↑' : ' ↓') : ''}</Tag>
           <Text style={{ fontSize: 12 }}>{verdict.detail}</Text>
@@ -230,7 +230,7 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
         </div>
       </FoldText>
       <FoldText
-        id="straddle.numbers" label="the straddle's numbers" defaultOpen style={{ marginBottom: 8 }}
+        id="straddle.numbers" label="the straddle's numbers" style={{ marginBottom: 8 }}
         summary={(
           <Text style={{ fontSize: 12 }}>
             <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> Auto ATM {now.strike} <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
