@@ -45,7 +45,8 @@ const CARD_ROWS = {
   marketRead: 13,
   entryChecklist: 12,
   dayOi: 13,
-  oiHeatmap: 17,
+  oiHeatmap: 13,
+  oiTotals: 9,
   spotAndEntry: 23,
   optionPremium: 14,
   optionFlow: 14,
@@ -67,6 +68,7 @@ const CARD_SPAN = {
   topStats: 12,
   entryChecklist: 12,
   oiHeatmap: 12,
+  oiTotals: 12,
   spotAndEntry: 12,
   futures: 12,
 }
@@ -123,21 +125,31 @@ export function isStackedLayout(layout, cardIds) {
   return layout.every((it) => it && ids.has(it.i) && it.x === 0 && it.w === GRID_COLS)
 }
 
-/** A saved layout reconciled with the cards the page has now: the cards it knows keep their place, a card
- *  added since goes at the bottom full width, and ids no longer on the page are dropped. */
+/** A saved layout reconciled with the cards the page has now: the cards it knows keep their place, ids no
+ *  longer on the page are dropped, and a card added since goes RIGHT UNDER the card before it in the page's
+ *  order (at its column, its own default width), everything from there down moving down to make room - a card
+ *  split out of another (the OI totals out of the heatmap) lands where its content used to be, not at the
+ *  bottom of the page. With none of the cards before it saved, it goes at the bottom, full width. */
 export function reconcileGridLayout(stored, cardIds, order = null) {
   const saved = new Map((Array.isArray(stored) ? stored : [])
     .filter((it) => it && typeof it.i === 'string')
     .map((it) => [it.i, it]))
   const ids = sortByOrder(cardIds, order)
   if (!saved.size) return defaultLayout(cardIds, order)
-  const out = ids.filter((id) => saved.has(id)).map((id) => gridItem(saved.get(id), id))
-  let bottom = out.reduce((b, it) => Math.max(b, it.y + it.h), 0)
-  for (const id of ids) {
-    if (saved.has(id)) continue
-    out.push({ i: id, x: 0, y: bottom, w: GRID_COLS, h: defaultRows(id) })
-    bottom += defaultRows(id)
-  }
+  let out = ids.filter((id) => saved.has(id)).map((id) => gridItem(saved.get(id), id))
+  ids.forEach((id, n) => {
+    if (saved.has(id)) return
+    const h = defaultRows(id)
+    const before = ids.slice(0, n).reverse().map((other) => out.find((it) => it.i === other)).find(Boolean)
+    if (!before) {
+      out.push({ i: id, x: 0, y: out.reduce((b, it) => Math.max(b, it.y + it.h), 0), w: GRID_COLS, h })
+      return
+    }
+    const w = defaultSpan(id)
+    const y = before.y + before.h
+    out = out.map((it) => (it.y >= y ? { ...it, y: it.y + h } : it))
+    out.push({ i: id, x: Math.min(before.x, GRID_COLS - w), y, w, h })
+  })
   // Back into the page's own order, so the DOM order (and so the tab order) still reads sensibly.
   const byId = new Map(out.map((it) => [it.i, it]))
   return ids.map((id) => byId.get(id))
@@ -255,6 +267,23 @@ export function nextFitScale(state, { scale, content, box, width, charts }) {
   return { scale: next, state: { prev: here, size, steps: steps + 1 } }
 }
 
+// Cards split out of another since a trader's "Sections shown" was saved: the new card -> the card it came out of.
+// The OI totals (CE / PE / Net cumulative Δ and their S/R break alerts) were part of the OI change heatmap card.
+export const SECTION_SPLITS = { oiTotals: 'oiHeatmap' }
+
+/** A saved choice of cards with each card split out since added wherever the card it came out of is shown (right
+ *  after it) - it holds what that card used to, so someone who showed the heatmap keeps seeing the totals (and their
+ *  alerts keep running). The page does this ONCE (SECTIONS_VERSION), so hiding the new card afterwards sticks. */
+export function withSplitSections(stored, splits = SECTION_SPLITS) {
+  if (!Array.isArray(stored)) return stored
+  const out = [...stored]
+  for (const [card, from] of Object.entries(splits)) {
+    if (out.includes(card) || !out.includes(from)) continue
+    out.splice(out.indexOf(from) + 1, 0, card)
+  }
+  return out
+}
+
 /** The cards to show, reconciled with the ones the page has now: anything saved that no longer exists is
  *  dropped, and nothing saved at all means `fallback` (the page's own default set). */
 export function reconcileSections(stored, allValues, fallback) {
@@ -272,9 +301,15 @@ export const STORED_QUICK_FAB = 'optionanalytics.oiReplay.quickFabOn'
 // The page's controls card folded to its one row of day / index / Load day (the rest behind "More").
 export const STORED_CONTROLS_COLLAPSED = 'optionanalytics.oiReplay.controlsCollapsed'
 export const STORED_FREE_PLACEMENT = 'optionanalytics.oiReplay.freePlacement'
+// The Day OI card's day read and its lookback table, open or folded to one line.
+export const STORED_DAY_READ_OPEN = 'optionanalytics.oiReplay.dayOi.readOpen'
+export const STORED_LOOKBACK_OPEN = 'optionanalytics.oiReplay.dayOi.lookbackOpen'
 export const STORED_SECTIONS = 'optionanalytics.oiReplay.sections'
 // The cards given a height of their own by dragging their corner - everything else follows its content.
 export const STORED_SIZED = 'optionanalytics.oiReplay.sizedCards'
 // Bumped when the DEFAULT layout changes in a way a saved one should pick up - see the page's migration.
 export const STORED_LAYOUT_VERSION = 'optionanalytics.oiReplay.gridLayoutVersion'
 export const LAYOUT_VERSION = '2'
+// Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration.
+export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
+export const SECTIONS_VERSION = '2'

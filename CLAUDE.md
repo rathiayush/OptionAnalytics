@@ -125,7 +125,9 @@ When adding or changing a strategy:
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
-  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
+  (`stepOiBreakAlerts`): the OI Replay page while it is open - in its own "OI totals" card (`oiTotals`: the CE / PE / Net
+  Δ and cumulative Δ table, Charts, its own bucket and these settings - `OiChangeHeatmapSection show="totals"` with
+  `alertUnderlying`; the heatmap card is `show="strikes"`, no alerts) - (pop-up, chime, voice) and the server scanner for every enabled
   index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). 🎯 = a cumulative-line break AND the CE or PE
   OI at ATM ± 1 shifting `atmShiftPct` % (default 20) of its size the same way, within the window. Settings (on / window / %) are
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
@@ -208,7 +210,11 @@ When adding or changing a strategy:
   outlines the grid - dragging works either way. The page OPENS as a dashboard, not a column: `defaultLayout` packs the
   cards left to right at `defaultSpan` (full width only for the snapshot, the checklist, the heatmap, the spot / entry and
   futures charts; the rest half) and wraps; a layout saved as the old all-full-width stack (`isStackedLayout`) is dropped
-  once (`LAYOUT_VERSION`) so this default takes over. Reset is offered only when something was arranged:
+  once (`LAYOUT_VERSION`) so this default takes over. A card added since a layout was saved goes RIGHT UNDER the card
+  before it in the page's order, everything below moving down (`reconcileGridLayout`) - with none of those saved, at the
+  bottom. A card SPLIT OUT of another (`SECTION_SPLITS`: the OI totals out of the heatmap) is added to a saved "Sections
+  shown" wherever its old card is shown, ONCE (`withSplitSections`, `SECTIONS_VERSION`) - hiding it afterwards sticks;
+  without it the totals and their alerts would have vanished for anyone with a saved choice. Reset is offered only when something was arranged:
   `isDefaultArrangement` (each SHOWN card's column, width and order down its column - not its height, which follows the
   content) - the grid saves only the cards on the page, so a hidden card comes back elsewhere and must not count.
   UNDER `WIDE_LAYOUT_PX` (1100) THERE IS NO GRID AT ALL: `DashboardGrid` stacks the cards full width at their own height,
@@ -249,6 +255,8 @@ When adding or changing a strategy:
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
   opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
   EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+- OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
+  its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

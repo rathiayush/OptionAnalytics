@@ -7,6 +7,7 @@ import {
   FIT_SCALE_MAX, FIT_SCALE_MIN, GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
   defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
   isStackedLayout, nextFitScale, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
+  SECTION_SPLITS, withSplitSections, defaultSpan as spanOf,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -59,14 +60,43 @@ test('one item is read back inside the grid, whatever was saved', () => {
   assert.deepEqual(gridItem(undefined, 'gex'), { i: 'gex', x: 0, y: 0, w: GRID_COLS, h: defaultRows('gex') })
 })
 
-test('a saved layout keeps its cards where they are; a new card goes to the bottom', () => {
+test('a saved layout keeps its cards where they are; a new card goes right under the card before it', () => {
   const saved = [{ i: 'gex', x: 6, y: 0, w: 6, h: 10 }, { i: 'topStats', x: 0, y: 0, w: 6, h: 5 }, { i: 'gone', x: 0, y: 9, w: 6, h: 5 }]
   const layout = reconcileGridLayout(saved, IDS)
   assert.deepEqual(layout.map((it) => it.i), IDS)                       // back in the page's order
   assert.deepEqual(layout.find((it) => it.i === 'gex'), { i: 'gex', x: 6, y: 0, w: 6, h: 10 })
   assert.equal(layout.some((it) => it.i === 'gone'), false)              // a card the page no longer has
-  const added = layout.find((it) => it.i === 'marketRead')               // a card added since it was saved
-  assert.deepEqual(added, { i: 'marketRead', x: 0, y: 10, w: GRID_COLS, h: defaultRows('marketRead') })
+  const added = layout.find((it) => it.i === 'marketRead')               // a card added since it was saved: under topStats
+  assert.deepEqual(added, { i: 'marketRead', x: 0, y: 5, w: spanOf('marketRead'), h: defaultRows('marketRead') })
+  // With none of the cards before it saved, at the bottom, full width.
+  const first = reconcileGridLayout([{ i: 'gex', x: 0, y: 0, w: 12, h: 10 }], ['topStats', 'gex'])
+  assert.deepEqual(first.find((it) => it.i === 'topStats'), { i: 'topStats', x: 0, y: 10, w: GRID_COLS, h: defaultRows('topStats') })
+})
+
+test('a card split out of another lands where its content was - everything below moves down to make room', () => {
+  // The OI totals left the heatmap card: a saved dashboard gets them right under the heatmap, not at the page's foot.
+  const ids = ['dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'gex']
+  const saved = [
+    { i: 'dayOi', x: 0, y: 0, w: 6, h: 13 },
+    { i: 'oiHeatmap', x: 0, y: 13, w: 12, h: 17 },
+    { i: 'spotAndEntry', x: 0, y: 30, w: 12, h: 23 },
+    { i: 'gex', x: 6, y: 0, w: 6, h: 13 },
+  ]
+  const layout = reconcileGridLayout(saved, ids)
+  const at = (id) => layout.find((it) => it.i === id)
+  assert.deepEqual(at('oiTotals'), { i: 'oiTotals', x: 0, y: 30, w: 12, h: defaultRows('oiTotals') })
+  assert.equal(at('spotAndEntry').y, 30 + defaultRows('oiTotals'))     // moved down by the new card's height
+  assert.deepEqual([at('dayOi').y, at('gex').y, at('oiHeatmap').y], [0, 0, 13])   // above it: untouched
+})
+
+test('a saved choice of cards that showed the heatmap shows the totals split out of it - once', () => {
+  assert.deepEqual(SECTION_SPLITS, { oiTotals: 'oiHeatmap' })
+  assert.deepEqual(withSplitSections(['dayOi', 'oiHeatmap', 'gex']), ['dayOi', 'oiHeatmap', 'oiTotals', 'gex'])
+  // The heatmap hidden: the totals stay hidden too (nothing of it was on the page).
+  assert.deepEqual(withSplitSections(['dayOi', 'gex']), ['dayOi', 'gex'])
+  // Already there: nothing doubled; nothing saved: nothing to do.
+  assert.deepEqual(withSplitSections(['oiHeatmap', 'oiTotals']), ['oiHeatmap', 'oiTotals'])
+  assert.equal(withSplitSections(null), null)
 })
 
 test('nothing saved - or nonsense saved - is the layout the page starts with', () => {

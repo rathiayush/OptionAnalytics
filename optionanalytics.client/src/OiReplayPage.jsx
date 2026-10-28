@@ -5,7 +5,7 @@ import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -56,7 +56,7 @@ import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './Dashb
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
-  STORED_LAYOUT_VERSION, LAYOUT_VERSION, fitLayoutHeights, isStackedLayout, WIDE_LAYOUT_PX,
+  STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -728,6 +728,7 @@ const SECTION_OPTIONS = [
   { value: 'entryChecklist', label: 'Entry checklist' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
+  { value: 'oiTotals', label: 'OI totals (CE / PE / Net Δ, S/R alerts)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'optionFlow', label: 'Option CDV / OBV' },
@@ -748,7 +749,7 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -758,13 +759,22 @@ const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 // anyone who never arranged anything; this drops it once so the real default takes over, and only once,
 // so "Cards a row: 1" still sticks for anyone who actually wants the column back.
 //
+// The same goes for the saved "Sections shown" once a card is split out of another (SECTION_SPLITS): the new card
+// is added where the old one is shown, once (SECTIONS_VERSION) - the OI totals and their S/R alerts left the heatmap
+// card, and a saved choice without them would have hidden the totals and stopped those alerts.
+//
 // Run from the component body rather than an effect: the saved layout is read by usePersistedState's own
 // first render, which is already too late for an effect to have cleared it.
 let layoutMigrated = false
-function migrateStackedLayout() {
+function migrateSavedDashboard() {
   if (layoutMigrated) return
   layoutMigrated = true
   try {
+    if (window.localStorage.getItem(STORED_SECTIONS_VERSION) !== JSON.stringify(SECTIONS_VERSION)) {
+      window.localStorage.setItem(STORED_SECTIONS_VERSION, JSON.stringify(SECTIONS_VERSION))
+      const sections = JSON.parse(window.localStorage.getItem(STORED_SECTIONS) ?? 'null')
+      if (Array.isArray(sections)) window.localStorage.setItem(STORED_SECTIONS, JSON.stringify(withSplitSections(sections)))
+    }
     if (window.localStorage.getItem(STORED_LAYOUT_VERSION) === JSON.stringify(LAYOUT_VERSION)) return
     window.localStorage.setItem(STORED_LAYOUT_VERSION, JSON.stringify(LAYOUT_VERSION))
     const saved = JSON.parse(window.localStorage.getItem(STORED_LAYOUT) ?? 'null')
@@ -3489,6 +3499,9 @@ export default function OiReplayPage() {
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
   const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
   const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
+  // The Day OI card's day read and its lookback table each fold to one line - remembered.
+  const [dayReadOpen, setDayReadOpen] = usePersistedState(STORED_DAY_READ_OPEN, true)
+  const [lookbackOpen, setLookbackOpen] = usePersistedState(STORED_LOOKBACK_OPEN, true)
   // The OI change heatmap's bucket, Numbers / Heatmap and Charts popup settings live in OiChangeHeatmapSection.
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
@@ -3522,6 +3535,7 @@ export default function OiReplayPage() {
   const [pePremiumEma2, setPePremiumEma2] = useState(15)
 
   // Saved, like where the cards sit and how big they are - the whole structure comes back on a reload.
+  migrateSavedDashboard()
   const [storedSections, setVisibleSections] = usePersistedState(STORED_SECTIONS, DEFAULT_SECTION_VALUES)
   const visibleSections = useMemo(
     () => reconcileSections(storedSections, ALL_SECTION_VALUES, DEFAULT_SECTION_VALUES),
@@ -3534,7 +3548,6 @@ export default function OiReplayPage() {
   // shown (visibleSections). Saved per browser; a narrow screen ignores it and keeps the single full-width
   // column it has always had.
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
-  migrateStackedLayout()
   const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
   // Which cards have been given a height of their own by dragging a corner. Everything else follows its
   // own content, so the page opens with no card scrolling inside itself (fitLayoutHeights).
@@ -5617,12 +5630,32 @@ export default function OiReplayPage() {
   // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 7): the same elements, rendered in both.
   const dayOiContent = dayOiSummary ? (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Alert
-        type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
-        showIcon
-        message={`Day so far: ${dayOiSummary.dayBias}`}
-        description={dayOiSummary.dayReason}
-      />
+      {dayReadOpen ? (
+        <Alert
+          type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
+          showIcon
+          message={`Day so far: ${dayOiSummary.dayBias}`}
+          description={dayOiSummary.dayReason}
+          action={(
+            <Tooltip title="Fold to one line">
+              <Button size="small" type="text" icon={<UpOutlined />} onClick={() => setDayReadOpen(false)} aria-label="Fold the day's read" />
+            </Tooltip>
+          )}
+        />
+      ) : (
+        // Folded: the verdict and the start of its reason on one line - the whole reason on hover.
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <Tooltip title="Show the day's read">
+            <Button size="small" type="text" icon={<RightOutlined />} onClick={() => setDayReadOpen(true)} aria-label="Show the day's read" />
+          </Tooltip>
+          <Tag color={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'default'} style={{ margin: 0 }}>
+            Day so far: {dayOiSummary.dayBias}
+          </Tag>
+          <Text type="secondary" title={dayOiSummary.dayReason} style={{ fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {dayOiSummary.dayReason}
+          </Text>
+        </div>
+      )}
       <Row gutter={[24, 16]}>
         <Col xs={12} md={6}>
           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
@@ -5660,36 +5693,53 @@ export default function OiReplayPage() {
         </Col>
       </Row>
       <div>
-        <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+        <Space align="center" size={12} wrap style={{ marginBottom: lookbackOpen ? 8 : 0 }}>
+          <Tooltip title={lookbackOpen ? 'Fold the lookback table to one line' : 'Show the lookback table'}>
+            <Button
+              size="small" type="text" icon={lookbackOpen ? <DownOutlined /> : <RightOutlined />} onClick={() => setLookbackOpen((v) => !v)}
+              aria-label={lookbackOpen ? 'Fold the lookback table' : 'Show the lookback table'}
+            />
+          </Tooltip>
           <Text type="secondary" style={{ fontSize: 12 }}>Total OI lookback</Text>
-          <Select
-            value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
-            options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
-          />
-          <Select
-            mode="tags" size="small" value={totalOiLookbackBars.map(String)}
-            onChange={(vals) => {
-              const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-              setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
-            }}
-            style={{ minWidth: 180 }}
-            options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
-          />
+          {lookbackOpen ? (
+            <>
+              <Select
+                value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
+                options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
+              />
+              <Select
+                mode="tags" size="small" value={totalOiLookbackBars.map(String)}
+                onChange={(vals) => {
+                  const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+                  setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+                }}
+                style={{ minWidth: 180 }}
+                options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
+              />
+            </>
+          ) : totalOiLookbackRows[0] && (
+            // Folded: the shortest lookback's two changes on the same line.
+            <Text style={{ fontSize: 12 }}>
+              {totalOiLookbackRows[0].bars} bars: CE {renderOiLookbackDelta(totalOiLookbackRows[0].ceDelta)} · PE {renderOiLookbackDelta(totalOiLookbackRows[0].peDelta)}
+            </Text>
+          )}
         </Space>
-        <Table
-          size="small"
-          pagination={false}
-          dataSource={totalOiLookbackRows}
-          locale={{ emptyText: 'No OI data yet today.' }}
-          scroll={{ x: 420 }}
-          columns={[
-            { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
-            { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
-            { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
-            { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
-            { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
-          ]}
-        />
+        {lookbackOpen && (
+          <Table
+            size="small"
+            pagination={false}
+            dataSource={totalOiLookbackRows}
+            locale={{ emptyText: 'No OI data yet today.' }}
+            scroll={{ x: 420 }}
+            columns={[
+              { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+              { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
+              { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
+              { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
+              { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
+            ]}
+          />
+        )}
       </div>
       {/* Whole-chain counterpart to the per-strike drill-down's own charts - a switch, not
           stacked, since the numbers right above already give the current since-open
@@ -6281,7 +6331,24 @@ export default function OiReplayPage() {
               <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI change heatmap (all strikes)</Space>}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="strikes"
+                  spotBars={oneMinBars} step={step}
+                />
+              </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
+            {/* The CE / PE / Net totals - each bucket's Δ and the cumulative Δ - with their charts and the S/R break and
+                🎯 alerts (alertUnderlying: the page's alerts run while THIS card is shown). Its own card, out of the
+                heatmap's: its own bucket too. */}
+            {visibleSections.includes('oiTotals') && (
+              <DashboardCard key="oiTotals" {...dash('oiTotals')}>
+              <LiveSection version={sectionVersion}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI totals: CE, PE and Net (CE − PE)</Space>}>
+                <OiChangeHeatmapSection
+                  ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alertUnderlying={underlying}
                   spotBars={oneMinBars} step={step}
                 />
               </Card>
