@@ -5,7 +5,7 @@ import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -38,7 +38,7 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
-import { QUICK_VIEWS, quickViewForKey } from './quickViews.js'
+import { QUICK_VIEWS, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
@@ -56,8 +56,8 @@ import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './Dashb
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
-  STORED_LAYOUT_VERSION, LAYOUT_VERSION, fitLayoutHeights, isStackedLayout, WIDE_LAYOUT_PX,
-  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections,
+  STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
+  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -728,6 +728,7 @@ const SECTION_OPTIONS = [
   { value: 'entryChecklist', label: 'Entry checklist' },
   { value: 'dayOi', label: 'Day OI Accumulation' },
   { value: 'oiHeatmap', label: 'OI change heatmap (all strikes)' },
+  { value: 'oiTotals', label: 'OI totals (CE / PE / Net Δ, S/R alerts)' },
   { value: 'entryCharts', label: 'Fast entry charts (3/1 min)' },
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'optionFlow', label: 'Option CDV / OBV' },
@@ -748,7 +749,7 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -758,13 +759,22 @@ const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 // anyone who never arranged anything; this drops it once so the real default takes over, and only once,
 // so "Cards a row: 1" still sticks for anyone who actually wants the column back.
 //
+// The same goes for the saved "Sections shown" once a card is split out of another (SECTION_SPLITS): the new card
+// is added where the old one is shown, once (SECTIONS_VERSION) - the OI totals and their S/R alerts left the heatmap
+// card, and a saved choice without them would have hidden the totals and stopped those alerts.
+//
 // Run from the component body rather than an effect: the saved layout is read by usePersistedState's own
 // first render, which is already too late for an effect to have cleared it.
 let layoutMigrated = false
-function migrateStackedLayout() {
+function migrateSavedDashboard() {
   if (layoutMigrated) return
   layoutMigrated = true
   try {
+    if (window.localStorage.getItem(STORED_SECTIONS_VERSION) !== JSON.stringify(SECTIONS_VERSION)) {
+      window.localStorage.setItem(STORED_SECTIONS_VERSION, JSON.stringify(SECTIONS_VERSION))
+      const sections = JSON.parse(window.localStorage.getItem(STORED_SECTIONS) ?? 'null')
+      if (Array.isArray(sections)) window.localStorage.setItem(STORED_SECTIONS, JSON.stringify(withSplitSections(sections)))
+    }
     if (window.localStorage.getItem(STORED_LAYOUT_VERSION) === JSON.stringify(LAYOUT_VERSION)) return
     window.localStorage.setItem(STORED_LAYOUT_VERSION, JSON.stringify(LAYOUT_VERSION))
     const saved = JSON.parse(window.localStorage.getItem(STORED_LAYOUT) ?? 'null')
@@ -924,10 +934,11 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
   return `${prefix} ${oiBarText(t)} ${strike} (${formatOiMillions(oi)} OI${iv != null ? `, IV ${iv.toFixed(1)}` : ''}${delta ? `, ${delta}` : ''}, ${sr})${staleTag}`
 }
 
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, profileBars = null }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null }) {
   // In a dashboard card the trader has sized, the height the card's fit gives it (useFitHeight); anywhere else - a
-  // floating panel, the review popup - the height the caller asked for.
-  const height = useFitHeight(givenHeight)
+  // floating panel, the review popup - the height the caller asked for. `extraHeight` on top: what lines its bottom
+  // up with the charts beside it (useEvenChartBottoms).
+  const height = useFitHeight(givenHeight) + extraHeight
   const containerRef = useRef(null)
   // Read once at creation; a later height (a floating panel resized) is applied to the same chart, not a new one.
   const heightRef = useRef(height)
@@ -1710,8 +1721,9 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
 export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null, spotBars = null, step = null }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
-  // timeframe picker on the page.
-  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = useState(1)
+  // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card - whose
+  // alerts read it - the quick view, the External page's tabs).
+  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = usePersistedState(`optionanalytics.oiReplay.bucket.${show}`, 1)
   // The totals (CE / PE / net) as numbers (default) or as a heatmap - remembered.
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
@@ -2194,9 +2206,10 @@ const VOLUME_PROFILE_NODE_SHADE_ALPHAS = [0.9, 0.45]
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
 function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, volumeProfile = null, showVolumeProfile = true, profileBars = null,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, extraHeight = 0, volumeProfile = null, showVolumeProfile = true, profileBars = null,
 }) {
-  const height = useFitHeight(givenHeight)
+  // Its own height (fitted in a sized card), plus what lines its bottom up with the charts beside it (useEvenChartBottoms).
+  const height = useFitHeight(givenHeight) + extraHeight
   // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -3450,12 +3463,65 @@ const SPEED_OPTIONS = [
 // that's not fresh enough (see OiReplayService's own doc comment); TODAY additionally stays live
 // via OiReplayLiveFeedService's WebSocket-fed ticks (see useOiReplayLiveFeed below) once the
 // initial snapshot has loaded, rather than only ever showing whatever was true at load time.
+// The spot chart and the two entry charts sit side by side in one card; their own headers are not the same height (in a
+// narrow column the spot card's controls wrap to seven lines, an entry chart's to three), so with the same chart
+// height the spot card ended well below the other two. This gives each chart however much shorter its card's
+// header and footer are than the tallest one's (card height less its chart's), so the three end on one line - only
+// while they share a row (stacked on a narrower screen, nothing). A card's chrome does not depend on its chart's
+// height, so the measure never chases itself.
+function useEvenChartBottoms(count) {
+  const cards = useRef([])
+  const observer = useRef(null)
+  const frame = useRef(0)
+  const [extras, setExtras] = useState(() => new Array(count).fill(0))
+  const measure = useCallback(() => {
+    cancelAnimationFrame(frame.current)
+    frame.current = requestAnimationFrame(() => {
+      const items = []
+      cards.current.slice(0, count).forEach((card, i) => {
+        const chart = card?.querySelector('.tv-lightweight-charts')
+        if (!chart || !chart.offsetHeight) return
+        const box = card.getBoundingClientRect()
+        items.push({ i, top: box.top, chrome: box.height - chart.getBoundingClientRect().height })
+      })
+      const next = new Array(count).fill(0)
+      if (items.length > 1 && items.every((it) => Math.abs(it.top - items[0].top) <= 2)) {
+        const most = Math.max(...items.map((it) => it.chrome))
+        for (const it of items) next[it.i] = Math.round(most - it.chrome)
+      }
+      setExtras((prev) => (prev.every((v, k) => Math.abs(v - next[k]) <= 1) ? prev : next))
+    })
+  }, [count])
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const resize = new ResizeObserver(measure)
+    observer.current = resize
+    for (const card of cards.current) if (card) resize.observe(card)
+    measure()
+    return () => { cancelAnimationFrame(frame.current); resize.disconnect(); observer.current = null }
+  }, [measure])
+  // One stable ref callback per card: a card element that comes or goes (a section shown, a day loaded, the spot chart
+  // docked back) is watched from then on - an observer set up once kept watching the element it first saw.
+  const refs = useRef([])
+  const cardRef = (i) => {
+    refs.current[i] ??= (el) => {
+      const before = cards.current[i]
+      if (before === el) return
+      if (before) observer.current?.unobserve(before)
+      cards.current[i] = el
+      if (el) { observer.current?.observe(el); measure() }
+    }
+    return refs.current[i]
+  }
+  return { cardRef, extras }
+}
+
 export default function OiReplayPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
   // Only meaningful for a HISTORICAL (non-today) day - Dhan's rolling-option REST endpoint (what a
   // past day's CE/PE data ultimately comes from) only ever accepts these two literal flags.
-  const [expiryFlag, setExpiryFlag] = useState('WEEK')
+  const [expiryFlag, setExpiryFlag] = usePersistedState('optionanalytics.oiReplay.expiryFlag', 'WEEK')
   // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall, only meaningful
   // while isLive (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
   // user's own explicit "it's going to next expiry, add an expiry filter" ask for the live page this
@@ -3468,7 +3534,7 @@ export default function OiReplayPage() {
   // the real calendar date "Weekly"/"Monthly" resolve to, shown as a tag on the matching option.
   const [resolvedExpiries, setResolvedExpiries] = useState({ week: null, month: null, expiries: [] })
   const [date, setDate] = useState(null)
-  const [speedMs, setSpeedMs] = useState(500)
+  const [speedMs, setSpeedMs] = usePersistedState('optionanalytics.oiReplay.speedMs', 500)
 
   // Two EmaChart instances, running SIDE BY SIDE alongside the main (typically 15-min) chart - the
   // user's own "I need basically three charts... 15, 3 and 1 min... according to their tick" ask:
@@ -3477,18 +3543,21 @@ export default function OiReplayPage() {
   // own timeframe/EMA controls (see EmaChart itself), so either can still be retuned to something
   // else entirely if wanted. Deliberately NOT persisted the way the main timeframe is - a quick
   // per-session tuning knob, not a durable preference.
-  const [chartBTimeframe, setChartBTimeframe] = useState(3)
-  const [chartBEma1, setChartBEma1] = useState(9)
-  const [chartBEma2, setChartBEma2] = useState(15)
+  const [chartBTimeframe, setChartBTimeframe] = usePersistedState('optionanalytics.oiReplay.chartB.timeframe', 3)
+  const [chartBEma1, setChartBEma1] = usePersistedState('optionanalytics.oiReplay.chartB.ema1', 9)
+  const [chartBEma2, setChartBEma2] = usePersistedState('optionanalytics.oiReplay.chartB.ema2', 15)
   // ATM OI change over the last N bars of chart B's OWN timeframe - shown as a small overlay
   // directly on chart B's own Card (not a separate panel) - the replay clock (asOfMs) keeps this
   // from ever revealing more than the rest of the page has "played" up to.
-  const [oiLookbackBars, setOiLookbackBars] = useState(3)
+  const [oiLookbackBars, setOiLookbackBars] = usePersistedState('optionanalytics.oiReplay.chartB.oiLookbackBars', 3)
   // Total OI Lookback Table's own state (Day OI Accumulation card, below) - deliberately separate
   // from chart B's own oiLookbackBars above: several bar counts at once, against the WHOLE chain's
   // total OI rather than one strike, with its own independent timeframe (default 1-minute bars).
-  const [totalOiLookbackBars, setTotalOiLookbackBars] = useState(DEFAULT_TOTAL_OI_LOOKBACK_BARS)
-  const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = useState(1)
+  const [totalOiLookbackBars, setTotalOiLookbackBars] = usePersistedState('optionanalytics.oiReplay.dayOi.lookbackBars', DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+  const [totalOiLookbackTimeframe, setTotalOiLookbackTimeframe] = usePersistedState('optionanalytics.oiReplay.dayOi.lookbackTimeframe', 1)
+  // The Day OI card's day read and its lookback table each fold to one line - remembered.
+  const [dayReadOpen, setDayReadOpen] = usePersistedState(STORED_DAY_READ_OPEN, true)
+  const [lookbackOpen, setLookbackOpen] = usePersistedState(STORED_LOOKBACK_OPEN, true)
   // The OI change heatmap's bucket, Numbers / Heatmap and Charts popup settings live in OiChangeHeatmapSection.
   // The Futures chart's own candle timeframe (1/3/5/15), independent of the spot chart's.
   const [futuresTimeframe, setFuturesTimeframe] = usePersistedState('optionanalytics.oiReplay.futuresTimeframe', 5)
@@ -3505,23 +3574,24 @@ export default function OiReplayPage() {
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
   // right above the chart already give the CURRENT since-open figure - the chart's own job here is
   // showing its TRAJECTORY, one view at a time, not re-deriving the same number again).
-  const [dayOiChartMode, setDayOiChartMode] = useState('total')
-  const [chartCTimeframe, setChartCTimeframe] = useState(1)
-  const [chartCEma1, setChartCEma1] = useState(9)
-  const [chartCEma2, setChartCEma2] = useState(15)
+  const [dayOiChartMode, setDayOiChartMode] = usePersistedState('optionanalytics.oiReplay.dayOi.chartMode', 'total')
+  const [chartCTimeframe, setChartCTimeframe] = usePersistedState('optionanalytics.oiReplay.chartC.timeframe', 1)
+  const [chartCEma1, setChartCEma1] = usePersistedState('optionanalytics.oiReplay.chartC.ema1', 9)
+  const [chartCEma2, setChartCEma2] = usePersistedState('optionanalytics.oiReplay.chartC.ema2', 15)
 
   // Option premium chart's own CE/PE strike pickers - offsets from ATM (see StrikePicker.jsx),
   // independently selectable, both defaulting to ATM itself.
-  const [cePremiumOffset, setCePremiumOffset] = useState(0)
-  const [pePremiumOffset, setPePremiumOffset] = useState(0)
-  const [cePremiumTimeframe, setCePremiumTimeframe] = useState(1)
-  const [cePremiumEma1, setCePremiumEma1] = useState(9)
-  const [cePremiumEma2, setCePremiumEma2] = useState(15)
-  const [pePremiumTimeframe, setPePremiumTimeframe] = useState(1)
-  const [pePremiumEma1, setPePremiumEma1] = useState(9)
-  const [pePremiumEma2, setPePremiumEma2] = useState(15)
+  const [cePremiumOffset, setCePremiumOffset] = usePersistedState('optionanalytics.oiReplay.cePremium.offset', 0)
+  const [pePremiumOffset, setPePremiumOffset] = usePersistedState('optionanalytics.oiReplay.pePremium.offset', 0)
+  const [cePremiumTimeframe, setCePremiumTimeframe] = usePersistedState('optionanalytics.oiReplay.cePremium.timeframe', 1)
+  const [cePremiumEma1, setCePremiumEma1] = usePersistedState('optionanalytics.oiReplay.cePremium.ema1', 9)
+  const [cePremiumEma2, setCePremiumEma2] = usePersistedState('optionanalytics.oiReplay.cePremium.ema2', 15)
+  const [pePremiumTimeframe, setPePremiumTimeframe] = usePersistedState('optionanalytics.oiReplay.pePremium.timeframe', 1)
+  const [pePremiumEma1, setPePremiumEma1] = usePersistedState('optionanalytics.oiReplay.pePremium.ema1', 9)
+  const [pePremiumEma2, setPePremiumEma2] = usePersistedState('optionanalytics.oiReplay.pePremium.ema2', 15)
 
   // Saved, like where the cards sit and how big they are - the whole structure comes back on a reload.
+  migrateSavedDashboard()
   const [storedSections, setVisibleSections] = usePersistedState(STORED_SECTIONS, DEFAULT_SECTION_VALUES)
   const visibleSections = useMemo(
     () => reconcileSections(storedSections, ALL_SECTION_VALUES, DEFAULT_SECTION_VALUES),
@@ -3534,7 +3604,8 @@ export default function OiReplayPage() {
   // shown (visibleSections). Saved per browser; a narrow screen ignores it and keeps the single full-width
   // column it has always had.
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
-  migrateStackedLayout()
+  // A monitor wide enough for six cards a row - "Cards a row" offers 6 there.
+  const sixARow = useMediaQuery(`(min-width: ${SIX_A_ROW_PX}px)`)
   const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
   // Which cards have been given a height of their own by dragging a corner. Everything else follows its
   // own content, so the page opens with no card scrolling inside itself (fitLayoutHeights).
@@ -4922,8 +4993,8 @@ export default function OiReplayPage() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.ctrlKey || e.metaKey || e.altKey || ticketBlockedRef.current) return
-      const el = e.target
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return
+      // Not while typing in a box - but a ticked checkbox, a toggle or a dropdown still holding the focus is not typing.
+      if (isTypingField(e.target)) return
       const direction = e.key === 'F1' || e.key === 'b' || e.key === 'B' ? 'BUY' : e.key === 'F2' || e.key === 's' || e.key === 'S' ? 'SELL' : null
       if (!direction) return
       e.preventDefault()
@@ -5201,12 +5272,12 @@ export default function OiReplayPage() {
   // actually watches tick to tick, not the whole +-10 band the ladder shows). Checked once PER
   // REPLAY TICK (native 1-minute), not once per render, so it beeps at most once per real minute
   // rather than repeatedly while a breach's own row re-renders for unrelated reasons.
-  const [alertThreshold, setAlertThreshold] = useState(1_000_000)
-  const [soundEnabled, setSoundEnabled] = useState(true)
+  const [alertThreshold, setAlertThreshold] = usePersistedState('optionanalytics.oiReplay.alertThreshold', 1_000_000)
+  const [soundEnabled, setSoundEnabled] = usePersistedState('optionanalytics.oiReplay.alertSound', true)
   // Defaults to top-5-only (the chart's original, carefully-tuned-for-readability behavior) - the
   // user's own "switch ... if true show top 5 else all wall" ask, off shows every real wall in the
   // whole fetched band instead (see ReplayChart's own top5Only doc comment).
-  const [top5WallsOnly, setTop5WallsOnly] = useState(true)
+  const [top5WallsOnly, setTop5WallsOnly] = usePersistedState('optionanalytics.oiReplay.top5WallsOnly', true)
   // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
   // the candles. On by default; unticked shows the full labels. Remembered in this browser.
   const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, true)
@@ -5488,6 +5559,8 @@ export default function OiReplayPage() {
   // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
   // must not assume a loaded day: live candles keep arriving while today's fetch is being redone
   // or has failed, and reading result.date then crashed the whole page.
+  // The spot, entry B and entry C charts end on one line (useEvenChartBottoms).
+  const { cardRef: evenChartCard, extras: chartExtras } = useEvenChartBottoms(3)
   const spotPanelSized = spotFloating && Number.isFinite(spotPanelSize.height) && floatingChartBoxHeight != null
   const spotChartHeight = !spotFloating ? 560 : spotPanelSized ? Math.max(FLOATING_SPOT_CHART_MIN_HEIGHT, floatingChartBoxHeight) : 440
   const spotChart = oneMinBars.length > 0
@@ -5505,6 +5578,7 @@ export default function OiReplayPage() {
           showVwap={showVwap}
           onStrikeClick={setDrilldownStrike}
           height={spotChartHeight}
+          extraHeight={spotFloating ? 0 : chartExtras[0]}
           profileBars={spotProfileBars}
         />
       </ChartErrorBoundary>
@@ -5617,12 +5691,32 @@ export default function OiReplayPage() {
   // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 7): the same elements, rendered in both.
   const dayOiContent = dayOiSummary ? (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Alert
-        type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
-        showIcon
-        message={`Day so far: ${dayOiSummary.dayBias}`}
-        description={dayOiSummary.dayReason}
-      />
+      {dayReadOpen ? (
+        <Alert
+          type={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'info'}
+          showIcon
+          message={`Day so far: ${dayOiSummary.dayBias}`}
+          description={dayOiSummary.dayReason}
+          action={(
+            <Tooltip title="Fold to one line">
+              <Button size="small" type="text" icon={<UpOutlined />} onClick={() => setDayReadOpen(false)} aria-label="Fold the day's read" />
+            </Tooltip>
+          )}
+        />
+      ) : (
+        // Folded: the verdict and the start of its reason on one line - the whole reason on hover.
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+          <Tooltip title="Show the day's read">
+            <Button size="small" type="text" icon={<RightOutlined />} onClick={() => setDayReadOpen(true)} aria-label="Show the day's read" />
+          </Tooltip>
+          <Tag color={dayOiSummary.dayBias === 'Bullish' ? 'success' : dayOiSummary.dayBias === 'Bearish' ? 'error' : 'default'} style={{ margin: 0 }}>
+            Day so far: {dayOiSummary.dayBias}
+          </Tag>
+          <Text type="secondary" title={dayOiSummary.dayReason} style={{ fontSize: 12, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {dayOiSummary.dayReason}
+          </Text>
+        </div>
+      )}
       <Row gutter={[24, 16]}>
         <Col xs={12} md={6}>
           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>CE OI since open</Text>
@@ -5660,36 +5754,53 @@ export default function OiReplayPage() {
         </Col>
       </Row>
       <div>
-        <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
+        <Space align="center" size={12} wrap style={{ marginBottom: lookbackOpen ? 8 : 0 }}>
+          <Tooltip title={lookbackOpen ? 'Fold the lookback table to one line' : 'Show the lookback table'}>
+            <Button
+              size="small" type="text" icon={lookbackOpen ? <DownOutlined /> : <RightOutlined />} onClick={() => setLookbackOpen((v) => !v)}
+              aria-label={lookbackOpen ? 'Fold the lookback table' : 'Show the lookback table'}
+            />
+          </Tooltip>
           <Text type="secondary" style={{ fontSize: 12 }}>Total OI lookback</Text>
-          <Select
-            value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
-            options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
-          />
-          <Select
-            mode="tags" size="small" value={totalOiLookbackBars.map(String)}
-            onChange={(vals) => {
-              const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
-              setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
-            }}
-            style={{ minWidth: 180 }}
-            options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
-          />
+          {lookbackOpen ? (
+            <>
+              <Select
+                value={totalOiLookbackTimeframe} onChange={setTotalOiLookbackTimeframe} size="small" style={{ width: 100 }}
+                options={TOTAL_OI_LOOKBACK_TIMEFRAME_OPTIONS}
+              />
+              <Select
+                mode="tags" size="small" value={totalOiLookbackBars.map(String)}
+                onChange={(vals) => {
+                  const parsed = [...new Set(vals.map((v) => parseInt(v, 10)).filter((n) => Number.isInteger(n) && n > 0))].sort((a, b) => a - b)
+                  setTotalOiLookbackBars(parsed.length > 0 ? parsed : DEFAULT_TOTAL_OI_LOOKBACK_BARS)
+                }}
+                style={{ minWidth: 180 }}
+                options={TOTAL_OI_LOOKBACK_BAR_OPTIONS.map((n) => ({ value: String(n), label: `${n} bars` }))}
+              />
+            </>
+          ) : totalOiLookbackRows[0] && (
+            // Folded: the shortest lookback's two changes on the same line.
+            <Text style={{ fontSize: 12 }}>
+              {totalOiLookbackRows[0].bars} bars: CE {renderOiLookbackDelta(totalOiLookbackRows[0].ceDelta)} · PE {renderOiLookbackDelta(totalOiLookbackRows[0].peDelta)}
+            </Text>
+          )}
         </Space>
-        <Table
-          size="small"
-          pagination={false}
-          dataSource={totalOiLookbackRows}
-          locale={{ emptyText: 'No OI data yet today.' }}
-          scroll={{ x: 420 }}
-          columns={[
-            { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
-            { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
-            { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
-            { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
-            { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
-          ]}
-        />
+        {lookbackOpen && (
+          <Table
+            size="small"
+            pagination={false}
+            dataSource={totalOiLookbackRows}
+            locale={{ emptyText: 'No OI data yet today.' }}
+            scroll={{ x: 420 }}
+            columns={[
+              { title: 'Lookback', dataIndex: 'bars', key: 'bars', render: (b) => `${b} bars ago` },
+              { title: 'Total CE OI Δ', dataIndex: 'ceDelta', key: 'ceDelta', render: renderOiLookbackDelta },
+              { title: 'CE %', dataIndex: 'cePercent', key: 'cePercent', render: renderOiLookbackPercent },
+              { title: 'Total PE OI Δ', dataIndex: 'peDelta', key: 'peDelta', render: renderOiLookbackDelta },
+              { title: 'PE %', dataIndex: 'pePercent', key: 'pePercent', render: renderOiLookbackPercent },
+            ]}
+          />
+        )}
       </div>
       {/* Whole-chain counterpart to the per-strike drill-down's own charts - a switch, not
           stacked, since the numbers right above already give the current since-open
@@ -5910,16 +6021,12 @@ export default function OiReplayPage() {
   const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
 
   return (
-    // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
-    // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
-    // futures chart at once, all genuinely useful wider (more candles visible, more of the ladder's
-    // own numbers readable without scrolling) rather than sitting centered in a narrow column with
-    // large empty margins either side on any normal desktop monitor - the user's own "I see a lot of
-    // space on left and right, it should fit, we can show a lot of thing in left and right". Raised
-    // again to 2600 for the user's own "width more than 2500 trading monitor" - three chart columns
-    // (Spot + Entry chart B + Entry chart C) side by side need real width each to stay readable, not
-    // just technically fit.
-    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
+    // The WHOLE window, however wide - unlike every other page's own 1280. This is the page carrying the charts, the
+    // OI/IV ladder, the heatmaps and a dozen more cards at once, laid out as a dashboard (DashboardGrid): on a wide or
+    // ultra-wide trading monitor the grid's twelve columns simply get wider, so more cards fit side by side ("Cards a
+    // row" offers six there) instead of the page sitting centred with empty space either side. It was capped at
+    // 2600 px, which left a third of a 3440 px monitor empty.
+    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
         <Space align="center" size={16} wrap className="oa-brand-row">
@@ -6080,8 +6187,8 @@ export default function OiReplayPage() {
                       </Button>
                     </Tooltip>
                     <Text type="secondary" style={{ fontSize: 12 }}>Cards a row:</Text>
-                    {[1, 2, 3, 4].map((n) => (
-                      <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(OI_REPLAY_CARD_IDS, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
+                    {cardsARowChoices(sixARow ? SIX_A_ROW_PX : 0).map((n) => (
+                      <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(shownCardIds, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
                     ))}
                     <Tooltip title="Every card back to exactly the height its own content needs - nothing scrolls inside a card. A card whose corner you drag keeps the height you gave it (and scrolls inside it if its content is taller) until this.">
                       <Button size="small" onClick={fitAllHeights} disabled={!sized.size}>Fit heights</Button>
@@ -6281,7 +6388,24 @@ export default function OiReplayPage() {
               <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI change heatmap (all strikes)</Space>}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="strikes"
+                  spotBars={oneMinBars} step={step}
+                />
+              </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
+            {/* The CE / PE / Net totals - each bucket's Δ and the cumulative Δ - with their charts and the S/R break and
+                🎯 alerts (alertUnderlying: the page's alerts run while THIS card is shown). Its own card, out of the
+                heatmap's: its own bucket too. */}
+            {visibleSections.includes('oiTotals') && (
+              <DashboardCard key="oiTotals" {...dash('oiTotals')}>
+              <LiveSection version={sectionVersion}>
+              <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI totals: CE, PE and Net (CE − PE)</Space>}>
+                <OiChangeHeatmapSection
+                  ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alertUnderlying={underlying}
                   spotBars={oneMinBars} step={step}
                 />
               </Card>
@@ -6298,21 +6422,23 @@ export default function OiReplayPage() {
               </Space>
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
-                  <Card
-                    size="small" title="Spot (replaying)"
-                    extra={!spotFloating && (
-                      <Tooltip title="Pop the whole spot chart out into a panel you can drag anywhere - e.g. next to the heatmap">
-                        <Button size="small" icon={<ExportOutlined />} onClick={() => setSpotFloating(true)}>Float</Button>
-                      </Tooltip>
-                    )}
-                  >
-                  {spotFloating ? (
-                    <Space direction="vertical" size={8} style={{ width: '100%', padding: '24px 0' }} align="center">
-                      <Text type="secondary">The spot chart is in its own floating panel.</Text>
-                      <Button size="small" onClick={() => setSpotFloating(false)}>Dock it back here</Button>
-                    </Space>
-                  ) : spotCardContent}
-                </Card>
+                  <div ref={evenChartCard(0)}>
+                    <Card
+                      size="small" title="Spot (replaying)"
+                      extra={!spotFloating && (
+                        <Tooltip title="Pop the whole spot chart out into a panel you can drag anywhere - e.g. next to the heatmap">
+                          <Button size="small" icon={<ExportOutlined />} onClick={() => setSpotFloating(true)}>Float</Button>
+                        </Tooltip>
+                      )}
+                    >
+                    {spotFloating ? (
+                      <Space direction="vertical" size={8} style={{ width: '100%', padding: '24px 0' }} align="center">
+                        <Text type="secondary">The spot chart is in its own floating panel.</Text>
+                        <Button size="small" onClick={() => setSpotFloating(false)}>Dock it back here</Button>
+                      </Space>
+                    ) : spotCardContent}
+                  </Card>
+                  </div>
               </Col>
               {/* The user's own "width more than 2500... adjust all 3 charts in same row" ask - on a
                   wide enough monitor, the main chart and both fast-entry charts sit side by side in
@@ -6323,67 +6449,71 @@ export default function OiReplayPage() {
               {visibleSections.includes('entryCharts') && (
                 <>
                   <Col xs={24} md={8}>
-                    <Card
-                      size="small"
-                      title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
-                      extra={
-                        <Select
-                          value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
-                          options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
-                        />
-                      }
-                    >
-                      {oneMinBars.length > 0
-                        ? (
-                          <div style={{ position: 'relative' }}>
-                            <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                    <div ref={evenChartCard(1)}>
+                      <Card
+                        size="small"
+                        title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
+                        extra={
+                          <Select
+                            value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
+                            options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
+                          />
+                        }
+                      >
+                        {oneMinBars.length > 0
+                          ? (
+                            <div style={{ position: 'relative' }}>
+                              <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                                <EmaChart
+                                  oneMinBars={oneMinBars}
+                                  visibleCount={visibleCount}
+                                  timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
+                                  ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
+                                  ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
+                                  dayKey={`emaB-${underlying}-${result.date}`}
+                                  vwapSeries={shownVwap} showVwap={showVwap}
+                                  height={560} extraHeight={chartExtras[1]}
+                                  volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
+                                />
+                              </ChartErrorBoundary>
+                              {atmStrike != null && (
+                                <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
+                                  <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: ceOiLookback.delta > 0 ? '#3ddc84' : ceOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                    CE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(ceOiLookback.delta)}
+                                  </span>
+                                  <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: peOiLookback.delta > 0 ? '#3ddc84' : peOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                    PE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(peOiLookback.delta)}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )
+                          : <Empty description="No spot candles for this day." />}
+                      </Card>
+                    </div>
+                  </Col>
+                  <Col xs={24} md={8}>
+                    <div ref={evenChartCard(2)}>
+                      <Card size="small" title="Entry chart C (independent timeframe + EMA)">
+                        {oneMinBars.length > 0
+                          ? (
+                            <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
                               <EmaChart
                                 oneMinBars={oneMinBars}
                                 visibleCount={visibleCount}
-                                timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
-                                ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
-                                ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
-                                dayKey={`emaB-${underlying}-${result.date}`}
+                                timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
+                                ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
+                                ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
+                                dayKey={`emaC-${underlying}-${result.date}`}
                                 vwapSeries={shownVwap} showVwap={showVwap}
-                                height={560}
+                                height={560} extraHeight={chartExtras[2]}
                                 volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                               />
                             </ChartErrorBoundary>
-                            {atmStrike != null && (
-                              <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
-                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: ceOiLookback.delta > 0 ? '#3ddc84' : ceOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
-                                  CE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(ceOiLookback.delta)}
-                                </span>
-                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: peOiLookback.delta > 0 ? '#3ddc84' : peOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
-                                  PE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(peOiLookback.delta)}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        )
-                        : <Empty description="No spot candles for this day." />}
-                    </Card>
-                  </Col>
-                  <Col xs={24} md={8}>
-                    <Card size="small" title="Entry chart C (independent timeframe + EMA)">
-                      {oneMinBars.length > 0
-                        ? (
-                          <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
-                            <EmaChart
-                              oneMinBars={oneMinBars}
-                              visibleCount={visibleCount}
-                              timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
-                              ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
-                              ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
-                              dayKey={`emaC-${underlying}-${result.date}`}
-                              vwapSeries={shownVwap} showVwap={showVwap}
-                              height={560}
-                              volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
-                            />
-                          </ChartErrorBoundary>
-                        )
-                        : <Empty description="No spot candles for this day." />}
-                    </Card>
+                          )
+                          : <Empty description="No spot candles for this day." />}
+                      </Card>
+                    </div>
                   </Col>
                 </>
               )}

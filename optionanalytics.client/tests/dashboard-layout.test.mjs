@@ -7,6 +7,7 @@ import {
   FIT_SCALE_MAX, FIT_SCALE_MIN, GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
   defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
   isStackedLayout, nextFitScale, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
+  SECTION_SPLITS, withSplitSections, defaultSpan as spanOf, cardsARowChoices, SIX_A_ROW_PX,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -59,14 +60,43 @@ test('one item is read back inside the grid, whatever was saved', () => {
   assert.deepEqual(gridItem(undefined, 'gex'), { i: 'gex', x: 0, y: 0, w: GRID_COLS, h: defaultRows('gex') })
 })
 
-test('a saved layout keeps its cards where they are; a new card goes to the bottom', () => {
+test('a saved layout keeps its cards where they are; a new card goes right under the card before it', () => {
   const saved = [{ i: 'gex', x: 6, y: 0, w: 6, h: 10 }, { i: 'topStats', x: 0, y: 0, w: 6, h: 5 }, { i: 'gone', x: 0, y: 9, w: 6, h: 5 }]
   const layout = reconcileGridLayout(saved, IDS)
   assert.deepEqual(layout.map((it) => it.i), IDS)                       // back in the page's order
   assert.deepEqual(layout.find((it) => it.i === 'gex'), { i: 'gex', x: 6, y: 0, w: 6, h: 10 })
   assert.equal(layout.some((it) => it.i === 'gone'), false)              // a card the page no longer has
-  const added = layout.find((it) => it.i === 'marketRead')               // a card added since it was saved
-  assert.deepEqual(added, { i: 'marketRead', x: 0, y: 10, w: GRID_COLS, h: defaultRows('marketRead') })
+  const added = layout.find((it) => it.i === 'marketRead')               // a card added since it was saved: under topStats
+  assert.deepEqual(added, { i: 'marketRead', x: 0, y: 5, w: spanOf('marketRead'), h: defaultRows('marketRead') })
+  // With none of the cards before it saved, at the bottom, full width.
+  const first = reconcileGridLayout([{ i: 'gex', x: 0, y: 0, w: 12, h: 10 }], ['topStats', 'gex'])
+  assert.deepEqual(first.find((it) => it.i === 'topStats'), { i: 'topStats', x: 0, y: 10, w: GRID_COLS, h: defaultRows('topStats') })
+})
+
+test('a card split out of another lands where its content was - everything below moves down to make room', () => {
+  // The OI totals left the heatmap card: a saved dashboard gets them right under the heatmap, not at the page's foot.
+  const ids = ['dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'gex']
+  const saved = [
+    { i: 'dayOi', x: 0, y: 0, w: 6, h: 13 },
+    { i: 'oiHeatmap', x: 0, y: 13, w: 12, h: 17 },
+    { i: 'spotAndEntry', x: 0, y: 30, w: 12, h: 23 },
+    { i: 'gex', x: 6, y: 0, w: 6, h: 13 },
+  ]
+  const layout = reconcileGridLayout(saved, ids)
+  const at = (id) => layout.find((it) => it.i === id)
+  assert.deepEqual(at('oiTotals'), { i: 'oiTotals', x: 0, y: 30, w: 12, h: defaultRows('oiTotals') })
+  assert.equal(at('spotAndEntry').y, 30 + defaultRows('oiTotals'))     // moved down by the new card's height
+  assert.deepEqual([at('dayOi').y, at('gex').y, at('oiHeatmap').y], [0, 0, 13])   // above it: untouched
+})
+
+test('a saved choice of cards that showed the heatmap shows the totals split out of it - once', () => {
+  assert.deepEqual(SECTION_SPLITS, { oiTotals: 'oiHeatmap' })
+  assert.deepEqual(withSplitSections(['dayOi', 'oiHeatmap', 'gex']), ['dayOi', 'oiHeatmap', 'oiTotals', 'gex'])
+  // The heatmap hidden: the totals stay hidden too (nothing of it was on the page).
+  assert.deepEqual(withSplitSections(['dayOi', 'gex']), ['dayOi', 'gex'])
+  // Already there: nothing doubled; nothing saved: nothing to do.
+  assert.deepEqual(withSplitSections(['oiHeatmap', 'oiTotals']), ['oiHeatmap', 'oiTotals'])
+  assert.equal(withSplitSections(null), null)
 })
 
 test('nothing saved - or nonsense saved - is the layout the page starts with', () => {
@@ -93,6 +123,39 @@ test('the presets put the same number of cards in every row, left to right', () 
   assert.deepEqual(presetLayout(IDS, 3).map((it) => it.x), [0, 4, 8])
   assert.deepEqual(presetLayout(IDS, 4).map((it) => it.w), [3, 3, 3])
   assert.deepEqual(presetLayout(IDS, 1).map((it) => it.w), [12, 12, 12])
+  // Six a row on a very wide monitor: a sixth each; more than six is six.
+  assert.deepEqual(presetLayout(IDS, 6).map((it) => [it.x, it.w]), [[0, 2], [2, 2], [4, 2]])
+  assert.deepEqual(presetLayout(IDS, 9).map((it) => it.w), [2, 2, 2])
+})
+
+test('"Cards a row" offers six only on a monitor wide enough for it', () => {
+  assert.deepEqual(cardsARowChoices(1500), [1, 2, 3, 4])
+  assert.deepEqual(cardsARowChoices(SIX_A_ROW_PX), [1, 2, 3, 4, 6])
+  assert.deepEqual(cardsARowChoices(3440), [1, 2, 3, 4, 6])
+  // A card can be as narrow as a sixth - and is read back no narrower than that.
+  assert.equal(MIN_W, GRID_COLS / 6)
+  assert.equal(gridItem({ x: 0, y: 0, w: 1, h: 10 }, 'gex').w, MIN_W)
+})
+
+test('a preset lays out only the cards given, keeps the spot / entry charts readable, and leaves no holes', () => {
+  // The page passes the cards it SHOWS - a hidden card given a slot left a hole at the top.
+  const shown = ['entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'gex']
+  const six = presetLayout(shown, 6)
+  assert.deepEqual(six.map((it) => it.i), shown)
+  const at = (id) => six.find((it) => it.i === id)
+  assert.equal(at('spotAndEntry').w, 6)                                 // three charts: never a sixth
+  // The first row takes the narrow cards that still fit, rather than closing at the wide one.
+  assert.deepEqual(['entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'optionPremium', 'optionFlow'].map((id) => [at(id).x, at(id).y]),
+    [[0, 0], [2, 0], [4, 0], [6, 0], [8, 0], [10, 0]])
+  assert.equal(at('spotAndEntry').y, Math.max(...['entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'optionPremium', 'optionFlow'].map(defaultRows)))
+  // Every row filled edge to edge: the row closed short (spot / entry 6 + gex 2, nothing left) is the last - left as is.
+  assert.deepEqual([at('spotAndEntry').x, at('gex').x, at('gex').w], [0, 6, 2])
+  // A row closed short because the next card does not fit: its last card takes the rest.
+  const three = presetLayout(['dayOi', 'spotAndEntry', 'gex', 'oiTotals'], 3)
+  const t = (id) => three.find((it) => it.i === id)
+  // dayOi 4 + spot / entry 6 = 10, gex (4) does not fit the 2 left: spot / entry takes them (8), gex starts the next row.
+  assert.deepEqual([t('dayOi').w, t('spotAndEntry').w, t('gex').x, t('gex').y], [4, 8, 0, defaultRows('spotAndEntry')])
+  assert.equal(t('spotAndEntry').x + t('spotAndEntry').w, GRID_COLS)
 })
 
 test('a preset keeps the heights the cards were given', () => {

@@ -341,6 +341,9 @@ builder.Services.AddSingleton<ScannerRunnerStore>();
 builder.Services.AddSingleton<TradeSettingsStore>();
 // OI Replay's paper positions per account and day, on the server so every browser shows the same (PaperPositionStore).
 builder.Services.AddSingleton<PaperPositionStore>();
+// Each account's page preferences (dashboard layouts, cards, timeframes, switches) on the server, so a refresh, a
+// restart / deploy or another browser opens the pages as they were left (UserPreferencesStore).
+builder.Services.AddSingleton<UserPreferencesStore>();
 // Who opens which page, when and from where (the admin Visitors page): the place from the connection, looked up in a
 // database kept here and refreshed monthly - addresses are never kept (VisitorLog / GeoLocator / GeoDbUpdater).
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.Visitors.VisitorLog>();

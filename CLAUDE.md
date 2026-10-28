@@ -125,7 +125,9 @@ When adding or changing a strategy:
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
-  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
+  (`stepOiBreakAlerts`): the OI Replay page while it is open - in its own "OI totals" card (`oiTotals`: the CE / PE / Net
+  Δ and cumulative Δ table, Charts, its own bucket and these settings - `OiChangeHeatmapSection show="totals"` with
+  `alertUnderlying`; the heatmap card is `show="strikes"`, no alerts) - (pop-up, chime, voice) and the server scanner for every enabled
   index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). 🎯 = a cumulative-line break AND the CE or PE
   OI at ATM ± 1 shifting `atmShiftPct` % (default 20) of its size the same way, within the window. Settings (on / window / %) are
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
@@ -188,6 +190,21 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
+  `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and
+  User only - the External account never reaches it, `ExternalAccessTests`): every `optionanalytics.*` localStorage key a
+  page writes (layouts, cards shown, folds, timeframes, EMAs, tabs, switches) so a refresh, a restart / deploy, another
+  browser or computer opens the pages as they were left. `prefsSync.js` does it with no page code: it watches
+  localStorage's `setItem` / `removeItem` and sends changes (gathered ~0.8 s, at once when the tab is hidden or closed,
+  retried when they fail), and `loadPreferences()` puts the server's values into localStorage BEFORE any page draws (on a
+  page load already signed in and on login - `App.jsx`); the first time (nothing saved for the account) this browser's
+  own preferences go up instead. A load that fails sends nothing for that page's life - a fresh browser's defaults never
+  overwrite what was saved. NOT kept (`LOCAL_ONLY`): caches and records (the live day cache, the scanner's history /
+  paper / fired / trail logs, sent-Telegram keys), the visitor id, the paper positions and trade levels (the server
+  keeps those itself) and the scanner's Paper / Live choice - live trading is never switched from another browser. A new
+  setting only has to use `usePersistedState` (or localStorage) with an `optionanalytics.` key; one that must stay in
+  this browser goes in `LOCAL_ONLY` (`tests/prefs-sync.test.mjs`, `UserPreferencesStoreTests.cs`). A new `Storage:*` path
+  goes in BOTH `docker-compose.yml` and the `Dockerfile`'s `ENV` (the Dockerfile's list was missing four).
 - The site NAVIGATION (`NavBar` in `shared.jsx`, `.oa-sidenav-*` in `index.css`): over 768 px a SIDEBAR down the left - the
   name, the menu (an icon a page), the server's status tags, the email and Log out - portalled to <body> and fixed; the
   page makes room with `body.oa-sidenav`'s padding (NavBar sets the class while it is mounted), and the page's own
@@ -201,14 +218,26 @@ When adding or changing a strategy:
   (`GRID_ROW_HEIGHT` + `GRID_MARGIN` each - `rowsToPx`), saved whole in `STORED_LAYOUT`. The model is all pure functions
   (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `nextFitScale`,
   `tests/dashboard-layout.test.mjs`); the dragging, collisions and packing are the library's. Dragging starts ONLY from
-  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. "Cards a row" 1 - 4, "Fit
+  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. The page takes the WHOLE window
+  (no max width - a 3440 px monitor was a third empty at the old 2600 cap); a card is at least `MIN_W` (2) columns,
+  the grid's `minW` too, so a card is never dragged narrower than it is read back. "Cards a row" 1 - 4, and 6 from a
+  `SIX_A_ROW_PX` (2400) window (`cardsARowChoices`) - `presetLayout` lays out the SHOWN cards only (a hidden one left
+  a hole), never makes the spot / entry card (three charts) under half (`PRESET_MIN_SPAN`), fills a row with the next
+  cards that still fit and gives a row closed short its last card the rest of the width. The spot / entry card's three
+  charts END ON ONE LINE while side by side (`useEvenChartBottoms`: each chart gets `extraHeight` = how much shorter
+  its card's header / footer is than the tallest - card height less chart height, which never depends on the chart, so
+  the measure cannot chase itself; stacked, nothing). "Fit
   heights", "Reset" (place, width AND height back) and "Free placement" (`compactType` null: a card stays exactly where it is
   dropped, gaps and all; off, the cards pack upwards). `preventCollision` is always OFF - on, a card dropped on an occupied
   place sprang back, which reads as "I cannot move this card"; off, whatever is in the way moves aside. "Arrange" only
   outlines the grid - dragging works either way. The page OPENS as a dashboard, not a column: `defaultLayout` packs the
   cards left to right at `defaultSpan` (full width only for the snapshot, the checklist, the heatmap, the spot / entry and
   futures charts; the rest half) and wraps; a layout saved as the old all-full-width stack (`isStackedLayout`) is dropped
-  once (`LAYOUT_VERSION`) so this default takes over. Reset is offered only when something was arranged:
+  once (`LAYOUT_VERSION`) so this default takes over. A card added since a layout was saved goes RIGHT UNDER the card
+  before it in the page's order, everything below moving down (`reconcileGridLayout`) - with none of those saved, at the
+  bottom. A card SPLIT OUT of another (`SECTION_SPLITS`: the OI totals out of the heatmap) is added to a saved "Sections
+  shown" wherever its old card is shown, ONCE (`withSplitSections`, `SECTIONS_VERSION`) - hiding it afterwards sticks;
+  without it the totals and their alerts would have vanished for anyone with a saved choice. Reset is offered only when something was arranged:
   `isDefaultArrangement` (each SHOWN card's column, width and order down its column - not its height, which follows the
   content) - the grid saves only the cards on the page, so a hidden card comes back elsewhere and must not count.
   UNDER `WIDE_LAYOUT_PX` (1100) THERE IS NO GRID AT ALL: `DashboardGrid` stacks the cards full width at their own height,
@@ -249,6 +278,12 @@ When adding or changing a strategy:
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
   opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
   EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+- OI Replay's keyboard order ticket (B / F1 buy, S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
+  `quickViews.js`): a text / number / date box, a searchable or tags dropdown, a text area. A checkbox, a radio (antd's
+  Segmented), a switch or a plain dropdown (antd marks its input read-only) only hold the focus after a click - they used
+  to count as typing, so after ticking VWAP or picking a timeframe B / S did nothing (`tests/quick-views.test.mjs`).
+- OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
+  its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

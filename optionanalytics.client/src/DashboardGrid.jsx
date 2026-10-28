@@ -58,7 +58,9 @@ export function DashboardGrid({
           rowHeight={GRID_ROW_HEIGHT}
           margin={[GRID_MARGIN, GRID_MARGIN]}
           containerPadding={[0, 0]}
-          layout={items}
+          // The narrowest / shortest a card is KEPT at (gridItem) is also the narrowest it can be dragged to -
+          // otherwise a card resized past it jumped back wider on the next load.
+          layout={items.map((it) => ({ ...it, minW: MIN_W, minH: MIN_H }))}
           // Packed upwards by default, so a card dragged out never leaves a hole above it. "Free placement"
           // turns that off: a card then stays exactly where it is dropped, gaps and all.
           //

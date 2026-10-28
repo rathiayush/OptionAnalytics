@@ -2,7 +2,7 @@
 // else - Ctrl alone (the browser's tab keys), Alt, Cmd, other keys - opens nothing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, isFabDrag, placeFab, quickViewForKey } from '../src/quickViews.js'
+import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, isFabDrag, isTypingField, placeFab, quickViewForKey } from '../src/quickViews.js'
 
 const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, ...mods })
 
@@ -40,4 +40,16 @@ test('the floating button stays on the screen, starts bottom right, and opens it
   assert.equal(fabOpensUp({ x: 300, y: 664 }, QUICK_VIEWS.length, phone), true)
   assert.equal(fabOpensUp({ x: 300, y: 40 }, QUICK_VIEWS.length, phone), false)
   assert.equal(fabOpensUp({ x: 300, y: need }, QUICK_VIEWS.length, phone), true)
+})
+
+test('the B / S ticket keys are kept from a box you type in - not from a checkbox, toggle or dropdown holding the focus', () => {
+  const input = (type, readOnly = false) => ({ tagName: 'INPUT', type, readOnly })
+  // Typing: a text / number box, the date picker, a search or tags dropdown, a text area, an editable element.
+  for (const el of [input('text'), input('number'), input('search'), { tagName: 'TEXTAREA' }, { tagName: 'SELECT' }, { tagName: 'DIV', isContentEditable: true }]) {
+    assert.equal(isTypingField(el), true, JSON.stringify(el))
+  }
+  // Not typing: a ticked checkbox (VWAP), antd's Segmented (a radio), a plain dropdown (read-only input), a switch / button.
+  for (const el of [input('checkbox'), input('radio'), input('text', true), { tagName: 'BUTTON' }, { tagName: 'DIV' }, null]) {
+    assert.equal(isTypingField(el), false, JSON.stringify(el))
+  }
 })

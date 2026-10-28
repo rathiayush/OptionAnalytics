@@ -74,7 +74,11 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__TradeSettingsPath=/app/data/trade-settings.csv \
     Storage__RiskSettingsPath=/app/data/risk-settings.csv \
     Storage__DhanCachePath=/app/data/dhan-cache \
-    Storage__DhanCacheMaxGb=10
+    Storage__DhanCacheMaxGb=10 \
+    Storage__PaperPositionsPath=/app/data/paper-positions \
+    Storage__PreferencesPath=/app/data/preferences \
+    Storage__VisitorLogPath=/app/data/visitor-log \
+    Storage__GeoDbPath=/app/data/geo
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made

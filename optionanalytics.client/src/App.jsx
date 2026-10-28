@@ -23,6 +23,7 @@ import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
 import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS } from './shared.jsx'
 import './App.css'
+import { loadPreferences, pausePreferenceSync } from './prefsSync.js'
 
 const { Title, Text } = Typography
 
@@ -1743,6 +1744,9 @@ export default function App() {
           if (r.status === 401 || r.status === 403) return null
           throw new Error(`HTTP ${r.status}`)
         })
+        // The account's saved page preferences (layouts, cards, timeframes...) into this browser before any page draws
+        // - prefsSync.js; it never throws, and a slow server only falls back to this browser's own copy.
+        .then(async (me) => { if (me && me.role !== 'External') await loadPreferences(); return me })
         .then((me) => { if (!cancelled) { setServerUnreachable(false); setUser(me) } })
         .catch(() => {
           if (cancelled) return
@@ -1764,11 +1768,14 @@ export default function App() {
       const body = await r.json().catch(() => null)
       if (r.status === 429) throw new Error('Too many login attempts - wait a few minutes and try again.')
       if (!r.ok) throw new Error(body?.error || 'Login failed')
+      if (body?.role !== 'External') await loadPreferences()
       setUser(body)
       return body
     })
 
   const logout = () => {
+    // Whatever preference is still waiting goes now; nothing more is sent until the next sign-in.
+    pausePreferenceSync()
     // Optimistic: the session is cleared locally (back to the login screen) the instant the
     // request is sent, rather than waiting on the response - there is nothing useful to show if
     // the logout call itself fails, and the cookie is gone either way once SignOutAsync runs.
