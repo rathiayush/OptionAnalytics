@@ -17,10 +17,13 @@
 export const GRID_COLS = 12
 export const GRID_ROW_HEIGHT = 30
 export const GRID_MARGIN = 16
-// A card narrower than a quarter of the page is unreadable (its title alone wraps to three lines), and one
-// under MIN_H rows has no room for anything but its own title bar.
-export const MIN_W = 3
+// A card narrower than a sixth of the page has no room (on a laptop its title alone wraps to three lines - there, a
+// quarter is the narrowest worth having, and the presets stop at four a row), and one under MIN_H rows has no room for
+// anything but its own title bar. A sixth is for a monitor wide enough for six cards a row (SIX_A_ROW_PX).
+export const MIN_W = 2
 export const MIN_H = 4
+// From this window width (CSS px) "Cards a row" also offers six - each card still ~380 px wide or more.
+export const SIX_A_ROW_PX = 2400
 // Under this the page is one column - see the note above.
 export const WIDE_LAYOUT_PX = 1100
 
@@ -189,20 +192,42 @@ export function isDefaultArrangement(layout, cardIds, order = null, shown = null
   return [...want].every(([x, ids]) => (have.get(x) ?? []).join('|') === ids.join('|'))
 }
 
-/** Every card the same width, `columns` of them a row, left to right in the page's order - the one-click
- *  presets. Each card keeps the height it has; a row starts below the tallest card of the row above. */
+/** The "Cards a row" presets a window `widthPx` wide is offered: one to four, and six on a very wide monitor. */
+export const cardsARowChoices = (widthPx) => (widthPx >= SIX_A_ROW_PX ? [1, 2, 3, 4, 6] : [1, 2, 3, 4])
+
+// The narrowest a preset makes a card that holds several charts side by side - the spot / entry card is three of
+// them; at a sixth of the page each was a sliver.
+const PRESET_MIN_SPAN = { spotAndEntry: 6 }
+
+/** `columns` cards a row (1 - 6), left to right in the page's order - the one-click presets. Pass the cards ON THE
+ *  PAGE: a hidden card given a slot left a hole the others then slid into out of order. Every card is a
+ *  `columns`-th of the width, but no narrower than PRESET_MIN_SPAN says; a row takes the next cards that still FIT
+ *  (so a wide card moving to the next row does not leave a hole for the narrow ones behind it), and a row closed
+ *  short because nothing left fits gives its last card the rest of the row. Each card keeps the height it has; a
+ *  row starts below the tallest card of the row above. */
 export function presetLayout(cardIds, columns, { order = null, layout = null } = {}) {
-  const cols = clamp(Math.round(columns) || 1, 1, 4)
-  const w = Math.max(MIN_W, Math.floor(GRID_COLS / cols))
+  const cols = clamp(Math.round(columns) || 1, 1, 6)
+  const span = Math.max(MIN_W, Math.floor(GRID_COLS / cols))
+  const widthOf = (id) => Math.min(GRID_COLS, Math.max(span, PRESET_MIN_SPAN[id] ?? 0))
   const heights = new Map((layout ?? []).map((it) => [it.i, it.h]))
   const ids = sortByOrder(cardIds, order)
   const rowsOf = (id) => heights.get(id) ?? defaultRows(id)
+  const left = [...ids]
   const out = []
   let y = 0
-  for (let at = 0; at < ids.length; at += cols) {
-    const row = ids.slice(at, at + cols)
-    row.forEach((id, n) => out.push({ i: id, x: n * w, y, w, h: rowsOf(id) }))
-    y += Math.max(...row.map(rowsOf))
+  while (left.length) {
+    const row = []
+    let x = 0
+    for (let k = 0; k < left.length && x < GRID_COLS;) {
+      const w = widthOf(left[k])
+      if (x + w > GRID_COLS) { k += 1; continue }
+      const [id] = left.splice(k, 1)
+      row.push({ i: id, x, y, w, h: rowsOf(id) })
+      x += w
+    }
+    if (left.length && x < GRID_COLS) row[row.length - 1].w += GRID_COLS - x
+    out.push(...row)
+    y += Math.max(...row.map((it) => it.h))
   }
   const byId = new Map(out.map((it) => [it.i, it]))
   return ids.map((id) => byId.get(id))

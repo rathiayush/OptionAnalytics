@@ -57,7 +57,7 @@ import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
-  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections,
+  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX,
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -3548,6 +3548,8 @@ export default function OiReplayPage() {
   // shown (visibleSections). Saved per browser; a narrow screen ignores it and keeps the single full-width
   // column it has always had.
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
+  // A monitor wide enough for six cards a row - "Cards a row" offers 6 there.
+  const sixARow = useMediaQuery(`(min-width: ${SIX_A_ROW_PX}px)`)
   const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
   // Which cards have been given a height of their own by dragging a corner. Everything else follows its
   // own content, so the page opens with no card scrolling inside itself (fitLayoutHeights).
@@ -5960,16 +5962,12 @@ export default function OiReplayPage() {
   const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
 
   return (
-    // Deliberately wider than every other page's own 1280 (see shared.jsx/App.jsx/etc.) - this is
-    // the one page in the app carrying a chart, an OI/IV ladder, a whole-band liquidity table AND a
-    // futures chart at once, all genuinely useful wider (more candles visible, more of the ladder's
-    // own numbers readable without scrolling) rather than sitting centered in a narrow column with
-    // large empty margins either side on any normal desktop monitor - the user's own "I see a lot of
-    // space on left and right, it should fit, we can show a lot of thing in left and right". Raised
-    // again to 2600 for the user's own "width more than 2500 trading monitor" - three chart columns
-    // (Spot + Entry chart B + Entry chart C) side by side need real width each to stay readable, not
-    // just technically fit.
-    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
+    // The WHOLE window, however wide - unlike every other page's own 1280. This is the page carrying the charts, the
+    // OI/IV ladder, the heatmaps and a dozen more cards at once, laid out as a dashboard (DashboardGrid): on a wide or
+    // ultra-wide trading monitor the grid's twelve columns simply get wider, so more cards fit side by side ("Cards a
+    // row" offers six there) instead of the page sitting centred with empty space either side. It was capped at
+    // 2600 px, which left a third of a 3440 px monitor empty.
+    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
         <Space align="center" size={16} wrap className="oa-brand-row">
@@ -6130,8 +6128,8 @@ export default function OiReplayPage() {
                       </Button>
                     </Tooltip>
                     <Text type="secondary" style={{ fontSize: 12 }}>Cards a row:</Text>
-                    {[1, 2, 3, 4].map((n) => (
-                      <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(OI_REPLAY_CARD_IDS, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
+                    {cardsARowChoices(sixARow ? SIX_A_ROW_PX : 0).map((n) => (
+                      <Button key={n} size="small" onClick={() => setGridLayout(presetLayout(shownCardIds, n, { order: cardOrder, layout: gridLayout }))}>{n}</Button>
                     ))}
                     <Tooltip title="Every card back to exactly the height its own content needs - nothing scrolls inside a card. A card whose corner you drag keeps the height you gave it (and scrolls inside it if its content is taller) until this.">
                       <Button size="small" onClick={fitAllHeights} disabled={!sized.size}>Fit heights</Button>

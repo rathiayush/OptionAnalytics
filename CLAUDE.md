@@ -203,7 +203,12 @@ When adding or changing a strategy:
   (`GRID_ROW_HEIGHT` + `GRID_MARGIN` each - `rowsToPx`), saved whole in `STORED_LAYOUT`. The model is all pure functions
   (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `nextFitScale`,
   `tests/dashboard-layout.test.mjs`); the dragging, collisions and packing are the library's. Dragging starts ONLY from
-  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. "Cards a row" 1 - 4, "Fit
+  `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. The page takes the WHOLE window
+  (no max width - a 3440 px monitor was a third empty at the old 2600 cap); a card is at least `MIN_W` (2) columns,
+  the grid's `minW` too, so a card is never dragged narrower than it is read back. "Cards a row" 1 - 4, and 6 from a
+  `SIX_A_ROW_PX` (2400) window (`cardsARowChoices`) - `presetLayout` lays out the SHOWN cards only (a hidden one left
+  a hole), never makes the spot / entry card (three charts) under half (`PRESET_MIN_SPAN`), fills a row with the next
+  cards that still fit and gives a row closed short its last card the rest of the width. "Fit
   heights", "Reset" (place, width AND height back) and "Free placement" (`compactType` null: a card stays exactly where it is
   dropped, gaps and all; off, the cards pack upwards). `preventCollision` is always OFF - on, a card dropped on an occupied
   place sprang back, which reads as "I cannot move this card"; off, whatever is in the way moves aside. "Arrange" only
