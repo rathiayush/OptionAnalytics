@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
 import { CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
+import { fitWholeDay } from './chartFit.js'
 import * as signalR from '@microsoft/signalr'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, RECONNECT_RETRY_POLICY,
@@ -44,28 +45,13 @@ const EMPTY_ARRAY = []
 // the day's full span the moment they scroll/zoom back to inspect an earlier stretch, fighting the
 // very thing they just did. Same reasoning ReplayChart's own allowShiftVisibleRangeOnWhitespaceReplacement
 // doc comment already gives for shiftVisibleRangeOnNewBar.
-// Auto-fit never zooms in further than this many pixels per candle: with only a few bars (early in
-// the day, or a coarse timeframe) fitting them all made every candle huge and the viewer had to
-// squeeze the chart by hand. Past that, the newest candles are shown at this width instead.
-const MAX_AUTO_BAR_SPACING = 8
 
 // Candle charts leave this much room above and below the candles by default, so a quiet stretch
 // doesn't stretch a few points of range across the whole height.
 export const CANDLE_SCALE_MARGINS = { top: 0.2, bottom: 0.2 }
 
-// Fits the whole series, capped at MAX_AUTO_BAR_SPACING per candle (see its comment).
-export function fitWholeDay(chart) {
-  if (!chart) return
-  const timeScale = chart.timeScale()
-  timeScale.fitContent()
-  const range = timeScale.getVisibleLogicalRange()
-  const width = timeScale.width()
-  if (!range || width <= 0) return
-  if (width / Math.max(1, range.to - range.from) > MAX_AUTO_BAR_SPACING) {
-    timeScale.applyOptions({ barSpacing: MAX_AUTO_BAR_SPACING })
-    timeScale.scrollToRealTime()
-  }
-}
+// Fits the whole series, capped per candle (chartFit.js).
+export { fitWholeDay }
 
 export function useFitContentAsDataGrows(chartRef, dataLength, dayKey) {
   const prevLengthRef = useRef(0)

@@ -17,8 +17,14 @@ export const TPO_LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
  *  (footprint levels bucketed to the row size). */
 export function sessionVolumeProfile(bars) {
   const profile = volumeProfile(bars)
-  if (!profile.rows.length) return { ...profile, hvn: [], lvn: [], hvnTop: null, lvnTop: null }
-  const rows = profile.rows
+  return { ...profile, ...profileNodes(profile) }
+}
+
+/** The high / low volume nodes of a volume profile (`rows` [{ price, total }] in price order, `poc`) - any row size,
+ *  footprint or candle-spread: { hvn, lvn, hvnTop, lvnTop }. */
+export function profileNodes(profile) {
+  const rows = profile?.rows ?? []
+  if (!rows.length) return { hvn: [], lvn: [], hvnTop: null, lvnTop: null }
   // Smooth over three rows so a single thin row inside a busy area is not called a node.
   const smooth = rows.map((r, i) => (rows[i - 1]?.total ?? r.total) / 4 + r.total / 2 + (rows[i + 1]?.total ?? r.total) / 4)
   const mean = smooth.reduce((s, v) => s + v, 0) / smooth.length
@@ -39,7 +45,7 @@ export function sessionVolumeProfile(bars) {
   const lvn = thinnest.slice(0, 2).map((t) => t.price).sort((a, b) => a - b)
   // What the charts show: ONE of each - the strongest HVN after the POC (the highest-volume node) and
   // the thinnest LVN (the lowest-volume node). The lists above stay for the strategies.
-  return { ...profile, hvn, lvn, hvnTop: byVolume[0]?.price ?? null, lvnTop: thinnest[0]?.price ?? null }
+  return { hvn, lvn, hvnTop: byVolume[0]?.price ?? null, lvnTop: thinnest[0]?.price ?? null }
 }
 
 /** A TPO (market) profile: each `periodMinutes` period puts its letter on every row its range touched.

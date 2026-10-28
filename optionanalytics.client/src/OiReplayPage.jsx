@@ -31,7 +31,7 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
-import { tpoRowFor } from './profiles.js'
+import { tpoRowFor, profileNodes } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
@@ -760,6 +760,15 @@ const CHART_MAX_WINDOW_STEPS = 10
 // between NIFTY (step 50) and BANKNIFTY (step 100).
 const FUTURES_REGIME_OI_THRESHOLD = 50_000
 const FUTURES_REGIME_PRICE_STEP_FACTOR = 0.2
+// The futures card's OI in a unit that shows its moves: millions for a big contract (NIFTY's crores of units), lakh /
+// thousand for a small one - SENSEX futures' few thousand lots read "0.08M" and every change "-0.00M".
+const FUTURES_OI_UNITS = { M: 1e6, L: 1e5, K: 1e3 }
+const futuresOiUnitFor = (oi) => (Math.abs(oi ?? 0) >= 1e6 ? 'M' : Math.abs(oi ?? 0) >= 1e5 ? 'L' : 'K')
+function formatFuturesOi(n, unit, { signed = false, withUnit = true } = {}) {
+  if (n == null) return '—'
+  const v = n / FUTURES_OI_UNITS[unit]
+  return `${signed && v > 0 ? '+' : ''}${v.toFixed(unit === 'K' ? 1 : 2)}${withUnit ? unit : ''}`
+}
 
 // latestAtOrBefore always returns the newest point at-or-before "now", even if that point is from
 // an hour ago - if NiftyDataCollector's own backfill for a strike/side simply has no newer rows yet
@@ -2094,8 +2103,8 @@ const VWAP_COLOR = '#e072e8'
 // main chart's own red/green R/S wall convention, so five more lines on the SAME chart never get
 // mistaken for one of those. POC is the boldest (the single most important level); VAH/VAL a step
 // down; HVN/LVN dotted and muted - genuinely useful reference points, but secondary to POC/VA.
-// The previous session's levels - the same colours as everywhere else (profileColors.js); today's running
-// profile (the futures chart) has its own.
+// The previous session's levels - the same colours as everywhere else (profileColors.js), the futures chart's
+// previous-day profile included (volumeProfilePrimitive.js).
 const VOLUME_PROFILE_POC_COLOR = PREV_PROFILE.poc
 const VOLUME_PROFILE_VA_COLOR = PREV_PROFILE.va
 const VOLUME_PROFILE_HVN_COLOR = PREV_PROFILE.hvn
@@ -2281,13 +2290,13 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 // option strike, a future has no strike chain to draw S/R walls for, so this chart's OI story is
 // entirely about ITS OWN change over time rather than a level.
 // profile: the previous session's volume profile (orderFlowMath.volumeProfileFromCandles) in profileRowSize
-// rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL price lines (profileLabel on the POC).
+// rows - drawn into the chart by VolumeProfilePrimitive, with POC / VAH / VAL / HVN / LVN price lines (profileLabel on the POC).
 // deltaBars: [{ time (chart time), delta, cvd, estimated }] per candle - each candle's delta as a histogram and the
 // cumulative delta as a line, in their own pane under the candles (own scales, the same time axis).
 const DELTA_PANE_HEIGHT = 150
 const FLOW_TIMEFRAMES = [1, 3, 5, 15]
 const CVD_COLOR = '#f5c542'
-function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
+function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const vwapSeriesRef = useRef(null)
@@ -2332,14 +2341,9 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
     // otherwise squash one or the other into a flat line.
     oiSeriesRef.current = chart.addSeries(LineSeries, {
       color: `${AXIS_COLOR}cc`, lineWidth: 2, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: true,
-      title: 'OI (M)',
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
-    // The plotted values are already OI/1e6 (see the caller's own futuresOiLine) - format the axis
-    // itself to 2 decimals instead of lightweight-charts' own default (which would otherwise round
-    // a value like 12.34 down to whole numbers and make small OI moves invisible on the axis).
     chart.priceScale('left').applyOptions({ mode: 0 })
-    oiSeriesRef.current.applyOptions({ priceFormat: { type: 'custom', formatter: (v) => v.toFixed(2) } })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
@@ -2420,6 +2424,12 @@ function FuturesChart({ bars, oiLine, markers, dayKey, height = 320, profile = n
     if (!oiSeriesRef.current) return
     oiSeriesRef.current.setData(oiLine)
   }, [oiLine])
+  // The plotted values are already OI in `oiUnit` (see the caller's own futuresOiLine) - the axis shows them to 2
+  // decimals (1 for thousands) instead of lightweight-charts' own default, which rounds a value like 12.34 down to whole
+  // numbers and makes small OI moves invisible on the axis.
+  useEffect(() => {
+    oiSeriesRef.current?.applyOptions({ title: `OI (${oiUnit})`, priceFormat: { type: 'custom', formatter: (v) => v.toFixed(oiUnit === 'K' ? 1 : 2) } })
+  }, [oiUnit])
 
   useEffect(() => {
     markersRef.current?.setMarkers(markers ?? [])
@@ -4465,10 +4475,12 @@ export default function OiReplayPage() {
     return () => { cancelled = true }
   }, [futuresProfileOn, prevFuturesKey])
   const prevFuturesShown = futuresProfileOn && prevFutures?.key === prevFuturesKey ? prevFutures : null
-  const futuresProfile = useMemo(
-    () => (prevFuturesShown?.bars?.length ? volumeProfileFromCandles(prevFuturesShown.bars, futuresProfileRow) : null),
-    [prevFuturesShown, futuresProfileRow],
-  )
+  // With its one HVN and one LVN (profileNodes - the same rule as the entry charts' spot profile).
+  const futuresProfile = useMemo(() => {
+    if (!prevFuturesShown?.bars?.length) return null
+    const profile = volumeProfileFromCandles(prevFuturesShown.bars, futuresProfileRow)
+    return { ...profile, ...profileNodes(profile) }
+  }, [prevFuturesShown, futuresProfileRow])
   const futuresProfileLabel = prevFuturesShown?.date ? ` (${fmtDateOnly(prevFuturesShown.date)})` : ''
   const futuresProfileOtherContract = prevFuturesShown?.expiry && result?.futuresExpiry
     && String(prevFuturesShown.expiry).slice(0, 10) !== String(result.futuresExpiry).slice(0, 10)
@@ -4505,12 +4517,13 @@ export default function OiReplayPage() {
     () => oiAtCandleCloses(futuresPointsRaw, displayFuturesBars.map((bar) => fromChartTime(bar.time) * 1000), futuresTimeframe, asOfMs),
     [futuresPointsRaw, displayFuturesBars, futuresTimeframe, asOfMs],
   )
+  const futuresOiUnit = futuresOiUnitFor(futuresPointsRaw[0]?.openInterest)
   const futuresOiLine = useMemo(() => {
     if (!result?.futuresOiAvailable) return []
     return displayFuturesBars
-      .map((bar, i) => (futuresCandleOi[i] != null ? { time: bar.time, value: futuresCandleOi[i] / 1_000_000 } : null))
+      .map((bar, i) => (futuresCandleOi[i] != null ? { time: bar.time, value: futuresCandleOi[i] / FUTURES_OI_UNITS[futuresOiUnit] } : null))
       .filter(Boolean)
-  }, [displayFuturesBars, futuresCandleOi, result])
+  }, [displayFuturesBars, futuresCandleOi, result, futuresOiUnit])
 
   // Every row carries its OI both ONE MINUTE AGO (native resolution regardless of the chart's own
   // timeframe - "change every min" was explicit) AND at the DAY'S OPEN, alongside the current
@@ -6163,7 +6176,7 @@ export default function OiReplayPage() {
                             type={futuresRegimeSinceOpen.bias === 'Bullish' ? 'success' : futuresRegimeSinceOpen.bias === 'Bearish' ? 'error' : 'info'}
                             showIcon
                             message={`Since open: ${futuresRegimeSinceOpen.regime} (${futuresRegimeSinceOpen.bias})`}
-                            description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatOiMillions(futuresRegimeSinceOpen.oiDelta, { signed: true })} since today's open.`}
+                            description={`${futuresRegimeSinceOpen.blurb} Price ${futuresRegimeSinceOpen.priceDelta >= 0 ? '+' : ''}${futuresRegimeSinceOpen.priceDelta.toFixed(1)} pts, OI ${formatFuturesOi(futuresRegimeSinceOpen.oiDelta, futuresOiUnit, { signed: true })} since today's open.`}
                           />
                         )}
                         <Row gutter={24} style={{ marginBottom: 12 }}>
@@ -6178,12 +6191,12 @@ export default function OiReplayPage() {
                             />
                           </Col>
                           <Col>
-                            <Statistic title="Futures OI (M)" value={result.futuresOiAvailable ? formatOiMillions(currentFutures?.openInterest, { withUnit: false }) : 'N/A'} />
+                            <Statistic title={`Futures OI (${futuresOiUnit})`} value={result.futuresOiAvailable ? formatFuturesOi(currentFutures?.openInterest, futuresOiUnit, { withUnit: false }) : 'N/A'} />
                           </Col>
                           <Col>
                             <Statistic
                               title="OI since open"
-                              value={result.futuresOiAvailable ? formatOiMillions(futuresOiSinceOpen, { signed: true }) : 'N/A'}
+                              value={result.futuresOiAvailable ? formatFuturesOi(futuresOiSinceOpen, futuresOiUnit, { signed: true }) : 'N/A'}
                               valueStyle={{ color: futuresOiSinceOpen == null ? undefined : futuresOiSinceOpen >= 0 ? UP_COLOR : DOWN_COLOR }}
                             />
                           </Col>
@@ -6202,7 +6215,7 @@ export default function OiReplayPage() {
                           <FuturesChart
                             bars={displayFuturesBars}
                             vwap={futuresVwap}
-                            oiLine={futuresOiLine}
+                            oiLine={futuresOiLine} oiUnit={futuresOiUnit}
                             markers={futuresRegimeMarkers}
                             dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
                             height={320}
@@ -6223,6 +6236,7 @@ export default function OiReplayPage() {
                         {futuresProfile?.poc != null && (
                           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
                             Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
+                            {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
                             {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
                             {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
                           </Text>
