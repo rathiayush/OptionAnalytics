@@ -6240,7 +6240,7 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={shownVwap} showVwap={showVwap}
                                 height={560}
-                                volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars} profileBars={spotProfileBars}
+                                volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
