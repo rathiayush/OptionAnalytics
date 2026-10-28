@@ -7,8 +7,8 @@
 // plain function so the rules can be tested without a browser.
 //
 // h is in GRID ROWS, not pixels: a row is GRID_ROW_HEIGHT px plus the margin between rows, so a card's
-// real height is rowsToPx(h). Every card therefore has a height, and one whose content is taller scrolls
-// inside it - that is what a dashboard is.
+// real height is rowsToPx(h). A card nobody has sized is exactly as tall as its content (fitLayoutHeights -
+// nothing to scroll); one whose corner was dragged keeps that height and scrolls inside it if it must.
 //
 // NARROW SCREENS NEVER USE IT: under WIDE_LAYOUT_PX the page stacks the cards full width at their own
 // height, exactly as it always has. A layout dragged out on a monitor cannot leave a phone with a sliver
@@ -32,6 +32,11 @@ export const rowsToPx = (rows, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN
 export const pxToRows = (px, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN) =>
   Math.max(MIN_H, Math.round((px + margin) / (rowHeight + margin)))
 
+/** The fewest rows that hold `px` whole - a card fitted to its content is never a few pixels short of it
+ *  (the card clips what it does not hold, so the nearest row could cut off its last line). */
+export const rowsToHold = (px, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN) =>
+  Math.max(MIN_H, Math.ceil((px + margin) / (rowHeight + margin)))
+
 // How tall each card starts out, in grid rows - roughly what it is worth on the page today, so the first
 // sight of the dashboard looks like the page the layout replaced. A card not named here gets DEFAULT_ROWS.
 const DEFAULT_ROWS = 12
@@ -51,6 +56,21 @@ const CARD_ROWS = {
   futures: 21,
 }
 export const defaultRows = (id) => CARD_ROWS[id] ?? DEFAULT_ROWS
+
+// How WIDE each card starts out, in grid columns. The page used to open with every card full width,
+// which looked exactly like the page before the grid existed and gave no hint that anything could be
+// moved - and with w = 12 there is nowhere sideways for a card to go, so dragging one did nothing
+// visible. The cards that earn the full width (the charts, the heatmap, the two-column checklist) keep
+// it; the reads sit beside each other.
+const DEFAULT_SPAN = 6
+const CARD_SPAN = {
+  topStats: 12,
+  entryChecklist: 12,
+  oiHeatmap: 12,
+  spotAndEntry: 12,
+  futures: 12,
+}
+export const defaultSpan = (id) => Math.min(GRID_COLS, Math.max(MIN_W, CARD_SPAN[id] ?? DEFAULT_SPAN))
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 const int = (v, fallback) => (Number.isFinite(v) ? Math.round(v) : fallback)
@@ -74,14 +94,33 @@ function sortByOrder(cardIds, order) {
   return ids.sort((a, b) => at(a) - at(b))
 }
 
-/** The layout the page starts with: every card full width, stacked in `order` (the page's own card order). */
+/** The layout the page starts with: each card at its own default width (defaultSpan), laid out left to
+ *  right in `order` (the page's own card order) and wrapped to a new row when the next one no longer
+ *  fits - a dashboard rather than a column. A row starts below the tallest card of the row above. */
 export function defaultLayout(cardIds, order = null) {
+  const out = []
   let y = 0
-  return sortByOrder(cardIds, order).map((id) => {
-    const item = { i: id, x: 0, y, w: GRID_COLS, h: defaultRows(id) }
-    y += item.h
-    return item
-  })
+  let x = 0
+  let rowRows = 0
+  for (const id of sortByOrder(cardIds, order)) {
+    const w = defaultSpan(id)
+    if (x + w > GRID_COLS) { y += rowRows; x = 0; rowRows = 0 }
+    const h = defaultRows(id)
+    out.push({ i: id, x, y, w, h })
+    x += w
+    rowRows = Math.max(rowRows, h)
+  }
+  return out
+}
+
+/** Whether `layout` is a plain one-column stack - every card full width, so nothing was ever actually
+ *  arranged sideways. The dashboard first shipped with exactly this as its default, and the page wrote
+ *  it straight back to storage on the first render, so it is also what someone who never touched the
+ *  layout has saved (see the page's own one-time migration). */
+export function isStackedLayout(layout, cardIds) {
+  if (!Array.isArray(layout) || !layout.length || layout.length !== (cardIds?.length ?? -1)) return false
+  const ids = new Set(cardIds)
+  return layout.every((it) => it && ids.has(it.i) && it.x === 0 && it.w === GRID_COLS)
 }
 
 /** A saved layout reconciled with the cards the page has now: the cards it knows keep their place, a card
@@ -115,6 +154,29 @@ export function isDefaultLayout(layout, cardIds, order = null) {
   })
 }
 
+/** Whether a layout is still ARRANGED as the page starts - every card in its default column and width, and in
+ *  its default order down each column - whatever heights the cards have. isDefaultLayout compares heights too,
+ *  and a card nobody sized follows its content (fitLayoutHeights), so that never matches once a card has been
+ *  measured; this is the "anything to reset?" question the page actually asks. Packing a column upwards
+ *  never reorders it, so the order down a column survives the heights changing. `shown`: only these cards
+ *  count - the grid saves just the cards on the page, so a hidden one always comes back elsewhere. */
+export function isDefaultArrangement(layout, cardIds, order = null, shown = null) {
+  if (!Array.isArray(layout)) return false
+  const showing = shown ? new Set(shown) : null
+  const base = defaultLayout(cardIds, order).filter((b) => !showing || showing.has(b.i))
+  const byId = new Map(layout.map((it) => [it?.i, it]))
+  if (!base.every((b) => byId.has(b.i))) return false
+  if (!base.every((b) => byId.get(b.i)?.x === b.x && byId.get(b.i)?.w === b.w)) return false
+  const lanes = (items) => {
+    const out = new Map()
+    for (const it of [...items].sort((a, b) => a.y - b.y)) out.set(it.x, [...(out.get(it.x) ?? []), it.i])
+    return out
+  }
+  const want = lanes(base)
+  const have = lanes(base.map((b) => byId.get(b.i)))
+  return [...want].every(([x, ids]) => (have.get(x) ?? []).join('|') === ids.join('|'))
+}
+
 /** Every card the same width, `columns` of them a row, left to right in the page's order - the one-click
  *  presets. Each card keeps the height it has; a row starts below the tallest card of the row above. */
 export function presetLayout(cardIds, columns, { order = null, layout = null } = {}) {
@@ -134,15 +196,63 @@ export function presetLayout(cardIds, columns, { order = null, layout = null } =
   return ids.map((id) => byId.get(id))
 }
 
-// A chart never gets less than this, however short its card was dragged - under it there is nothing to
-// read, and the card scrolls instead.
-const MIN_CONTENT_HEIGHT = 90
+/** The layout with every card that the trader has NOT resized by hand set to exactly the height its own
+ *  content needs - `measured` is each card's measured content height in pixels (DashboardCard reports
+ *  it), `sized` the ids that have been dragged to a height of their own and so keep it.
+ *
+ *  This is what stops a dashboard full of scrollbars: a card is either its content's own height (nothing
+ *  to scroll) or a height the trader chose (scrolls, because they asked for it to be that size). There is
+ *  no feedback loop between the two - a card being measured hands its charts no height at all, so they
+ *  stand at their own and the measurement settles (see DashboardCard).
+ *
+ *  Returns the SAME array when nothing changed, so re-measuring the same page costs no render. */
+export function fitLayoutHeights(layout, measured, sized = null) {
+  if (!Array.isArray(layout) || !measured?.size) return layout
+  let changed = false
+  const out = layout.map((it) => {
+    if (sized?.has(it.i)) return it
+    const px = measured.get(it.i)
+    if (!Number.isFinite(px) || px <= 0) return it
+    const h = rowsToHold(px)
+    if (h === it.h) return it
+    changed = true
+    return { ...it, h }
+  })
+  return changed ? out : layout
+}
 
-/** The height a chart filling this card may use: the card's own height less `chromePx` (its title bar and
- *  padding). Null when the card has no grid height of its own (a narrow screen). */
-export function contentHeight(rows, { chromePx = 86, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN } = {}) {
-  if (!Number.isFinite(rows)) return null
-  return Math.max(MIN_CONTENT_HEIGHT, rowsToPx(rows, rowHeight, margin) - chromePx)
+// ---- A sized card's content follows its size ----
+//
+// A card the trader has sized keeps that height, and its content is fitted INTO it: every chart (and every table /
+// heatmap box) in it takes its own height x ONE scale for the card, worked out so that the content is exactly the
+// card's height - charts taller in a taller card, shorter in a shorter one, nothing to scroll. One scale for all, not
+// a sum of chart heights: charts stacked, side by side, or both - the content's height is the same straight line in
+// the scale either way (height = the rest + scale x the charts along its tallest column), so the scale is found by
+// measuring - the secant method: the first step guesses the charts are one above the other, every later one uses the
+// slope the last two measurements gave. Two or three steps; a few more where a chart stops at its smallest.
+export const FIT_SCALE_MIN = 0.25
+export const FIT_SCALE_MAX = 4
+// Aim this far under the card's height (a scrollbar appears at the first pixel over it) and stop this close to it.
+const FIT_SLACK = 2
+const FIT_TOLERANCE = 3
+// At most this many steps for one card size - one that keeps missing (its content changing as it is measured) stops.
+const FIT_MAX_STEPS = 8
+
+/** The next fit scale for a sized card. `state` (what the last call returned, null at first); `scale` the scale its
+ *  content was measured at; `content` its content's height (px), `box` the card body's height and `width` its width;
+ *  `charts` the sum of the fitted elements' own heights (the first step's slope). Returns { scale, state }: the same
+ *  scale when the content already fits (or nothing in it scales). A new card size or width starts the steps afresh. */
+export function nextFitScale(state, { scale, content, box, width, charts }) {
+  let { prev = null, size = null, steps = 0 } = state ?? {}
+  if (!size || Math.abs(size.box - box) > 1 || Math.abs(size.width - width) > 1) { prev = null; steps = 0; size = { box, width } }
+  const target = box - FIT_SLACK
+  const here = { scale, content }
+  if (Math.abs(content - target) <= FIT_TOLERANCE) return { scale, state: { prev: here, size, steps: 0 } }
+  if (steps >= FIT_MAX_STEPS) return { scale, state: { prev, size, steps } }
+  const slope = prev && Math.abs(scale - prev.scale) > 1e-4 ? (content - prev.content) / (scale - prev.scale) : charts
+  if (!(slope > 1)) return { scale, state: { prev: here, size, steps: steps + 1 } }
+  const next = Math.round(clamp(scale + (target - content) / slope, FIT_SCALE_MIN, FIT_SCALE_MAX) * 1000) / 1000
+  return { scale: next, state: { prev: here, size, steps: steps + 1 } }
 }
 
 /** The cards to show, reconciled with the ones the page has now: anything saved that no longer exists is
@@ -161,3 +271,8 @@ export const STORED_COMPACT = 'optionanalytics.oiReplay.compact'
 export const STORED_QUICK_FAB = 'optionanalytics.oiReplay.quickFabOn'
 export const STORED_FREE_PLACEMENT = 'optionanalytics.oiReplay.freePlacement'
 export const STORED_SECTIONS = 'optionanalytics.oiReplay.sections'
+// The cards given a height of their own by dragging their corner - everything else follows its content.
+export const STORED_SIZED = 'optionanalytics.oiReplay.sizedCards'
+// Bumped when the DEFAULT layout changes in a way a saved one should pick up - see the page's migration.
+export const STORED_LAYOUT_VERSION = 'optionanalytics.oiReplay.gridLayoutVersion'
+export const LAYOUT_VERSION = '2'

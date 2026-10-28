@@ -35,16 +35,22 @@ function useWidth(ref) {
 }
 
 export function DashboardGrid({
-  wide, cardIds, order, layout, onLayoutChange, editing = false, freePlacement = false, children,
+  wide, cardIds, order, layout, onLayoutChange, onResizeCard, editing = false, freePlacement = false, children,
 }) {
   const ref = useRef(null)
   const width = useWidth(ref)
+  // While a card is being resized or dragged the grid keeps at least the height it had when that started. Without it,
+  // shrinking the bottom card shortened the page, the browser scrolled up to match, the card's corner moved away from
+  // the pointer - and the card shrank again, all the way down to its minimum, from a small drag.
+  const [holdHeight, setHoldHeight] = useState(null)
+  const hold = () => setHoldHeight(ref.current?.offsetHeight ?? null)
+  const release = () => setHoldHeight(null)
 
   if (!wide) return <div className="oi-dash-stack">{children}</div>
 
   const items = reconcileGridLayout(layout, cardIds, order)
   return (
-    <div ref={ref} className={`oi-dash-grid${editing ? ' oi-dash-grid--editing' : ''}`}>
+    <div ref={ref} className={`oi-dash-grid${editing ? ' oi-dash-grid--editing' : ''}`} style={holdHeight ? { minHeight: holdHeight } : undefined}>
       {width > 0 && (
         <ReactGridLayout
           width={width}
@@ -55,8 +61,12 @@ export function DashboardGrid({
           layout={items}
           // Packed upwards by default, so a card dragged out never leaves a hole above it. "Free placement"
           // turns that off: a card then stays exactly where it is dropped, gaps and all.
+          //
+          // preventCollision stays OFF either way. With it on, a card dropped anywhere already occupied
+          // was simply refused and snapped back to where it came from - which reads as "I cannot move
+          // this card" rather than as free placement. Off, whatever is in the way moves aside instead.
           compactType={freePlacement ? null : 'vertical'}
-          preventCollision={freePlacement}
+          preventCollision={false}
           isDraggable
           isResizable
           draggableHandle={DRAG_HANDLE}
@@ -66,8 +76,12 @@ export function DashboardGrid({
           allowMobileScroll
           useCSSTransforms
           onLayoutChange={onLayoutChange}
-          onDragStop={onLayoutChange}
-          onResizeStop={onLayoutChange}
+          onDragStart={hold}
+          onDragStop={(next) => { release(); onLayoutChange(next) }}
+          onResizeStart={hold}
+          // A card whose corner has been dragged has been given a height of its own, and stops following
+          // its content from here on (DashboardCard's two modes) - the page remembers which those are.
+          onResizeStop={(next, _before, item) => { release(); onLayoutChange(next); if (item?.i) onResizeCard?.(item.i) }}
         >
           {children}
         </ReactGridLayout>

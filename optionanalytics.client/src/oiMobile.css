@@ -44,12 +44,20 @@
 .oi-dash-stack { display: flex; flex-direction: column; gap: 20px; width: 100%; }
 .oi-dash-stack > .oa-dash-card { width: 100%; }
 
+/* DashboardCard: the grid item (.oa-dash-card) > its body (.oa-dash-body) > LiveSection's display:contents
+   wrapper > the antd card. */
 .oa-dash-card { min-width: 0; }
-.oa-dash-card > .ant-card { width: 100%; }
-/* In the grid every card has a height of its own, so its content scrolls inside it rather than the page
-   growing. On the wrapper, not the card: the cards sit inside a display:contents wrapper (LiveSection),
-   so a child selector would never reach them and a descendant one would also catch a card inside a card. */
-.react-grid-item.oa-dash-card { overflow: auto; }
+.oa-dash-body { width: 100%; min-width: 0; }
+/* In the grid the CARD never scrolls - its body does. The resize corner is a child of the card, pinned to its
+   bottom-right: while the card itself was the scrolling box the corner sat under its scrollbar, and the
+   scrollbar swallowed every drag of it. */
+.react-grid-item.oa-dash-card { overflow: hidden; }
+/* A card given a height of its own (its corner dragged): the body fills it and scrolls if its content is
+   taller - the trader asked for that size. */
+.react-grid-item > .oa-dash-body { height: 100%; overflow: auto; }
+/* A card following its content (the default): the body stands at the content's own height, the page measures
+   it and fits the card to it (fitLayoutHeights) - nothing to scroll. */
+.react-grid-item > .oa-dash-body.oa-dash-body--auto { height: auto; overflow: visible; }
 
 /* The ⠿ grip is what a drag starts from (DashboardGrid's draggableHandle) - make it say so. */
 .oa-dash-grip { cursor: grab; }
@@ -61,19 +69,25 @@
   opacity: 0.18;
   border-radius: 8px;
 }
-/* The resize corner: out of the way until the pointer is on the card, and always visible while arranging. */
-.react-grid-item > .react-resizable-handle {
-  opacity: 0;
+/* The resize corner: always there (faint), plain on the card under the pointer and while arranging, and big
+   enough to grab - the library's own is a 5 px dark mark, invisible on a dark card. Above the card's body.
+   Scoped to .oi-dash-grid: the library's stylesheet loads after this one, and its rules are as specific. */
+.oi-dash-grid .react-grid-item > .react-resizable-handle {
+  width: 26px;
+  height: 26px;
+  opacity: 0.35;
   transition: opacity 120ms;
-  z-index: 3;
+  z-index: 5;
 }
-.react-grid-item:hover > .react-resizable-handle,
-.oi-dash-grid--editing .react-grid-item > .react-resizable-handle { opacity: 0.85; }
-.react-grid-item > .react-resizable-handle::after {
+.oi-dash-grid .react-grid-item:hover > .react-resizable-handle,
+.oi-dash-grid--editing .react-grid-item > .react-resizable-handle { opacity: 1; }
+.oi-dash-grid .react-grid-item > .react-resizable-handle::after {
+  right: 5px;
+  bottom: 5px;
+  width: 11px;
+  height: 11px;
   border-right: 2px solid #1677ff;
   border-bottom: 2px solid #1677ff;
-  width: 9px;
-  height: 9px;
 }
 /* While arranging, every card shows its edge - otherwise an empty-ish card gives no hint where its
    corner (and so its resize handle) actually is. */

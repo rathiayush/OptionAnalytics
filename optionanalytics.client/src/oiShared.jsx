@@ -1,4 +1,5 @@
 import { Component, useEffect, useMemo, useRef, useState, useId, useSyncExternalStore } from 'react'
+import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { alignToBars, chartVwap } from './chartVwap.js'
 import { createPortal } from 'react-dom'
 import { Select, Space, Typography, Button, Row, Col, Tooltip, Tag, InputNumber, Table, Segmented, Empty, Alert } from 'antd'
@@ -1001,8 +1002,12 @@ export function PremiumCandleChart({ bars, dayKey, height = 320 }) {
 // page's replay has "played" up to, same as every other chart there.
 export function PremiumEmaChart({
   points, asOfMs, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  showVwap = false, height = 320,
+  showVwap = false, height: givenHeight = 320,
 }) {
+  // Fitted to its dashboard card when that card was sized (useFitHeight); the height asked for anywhere else.
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -1029,7 +1034,7 @@ export function PremiumEmaChart({
     if (!containerRef.current) return
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
@@ -1084,7 +1089,9 @@ export function PremiumEmaChart({
       ema2SeriesRef.current = null
       vwapSeriesRef.current = null
     }
-  }, [height])
+  }, [])
+  // A new height is applied to the chart there is - drawn again it had no data until the next update.
+  useChartHeight(chartRef, height)
 
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
