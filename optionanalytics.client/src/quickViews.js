@@ -17,6 +17,19 @@ export function quickViewForKey(e) {
   return QUICK_VIEWS.find((v) => e.code === `Digit${v.digit}` || e.code === `Numpad${v.digit}`) ?? null
 }
 
+// Whether a key pressed in `el` types into it - then a LETTER shortcut (the order ticket's B / S) is not taken from it. A
+// checkbox, a radio (antd's Segmented - Numbers / Heatmap, Total OI / Since open), a switch and a dropdown you cannot type
+// in (antd marks its input read-only) only HOLD the focus after a click; they used to count as "typing", so after
+// ticking VWAP or picking a timeframe B / S did nothing until a click somewhere else.
+const NOT_TYPED_IN = new Set(['checkbox', 'radio', 'button', 'submit', 'reset', 'range', 'color', 'file', 'image'])
+export function isTypingField(el) {
+  if (!el) return false
+  if (el.isContentEditable) return true
+  if (el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') return true
+  if (el.tagName !== 'INPUT') return false
+  return !el.readOnly && !NOT_TYPED_IN.has(String(el.type || 'text').toLowerCase())
+}
+
 // On a phone there is no keyboard: a small round button (QuickViewFab.jsx), dragged anywhere on the screen, whose tap
 // opens the quick views as small icons. Sizes in px.
 export const FAB_SIZE = 40

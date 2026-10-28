@@ -208,7 +208,10 @@ When adding or changing a strategy:
   the grid's `minW` too, so a card is never dragged narrower than it is read back. "Cards a row" 1 - 4, and 6 from a
   `SIX_A_ROW_PX` (2400) window (`cardsARowChoices`) - `presetLayout` lays out the SHOWN cards only (a hidden one left
   a hole), never makes the spot / entry card (three charts) under half (`PRESET_MIN_SPAN`), fills a row with the next
-  cards that still fit and gives a row closed short its last card the rest of the width. "Fit
+  cards that still fit and gives a row closed short its last card the rest of the width. The spot / entry card's three
+  charts END ON ONE LINE while side by side (`useEvenChartBottoms`: each chart gets `extraHeight` = how much shorter
+  its card's header / footer is than the tallest - card height less chart height, which never depends on the chart, so
+  the measure cannot chase itself; stacked, nothing). "Fit
   heights", "Reset" (place, width AND height back) and "Free placement" (`compactType` null: a card stays exactly where it is
   dropped, gaps and all; off, the cards pack upwards). `preventCollision` is always OFF - on, a card dropped on an occupied
   place sprang back, which reads as "I cannot move this card"; off, whatever is in the way moves aside. "Arrange" only
@@ -260,6 +263,10 @@ When adding or changing a strategy:
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
   opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
   EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+- OI Replay's keyboard order ticket (B / F1 buy, S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
+  `quickViews.js`): a text / number / date box, a searchable or tags dropdown, a text area. A checkbox, a radio (antd's
+  Segmented), a switch or a plain dropdown (antd marks its input read-only) only hold the focus after a click - they used
+  to count as typing, so after ticking VWAP or picking a timeframe B / S did nothing (`tests/quick-views.test.mjs`).
 - OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
   its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked

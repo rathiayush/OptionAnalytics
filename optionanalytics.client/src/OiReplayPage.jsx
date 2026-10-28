@@ -38,7 +38,7 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
-import { QUICK_VIEWS, quickViewForKey } from './quickViews.js'
+import { QUICK_VIEWS, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
@@ -934,10 +934,11 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
   return `${prefix} ${oiBarText(t)} ${strike} (${formatOiMillions(oi)} OI${iv != null ? `, IV ${iv.toFixed(1)}` : ''}${delta ? `, ${delta}` : ''}, ${sr})${staleTag}`
 }
 
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, profileBars = null }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null }) {
   // In a dashboard card the trader has sized, the height the card's fit gives it (useFitHeight); anywhere else - a
-  // floating panel, the review popup - the height the caller asked for.
-  const height = useFitHeight(givenHeight)
+  // floating panel, the review popup - the height the caller asked for. `extraHeight` on top: what lines its bottom
+  // up with the charts beside it (useEvenChartBottoms).
+  const height = useFitHeight(givenHeight) + extraHeight
   const containerRef = useRef(null)
   // Read once at creation; a later height (a floating panel resized) is applied to the same chart, not a new one.
   const heightRef = useRef(height)
@@ -2204,9 +2205,10 @@ const VOLUME_PROFILE_NODE_SHADE_ALPHAS = [0.9, 0.45]
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
 function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, volumeProfile = null, showVolumeProfile = true, profileBars = null,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, extraHeight = 0, volumeProfile = null, showVolumeProfile = true, profileBars = null,
 }) {
-  const height = useFitHeight(givenHeight)
+  // Its own height (fitted in a sized card), plus what lines its bottom up with the charts beside it (useEvenChartBottoms).
+  const height = useFitHeight(givenHeight) + extraHeight
   // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -3460,6 +3462,59 @@ const SPEED_OPTIONS = [
 // that's not fresh enough (see OiReplayService's own doc comment); TODAY additionally stays live
 // via OiReplayLiveFeedService's WebSocket-fed ticks (see useOiReplayLiveFeed below) once the
 // initial snapshot has loaded, rather than only ever showing whatever was true at load time.
+// The spot chart and the two entry charts sit side by side in one card; their own headers are not the same height (in a
+// narrow column the spot card's controls wrap to seven lines, an entry chart's to three), so with the same chart
+// height the spot card ended well below the other two. This gives each chart however much shorter its card's
+// header and footer are than the tallest one's (card height less its chart's), so the three end on one line - only
+// while they share a row (stacked on a narrower screen, nothing). A card's chrome does not depend on its chart's
+// height, so the measure never chases itself.
+function useEvenChartBottoms(count) {
+  const cards = useRef([])
+  const observer = useRef(null)
+  const frame = useRef(0)
+  const [extras, setExtras] = useState(() => new Array(count).fill(0))
+  const measure = useCallback(() => {
+    cancelAnimationFrame(frame.current)
+    frame.current = requestAnimationFrame(() => {
+      const items = []
+      cards.current.slice(0, count).forEach((card, i) => {
+        const chart = card?.querySelector('.tv-lightweight-charts')
+        if (!chart || !chart.offsetHeight) return
+        const box = card.getBoundingClientRect()
+        items.push({ i, top: box.top, chrome: box.height - chart.getBoundingClientRect().height })
+      })
+      const next = new Array(count).fill(0)
+      if (items.length > 1 && items.every((it) => Math.abs(it.top - items[0].top) <= 2)) {
+        const most = Math.max(...items.map((it) => it.chrome))
+        for (const it of items) next[it.i] = Math.round(most - it.chrome)
+      }
+      setExtras((prev) => (prev.every((v, k) => Math.abs(v - next[k]) <= 1) ? prev : next))
+    })
+  }, [count])
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const resize = new ResizeObserver(measure)
+    observer.current = resize
+    for (const card of cards.current) if (card) resize.observe(card)
+    measure()
+    return () => { cancelAnimationFrame(frame.current); resize.disconnect(); observer.current = null }
+  }, [measure])
+  // One stable ref callback per card: a card element that comes or goes (a section shown, a day loaded, the spot chart
+  // docked back) is watched from then on - an observer set up once kept watching the element it first saw.
+  const refs = useRef([])
+  const cardRef = (i) => {
+    refs.current[i] ??= (el) => {
+      const before = cards.current[i]
+      if (before === el) return
+      if (before) observer.current?.unobserve(before)
+      cards.current[i] = el
+      if (el) { observer.current?.observe(el); measure() }
+    }
+    return refs.current[i]
+  }
+  return { cardRef, extras }
+}
+
 export default function OiReplayPage() {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
@@ -4937,8 +4992,8 @@ export default function OiReplayPage() {
   useEffect(() => {
     const onKey = (e) => {
       if (e.ctrlKey || e.metaKey || e.altKey || ticketBlockedRef.current) return
-      const el = e.target
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return
+      // Not while typing in a box - but a ticked checkbox, a toggle or a dropdown still holding the focus is not typing.
+      if (isTypingField(e.target)) return
       const direction = e.key === 'F1' || e.key === 'b' || e.key === 'B' ? 'BUY' : e.key === 'F2' || e.key === 's' || e.key === 'S' ? 'SELL' : null
       if (!direction) return
       e.preventDefault()
@@ -5503,6 +5558,8 @@ export default function OiReplayPage() {
   // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
   // must not assume a loaded day: live candles keep arriving while today's fetch is being redone
   // or has failed, and reading result.date then crashed the whole page.
+  // The spot, entry B and entry C charts end on one line (useEvenChartBottoms).
+  const { cardRef: evenChartCard, extras: chartExtras } = useEvenChartBottoms(3)
   const spotPanelSized = spotFloating && Number.isFinite(spotPanelSize.height) && floatingChartBoxHeight != null
   const spotChartHeight = !spotFloating ? 560 : spotPanelSized ? Math.max(FLOATING_SPOT_CHART_MIN_HEIGHT, floatingChartBoxHeight) : 440
   const spotChart = oneMinBars.length > 0
@@ -5520,6 +5577,7 @@ export default function OiReplayPage() {
           showVwap={showVwap}
           onStrikeClick={setDrilldownStrike}
           height={spotChartHeight}
+          extraHeight={spotFloating ? 0 : chartExtras[0]}
           profileBars={spotProfileBars}
         />
       </ChartErrorBoundary>
@@ -6363,21 +6421,23 @@ export default function OiReplayPage() {
               </Space>
               <Row gutter={[16, 16]}>
                 <Col xs={24} md={visibleSections.includes('entryCharts') ? 8 : 24}>
-                  <Card
-                    size="small" title="Spot (replaying)"
-                    extra={!spotFloating && (
-                      <Tooltip title="Pop the whole spot chart out into a panel you can drag anywhere - e.g. next to the heatmap">
-                        <Button size="small" icon={<ExportOutlined />} onClick={() => setSpotFloating(true)}>Float</Button>
-                      </Tooltip>
-                    )}
-                  >
-                  {spotFloating ? (
-                    <Space direction="vertical" size={8} style={{ width: '100%', padding: '24px 0' }} align="center">
-                      <Text type="secondary">The spot chart is in its own floating panel.</Text>
-                      <Button size="small" onClick={() => setSpotFloating(false)}>Dock it back here</Button>
-                    </Space>
-                  ) : spotCardContent}
-                </Card>
+                  <div ref={evenChartCard(0)}>
+                    <Card
+                      size="small" title="Spot (replaying)"
+                      extra={!spotFloating && (
+                        <Tooltip title="Pop the whole spot chart out into a panel you can drag anywhere - e.g. next to the heatmap">
+                          <Button size="small" icon={<ExportOutlined />} onClick={() => setSpotFloating(true)}>Float</Button>
+                        </Tooltip>
+                      )}
+                    >
+                    {spotFloating ? (
+                      <Space direction="vertical" size={8} style={{ width: '100%', padding: '24px 0' }} align="center">
+                        <Text type="secondary">The spot chart is in its own floating panel.</Text>
+                        <Button size="small" onClick={() => setSpotFloating(false)}>Dock it back here</Button>
+                      </Space>
+                    ) : spotCardContent}
+                  </Card>
+                  </div>
               </Col>
               {/* The user's own "width more than 2500... adjust all 3 charts in same row" ask - on a
                   wide enough monitor, the main chart and both fast-entry charts sit side by side in
@@ -6388,67 +6448,71 @@ export default function OiReplayPage() {
               {visibleSections.includes('entryCharts') && (
                 <>
                   <Col xs={24} md={8}>
-                    <Card
-                      size="small"
-                      title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
-                      extra={
-                        <Select
-                          value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
-                          options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
-                        />
-                      }
-                    >
-                      {oneMinBars.length > 0
-                        ? (
-                          <div style={{ position: 'relative' }}>
-                            <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                    <div ref={evenChartCard(1)}>
+                      <Card
+                        size="small"
+                        title={`Entry chart B (independent timeframe + EMA) · ATM ${atmStrike ?? ''} OI Δ`}
+                        extra={
+                          <Select
+                            value={oiLookbackBars} onChange={setOiLookbackBars} size="small" style={{ width: 110 }}
+                            options={OI_LOOKBACK_N_OPTIONS.map((n) => ({ value: n, label: `${n} bars` }))}
+                          />
+                        }
+                      >
+                        {oneMinBars.length > 0
+                          ? (
+                            <div style={{ position: 'relative' }}>
+                              <ChartErrorBoundary key={`emaB-${underlying}-${result.date}-${chartBTimeframe}`}>
+                                <EmaChart
+                                  oneMinBars={oneMinBars}
+                                  visibleCount={visibleCount}
+                                  timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
+                                  ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
+                                  ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
+                                  dayKey={`emaB-${underlying}-${result.date}`}
+                                  vwapSeries={shownVwap} showVwap={showVwap}
+                                  height={560} extraHeight={chartExtras[1]}
+                                  volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
+                                />
+                              </ChartErrorBoundary>
+                              {atmStrike != null && (
+                                <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
+                                  <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: ceOiLookback.delta > 0 ? '#3ddc84' : ceOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                    CE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(ceOiLookback.delta)}
+                                  </span>
+                                  <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: peOiLookback.delta > 0 ? '#3ddc84' : peOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
+                                    PE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(peOiLookback.delta)}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          )
+                          : <Empty description="No spot candles for this day." />}
+                      </Card>
+                    </div>
+                  </Col>
+                  <Col xs={24} md={8}>
+                    <div ref={evenChartCard(2)}>
+                      <Card size="small" title="Entry chart C (independent timeframe + EMA)">
+                        {oneMinBars.length > 0
+                          ? (
+                            <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
                               <EmaChart
                                 oneMinBars={oneMinBars}
                                 visibleCount={visibleCount}
-                                timeframe={chartBTimeframe} onTimeframeChange={setChartBTimeframe}
-                                ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
-                                ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
-                                dayKey={`emaB-${underlying}-${result.date}`}
+                                timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
+                                ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
+                                ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
+                                dayKey={`emaC-${underlying}-${result.date}`}
                                 vwapSeries={shownVwap} showVwap={showVwap}
-                                height={560}
+                                height={560} extraHeight={chartExtras[2]}
                                 volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                               />
                             </ChartErrorBoundary>
-                            {atmStrike != null && (
-                              <div style={{ position: 'absolute', top: 8, left: 8, display: 'flex', flexDirection: 'column', gap: 4, pointerEvents: 'none' }}>
-                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: ceOiLookback.delta > 0 ? '#3ddc84' : ceOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
-                                  CE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(ceOiLookback.delta)}
-                                </span>
-                                <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 6px', borderRadius: 4, background: '#00000080', color: peOiLookback.delta > 0 ? '#3ddc84' : peOiLookback.delta < 0 ? '#ff5c5c' : AXIS_COLOR, border: `1px solid ${AXIS_COLOR}` }}>
-                                  PE OI ({oiLookbackBars}×{chartBTimeframe}m) {fmtOiDelta(peOiLookback.delta)}
-                                </span>
-                              </div>
-                            )}
-                          </div>
-                        )
-                        : <Empty description="No spot candles for this day." />}
-                    </Card>
-                  </Col>
-                  <Col xs={24} md={8}>
-                    <Card size="small" title="Entry chart C (independent timeframe + EMA)">
-                      {oneMinBars.length > 0
-                        ? (
-                          <ChartErrorBoundary key={`emaC-${underlying}-${result.date}-${chartCTimeframe}`}>
-                            <EmaChart
-                              oneMinBars={oneMinBars}
-                              visibleCount={visibleCount}
-                              timeframe={chartCTimeframe} onTimeframeChange={setChartCTimeframe}
-                              ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
-                              ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
-                              dayKey={`emaC-${underlying}-${result.date}`}
-                              vwapSeries={shownVwap} showVwap={showVwap}
-                              height={560}
-                              volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
-                            />
-                          </ChartErrorBoundary>
-                        )
-                        : <Empty description="No spot candles for this day." />}
-                    </Card>
+                          )
+                          : <Empty description="No spot candles for this day." />}
+                      </Card>
+                    </div>
                   </Col>
                 </>
               )}
