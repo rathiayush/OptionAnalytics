@@ -9,6 +9,8 @@ import { PREV_PROFILE } from './profileColors.js'
 
 const SELL = [239, 83, 80]
 const BUY = [38, 166, 154]
+// A row with no buy / sell split of its own (the spot profile's server-side bins) is one neutral bar.
+const NEUTRAL = [150, 170, 200]
 const rgba = ([r, g, b], a) => `rgba(${r},${g},${b},${a})`
 
 export class VolumeProfilePrimitive {
@@ -63,16 +65,23 @@ export class VolumeProfilePrimitive {
         if (top > bitmapSize.height || top + height < 0) continue
         const inValue = row.price >= profile.val && row.price <= profile.vah
         const alpha = inValue ? 0.42 : 0.18
-        const buyLen = (row.buy / profile.maxRow) * maxLen
-        const sellLen = (row.sell / profile.maxRow) * maxLen
-        ctx.fillStyle = rgba(BUY, alpha)
-        ctx.fillRect(right - buyLen, top, buyLen, height)
-        ctx.fillStyle = rgba(SELL, alpha)
-        ctx.fillRect(right - buyLen - sellLen, top, sellLen, height)
+        const buy = row.buy ?? 0
+        const sell = row.sell ?? 0
+        // Bins with no side of their own (binsProfile) are one neutral bar as wide as the whole row.
+        const parts = buy > 0 || sell > 0
+          ? [[buy, BUY], [sell, SELL]]
+          : [[row.total ?? 0, NEUTRAL]]
+        let x = right
+        for (const [value, color] of parts) {
+          const len = (value / profile.maxRow) * maxLen
+          ctx.fillStyle = rgba(color, alpha)
+          ctx.fillRect(x - len, top, len, height)
+          x -= len
+        }
         if (row.price === profile.poc) {
           ctx.strokeStyle = 'rgba(250,219,20,0.9)'
           ctx.lineWidth = Math.max(1, hpr)
-          ctx.strokeRect(right - buyLen - sellLen, top, buyLen + sellLen, height)
+          ctx.strokeRect(x, top, right - x, height)
         }
       }
     })

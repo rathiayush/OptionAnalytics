@@ -314,7 +314,7 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}{away(now.putWall)}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}{away(now.maxGamma)}</span></Col>
         <Col>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text className="oa-note" type="secondary" style={{ fontSize: 12 }}>
             {istHhmm(now.time)} · ATM {now.atm} · ATM IV {num(now.atmIv * 100, 1)} (from the premiums) · forward {num(now.forward, 1)} ({now.forward >= now.spot ? '+' : '−'}{num(Math.abs(now.forward - now.spot), 1)} carry) ·{' '}
             {now.yearsFrom === 'expiry'
               ? <>expiry {dayjs(expiry).format('ddd D MMM')} ({EXPIRY_SOURCES[expirySource] ?? 'weekday rule'}) - {num(now.years * 365, 2)} days left</>
@@ -325,11 +325,11 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={10}>
           <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
-          <Text type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
+          <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
           <StrikeBars minute={now} />
           <div style={{ marginTop: 10 }}>
             <Text strong style={{ fontSize: 12 }}>GEX profile</Text>
-            <Text type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>
             <ProfileChart minute={now} />
           </div>
         </Col>

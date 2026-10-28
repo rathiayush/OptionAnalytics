@@ -188,6 +188,18 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardCard.jsx`, the `.oi-dash-row` rules in `oiMobile.css`): the
+  cards TILE into rows instead of stacking. Three separate things, each saved on its own: which cards are shown
+  (`SECTION_OPTIONS` / "Sections shown"), the order they come in (`useCardOrder`, the ⠿ handle), and how wide and how
+  tall each one is - `{ span (twelfths), h (px, null = its own height) }` a card, `STORED_LAYOUT`. "Adjust layout" puts a
+  grip at each card's bottom-right: dragged sideways for the width, down for the height (double-click = its own height
+  back); the size follows the pointer and is saved when it is let go, so a drag is ONE change. "Cards a row" 1 - 4
+  (`presetLayout`) and "Reset sizes" are the one-click versions. UNDER `WIDE_LAYOUT_PX` (1100) THE LAYOUT IS IGNORED -
+  a phone keeps its one full-width column, whatever a monitor saved (`cardStyle`, `tests/dashboard-layout.test.mjs`).
+  A card given a height scrolls inside it (`.oa-dash-card--sized`); the charts already follow their container's WIDTH
+  (every one has a ResizeObserver), and the spot / entry charts follow the card's HEIGHT too - `useCardContentHeight`,
+  which hands down the height as GIVEN, never the one under the pointer mid-drag (a chart that rebuilds on a new height
+  would be torn down on every pixel). "Compact" hides the cards' long explanatory paragraphs (the `oa-note` class).
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
@@ -198,7 +210,8 @@ When adding or changing a strategy:
   its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
-  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup.
+  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
+  EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
@@ -220,7 +233,11 @@ When adding or changing a strategy:
   (`marketRead.js`): resistance = the most call OI AT OR ABOVE spot, support = the most put OI AT OR BELOW it - its
   Sell suggestion is one of them; the OI build-up is over the same 5 bars as the price move. The futures chart's OI
   line and regime markers read each candle's OI at its close (`oiAtCandleCloses`). The straddle card's charts
-  (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's.
+  (`LinesChart`): a line's label follows the line; the fixed straddle has its own pane under the Auto ATM's. The previous
+  day's volume profile is drawn as HORIZONTAL BARS behind the candles on the spot and both entry charts as well as the
+  futures chart (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
+  POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
+  "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

@@ -13,7 +13,8 @@ import './oiMobile.css'
 import {
   UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   istTimeFormatter, istTimeWithSecondsFormatter, istTickMarkFormatter, toBar, toChartTime, fromChartTime, istDateKey, fmtDateOnly,
-  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, usePersistedState,
+  NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, STORED_SHOW_VOLUME_PROFILE, STORED_SHOW_PROFILE_BARS, usePersistedState,
+  useMediaQuery,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth, POLL_HEADERS,
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
@@ -31,7 +32,7 @@ import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
-import { tpoRowFor, profileNodes } from './profiles.js'
+import { tpoRowFor, profileNodes, binsProfile } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
@@ -51,6 +52,8 @@ import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, anal
 import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
+import { DashboardCard, useCardContentHeight } from './DashboardCard.jsx'
+import { STORED_COMPACT, STORED_LAYOUT, STORED_QUICK_FAB, WIDE_LAYOUT_PX, isDefaultLayout, presetLayout, reconcileLayout } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
 
@@ -887,7 +890,10 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
   return `${prefix} ${oiBarText(t)} ${strike} (${formatOiMillions(oi)} OI${iv != null ? `, IV ${iv.toFixed(1)}` : ''}${delta ? `, ${delta}` : ''}, ${sr})${staleTag}`
 }
 
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height = 440 }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, profileBars = null }) {
+  // A dashboard card dragged to its own height hands that down (useCardContentHeight); anywhere else - a
+  // floating panel, the review popup - it is the height the caller asked for.
+  const height = useCardContentHeight(givenHeight)
   const containerRef = useRef(null)
   // Read once at creation; a later height (a floating panel resized) is applied to the same chart, not a new one.
   const heightRef = useRef(height)
@@ -902,6 +908,10 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
   const stepRef = useRef(step)
   stepRef.current = step
   const priceLinesRef = useRef([])
+  // The previous day's volume profile as horizontal bars (binsProfile -> VolumeProfilePrimitive), the
+  // same drawing the futures chart has. Bars only: this chart's right edge already carries its OI S-R
+  // wall labels, and five more POC / VAH / VAL / HVN / LVN lines there would bury them.
+  const profilePrimitiveRef = useRef(null)
 
   // Same ATM-centered adaptive window the price lines below are drawn from - memoized so the
   // render's own CE/PE delta tags (see the bottom of this component) read the EXACT SAME top
@@ -962,6 +972,8 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    profilePrimitiveRef.current = new VolumeProfilePrimitive()
+    seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
 
     // Click-to-drill-down: rounds whatever price was clicked to the nearest tracked strike (the same
     // step every other strike-rounding on this page uses), regardless of whether that exact level
@@ -1006,9 +1018,12 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       chartRef.current = null
       seriesRef.current = null
       vwapSeriesRef.current = null
+      profilePrimitiveRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
   }, [])
+
+  useEffect(() => { profilePrimitiveRef.current?.setProfile(profileBars, profileBars?.rowSize ?? 0) }, [profileBars])
 
   // A new height resizes the chart in place - dragging a floating panel's size must not rebuild the chart (and lose its
   // zoom) on every pixel.
@@ -1682,7 +1697,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const serverSent = serverOiBreaks?.alerts?.sent ?? []
   const strikesPart = (
     <>
-      <Text type="secondary" style={{ fontSize: 12 }}>
+      <Text className="oa-note" type="secondary" style={{ fontSize: 12 }}>
         Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
         (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
         out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
@@ -2135,8 +2150,9 @@ const VOLUME_PROFILE_NODE_SHADE_ALPHAS = [0.9, 0.45]
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
 function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  vwapSeries = EMPTY_ARRAY, showVwap = false, height = 320, volumeProfile = null, showVolumeProfile = true,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, volumeProfile = null, showVolumeProfile = true, profileBars = null,
 }) {
+  const height = useCardContentHeight(givenHeight)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -2144,6 +2160,8 @@ function EmaChart({
   const ema2SeriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
   const volumeProfileLinesRef = useRef([])
+  // The same previous-day profile its POC / VAH / VAL lines come from, as horizontal bars (profileBars).
+  const profilePrimitiveRef = useRef(null)
 
   const displayBars = useMemo(
     () => aggregateBars(oneMinBars.slice(0, visibleCount), timeframe),
@@ -2171,6 +2189,8 @@ function EmaChart({
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    profilePrimitiveRef.current = new VolumeProfilePrimitive()
+    seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
     // ResizeObserver, not a plain window 'resize' listener: on mobile, a chart's own container
@@ -2191,9 +2211,14 @@ function EmaChart({
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
       vwapSeriesRef.current = null
+      profilePrimitiveRef.current = null
       volumeProfileLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
   }, [height])
+
+  useEffect(() => {
+    profilePrimitiveRef.current?.setProfile(showVolumeProfile ? profileBars : null, profileBars?.rowSize ?? 0)
+  }, [profileBars, showVolumeProfile])
 
   useEffect(() => { ema1SeriesRef.current?.applyOptions({ title: `EMA ${ema1Period}` }) }, [ema1Period])
   useEffect(() => { ema2SeriesRef.current?.applyOptions({ title: `EMA ${ema2Period}` }) }, [ema2Period])
@@ -2753,7 +2778,7 @@ function PaperTradePanel({
             after a restart and include anything opened elsewhere; P&amp;L moves with the live tick feed.
           </Text>
         ) : (
-        <Text type="secondary" style={{ fontSize: 10 }}>
+        <Text className="oa-note" type="secondary" style={{ fontSize: 10 }}>
           Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
           then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
           open position once its own premium has moved that many points against/in its favor (0 disables
@@ -3001,7 +3026,7 @@ function LiquidityMapTable({ rows, atmStrike, currentPrice, sudden = [] }) {
         scroll={{ x: 920, y: 360 }}
         onRow={(r) => (sudden.some((w) => w.strike === r.strike) ? { style: { background: '#faad1418' } } : {})}
       />
-      <Text type="secondary" style={{ fontSize: 11 }}>
+      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
         Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
         rest of the band) - not a prediction. "Nearest wall" is a distance fact; whether price actually reaches or holds it is not something OI alone can tell you.
       </Text>
@@ -3237,7 +3262,7 @@ function ReviewFootprint({ state, asOfMs, isLive }) {
         {estimated && <Tag color="orange">estimated from 1-min candles</Tag>}
       </Space>
       <FootprintChart bars={shown.last} rowSize={day.rowSize} lotSize={lotSize} showLots lastPrice={day.meta?.lastPrice} height={420} timeframe={timeframe} />
-      <Text type="secondary" style={{ fontSize: 11 }}>
+      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
         Each bar's rows are sell (at the bid) × buy (at the ask); Δ is the bar's buy minus sell and ΣΔ the running total. Built from Dhan's per-second snapshot ticks, so it can differ from a tick-by-tick chart.
       </Text>
     </Space>
@@ -3446,16 +3471,32 @@ export default function OiReplayPage() {
   const [visibleSections, setVisibleSections] = useState(ALL_SECTION_VALUES)
   // Drag-to-reorder the page's own top-level blocks - see OI_REPLAY_CARD_IDS' own doc comment.
   const { order: cardOrder, dragHandleProps, dropTargetProps } = useCardOrder('optionanalytics.oiReplayCardOrder', OI_REPLAY_CARD_IDS)
-  // dropTargetProps already returns its own conditional highlight `style` (see useCardOrder's own
-  // doc comment) - merged here with the `order` CSS property that actually moves the block, rather
-  // than each of the 9 call sites below re-deriving that merge by hand.
+  // ---- The dashboard: how wide and how tall each card is (dashboardLayout.js), beside WHICH cards are
+  // shown (visibleSections) and in what ORDER they come (cardOrder). Saved per browser; a narrow screen
+  // ignores it and keeps the single full-width column it has always had.
+  const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
+  const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, {})
+  const layout = useMemo(() => reconcileLayout(storedLayout, OI_REPLAY_CARD_IDS), [storedLayout])
+  const [layoutEditing, setLayoutEditing] = useState(false)
+  // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
+  // every reading is worked out, which is worth reading once and in the way after that.
+  const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
+  // The quick views' floating button, on every screen now - see QuickViewFab.
+  const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
+  const setCardLayout = useCallback((id, entry) => setStoredLayout((prev) => ({ ...prev, [id]: entry })), [setStoredLayout])
+  // Everything one card needs to take its place in the row: its size, where it comes, and the drag-to-reorder
+  // drop target (dropTargetProps brings its own highlight style, which cardStyle is merged into).
+  const dash = (id) => ({
+    id,
+    entry: layout[id],
+    order: cardOrder.indexOf(id),
+    wide: wideLayout,
+    editing: layoutEditing,
+    onChange: setCardLayout,
+    dropProps: dropTargetProps(id),
+  })
   // See LiveSection - off-screen sections still re-render when this changes (layout, not data).
-  const sectionVersion = `${cardOrder.join(',')}|${visibleSections.join(',')}`
-
-  const orderedDropProps = (id) => {
-    const { style, ...handlers } = dropTargetProps(id)
-    return { style: { order: cardOrder.indexOf(id), ...style }, ...handlers }
-  }
+  const sectionVersion = `${cardOrder.join(',')}|${visibleSections.join(',')}|${JSON.stringify(storedLayout)}`
 
   const [loading, setLoading] = useState(false)
   // The current / last day load's id - the server records what that load is doing under it, and the progress panel
@@ -3515,11 +3556,20 @@ export default function OiReplayPage() {
   // of whether it's currently shown (cheap, and toggling back on shouldn't need a fresh network
   // round trip) - only the DRAWING inside EmaChart is gated on it.
   const [showVolumeProfile, setShowVolumeProfile] = usePersistedState(STORED_SHOW_VOLUME_PROFILE, true)
+  // The previous day's profile as HORIZONTAL BARS behind the spot and entry candles, the drawing the futures
+  // chart already had. On with the Volume Profile tick (the levels alone were the old behaviour); its own tick
+  // turns just the bars off and leaves the POC / VAH / VAL lines.
+  const [showProfileBars, setShowProfileBars] = usePersistedState(STORED_SHOW_PROFILE_BARS, true)
   // Refetched whenever the underlying or the loaded day itself changes (NOT on every tick - these are
   // yesterday's own already-closed levels, which never move once fetched) - keyed off result's own
   // fields rather than the raw underlying/date state above so this never fires for a day whose actual
   // data hasn't landed yet.
   const [volumeProfile, setVolumeProfile] = useState(null)
+  // Its bins as the rows VolumeProfilePrimitive draws - built once here for all three charts.
+  const spotProfileBars = useMemo(
+    () => (showVolumeProfile && showProfileBars ? binsProfile(volumeProfile) : null),
+    [volumeProfile, showVolumeProfile, showProfileBars],
+  )
   useEffect(() => {
     // The loaded run's own index - just after switching index the old run is still shown until the new one lands.
     const runUnderlying = result?.underlying
@@ -5371,6 +5421,7 @@ export default function OiReplayPage() {
           showVwap={showVwap}
           onStrikeClick={setDrilldownStrike}
           height={spotChartHeight}
+          profileBars={spotProfileBars}
         />
       </ChartErrorBoundary>
     )
@@ -5737,7 +5788,7 @@ export default function OiReplayPage() {
             />
           </ChartErrorBoundary>
           {futuresDeltaBars?.length > 0 && (
-            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
               Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
               {futuresFlow?.source === 'estimated'
                 ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
@@ -5747,7 +5798,7 @@ export default function OiReplayPage() {
             </Text>
           )}
           {futuresProfile?.poc != null && (
-            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
               Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
               {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
               {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
@@ -5757,11 +5808,11 @@ export default function OiReplayPage() {
           {prevFuturesShown?.error && (
             <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
           )}
-          <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+          <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
             The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
           </Text>
           {result.futuresOiAvailable && (
-            <Text type="secondary" style={{ fontSize: 11 }}>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
               Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
             </Text>
           )}
@@ -5784,7 +5835,7 @@ export default function OiReplayPage() {
     // again to 2600 for the user's own "width more than 2500 trading monitor" - three chart columns
     // (Spot + Entry chart B + Entry chart C) side by side need real width each to stay readable, not
     // just technically fit.
-    <div className="oi-mobile-page" style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
+    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -5857,6 +5908,9 @@ export default function OiReplayPage() {
                 <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               </Tooltip>
               <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
+              <Tooltip title="The previous day's volume by price as horizontal bars behind the candles - on the spot and both entry charts, the drawing the futures chart has. Off leaves its POC / VAH / VAL lines.">
+                <Checkbox checked={showProfileBars} disabled={!showVolumeProfile} onChange={(e) => setShowProfileBars(e.target.checked)}>VP bars</Checkbox>
+              </Tooltip>
               {isLive && <ProfileAlertsBar {...spotProfileAlerts} live={isLive} spotOnly />}
               {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. */}
               {syncControl}
@@ -5897,6 +5951,35 @@ export default function OiReplayPage() {
                     <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.digit} · {v.label}</Button>
                   </Tooltip>
                 ))}
+                <Tooltip title="The same seven views from a small round button floating over the page - drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
+                  <Checkbox checked={quickFabOn} onChange={(e) => setQuickFabOn(e.target.checked)}>Quick button</Checkbox>
+                </Tooltip>
+              </Space>
+            )}
+            {/* The dashboard: the cards tile into rows, each one as wide and as tall as it was dragged
+                (dashboardLayout.js). Only on a screen wide enough for it - a phone keeps its one column. */}
+            {result && (
+              <Space align="center" size={8} wrap>
+                <Text type="secondary" style={{ fontSize: 12 }}>Layout</Text>
+                {wideLayout ? (
+                  <>
+                    <Tooltip title="Shows a blue grip at each card's bottom-right corner: drag it sideways for the card's width, down for its height. Double-click a grip to give that card its own height back. Saved in this browser.">
+                      <Button size="small" type={layoutEditing ? 'primary' : 'default'} onClick={() => setLayoutEditing((v) => !v)}>
+                        {layoutEditing ? 'Done adjusting' : 'Adjust layout'}
+                      </Button>
+                    </Tooltip>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Cards a row:</Text>
+                    {[1, 2, 3, 4].map((n) => (
+                      <Button key={n} size="small" onClick={() => setStoredLayout((prev) => presetLayout(OI_REPLAY_CARD_IDS, n, prev))}>{n}</Button>
+                    ))}
+                    <Button size="small" onClick={() => setStoredLayout({})} disabled={isDefaultLayout(layout)}>Reset sizes</Button>
+                  </>
+                ) : (
+                  <Text type="secondary" style={{ fontSize: 12 }}>One column on this screen - widen the window past {WIDE_LAYOUT_PX}px to lay the cards out side by side.</Text>
+                )}
+                <Tooltip title="Hides the long explanatory paragraphs under the cards - the ones that explain how each reading is worked out. Every number, chart and control stays.">
+                  <Checkbox checked={compact} onChange={(e) => setCompact(e.target.checked)}>Compact</Checkbox>
+                </Tooltip>
               </Space>
             )}
             {isLive && liveExpiryFlag !== 'N1' && (
@@ -5957,10 +6040,11 @@ export default function OiReplayPage() {
         </Card>
 
         {result && (
-          <>
+          <div className={`oi-dash-row${layoutEditing ? ' oi-dash-row--editing' : ''}`}>
             {visibleSections.includes('topStats') && (
+              <DashboardCard {...dash('topStats')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('topStats')} />Snapshot</Space>} {...orderedDropProps('topStats')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('topStats')} />Snapshot</Space>}>
                 <Row gutter={24}>
                   <Col><Statistic title="Spot" value={currentBar?.close ?? '—'} precision={2} /></Col>
                   <Col><Statistic title="ATM" value={atmStrike ?? '—'} /></Col>
@@ -5972,11 +6056,13 @@ export default function OiReplayPage() {
                 </Row>
               </Card>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {visibleSections.includes('marketRead') && marketRead && (
+              <DashboardCard {...dash('marketRead')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('marketRead')} />Market Read</Space>} {...orderedDropProps('marketRead')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('marketRead')} />Market Read</Space>}>
                 <Space direction="vertical" size={12} style={{ width: '100%' }}>
                   <Alert
                     type={marketRead.safetyOk ? 'success' : 'warning'}
@@ -6028,18 +6114,20 @@ export default function OiReplayPage() {
                         : `Buy: ${marketRead.buyStrike} ${marketRead.buySide}. Sell: ${marketRead.sellStrike ?? '—'} ${marketRead.sellSide} (the wall on the side this move isn't expected to reach).`
                     }
                   />
-                  <Text type="secondary" style={{ fontSize: 11 }}>
+                  <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
                     Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself. IV skew is read as a CHANGE since the open, not its raw level - index options almost always price puts richer than calls (a permanent structural premium, not a daily sentiment signal), so only the trend is informative.
                   </Text>
                 </Space>
               </Card>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {/* Which of a good option-buying entry's usual conditions hold at the replay clock (or now, live) - CE and PE. */}
             {visibleSections.includes('entryChecklist') && (
+              <DashboardCard {...dash('entryChecklist')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('entryChecklist')} />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>} {...orderedDropProps('entryChecklist')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('entryChecklist')} />Entry checklist (option buying){isLive ? ' · live' : ''}</Space>}>
                 <EntryChecklistCard
                   asOfMs={replayEndTime != null ? fromChartTime(replayEndTime) * 1000 : null}
                   spotBars={flowSpotBars} vwap={checklistVwap} cePoints={flowCePoints} pePoints={flowPePoints}
@@ -6047,19 +6135,23 @@ export default function OiReplayPage() {
                 />
               </Card>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {visibleSections.includes('dayOi') && dayOiSummary && (
+              <DashboardCard {...dash('dayOi')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>} {...orderedDropProps('dayOi')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('dayOi')} />Day OI Accumulation (since today's open)</Space>}>
                 {dayOiContent}
               </Card>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {visibleSections.includes('oiHeatmap') && (
+              <DashboardCard {...dash('oiHeatmap')}>
               <LiveSection version={sectionVersion}>
-              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>} {...orderedDropProps('oiHeatmap')}>
+              <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('oiHeatmap')} />OI change heatmap (all strikes)</Space>}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                   lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} alertUnderlying={underlying}
@@ -6067,10 +6159,12 @@ export default function OiReplayPage() {
                 />
               </Card>
               </LiveSection>
+              </DashboardCard>
             )}
 
+            <DashboardCard {...dash('spotAndEntry')}>
             <LiveSection version={sectionVersion}>
-            <div {...orderedDropProps('spotAndEntry')}>
+            <div>
               <Space size={4} style={{ marginBottom: 4 }}>
                 <CardDragHandle {...dragHandleProps('spotAndEntry')} />
                 <Text type="secondary" style={{ fontSize: 12 }}>Spot &amp; entry charts</Text>
@@ -6125,7 +6219,7 @@ export default function OiReplayPage() {
                                 dayKey={`emaB-${underlying}-${result.date}`}
                                 vwapSeries={shownVwap} showVwap={showVwap}
                                 height={560}
-                                volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
+                                volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars} profileBars={spotProfileBars}
                               />
                             </ChartErrorBoundary>
                             {atmStrike != null && (
@@ -6157,7 +6251,7 @@ export default function OiReplayPage() {
                               dayKey={`emaC-${underlying}-${result.date}`}
                               vwapSeries={shownVwap} showVwap={showVwap}
                               height={560}
-                              volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile}
+                              volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                             />
                           </ChartErrorBoundary>
                         )
@@ -6169,10 +6263,12 @@ export default function OiReplayPage() {
               </Row>
             </div>
             </LiveSection>
+            </DashboardCard>
 
             {visibleSections.includes('optionPremium') && (
+              <DashboardCard {...dash('optionPremium')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={[16, 16]} style={{ marginTop: 16 }} {...orderedDropProps('optionPremium')}>
+              <Row gutter={[16, 16]}>
                 <Col span={24} style={{ marginBottom: 8 }}>
                   <Space size={12} wrap>
                     <CardDragHandle {...dragHandleProps('optionPremium')} />
@@ -6182,13 +6278,15 @@ export default function OiReplayPage() {
                 {premiumCharts}
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {/* The dashboard's option CDV / OBV - worked out from the day's own option bars: a replayed day up to the
                 replay clock, today live (the backfill plus every live tick's minute, ticking). */}
             {visibleSections.includes('optionFlow') && (
+              <DashboardCard {...dash('optionFlow')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('optionFlow')}>
+              <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
@@ -6208,13 +6306,15 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {/* The straddle from a set time (09:15 by default): the Auto ATM straddle and a fixed one (never shifted), each
                 against its VWAP, the range the options priced and the read - up to the replay clock, today live (straddle.js). */}
             {visibleSections.includes('straddle') && (
+              <DashboardCard {...dash('straddle')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('straddle')}>
+              <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
@@ -6229,13 +6329,15 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {/* GEX (gamma exposure) from the day's option OI, IV and premium: net GEX, the gamma flip, the call / put walls
                 and the max gamma strike - up to the replay clock, today live (gex.js). */}
             {visibleSections.includes('gex') && (
+              <DashboardCard {...dash('gex')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('gex')}>
+              <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
@@ -6250,9 +6352,11 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
 
-            <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('ladder')}>
+            <DashboardCard {...dash('ladder')}>
+            <Row gutter={16}>
               <Col span={24}>
                 <Card
                   size="small"
@@ -6263,10 +6367,12 @@ export default function OiReplayPage() {
                 </Card>
               </Col>
             </Row>
+            </DashboardCard>
 
             {visibleSections.includes('liquidityMap') && (
+              <DashboardCard {...dash('liquidityMap')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('liquidityMap')}>
+              <Row gutter={16}>
                 <Col span={24}>
                   <Card size="small" title={<Space size={4}><CardDragHandle {...dragHandleProps('liquidityMap')} />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
                     <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
@@ -6274,11 +6380,13 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
 
             {visibleSections.includes('futures') && (
+              <DashboardCard {...dash('futures')}>
               <LiveSection version={sectionVersion}>
-              <Row gutter={16} style={{ marginTop: 16 }} {...orderedDropProps('futures')}>
+              <Row gutter={16}>
                 <Col span={24}>
                   <Card
                     size="small"
@@ -6297,8 +6405,9 @@ export default function OiReplayPage() {
                 </Col>
               </Row>
               </LiveSection>
+              </DashboardCard>
             )}
-          </>
+          </div>
         )}
 
         {!result && !loading && (
@@ -6526,7 +6635,7 @@ export default function OiReplayPage() {
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
-      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} />}
+      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} />}
       {result && (
         <OiTotalsChartsPopup
           open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}

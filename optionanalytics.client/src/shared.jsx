@@ -431,6 +431,8 @@ export const STORED_SHOW_VWAP = 'optionanalytics.showVwap.v2'
 // shown on by default (the user's own original ask), with this the one way to hide it once it's
 // in the way of something else on the chart.
 export const STORED_SHOW_VOLUME_PROFILE = 'optionanalytics.showVolumeProfile'
+// The same profile as horizontal bars behind the candles, not only its levels (OI Replay's "VP bars" tick).
+export const STORED_SHOW_PROFILE_BARS = 'optionanalytics.showProfileBars'
 function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
@@ -440,6 +442,21 @@ function readStored(key, fallback) {
     // it just doesn't remember.
     return fallback
   }
+}
+
+// Whether a CSS media query matches right now, followed as the window changes - the one place a layout
+// decision reads the viewport, so a resize (or a phone turned sideways) re-renders instead of going stale.
+export function useMediaQuery(query) {
+  const [matches, setMatches] = useState(() => (typeof window === 'undefined' ? false : Boolean(window.matchMedia?.(query).matches)))
+  useEffect(() => {
+    const media = window.matchMedia?.(query)
+    if (!media) return undefined
+    const onChange = () => setMatches(media.matches)
+    onChange()
+    media.addEventListener('change', onChange)
+    return () => media.removeEventListener('change', onChange)
+  }, [query])
+  return matches
 }
 
 export function usePersistedState(key, fallback) {

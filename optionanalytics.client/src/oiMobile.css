@@ -36,3 +36,44 @@
 .oi-mobile-page .ant-btn {
   font-size: clamp(11px, 2.8vw, 14px);
 }
+
+/* ---- The dashboard layout (dashboardLayout.js / DashboardCard.jsx) ----
+   The page's cards tile into rows instead of stacking: each card's own width comes from the saved
+   layout (a flex-basis in twelfths), set inline. The row itself is the flex container.
+   A card given its own HEIGHT (--sized) fills it: its body takes the space the title bar leaves and
+   scrolls if its content is taller, so a dragged-down card is short and a dragged-up one is tall -
+   without every card inside having to know about any of it. */
+.oi-dash-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+}
+/* The space between cards is each card's own padding, not the row's `gap`: with a gap, two cards of
+   exactly half the row each no longer fit on one row and the second wraps. */
+.oa-dash-card {
+  min-width: 0;
+  padding: 0 8px 16px;
+  box-sizing: border-box;
+}
+.oa-dash-card > .ant-card { width: 100%; }
+/* A card dragged to its own height scrolls INSIDE that height - the page itself stays short. On the
+   wrapper, not the card: the cards sit inside a display:contents wrapper (LiveSection), so a child
+   selector would never reach them, and a descendant one would also catch the cards nested in a card. */
+.oa-dash-card--sized { overflow: auto; }
+
+/* While a layout is being adjusted, every card shows its edge - otherwise an empty-ish card gives no
+   hint where its corner (and so its grip) actually is. Drawn on the wrapper inside its own padding. */
+.oi-dash-row--editing .oa-dash-card::after {
+  content: '';
+  position: absolute;
+  inset: 0 8px 16px 8px;
+  border: 1px dashed #1677ff66;
+  border-radius: 8px;
+  pointer-events: none;
+}
+
+/* "Compact" - the long explanatory paragraphs under the cards are for learning the page, not for
+   trading it; one class hides every one of them at once (they carry it, see COMPACT_NOTE). */
+.oi-dash-compact .oa-note { display: none; }

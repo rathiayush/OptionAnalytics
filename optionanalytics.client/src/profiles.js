@@ -243,3 +243,23 @@ export async function fetchPreviousSession(underlying, date, rowSize, expiryQuer
   }
   return null
 }
+
+/** The SERVER's previous-day spot volume profile (`bins` of each bin's MIDDLE price and volume, with its own
+ *  poc / vah / val) as the shape VolumeProfilePrimitive draws - rows at each bin's BOTTOM price, `rowSize` tall,
+ *  with no buy / sell split (the bins carry none, so they are drawn in one neutral colour) and the levels moved
+ *  to the same bottom-of-row space. Null when there are not two bins to read a row size from. */
+export function binsProfile(profile) {
+  const bins = (profile?.bins ?? [])
+    .filter((b) => Number.isFinite(b?.price) && Number.isFinite(b?.volume) && b.volume > 0)
+    .sort((a, b) => a.price - b.price)
+  if (bins.length < 2) return null
+  const steps = bins.slice(1).map((b, i) => b.price - bins[i].price).filter((d) => d > 0)
+  if (!steps.length) return null
+  const rowSize = Math.min(...steps)
+  const half = rowSize / 2
+  const rows = bins.map((b) => ({ price: round2(b.price - half), buy: 0, sell: 0, total: b.volume }))
+  const maxRow = Math.max(...rows.map((r) => r.total))
+  if (!(maxRow > 0)) return null
+  const bottom = (v) => (Number.isFinite(v) ? round2(v - half) : null)
+  return { rows, rowSize, maxRow, poc: bottom(profile.poc), vah: bottom(profile.vah), val: bottom(profile.val) }
+}
