@@ -7,6 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMark
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
+import { CardFitBox, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { gexAgreement, gexProfile, gexUpTo } from './gex.js'
 
 const { Text } = Typography
@@ -32,7 +33,11 @@ const EXPIRY_SOURCES = { dhan: 'Dhan', calendar: 'weekday rule', 'calendar-holid
 const gexColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : AXIS_COLOR)
 
 // The net GEX through the day around zero: green above (dealers long gamma), red below (short gamma).
-function NetGexChart({ data, dayKey, height }) {
+function NetGexChart({ data, dayKey, height: givenHeight }) {
+  // Fitted to its dashboard card when that card was sized (useFitHeight); the height asked for anywhere else.
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -40,7 +45,7 @@ function NetGexChart({ data, dayKey, height }) {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -64,7 +69,9 @@ function NetGexChart({ data, dayKey, height }) {
       chartRef.current = null
       seriesRef.current = null
     }
-  }, [height])
+  }, [])
+  // A new height is applied to the chart there is - drawn again it had no data until the next update.
+  useChartHeight(chartRef, height)
   useEffect(() => {
     seriesRef.current?.setData(sanitizeLine(data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
   }, [data])
@@ -120,7 +127,9 @@ function StrikeBars({ minute }) {
 // The GEX profile at the clock (gexProfile): the net GEX if spot were at each price across the strikes loaded, that
 // minute's OI and IVs kept - it crosses zero at the flip. Spot, the flip, the walls and the max gamma strike marked; hover
 // for the net at a price.
-function ProfileChart({ minute, height = 200 }) {
+function ProfileChart({ minute, height: givenHeight = 200 }) {
+  // Drawn at the height its dashboard card's fit gives it (useFitHeight) - an SVG, so a new height is just a redraw.
+  const height = useFitHeight(givenHeight)
   const ref = useRef(null)
   const id = useId()
   const [width, setWidth] = useState(0)
@@ -326,7 +335,10 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
         <Col xs={24} lg={10}>
           <Text strong style={{ fontSize: 12 }}>GEX by strike</Text>
           <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · at {istHhmm(now.time)}; green = dealers long gamma, red = short</Text>
-          <StrikeBars minute={now} />
+          {/* In a card the trader sized, the table takes its share of the card and scrolls inside it (CardFitBox). */}
+          <CardFitBox min={100}>
+            <StrikeBars minute={now} />
+          </CardFitBox>
           <div style={{ marginTop: 10 }}>
             <Text strong style={{ fontSize: 12 }}>GEX profile</Text>
             <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · the net GEX if spot were here (this minute&apos;s OI and IVs); it crosses zero at the flip</Text>

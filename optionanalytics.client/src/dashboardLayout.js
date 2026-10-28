@@ -221,15 +221,38 @@ export function fitLayoutHeights(layout, measured, sized = null) {
   return changed ? out : layout
 }
 
-// A chart never gets less than this, however short its card was dragged - under it there is nothing to
-// read, and the card scrolls instead.
-const MIN_CONTENT_HEIGHT = 90
+// ---- A sized card's content follows its size ----
+//
+// A card the trader has sized keeps that height, and its content is fitted INTO it: every chart (and every table /
+// heatmap box) in it takes its own height x ONE scale for the card, worked out so that the content is exactly the
+// card's height - charts taller in a taller card, shorter in a shorter one, nothing to scroll. One scale for all, not
+// a sum of chart heights: charts stacked, side by side, or both - the content's height is the same straight line in
+// the scale either way (height = the rest + scale x the charts along its tallest column), so the scale is found by
+// measuring - the secant method: the first step guesses the charts are one above the other, every later one uses the
+// slope the last two measurements gave. Two or three steps; a few more where a chart stops at its smallest.
+export const FIT_SCALE_MIN = 0.25
+export const FIT_SCALE_MAX = 4
+// Aim this far under the card's height (a scrollbar appears at the first pixel over it) and stop this close to it.
+const FIT_SLACK = 2
+const FIT_TOLERANCE = 3
+// At most this many steps for one card size - one that keeps missing (its content changing as it is measured) stops.
+const FIT_MAX_STEPS = 8
 
-/** The height a chart filling this card may use: the card's own height less `chromePx` (its title bar and
- *  padding). Null when the card has no grid height of its own (a narrow screen). */
-export function contentHeight(rows, { chromePx = 86, rowHeight = GRID_ROW_HEIGHT, margin = GRID_MARGIN } = {}) {
-  if (!Number.isFinite(rows)) return null
-  return Math.max(MIN_CONTENT_HEIGHT, rowsToPx(rows, rowHeight, margin) - chromePx)
+/** The next fit scale for a sized card. `state` (what the last call returned, null at first); `scale` the scale its
+ *  content was measured at; `content` its content's height (px), `box` the card body's height and `width` its width;
+ *  `charts` the sum of the fitted elements' own heights (the first step's slope). Returns { scale, state }: the same
+ *  scale when the content already fits (or nothing in it scales). A new card size or width starts the steps afresh. */
+export function nextFitScale(state, { scale, content, box, width, charts }) {
+  let { prev = null, size = null, steps = 0 } = state ?? {}
+  if (!size || Math.abs(size.box - box) > 1 || Math.abs(size.width - width) > 1) { prev = null; steps = 0; size = { box, width } }
+  const target = box - FIT_SLACK
+  const here = { scale, content }
+  if (Math.abs(content - target) <= FIT_TOLERANCE) return { scale, state: { prev: here, size, steps: 0 } }
+  if (steps >= FIT_MAX_STEPS) return { scale, state: { prev, size, steps } }
+  const slope = prev && Math.abs(scale - prev.scale) > 1e-4 ? (content - prev.content) / (scale - prev.scale) : charts
+  if (!(slope > 1)) return { scale, state: { prev: here, size, steps: steps + 1 } }
+  const next = Math.round(clamp(scale + (target - content) / slope, FIT_SCALE_MIN, FIT_SCALE_MAX) * 1000) / 1000
+  return { scale: next, state: { prev: here, size, steps: steps + 1 } }
 }
 
 /** The cards to show, reconciled with the ones the page has now: anything saved that no longer exists is

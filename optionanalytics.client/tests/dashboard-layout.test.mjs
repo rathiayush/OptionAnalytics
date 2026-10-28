@@ -1,12 +1,12 @@
 // OI Replay's dashboard layout (dashboardLayout.js): the grid model react-grid-layout reads and writes -
-// what the page starts with, what a saved layout reconciles to, the presets, and the height a chart filling
-// a card gets. The dragging and resizing themselves are react-grid-layout's; these are the rules around it.
+// what the page starts with, what a saved layout reconciles to, the presets, and the scale a sized card's
+// content is drawn at to fill it. The dragging and resizing themselves are react-grid-layout's; these are the rules around it.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
-  contentHeight, defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
-  isStackedLayout, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
+  FIT_SCALE_MAX, FIT_SCALE_MIN, GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
+  defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
+  isStackedLayout, nextFitScale, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -100,11 +100,45 @@ test('a preset keeps the heights the cards were given', () => {
   assert.equal(presetLayout(IDS, 2, { layout }).find((it) => it.i === 'gex').h, 25)
 })
 
-test('a chart filling a card gets the card less its title bar, and never a sliver', () => {
-  assert.equal(contentHeight(10, { chromePx: 86 }), rowsToPx(10) - 86)
-  assert.equal(contentHeight(null), null)          // no grid height: the chart keeps its own
-  assert.equal(contentHeight(undefined), null)
-  assert.ok(contentHeight(MIN_H, { chromePx: 400 }) >= 90)
+// A sized card's content: every chart (and table box) in it is its own height x one scale, measured until the content is
+// the card's height (2 px of slack). `charts` = the heights that scale, summed - the first step's slope.
+const SIZE = { box: 802, width: 900, charts: 400 }
+
+test('a sized card: the first step scales by what its charts can take up', () => {
+  const first = nextFitScale(null, { ...SIZE, scale: 1, content: 600 })
+  assert.equal(first.scale, 1.5)                            // 200 px short, 400 px of charts: x1.5
+  assert.equal(first.state.steps, 1)
+  // Later steps go by what the last step actually did (text that wraps, a box that does not scale).
+  const second = nextFitScale(first.state, { ...SIZE, scale: 1.5, content: 780 })
+  assert.equal(second.scale, 1.556)                         // 180 px for 0.5: 20 more px = +0.0556
+  // Fits (within 3 px of the box less the slack): left as it is.
+  const done = nextFitScale(second.state, { ...SIZE, scale: 1.556, content: 801 })
+  assert.equal(done.scale, 1.556)
+  assert.equal(done.state.steps, 0)
+})
+
+test('a sized card shorter than its content shrinks the charts, never under the floor or over the ceiling', () => {
+  assert.equal(nextFitScale(null, { ...SIZE, scale: 1, content: 1000 }).scale, 0.5)   // 200 px over, 400 px of charts: x0.5
+  assert.equal(nextFitScale(null, { box: 200, width: 900, charts: 100, scale: 1, content: 5000 }).scale, FIT_SCALE_MIN)
+  assert.equal(nextFitScale(null, { box: 5000, width: 900, charts: 100, scale: 1, content: 100 }).scale, FIT_SCALE_MAX)
+})
+
+test('a card with nothing that scales is left alone (its body scrolls)', () => {
+  const next = nextFitScale(null, { box: 300, width: 900, charts: 0, scale: 1, content: 900 })
+  assert.equal(next.scale, 1)
+})
+
+test('the fit gives up after a few steps - and starts again when the card is resized', () => {
+  let state = null
+  let scale = 1
+  // Content that never answers the scale: it must stop, not chase it for ever.
+  for (let i = 0; i < 20; i += 1) ({ scale, state } = nextFitScale(state, { ...SIZE, scale, content: 600 }))
+  assert.equal(state.steps, 8)
+  const stuck = nextFitScale(state, { ...SIZE, scale, content: 600 })
+  assert.equal(stuck.scale, scale)
+  // A new height, or a new width (text wraps differently), is a new fit.
+  assert.notEqual(nextFitScale(state, { ...SIZE, box: 1002, scale, content: 600 }).scale, scale)
+  assert.equal(nextFitScale(state, { ...SIZE, width: 1200, scale, content: 600 }).state.steps, 1)
 })
 
 test('the cards to show are reconciled too, and never leave an empty page', () => {

@@ -7,6 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMark
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, straddleRead } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
+import { useFitHeight } from './DashboardCard.jsx'
 
 const { Text } = Typography
 
@@ -38,13 +39,17 @@ export function LinesChart({ lines, markers = [], dayKey, height, paneHeight = 1
   const markersRef = useRef(null)
   const ids = lines.map((l) => `${l.id}:${l.pane ?? 0}`).join('|')
   const panes = lines.some((l) => (l.pane ?? 0) > 0)
-  const fullHeight = height + (panes ? paneHeight : 0)
+  // The whole chart, panes and all, fitted to its dashboard card when that card was sized (useFitHeight); the panes
+  // keep their shares of it (`height` : `paneHeight`).
+  const fullHeight = useFitHeight(height + (panes ? paneHeight : 0))
+  const sizeRef = useRef(null)
+  sizeRef.current = { fullHeight, height, paneHeight }
 
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height: fullHeight,
+      height: sizeRef.current.fullHeight,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -62,12 +67,6 @@ export function LinesChart({ lines, markers = [], dayKey, height, paneHeight = 1
         priceFormat: { type: 'price', precision: 1, minMove: 0.1 },
       }, l.pane ?? 0))
     })
-    if (panes) {
-      // The first pane keeps `height`; the lower one takes `paneHeight` of the taller chart.
-      const [top, ...rest] = chart.panes()
-      top?.setStretchFactor(height)
-      for (const pane of rest) pane.setStretchFactor(paneHeight)
-    }
     seriesRef.current = series
     markersRef.current = lines.length ? createSeriesMarkers(series.get(lines[0].id), []) : null
     const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
@@ -80,7 +79,19 @@ export function LinesChart({ lines, markers = [], dayKey, height, paneHeight = 1
       markersRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [height, paneHeight, ids])
+  }, [ids])
+
+  // A new height is applied to the chart there is - drawn again it had no data until the next update (a paused
+  // replay's chart went blank on a resize). The first pane keeps `height`'s share, the lower ones `paneHeight`'s.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    chart.applyOptions({ height: fullHeight })
+    if (!panes) return
+    const [top, ...rest] = chart.panes()
+    top?.setStretchFactor(height)
+    for (const pane of rest) pane.setStretchFactor(paneHeight)
+  }, [fullHeight, height, paneHeight, panes, ids])
 
   useEffect(() => {
     for (const l of lines) {

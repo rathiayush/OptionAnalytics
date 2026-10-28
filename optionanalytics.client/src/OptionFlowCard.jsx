@@ -6,13 +6,18 @@ import { AXIS_COLOR, BORDER_COLOR, CE_COLOR, GRID_COLOR, PE_COLOR, fromChartTime
 import { formatOiMillions, useFitContentAsDataGrows } from './oiShared.jsx'
 import { bucketLine, optionFlowSeries, smoothLine } from './optionFlow.js'
 import { sanitizeLine } from './chartLine.js'
+import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 
 const { Text } = Typography
 
 const toLine = (series) => series.map((p) => ({ time: toChartTime(p.time), value: p.value }))
 
 // One CE-vs-PE line chart (CDV or OBV), the dashboard's own two-line shape.
-function FlowChart({ ce, pe, dayKey, height }) {
+function FlowChart({ ce, pe, dayKey, height: givenHeight }) {
+  // Fitted to its dashboard card when that card was sized (useFitHeight); the height asked for anywhere else.
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceRef = useRef(null)
@@ -22,7 +27,7 @@ function FlowChart({ ce, pe, dayKey, height }) {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -42,7 +47,9 @@ function FlowChart({ ce, pe, dayKey, height }) {
       ceRef.current = null
       peRef.current = null
     }
-  }, [height])
+  }, [])
+  // A new height is applied to the chart there is - drawn again it had no data until the next update.
+  useChartHeight(chartRef, height)
 
   useEffect(() => {
     ceRef.current?.setData(sanitizeLine(ce))

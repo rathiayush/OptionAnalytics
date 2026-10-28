@@ -192,7 +192,7 @@ When adding or changing a strategy:
   `oiMobile.css`): on a wide screen the cards are a FREE 12-COLUMN GRID (`react-grid-layout`, its legacy API) - any card
   dragged by its ⠿ grip to any place, resized from its bottom-right corner. Each is `{ i, x, y, w, h }`, h in grid ROWS
   (`GRID_ROW_HEIGHT` + `GRID_MARGIN` each - `rowsToPx`), saved whole in `STORED_LAYOUT`. The model is all pure functions
-  (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `contentHeight`,
+  (`defaultLayout` / `reconcileGridLayout` / `presetLayout` / `isDefaultLayout` / `nextFitScale`,
   `tests/dashboard-layout.test.mjs`); the dragging, collisions and packing are the library's. Dragging starts ONLY from
   `.oa-dash-grip` (`draggableHandle`) - otherwise scrubbing a chart would move its card. "Cards a row" 1 - 4, "Fit
   heights", "Reset" (place, width AND height back) and "Free placement" (`compactType` null: a card stays exactly where it is
@@ -208,10 +208,18 @@ When adding or changing a strategy:
   as the page always did, so a layout dragged out on a monitor can never leave a phone with a sliver of a chart.
   A card in the grid is in ONE OF TWO MODES (`DashboardCard`): AUTO (the default) - its body stands at its content's own
   height, is measured (ResizeObserver, next frame) and the card is fitted to it (`fitLayoutHeights`, `rowsToHold` - the
-  fewest rows that hold it ALL, never the nearest row: the card clips), so NO card scrolls inside itself; the height
-  context is null there, so the charts stand at their own height - that is what stops measure / fill chasing each other.
-  SIZED - its corner was dragged (`onResizeStop` -> `STORED_SIZED`): it keeps that height, its body scrolls if the content
-  is taller, and the spot / entry charts fill it (`useCardContentHeight`). "Fit heights" puts every card back to AUTO.
+  fewest rows that hold it ALL, never the nearest row: the card clips), so NO card scrolls inside itself; the fit context
+  is null there, so the charts stand at their own height - that is what stops measure / fill chasing each other.
+  SIZED - its corner was dragged (`onResizeStop` -> `STORED_SIZED`): it keeps that width and height and its CONTENT
+  FOLLOWS - every chart's height (`useFitHeight`: lightweight charts, the SVG GEX profile, the OI heatmap's row height)
+  and every table box (`CardFitBox`: the ladder, the liquidity map, GEX by strike - the box scrolls inside, the card does
+  not) is its own height x ONE scale for the card, measured until the content is the card's height (`nextFitScale`:
+  secant steps, the first by the heights that scale; 0.25 - 4x; at most 8 steps a size). Only text (a checklist) cannot
+  stretch - a card of it made taller has room under it. A chart's new height is APPLIED to the chart there is
+  (`useChartHeight` / `applyOptions`), never drawn again: a chart drawn again had no data until the next update (a
+  paused replay's chart went blank). While a card is resized or dragged the grid holds the height it had (`minHeight`):
+  shrinking the bottom card shortened the page, the browser scrolled up, the corner left the pointer and the card ran
+  down to its minimum. "Fit heights" puts every card back to AUTO.
   The CARD never scrolls (`.react-grid-item.oa-dash-card { overflow: hidden }`), its BODY does (`.oa-dash-body`), and the
   resize corner - which react-resizable hands in WITH the children (key `resizableHandle-*`) - is rendered on the card
   beside the body, not in it: inside the scrolling box the scrollbar swallowed every drag of it. The corner is 26 px,

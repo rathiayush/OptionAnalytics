@@ -39,12 +39,18 @@ export function DashboardGrid({
 }) {
   const ref = useRef(null)
   const width = useWidth(ref)
+  // While a card is being resized or dragged the grid keeps at least the height it had when that started. Without it,
+  // shrinking the bottom card shortened the page, the browser scrolled up to match, the card's corner moved away from
+  // the pointer - and the card shrank again, all the way down to its minimum, from a small drag.
+  const [holdHeight, setHoldHeight] = useState(null)
+  const hold = () => setHoldHeight(ref.current?.offsetHeight ?? null)
+  const release = () => setHoldHeight(null)
 
   if (!wide) return <div className="oi-dash-stack">{children}</div>
 
   const items = reconcileGridLayout(layout, cardIds, order)
   return (
-    <div ref={ref} className={`oi-dash-grid${editing ? ' oi-dash-grid--editing' : ''}`}>
+    <div ref={ref} className={`oi-dash-grid${editing ? ' oi-dash-grid--editing' : ''}`} style={holdHeight ? { minHeight: holdHeight } : undefined}>
       {width > 0 && (
         <ReactGridLayout
           width={width}
@@ -70,10 +76,12 @@ export function DashboardGrid({
           allowMobileScroll
           useCSSTransforms
           onLayoutChange={onLayoutChange}
-          onDragStop={onLayoutChange}
+          onDragStart={hold}
+          onDragStop={(next) => { release(); onLayoutChange(next) }}
+          onResizeStart={hold}
           // A card whose corner has been dragged has been given a height of its own, and stops following
           // its content from here on (DashboardCard's two modes) - the page remembers which those are.
-          onResizeStop={(next, _before, item) => { onLayoutChange(next); if (item?.i) onResizeCard?.(item.i) }}
+          onResizeStop={(next, _before, item) => { release(); onLayoutChange(next); if (item?.i) onResizeCard?.(item.i) }}
         >
           {children}
         </ReactGridLayout>

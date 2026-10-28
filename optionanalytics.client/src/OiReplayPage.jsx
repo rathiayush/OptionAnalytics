@@ -52,7 +52,7 @@ import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, anal
 import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
-import { DashboardCard, useCardContentHeight } from './DashboardCard.jsx'
+import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
@@ -925,9 +925,9 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
 }
 
 export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, profileBars = null }) {
-  // A dashboard card dragged to its own height hands that down (useCardContentHeight); anywhere else - a
-  // floating panel, the review popup - it is the height the caller asked for.
-  const height = useCardContentHeight(givenHeight)
+  // In a dashboard card the trader has sized, the height the card's fit gives it (useFitHeight); anywhere else - a
+  // floating panel, the review popup - the height the caller asked for.
+  const height = useFitHeight(givenHeight)
   const containerRef = useRef(null)
   // Read once at creation; a later height (a floating panel resized) is applied to the same chart, not a new one.
   const heightRef = useRef(height)
@@ -1219,7 +1219,11 @@ export function chainOiTotalsHistory(ceByStrike, peByStrike, oneMinBars, reveale
 // can't show). Rebuilds the whole chart on a mode switch rather than trying to swap a series' type
 // in place - lightweight-charts has no such API, and a mode change is a deliberate tab click, not a
 // live-tick-rate event, so the small recreation cost here is a non-issue.
-export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height = 320 }) {
+export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, height: givenHeight = 320 }) {
+  // Fitted to its dashboard card when that card was sized (useFitHeight); the height asked for anywhere else.
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const ceSeriesRef = useRef(null)
@@ -1229,7 +1233,8 @@ export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, heigh
     if (!containerRef.current) return
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      // Drawn again for another mode: at the height it stands at now, not the one it first had.
+      height: containerRef.current.clientHeight || heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
@@ -1286,7 +1291,9 @@ export function StrikeOiDrilldownChart({ ceSeries, peSeries, mode, dayKey, heigh
       ceSeriesRef.current = null
       peSeriesRef.current = null
     }
-  }, [height, mode])
+  }, [mode])
+  // A new height is applied to the chart there is - drawn again it had no data until the next update.
+  useChartHeight(chartRef, height)
 
   const userControlRef = useChartUserControl(chartRef, `${dayKey}-${mode}`)
 
@@ -1504,7 +1511,10 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
   }, [perStrikeChange])
 
   const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
-  const plotHeight = strikes.length * HEATMAP_ROW_HEIGHT
+  // Rows HEATMAP_ROW_HEIGHT tall - in a dashboard card the trader sized, taller or shorter so the card's content fills it
+  // (useFitHeight; never under 8 px a row).
+  const plotHeight = useFitHeight(strikes.length * HEATMAP_ROW_HEIGHT, strikes.length * 8)
+  const rowHeight = strikes.length ? plotHeight / strikes.length : HEATMAP_ROW_HEIGHT
 
   // Redraws the whole grid whenever the underlying matrix changes - a plain fillRect per cell, no
   // retained shapes to diff, so a full redraw on every live tick is cheap (a canvas clear + a few
@@ -1525,7 +1535,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
 
     strikes.forEach((strike, row) => {
       const byBucket = perStrikeChange.get(strike)
-      const y = row * HEATMAP_ROW_HEIGHT
+      const y = row * rowHeight
       columns.forEach((t, col) => {
         const v = byBucket?.get(t)
         if (v == null || v === 0 || maxAbs === 0) return
@@ -1538,7 +1548,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
         // minute"), the one thing a fixed-hue-by-side scheme would have hidden entirely. A real "how
         // do you show OI removed, I need to tell them apart" report confirmed exactly that gap.
         ctx.fillStyle = hexToRgba(v > 0 ? OI_ADDED_COLOR : OI_REMOVED_COLOR, alpha)
-        ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, HEATMAP_ROW_HEIGHT - 1)
+        ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, rowHeight - 1)
       })
     })
 
@@ -1549,7 +1559,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
       const marked = atmPeaks.get(t)
       if (!marked) return
       strikes.forEach((strike, row) => {
-        if (marked.has(strike)) ctx.strokeRect(col * HEATMAP_CELL_WIDTH + 1, row * HEATMAP_ROW_HEIGHT + 1, HEATMAP_CELL_WIDTH - 3, HEATMAP_ROW_HEIGHT - 3)
+        if (marked.has(strike)) ctx.strokeRect(col * HEATMAP_CELL_WIDTH + 1, row * rowHeight + 1, HEATMAP_CELL_WIDTH - 3, rowHeight - 3)
       })
     })
 
@@ -1583,7 +1593,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
       ctx.fillText(text, x, plotHeight + 14)
       nextFreeX = x + width + 6
     })
-  }, [columns, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, formatBucketTime, live, atmPeaks])
+  }, [columns, perStrikeChange, strikes, maxAbs, plotWidth, plotHeight, rowHeight, formatBucketTime, live, atmPeaks])
 
   // Brings the view back to the newest minute (the left edge) whenever a new column appears - not on
   // every tick within a minute, which would yank a reader's own scroll into history on every update.
@@ -1599,7 +1609,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     const col = Math.floor(x / HEATMAP_CELL_WIDTH)
-    const row = Math.floor(y / HEATMAP_ROW_HEIGHT)
+    const row = Math.floor(y / rowHeight)
     if (y >= plotHeight || col < 0 || col >= columns.length || row < 0 || row >= strikes.length) { setHover(null); return }
     const strike = strikes[row]
     const t = columns[col]
@@ -1625,7 +1635,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
               key={strike}
               title={noData ? `No ${label} OI data at this strike` : undefined}
               style={{
-                height: HEATMAP_ROW_HEIGHT, lineHeight: `${HEATMAP_ROW_HEIGHT}px`, textAlign: 'right', paddingRight: 8,
+                height: rowHeight, lineHeight: `${rowHeight}px`, textAlign: 'right', paddingRight: 8,
                 fontSize: 11, whiteSpace: 'nowrap', fontWeight: strike === atmStrike ? 700 : 400,
                 // Dimmed further than the normal AXIS_COLOR label, and italic - an empty row reads
                 // like a rendering glitch otherwise (see strikesWithNoData's own doc comment); this
@@ -2186,7 +2196,9 @@ function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
   vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, volumeProfile = null, showVolumeProfile = true, profileBars = null,
 }) {
-  const height = useCardContentHeight(givenHeight)
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -2208,7 +2220,7 @@ function EmaChart({
     if (!containerRef.current) return
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
@@ -2248,7 +2260,9 @@ function EmaChart({
       profilePrimitiveRef.current = null
       volumeProfileLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
-  }, [height])
+  }, [])
+  // A new height is applied to the chart there is - drawn again it had no data until the next update.
+  useChartHeight(chartRef, height)
 
   useEffect(() => {
     profilePrimitiveRef.current?.setProfile(showVolumeProfile ? profileBars : null, profileBars?.rowSize ?? 0)
@@ -2360,7 +2374,12 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 const DELTA_PANE_HEIGHT = 150
 const FLOW_TIMEFRAMES = [1, 3, 5, 15]
 const CVD_COLOR = '#f5c542'
-function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
+function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: givenHeight = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
+  // Fitted to its dashboard card when that card was sized (useFitHeight). Applied to the chart there is by the delta
+  // pane's effect below - drawn again on a new height, the chart had no candles until the next update.
+  const height = useFitHeight(givenHeight)
+  // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
+  const heightRef = useRef(height)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const vwapSeriesRef = useRef(null)
@@ -2377,7 +2396,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 32
     // The plain wheel scrolls the page past this full-width chart; Ctrl + wheel zooms it (chartZoom.js).
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
-      height,
+      height: heightRef.current,
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR, scaleMargins: CANDLE_SCALE_MARGINS },
@@ -2434,7 +2453,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 32
       cvdSeriesRef.current = null
       vwapSeriesRef.current = null
     }
-  }, [height])
+  }, [])
   // The futures' session VWAP, already on these candles' times (the caller aligns it).
   useEffect(() => { vwapSeriesRef.current?.setData(sanitizeLine(vwap)) }, [vwap])
 
@@ -3548,14 +3567,12 @@ export default function OiReplayPage() {
   const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
   // The cards on the page now - the spot / entry charts and the ladder always, the rest as "Sections shown" says.
   const shownCardIds = useMemo(() => OI_REPLAY_CARD_IDS.filter((id) => ALWAYS_SHOWN_CARDS.has(id) || visibleSections.includes(id)), [visibleSections])
-  // All a card needs to know is how tall it is, for the charts that fill it (useCardContentHeight).
-  const rowsById = useMemo(() => new Map(gridLayout.map((it) => [it.i, it.h])), [gridLayout])
   const dash = (id) => ({
     id,
-    rows: wideLayout ? rowsById.get(id) ?? null : null,
-    // A card nobody has sized follows its content and is measured; one that has been sized keeps that
-    // height and scrolls inside it. See DashboardCard for why the two modes cannot chase each other.
+    // A card nobody has sized follows its content and is measured; one that has been sized keeps that size
+    // and its content is fitted into it (DashboardCard).
     auto: wideLayout && !sized.has(id),
+    sized: wideLayout && sized.has(id),
     onMeasure: wideLayout ? onMeasure : undefined,
   })
   // See LiveSection - off-screen sections still re-render when this changes (layout, not data).
@@ -6441,9 +6458,11 @@ export default function OiReplayPage() {
                 <Card
                   size="small"
                   title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI / IV ladder (nearest expiry, as of the current candle)</Space>}
-                  bodyStyle={{ maxHeight: 460, overflowY: 'auto' }}
                 >
-                  <OiLadder rows={ladderRows} atmStrike={atmStrike} sudden={suddenWalls} />
+                  {/* 460 px of the ladder, scrolling through the rest - or, in a card the trader sized, its share of the card. */}
+                  <CardFitBox max={460}>
+                    <OiLadder rows={ladderRows} atmStrike={atmStrike} sudden={suddenWalls} />
+                  </CardFitBox>
                 </Card>
               </Col>
             </Row>
@@ -6455,7 +6474,9 @@ export default function OiReplayPage() {
               <Row gutter={16}>
                 <Col span={24}>
                   <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
-                    <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
+                    <CardFitBox>
+                      <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
+                    </CardFitBox>
                   </Card>
                 </Col>
               </Row>
