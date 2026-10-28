@@ -23,7 +23,7 @@ body {
   min-height: 100svh;
 }
 
-/* NavBar (shared.jsx) - exactly one of these two is visible at a time, picked by viewport width
+/* NavBar (shared.jsx) - the sidebar over 768 px, the ☰ trigger at 768 px and under, picked by viewport width
    rather than a JS resize listener (see NavBar's own doc comment for why). This lives here, not in
    a per-page scoped file like oiMobile.css, because NavBar itself is truly global (every page
    renders it) and carries no trading logic of its own - unlike App.jsx's page BODY, which stays
@@ -32,31 +32,11 @@ body {
   display: none;
 }
 
-/* antd's horizontal Menu only collapses items into its own "..." overflow submenu once its
-   DIRECT parent reports a genuinely bounded (shrinkable) width via ResizeObserver - inside a flex
-   row (NavBar's own Space, itself inside each page's own header Space) a plain block/inline-flex
-   child instead just grows to its full natural content width and forces the WHOLE ROW past the
-   viewport, wider than the Menu's own already-working "..." collapse would ever need. min-width: 0
-   overrides flexbox's default "never shrink below content size" so this item can actually shrink
-   down to whatever room the row has left, at which point the Menu's own existing overflow
-   behavior (confirmed working - it already renders an overflow item, just was never being given a
-   small enough measurement to use it) takes over correctly. Found for real: the Dashboard's own
-   header row (Title + NavBar + several Selects) overflowed the page horizontally at exactly 820px
-   before this fix, with no viewport-width magic number that would have stayed safe as any page
-   adds one more control to that same row in the future - this fixes the actual cause instead. */
-.navbar-desktop-menu {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  flex: 1 1 auto;
-}
-
-/* A flex item's default min-width is `auto` (its own content's min-content size), NOT 0 - the
-   actual reason the Menu above still couldn't shrink: antd wraps every Space child in its own
-   ant-space-item, and EVERY level of that wrapping between the Menu and the page's own outer
-   container re-introduces this same "never shrink below content size" floor, so overriding it on
-   just the Menu's own wrapper wasn't enough - the block was several ant-space-item levels further
-   up. This is the standard, low-risk fix for antd's Space component in a responsive layout: it
+/* A flex item's default min-width is `auto` (its own content's min-content size), NOT 0 - a header
+   row's control could not shrink (the old top-bar Menu was the case found): antd wraps every Space
+   child in its own ant-space-item, and EVERY level of that wrapping between a control and the page's
+   own outer container re-introduces this same "never shrink below content size" floor.
+   This is the standard, low-risk fix for antd's Space component in a responsive layout: it
    changes nothing when a row already has enough room (flex only shrinks an item once the row's
    total content exceeds the available space, which is exactly the "was that Menu too wide" problem
    this whole file's own header rows - not just NavBar's - can otherwise both hit as those rows'
@@ -79,10 +59,103 @@ body {
   max-width: 100%;
 }
 
-@media (max-width: 768px) {
-  .navbar-desktop-menu {
+/* NavBar's SIDEBAR (shared.jsx) - the site menu, the server's status and Log out down the left of the window, over
+   768 px. Fixed and portalled to <body>; the page makes room with body.oa-sidenav's padding (NavBar sets the class
+   while it is on the page). Folded (.oa-sidenav-panel--collapsed) it is the icons alone. At 768 px and under there is
+   no sidebar: the ☰ drawer and the header row's status below take over, as they always did. */
+.oa-sidenav-panel {
+  display: none;
+}
+
+@media (min-width: 769px) {
+  body.oa-sidenav {
+    padding-left: 216px;
+    transition: padding-left 150ms ease;
+  }
+  body.oa-sidenav.oa-sidenav--collapsed {
+    padding-left: 64px;
+  }
+  .oa-sidenav-panel {
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 216px;
+    box-sizing: border-box;
+    /* Under antd's popups (1000+) and the page's own floating panels / quick button, over the page. */
+    z-index: 900;
+    background: #15161c;
+    border-right: 1px solid #262833;
+    transition: width 150ms ease;
+  }
+  .oa-sidenav-panel--collapsed {
+    width: 64px;
+  }
+  .oa-sidenav-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 12px 8px 16px;
+    min-height: 52px;
+  }
+  .oa-sidenav-panel--collapsed .oa-sidenav-head {
+    justify-content: center;
+    padding: 12px 0 8px;
+  }
+  .oa-sidenav-brand {
+    font-weight: 600;
+    font-size: 16px;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .oa-sidenav-menu {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  /* antd draws a folded menu 80 px wide - the sidebar is 64. */
+  .oa-sidenav-panel .ant-menu-inline-collapsed {
+    width: 64px;
+  }
+  .oa-sidenav-foot {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 14px 16px;
+    border-top: 1px solid #262833;
+  }
+  .oa-sidenav-foot--collapsed {
+    align-items: center;
+    padding: 10px 0 14px;
+  }
+  .oa-sidenav-status {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .oa-sidenav-status .ant-tag {
+    margin: 0;
+    white-space: normal;
+  }
+  .oa-sidenav-dot {
+    display: inline-flex;
+    padding: 6px;
+    cursor: default;
+  }
+  /* The sidebar carries all of it: the header row's status / Log out (a phone's), and the page's own "Option
+     Analytics" title beside NavBar. */
+  .ant-space.navbar-inline {
     display: none;
   }
+  .ant-space-item:has(+ .ant-space-item > .navbar-inline) > h3.ant-typography {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
   /* Fixed to the corner rather than left inline where NavBar happens to sit in each page's own
      header Space - every page builds that row differently (Title, then NavBar, then that page's
      OWN Selects/buttons all sharing one wrapping Space), so an inline trigger landed in a different,

@@ -37,6 +37,12 @@
   font-size: clamp(11px, 2.8vw, 14px);
 }
 
+/* The page's own "Option Analytics" row: over 768 px the sidebar (NavBar, index.css) carries the name and the menu,
+   so the row is not shown at all - no empty row and gap above the controls. A phone keeps it. */
+@media (min-width: 769px) {
+  .oi-mobile-page .ant-space-item:has(> .oa-brand-row) { display: none; }
+}
+
 /* ---- The dashboard (dashboardLayout.js / DashboardGrid.jsx / DashboardCard.jsx) ----
    On a wide screen the cards are a 12-column grid any of them can be dragged around and resized in
    (react-grid-layout, which sets each card's own position and pixel size inline). Under WIDE_LAYOUT_PX

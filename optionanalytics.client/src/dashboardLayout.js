@@ -269,6 +269,8 @@ export function reconcileSections(stored, allValues, fallback) {
 export const STORED_LAYOUT = 'optionanalytics.oiReplay.gridLayout'
 export const STORED_COMPACT = 'optionanalytics.oiReplay.compact'
 export const STORED_QUICK_FAB = 'optionanalytics.oiReplay.quickFabOn'
+// The page's controls card folded to its one row of day / index / Load day (the rest behind "More").
+export const STORED_CONTROLS_COLLAPSED = 'optionanalytics.oiReplay.controlsCollapsed'
 export const STORED_FREE_PLACEMENT = 'optionanalytics.oiReplay.freePlacement'
 export const STORED_SECTIONS = 'optionanalytics.oiReplay.sections'
 // The cards given a height of their own by dragging their corner - everything else follows its content.
