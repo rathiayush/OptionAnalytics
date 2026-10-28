@@ -760,6 +760,11 @@ const CHART_MAX_WINDOW_STEPS = 10
 // between NIFTY (step 50) and BANKNIFTY (step 100).
 const FUTURES_REGIME_OI_THRESHOLD = 50_000
 const FUTURES_REGIME_PRICE_STEP_FACTOR = 0.2
+// ...but 50,000 is ~0.3% of NIFTY's futures OI and more than half of SENSEX's whole OI, so SENSEX never left Neutral
+// (and got no regime arrows): the threshold is 50,000 or this share of the day's opening OI, whichever is smaller -
+// NIFTY-size contracts keep 50,000.
+const FUTURES_REGIME_OI_SHARE = 0.004
+const futuresRegimeOiThreshold = (openOi) => (openOi > 0 ? Math.min(FUTURES_REGIME_OI_THRESHOLD, openOi * FUTURES_REGIME_OI_SHARE) : FUTURES_REGIME_OI_THRESHOLD)
 // The futures card's OI in a unit that shows its moves: millions for a big contract (NIFTY's crores of units), lakh /
 // thousand for a small one - SENSEX futures' few thousand lots read "0.08M" and every change "-0.00M".
 const FUTURES_OI_UNITS = { M: 1e6, L: 1e5, K: 1e3 }
@@ -2310,6 +2315,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 32
 
   useEffect(() => {
     if (!containerRef.current) return
+    // The plain wheel scrolls the page past this full-width chart; Ctrl + wheel zooms it (chartZoom.js).
     const chart = createZoomableChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height,
@@ -2320,7 +2326,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height = 32
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
-    })
+    }, { wheelZoomNeedsCtrl: true })
     chartRef.current = chart
     seriesRef.current = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
@@ -4409,6 +4415,7 @@ export default function OiReplayPage() {
     [result, liveFuturesPoints, isLive],
   )
   const futuresBarsChart = useMemo(() => futuresPointsRaw.map(toBar), [futuresPointsRaw])
+  const futuresRegimeOi = futuresRegimeOiThreshold(futuresPointsRaw[0]?.openInterest)
   // The futures' session VWAP from its 1-minute bars (they carry volume - toBar drops it), read at each
   // displayed candle - never past the replay clock (the last candle would otherwise take later VWAP).
   const futuresVwapMinutes = useMemo(() => sessionVwapFromBars(futuresPointsRaw.map((p) => ({
@@ -4887,7 +4894,7 @@ export default function OiReplayPage() {
       const oi = futuresCandleOi[i] ?? null
       if (oi == null || prevOi == null) { prevClose = bar.close; prevOi = oi; continue }
 
-      const regime = classifyFuturesRegime(bar.close - prevClose, oi - prevOi, priceThreshold, FUTURES_REGIME_OI_THRESHOLD)
+      const regime = classifyFuturesRegime(bar.close - prevClose, oi - prevOi, priceThreshold, futuresRegimeOi)
       if (regime !== 'Neutral' && regime !== prevRegime) {
         const info = FUTURES_REGIME_INFO[regime]
         const bullish = info.bias === 'Bullish'
@@ -4904,7 +4911,7 @@ export default function OiReplayPage() {
       prevOi = oi
     }
     return markers
-  }, [displayFuturesBars, futuresCandleOi, step, result])
+  }, [displayFuturesBars, futuresCandleOi, step, result, futuresRegimeOi])
 
   // The single "as of right now" verdict for the table/read box - same 4-quadrant classification
   // as the chart markers, just measured since the DAY'S OPEN rather than the previous candle, so
@@ -4912,9 +4919,9 @@ export default function OiReplayPage() {
   const futuresRegimeSinceOpen = useMemo(() => {
     if (!result?.futuresOiAvailable || currentFutures?.close == null || futuresOpen?.close == null || futuresOiSinceOpen == null) return null
     const priceDelta = currentFutures.close - futuresOpen.close
-    const regime = classifyFuturesRegime(priceDelta, futuresOiSinceOpen, step * FUTURES_REGIME_PRICE_STEP_FACTOR, FUTURES_REGIME_OI_THRESHOLD)
+    const regime = classifyFuturesRegime(priceDelta, futuresOiSinceOpen, step * FUTURES_REGIME_PRICE_STEP_FACTOR, futuresRegimeOi)
     return { regime, priceDelta, oiDelta: futuresOiSinceOpen, ...FUTURES_REGIME_INFO[regime] }
-  }, [currentFutures, futuresOpen, futuresOiSinceOpen, step, result])
+  }, [currentFutures, futuresOpen, futuresOiSinceOpen, step, result, futuresRegimeOi])
 
   // PCR (Put-Call Ratio, total PE OI / total CE OI across the whole fetched band) and Max Pain -
   // the two standard derived reads a real OI chain gets used for beyond "where's the wall" (per the
@@ -6244,6 +6251,9 @@ export default function OiReplayPage() {
                         {prevFuturesShown?.error && (
                           <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
                         )}
+                        <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                          The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
+                        </Text>
                         {result.futuresOiAvailable && (
                           <Text type="secondary" style={{ fontSize: 11 }}>
                             Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.

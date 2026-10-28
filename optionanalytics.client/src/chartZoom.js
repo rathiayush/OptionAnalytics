@@ -8,15 +8,21 @@ import { createChart } from 'lightweight-charts'
 //              up/down when dragged.
 //   Reset:     ⟲ or double-click - prices auto-fit again and the time axis fits the data.
 //
+// `wheelZoomNeedsCtrl` (the OI Replay futures chart - a full-width chart on a long page): the plain wheel scrolls the
+// PAGE, over the chart and its price axes alike, instead of zooming it - scrolling past it squeezed the candles into
+// a sliver. Ctrl (or ⌘) + wheel zooms the time axis instead (a trackpad pinch sends exactly that), Shift + wheel the
+// prices as on every chart.
+//
 // The buttons live inside the chart's own element and act on pointerdown, so useChartUserControl
 // (oiShared.jsx) sees a zoom from them exactly like a wheel zoom and stops auto-fitting the view.
 
 const SCALE_IDS = ['right', 'left']
 const STEP = 1.25
 
-export function createZoomableChart(container, options) {
+export function createZoomableChart(container, options, { wheelZoomNeedsCtrl = false } = {}) {
   const chart = createChart(container, options)
-  enableAxisZoom(chart)
+  if (wheelZoomNeedsCtrl) chart.applyOptions({ handleScale: { mouseWheel: false }, handleScroll: { mouseWheel: false } })
+  enableAxisZoom(chart, { wheelZoomNeedsCtrl })
   // Room for more time labels on the axis: they are short "HH:MM" (istTickMarkFormatter), so the axis spaces them for 5
   // characters ("09:30") rather than the library's wider default and a narrow (phone) chart still shows the time every so often.
   chart.applyOptions({ timeScale: { tickMarkMaxCharacterLength: 5 } })
@@ -95,7 +101,7 @@ function addStyle() {
   document.head.appendChild(style)
 }
 
-export function enableAxisZoom(chart) {
+export function enableAxisZoom(chart, { wheelZoomNeedsCtrl = false } = {}) {
   const element = chart.chartElement()
   if (!element || element.dataset.oaZoom) return
   element.dataset.oaZoom = '1'
@@ -105,6 +111,16 @@ export function enableAxisZoom(chart) {
 
   // Shift + wheel, or the wheel over a price axis: zoom prices around the cursor.
   const onWheel = (e) => {
+    if (wheelZoomNeedsCtrl && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()   // not the browser's page zoom
+      e.stopPropagation()
+      // A notch of a mouse wheel (~100) about 20%, a trackpad pinch's small steps a little each. Next frame: the
+      // viewer-control check (useChartUserControl) reads the view before it, so it sees the zoom and stops auto-fitting.
+      const factor = Math.exp(-(Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX) * 0.002)
+      requestAnimationFrame(() => zoomTime(chart, factor))
+      return
+    }
+    if (wheelZoomNeedsCtrl && !e.shiftKey) return // the plain wheel scrolls the page
     const rect = element.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
@@ -130,8 +146,8 @@ export function enableAxisZoom(chart) {
   const bar = document.createElement('div')
   bar.className = 'oa-zoom'
   const buttons = [
-    ['⟷−', 'Zoom out (time)', () => zoomTime(chart, 1 / STEP)],
-    ['⟷+', 'Zoom in (time)', () => zoomTime(chart, STEP)],
+    ['⟷−', `Zoom out (time)${wheelZoomNeedsCtrl ? ' - or Ctrl + wheel' : ''}`, () => zoomTime(chart, 1 / STEP)],
+    ['⟷+', `Zoom in (time)${wheelZoomNeedsCtrl ? ' - or Ctrl + wheel' : ''}`, () => zoomTime(chart, STEP)],
     ['↕−', 'Zoom out (price) - or Shift + wheel', () => zoomPrices(chart, 1 / STEP)],
     ['↕+', 'Zoom in (price) - or Shift + wheel', () => zoomPrices(chart, STEP)],
     ['⟲', 'Reset zoom (or double-click the chart)', () => { resetZoom(chart); chart.timeScale().fitContent(); element.dispatchEvent(new MouseEvent('dblclick', { bubbles: true })) }],
