@@ -5,7 +5,7 @@ import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -55,7 +55,7 @@ import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitiv
 import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
+  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
   STORED_LAYOUT_VERSION, LAYOUT_VERSION, fitLayoutHeights, isStackedLayout, WIDE_LAYOUT_PX,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections,
 } from './dashboardLayout.js'
@@ -3563,6 +3563,9 @@ export default function OiReplayPage() {
   const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
   // The quick views' floating button, on every screen now - see QuickViewFab.
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
+  // The controls card folded to one row: the day, the index and Load day - the rest (chart options, sections, quick
+  // views, layout) behind "More". The warnings and the load's progress show either way.
+  const [controlsCollapsed, setControlsCollapsed] = usePersistedState(STORED_CONTROLS_COLLAPSED, false)
   // Packed upwards, or a card left exactly where it is dropped (DashboardGrid).
   const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
   // The cards on the page now - the spot / entry charts and the ladder always, the rest as "Sections shown" says.
@@ -5918,20 +5921,33 @@ export default function OiReplayPage() {
     // just technically fit.
     <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
-        <Space align="center" size={16} wrap>
+        {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
+        <Space align="center" size={16} wrap className="oa-brand-row">
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
 
-        <Card size="small" title="OI Replay">
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Plays a trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
-              strike band alongside it. NIFTY/BANKNIFTY prefer your NiftyDataCollector database, falling back to a
-              live Dhan call when it's stale or unconfigured; SENSEX and futures always call Dhan live - there is no
-              stored source for either.
-            </Text>
+        <Card
+          size="small"
+          title={controlsCollapsed ? null : 'OI Replay'}
+          extra={controlsCollapsed ? null : (
+            <Tooltip title="Fold this card to one row - the day, the index and Load day. Chart options, sections, quick views and the layout come back with More.">
+              <Button size="small" icon={<UpOutlined />} onClick={() => setControlsCollapsed(true)}>Collapse</Button>
+            </Tooltip>
+          )}
+          styles={controlsCollapsed ? { body: { padding: '8px 12px' } } : undefined}
+        >
+          <Space direction="vertical" size={controlsCollapsed ? 8 : 12} style={{ width: '100%' }}>
+            {!controlsCollapsed && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Plays a trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
+                strike band alongside it. NIFTY/BANKNIFTY prefer your NiftyDataCollector database, falling back to a
+                live Dhan call when it's stale or unconfigured; SENSEX and futures always call Dhan live - there is no
+                stored source for either.
+              </Text>
+            )}
             <Space wrap size={12}>
+              {controlsCollapsed && <Text strong>OI Replay</Text>}
               <Button
                 type="primary" onClick={goLiveAndAnnounce} loading={loading} disabled={!underlying}
                 style={isLive ? { background: UP_COLOR, borderColor: UP_COLOR } : undefined}
@@ -5979,23 +5995,30 @@ export default function OiReplayPage() {
               <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
                 <Button type="primary" onClick={loadDayAndAnnounce} loading={loading} disabled={!canLoad}>Load day</Button>
               </Tooltip>
-              <Tooltip title="Skip the saved copy of this day (the server's Dhan cache and its stored database), ask Dhan for all of it again and update the cache with what comes back. Slower - use it when a day looks wrong or will not load from the cache. Unticks itself after the load.">
-                <Checkbox checked={forceFetch} onChange={(e) => setForceFetch(e.target.checked)} disabled={loading}>Force fetch from Dhan</Checkbox>
-              </Tooltip>
+              {!controlsCollapsed && (
+                <Tooltip title="Skip the saved copy of this day (the server's Dhan cache and its stored database), ask Dhan for all of it again and update the cache with what comes back. Slower - use it when a day looks wrong or will not load from the cache. Unticks itself after the load.">
+                  <Checkbox checked={forceFetch} onChange={(e) => setForceFetch(e.target.checked)} disabled={loading}>Force fetch from Dhan</Checkbox>
+                </Tooltip>
+              )}
               {isTodayDate && !isLive && oneMinBars.length > 0 && (
                 <Tag color="blue">Replaying today up to {istTimeFormatter(oneMinBars.at(-1).time)} - Load day again for the latest</Tag>
               )}
-              <Tooltip title={isLive ? 'Session VWAP on the spot, EMA and futures charts.' : 'Session VWAP on the futures chart (its bars carry volume). The spot VWAP comes from the live feed - today only.'}>
-                <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
-              </Tooltip>
-              <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
-              <Tooltip title="The previous day's volume by price as horizontal bars behind the candles - on the spot and both entry charts, the drawing the futures chart has. Off leaves its POC / VAH / VAL lines.">
-                <Checkbox checked={showProfileBars} disabled={!showVolumeProfile} onChange={(e) => setShowProfileBars(e.target.checked)}>VP bars</Checkbox>
-              </Tooltip>
-              {isLive && <ProfileAlertsBar {...spotProfileAlerts} live={isLive} spotOnly />}
-              {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. */}
-              {syncControl}
-              {isLive && (
+              {!controlsCollapsed && (
+                <>
+                  <Tooltip title={isLive ? 'Session VWAP on the spot, EMA and futures charts.' : 'Session VWAP on the futures chart (its bars carry volume). The spot VWAP comes from the live feed - today only.'}>
+                    <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+                  </Tooltip>
+                  <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
+                  <Tooltip title="The previous day's volume by price as horizontal bars behind the candles - on the spot and both entry charts, the drawing the futures chart has. Off leaves its POC / VAH / VAL lines.">
+                    <Checkbox checked={showProfileBars} disabled={!showVolumeProfile} onChange={(e) => setShowProfileBars(e.target.checked)}>VP bars</Checkbox>
+                  </Tooltip>
+                  {isLive && <ProfileAlertsBar {...spotProfileAlerts} live={isLive} spotOnly />}
+                </>
+              )}
+              {/* Sync with the Order Flow page in another tab - the day always; the replay clock while replaying. Folded,
+                  only when it could not follow the other page (its Retry). */}
+              {(!controlsCollapsed || (syncEnabled && syncMismatch)) && syncControl}
+              {!controlsCollapsed && isLive && (
                 // Today's own run + live ticks are kept in this browser (see LIVE_DAY_CACHE_STORAGE_KEY's
                 // own doc comment) so a reload doesn't have to re-fetch - this is the one way to force a
                 // genuine re-fetch instead, for whenever the cached data looks wrong/stale. Popconfirm
@@ -6010,19 +6033,26 @@ export default function OiReplayPage() {
                   <Button danger>Clear cache</Button>
                 </Popconfirm>
               )}
+              {controlsCollapsed && (
+                <Tooltip title="Show the whole card again - chart options (VWAP, volume profile), Force fetch, Sync, the sections shown, quick views and the layout.">
+                  <Button size="small" icon={<DownOutlined />} onClick={() => setControlsCollapsed(false)}>More</Button>
+                </Tooltip>
+              )}
             </Space>
-            <Space align="center" size={12} wrap>
-              <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
-              <Select
-                mode="multiple" value={visibleSections} onChange={setVisibleSections}
-                style={{ minWidth: 'min(420px, 100%)', maxWidth: 900 }} maxTagCount={SECTION_OPTIONS.length}
-                options={SECTION_OPTIONS}
-              />
-              <Button size="small" onClick={() => setVisibleSections(ALL_SECTION_VALUES)} disabled={visibleSections.length === ALL_SECTION_VALUES.length}>
-                Show all
-              </Button>
-            </Space>
-            {result && (
+            {!controlsCollapsed && (
+              <Space align="center" size={12} wrap>
+                <Text type="secondary" style={{ fontSize: 12 }}>Sections shown</Text>
+                <Select
+                  mode="multiple" value={visibleSections} onChange={setVisibleSections}
+                  style={{ minWidth: 'min(420px, 100%)', maxWidth: 900 }} maxTagCount={SECTION_OPTIONS.length}
+                  options={SECTION_OPTIONS}
+                />
+                <Button size="small" onClick={() => setVisibleSections(ALL_SECTION_VALUES)} disabled={visibleSections.length === ALL_SECTION_VALUES.length}>
+                  Show all
+                </Button>
+              </Space>
+            )}
+            {result && !controlsCollapsed && (
               <Space align="center" size={6} wrap>
                 <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 7 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
                   <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Ctrl + Shift + …)</Text>
@@ -6039,7 +6069,7 @@ export default function OiReplayPage() {
             )}
             {/* The dashboard: the cards tile into rows, each one as wide and as tall as it was dragged
                 (dashboardLayout.js). Only on a screen wide enough for it - a phone keeps its one column. */}
-            {result && (
+            {result && !controlsCollapsed && (
               <Space align="center" size={8} wrap>
                 <Text type="secondary" style={{ fontSize: 12 }}>Layout</Text>
                 {wideLayout ? (
@@ -6104,7 +6134,7 @@ export default function OiReplayPage() {
             {error && <Alert type="error" showIcon closable onClose={() => setError(null)} message={error} />}
             {/* Today's spot from the server's live feed because Dhan refused the day (OiReplayService) - says from when. */}
             {!error && result?.spotNote && <Alert type="warning" showIcon closable message={result.spotNote} />}
-            {!loading && loadProgress && (
+            {!loading && loadProgress && !controlsCollapsed && (
               <details style={{ margin: '4px 0 8px' }}>
                 <summary style={{ cursor: 'pointer', fontSize: 12 }}>
                   Last load: {loadProgress.error ? 'failed' : 'done'} in {loadProgress.elapsedSeconds}s · {loadProgress.dhanCalls} Dhan calls · {loadProgress.fromDisk} from disk

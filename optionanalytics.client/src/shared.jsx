@@ -1,5 +1,10 @@
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import {
+  BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, HistoryOutlined, LineChartOutlined,
+  LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
+} from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -1091,40 +1096,39 @@ export function DirectionTag({ direction }) {
 }
 
 const NAV_ITEMS = [
-  { key: '/', label: 'Dashboard' },
-  { key: '/backtest', label: 'Backtrack' },
+  { key: '/', label: 'Dashboard', icon: <DashboardOutlined /> },
+  { key: '/backtest', label: 'Backtrack', icon: <HistoryOutlined /> },
   {
     key: 'strike-data-group',
     label: 'Strike Data',
+    icon: <TableOutlined />,
     children: [
       { key: '/strike-data', label: 'Live' },
       { key: '/rolling-strike-data', label: 'Rolling (Expired)' },
     ],
   },
-  { key: '/expired-backtest', label: 'Expired Backtest' },
-  { key: '/oi-replay', label: 'OI Replay' },
-  { key: '/order-flow', label: 'Order Flow' },
-  { key: '/live-strike-data', label: 'Live Strike Data' },
-  { key: '/triggers', label: 'Triggers' },
-  { key: '/contracts', label: 'Contracts' },
-  { key: '/trade-settings', label: 'Trade settings' },
-  { key: '/strategy-tuning', label: 'Strategy tuning' },
-  { key: '/visitors', label: 'Visitors' },
+  { key: '/expired-backtest', label: 'Expired Backtest', icon: <ExperimentOutlined /> },
+  { key: '/oi-replay', label: 'OI Replay', icon: <LineChartOutlined /> },
+  { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
+  { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
+  { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
+  { key: '/contracts', label: 'Contracts', icon: <FileTextOutlined /> },
+  { key: '/trade-settings', label: 'Trade settings', icon: <SettingOutlined /> },
+  { key: '/strategy-tuning', label: 'Strategy tuning', icon: <SlidersOutlined /> },
+  { key: '/visitors', label: 'Visitors', icon: <TeamOutlined /> },
 ]
 
-// Shared between EVERY page (all nine currently render it) - a proper horizontal menu (not just
-// plain text links) so it reads as real site navigation, sitting inline in each page's own header
-// row with a transparent background so it blends into the page rather than looking like a separate
-// bar. Also carries the signed-in email and a log-out button - the one place that's shown
-// regardless of which page rendered this.
+// The site navigation, shared by EVERY page (each renders <NavBar /> in its own header row).
 //
-// Below NAV_COLLAPSE_BREAKPOINT, the horizontal Menu (9 top-level items, one with children - it has
-// no room to fit a phone-width screen at all, let alone stay legible) is replaced by a small "☰"
-// trigger opening the SAME items as a full-height Drawer with a vertical Menu instead - the same
-// "collapse to a drawer below a breakpoint" shape any responsive site nav uses. Both renderings
-// exist in the DOM at once and CSS (.navbar-desktop-menu/.navbar-mobile-trigger in index.css) picks
-// exactly one via the same breakpoint, rather than a JS resize listener - simpler, and immune to a
-// stale measurement on first paint before any resize event has fired.
+// Over 768 px it is a SIDEBAR down the left of the window (index.css: .oa-sidenav-panel, fixed; the page makes room
+// with body.oa-sidenav's padding): the brand, the menu with an icon a page, and at its foot the server's status tags,
+// the signed-in email and Log out. Its ☰/fold button narrows it to the icons alone (64 px, a page's name on hover) -
+// remembered in this browser. It is portalled to <body>, so where a page puts <NavBar /> does not matter, and the
+// page's own "Option Analytics" title beside it is hidden there (the sidebar carries the name).
+//
+// At 768 px and under (a phone) there is no sidebar: a "☰" fixed in the top-right corner opens the same items in a
+// Drawer, and the status tags / Log out stay in the page's header row - as before. Both renderings exist in the DOM
+// and CSS picks one by the same breakpoint, rather than a JS resize listener - immune to a stale first measurement.
 //
 // Triggers/Contracts are hidden here for a non-Admin account, but that is a convenience, not the
 // actual security boundary - App.jsx's own route guard covers someone typing the URL directly, and
@@ -1152,6 +1156,7 @@ function useSystemInfo(pollMs = null) {
 
 const FEED_HEALTH_POLL_MS = 15_000
 const FEED_BEHIND_MS = 2_000
+const STORED_SIDENAV_COLLAPSED = 'optionanalytics.sideNavCollapsed'
 
 // The Dhan disk cache's proof it is working: the past days it held when the server started (so they came through the
 // restart / deploy) and what this run read from it and saved to it. Red tags above cover a folder that is not writable / kept.
@@ -1174,9 +1179,9 @@ function DhanCacheTag({ cache, startedUtc }) {
   )
 }
 
-// The server's live-tick consumers (Spot, CDV, OI Replay - see TickConsumerQueue) as one tag: how far
-// behind live the slowest one has been over the last minute, and whether any had to drop ticks.
-function FeedHealthTag({ feed }) {
+// The server's live-tick consumers (Spot, CDV, OI Replay - see TickConsumerQueue) as one reading: how far behind live
+// the slowest one has been over the last minute, and whether any had to drop ticks. Null with nothing reported.
+function feedHealth(feed) {
   if (!Array.isArray(feed) || feed.length === 0) return null
   const worst = feed.reduce((a, b) => (b.queueWaitMaxMs > a.queueWaitMaxMs ? b : a))
   const dropping = feed.filter((c) => c.dropped > 0)
@@ -1184,6 +1189,12 @@ function FeedHealthTag({ feed }) {
   const color = dropping.length > 0 ? 'error' : behind ? 'warning' : 'success'
   const label = dropping.length > 0 ? `Feed: ${dropping.map((c) => c.name).join(', ')} dropping ticks`
     : behind ? `Feed: ${worst.name} ${(worst.queueWaitMaxMs / 1000).toFixed(1)}s behind` : 'Feed OK'
+  return { color, label }
+}
+
+function FeedHealthTag({ feed }) {
+  const health = feedHealth(feed)
+  if (!health) return null
   return (
     <Tooltip title={(
       <div>
@@ -1195,8 +1206,63 @@ function FeedHealthTag({ feed }) {
         ))}
       </div>
     )}>
-      <Tag color={color}>{label}</Tag>
+      <Tag color={health.color}>{health.label}</Tag>
     </Tooltip>
+  )
+}
+
+/** What the status tags say, for the folded sidebar's one dot: the worst of them (success / warning / error) and a
+ *  line each. */
+function navStatus(systemInfo, isAdmin) {
+  const lines = []
+  let level = 'success'
+  const add = (color, text) => {
+    lines.push(text)
+    if (color === 'error' || (color === 'warning' && level === 'success')) level = color
+  }
+  if (systemInfo?.buildTimeUtc) lines.push(`Deployed ${fmtIstDateTime(systemInfo.buildTimeUtc)}`)
+  if (isAdmin) {
+    const feed = feedHealth(systemInfo?.feed)
+    if (feed) add(feed.color, feed.label)
+    if (systemInfo?.loginsSurviveRestart === false) add('warning', 'Logins reset at last deploy')
+    const cache = systemInfo?.dhanCache
+    if (cache?.writable === false) add('error', 'Dhan cache not writable')
+    else if (cache?.keptAcrossDeploys === false) add('error', 'Dhan cache lost at every deploy')
+    else if (cache?.daysAtStart === 0) add('warning', 'Dhan cache started empty')
+    else if (cache?.daysAtStart != null) add('success', `Dhan cache ✓ ${cache.daysAtStart + (cache.savedToDisk ?? 0)} files`)
+  }
+  return { level, lines }
+}
+
+// The server's status for whoever is signed in: when it was deployed, and for an admin the feed, the logins and the
+// Dhan cache - in the sidebar's foot, or the page's header row on a phone.
+function NavStatusTags({ systemInfo, isAdmin }) {
+  return (
+    <>
+      {systemInfo?.buildTimeUtc && (
+        <Tooltip title={`Server running since ${fmtIstDateTime(systemInfo.startedUtc)} IST`}>
+          <Typography.Text type="secondary" style={{ fontSize: 11 }}>Deployed {fmtIstDateTime(systemInfo.buildTimeUtc)}</Typography.Text>
+        </Tooltip>
+      )}
+      {isAdmin && <FeedHealthTag feed={systemInfo?.feed} />}
+      {isAdmin && systemInfo?.loginsSurviveRestart === false && (
+        <Tooltip title="The login key ring was regenerated when the server last started, so every earlier login stopped working. /app/data is not on a persistent volume - mount a named volume there (Dokploy: Advanced > Volumes) so logins survive deploys.">
+          <Tag color="warning">Logins reset at last deploy</Tag>
+        </Tooltip>
+      )}
+      {/* The Dhan disk cache (past days) only saves Dhan calls when its folder can be written and outlives a deploy. */}
+      {isAdmin && systemInfo?.dhanCache?.writable === false && (
+        <Tooltip title="The server cannot write its Dhan cache folder (/app/data/dhan-cache), so nothing is kept and every day is asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose) - a bind mount of a root-owned host folder is not writable by the app.">
+          <Tag color="error">Dhan cache not writable</Tag>
+        </Tooltip>
+      )}
+      {isAdmin && systemInfo?.dhanCache?.writable !== false && systemInfo?.dhanCache?.keptAcrossDeploys === false && (
+        <Tooltip title="The Dhan cache folder (/app/data/dhan-cache) is not on a persistent volume, so every deploy starts it empty and the past days are asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose).">
+          <Tag color="error">Dhan cache lost at every deploy</Tag>
+        </Tooltip>
+      )}
+      {isAdmin && <DhanCacheTag cache={systemInfo?.dhanCache} startedUtc={systemInfo?.startedUtc} />}
+    </>
   )
 }
 
@@ -1205,68 +1271,89 @@ export function NavBar() {
   const navigate = useNavigate()
   const auth = useAuth()
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [collapsed, setCollapsed] = usePersistedState(STORED_SIDENAV_COLLAPSED, false)
   const isAdmin = auth?.user?.role === 'Admin'
   const systemInfo = useSystemInfo(isAdmin ? FEED_HEALTH_POLL_MS : null)
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
 
   const go = (key) => { navigate(key); setDrawerOpen(false) }
 
-  return (
-    <Space align="center" size={16} wrap>
-      <div className="navbar-desktop-menu">
-        <Menu
-          mode="horizontal"
-          theme="dark"
-          selectedKeys={[location.pathname]}
-          items={items}
-          onClick={({ key }) => go(key)}
-          style={{ minWidth: 340, background: 'transparent', borderBottom: 'none', lineHeight: '32px' }}
-        />
+  // The page makes room for the sidebar (body.oa-sidenav's padding - over 768 px only), set before the first paint so
+  // the page never draws under it first.
+  useLayoutEffect(() => {
+    const { classList } = document.body
+    classList.add('oa-sidenav')
+    classList.toggle('oa-sidenav--collapsed', collapsed)
+    return () => classList.remove('oa-sidenav', 'oa-sidenav--collapsed')
+  }, [collapsed])
+
+  const openGroup = NAV_ITEMS.find((item) => item.children?.some((child) => child.key === location.pathname))?.key
+  const status = navStatus(systemInfo, isAdmin)
+  const sidebar = (
+    <aside className={`oa-sidenav-panel${collapsed ? ' oa-sidenav-panel--collapsed' : ''}`} aria-label="Site navigation">
+      <div className="oa-sidenav-head">
+        <Tooltip title={collapsed ? 'Show the menu' : 'Fold the menu to its icons'} placement="right">
+          <Button
+            type="text" icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />} onClick={() => setCollapsed((v) => !v)}
+            aria-label={collapsed ? 'Show the menu' : 'Fold the menu'}
+          />
+        </Tooltip>
+        {!collapsed && <span className="oa-sidenav-brand">Option Analytics</span>}
       </div>
-      <Button
-        className="navbar-mobile-trigger" size="large" onClick={() => setDrawerOpen(true)}
-        aria-label="Open navigation menu" style={{ fontSize: 18, lineHeight: 1 }}
-      >
-        ☰
-      </Button>
-      <Drawer title="Menu" placement="left" onClose={() => setDrawerOpen(false)} open={drawerOpen} width={260}>
-        <Menu mode="inline" selectedKeys={[location.pathname]} items={items} onClick={({ key }) => go(key)} />
-      </Drawer>
-      {auth?.user && (
-        <Space size={8}>
-          {systemInfo?.buildTimeUtc && (
-            <Tooltip title={`Server running since ${fmtIstDateTime(systemInfo.startedUtc)} IST`}>
-              <Typography.Text type="secondary" style={{ fontSize: 11 }}>Deployed {fmtIstDateTime(systemInfo.buildTimeUtc)}</Typography.Text>
+      <nav className="oa-sidenav-menu">
+        <Menu
+          mode="inline" inlineCollapsed={collapsed} selectedKeys={[location.pathname]} defaultOpenKeys={openGroup ? [openGroup] : []}
+          items={items} onClick={({ key }) => go(key)} style={{ background: 'transparent', borderInlineEnd: 'none' }}
+        />
+      </nav>
+      {auth?.user && (collapsed ? (
+        <div className="oa-sidenav-foot oa-sidenav-foot--collapsed">
+          {status.lines.length > 0 && (
+            <Tooltip placement="right" title={<div>{status.lines.map((line) => <div key={line}>{line}</div>)}</div>}>
+              <span className="oa-sidenav-dot" aria-label="Server status"><Badge status={status.level} /></span>
             </Tooltip>
           )}
-          {isAdmin && <FeedHealthTag feed={systemInfo?.feed} />}
-          {isAdmin && systemInfo?.loginsSurviveRestart === false && (
-            <Tooltip title="The login key ring was regenerated when the server last started, so every earlier login stopped working. /app/data is not on a persistent volume - mount a named volume there (Dokploy: Advanced > Volumes) so logins survive deploys.">
-              <Tag color="warning">Logins reset at last deploy</Tag>
-            </Tooltip>
-          )}
-          {/* The Dhan disk cache (past days) only saves Dhan calls when its folder can be written and outlives a deploy. */}
-          {isAdmin && systemInfo?.dhanCache?.writable === false && (
-            <Tooltip title="The server cannot write its Dhan cache folder (/app/data/dhan-cache), so nothing is kept and every day is asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose) - a bind mount of a root-owned host folder is not writable by the app.">
-              <Tag color="error">Dhan cache not writable</Tag>
-            </Tooltip>
-          )}
-          {isAdmin && systemInfo?.dhanCache?.writable !== false && systemInfo?.dhanCache?.keptAcrossDeploys === false && (
-            <Tooltip title="The Dhan cache folder (/app/data/dhan-cache) is not on a persistent volume, so every deploy starts it empty and the past days are asked of Dhan again. Mount a named volume at /app/data (Dokploy: Advanced > Volumes, or deploy with docker-compose).">
-              <Tag color="error">Dhan cache lost at every deploy</Tag>
-            </Tooltip>
-          )}
-          {isAdmin && <DhanCacheTag cache={systemInfo?.dhanCache} startedUtc={systemInfo?.startedUtc} />}
-          {/* Always in view for an admin (the menu's own "Visitors" item can fold into its "···" on a laptop screen). */}
-          {isAdmin && (
-            <Tooltip title="Who opened which page, when and from where - every account and visitors with no account">
-              <Button size="small" type={location.pathname === '/visitors' ? 'primary' : 'default'} onClick={() => go('/visitors')}>👥 Visitors</Button>
-            </Tooltip>
-          )}
-          <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
-          <Button size="small" onClick={auth.logout}>Log out</Button>
-        </Space>
-      )}
-    </Space>
+          <Tooltip placement="right" title={`Log out ${auth.user.email}`}>
+            <Button type="text" icon={<LogoutOutlined />} onClick={auth.logout} aria-label="Log out" />
+          </Tooltip>
+        </div>
+      ) : (
+        <div className="oa-sidenav-foot">
+          <div className="oa-sidenav-status"><NavStatusTags systemInfo={systemInfo} isAdmin={isAdmin} /></div>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: auth.user.email }}>{auth.user.email}</Typography.Text>
+          <Button size="small" icon={<LogoutOutlined />} onClick={auth.logout}>Log out</Button>
+        </div>
+      ))}
+    </aside>
+  )
+
+  return (
+    <>
+      {createPortal(sidebar, document.body)}
+      {/* A phone's: the ☰ in the corner, and the status / Log out in the page's header row (hidden over 768 px). */}
+      <Space align="center" size={16} wrap className="navbar-inline">
+        <Button
+          className="navbar-mobile-trigger" size="large" onClick={() => setDrawerOpen(true)}
+          aria-label="Open navigation menu" style={{ fontSize: 18, lineHeight: 1 }}
+        >
+          ☰
+        </Button>
+        <Drawer title="Menu" placement="left" onClose={() => setDrawerOpen(false)} open={drawerOpen} width={260}>
+          <Menu mode="inline" selectedKeys={[location.pathname]} defaultOpenKeys={openGroup ? [openGroup] : []} items={items} onClick={({ key }) => go(key)} />
+        </Drawer>
+        {auth?.user && (
+          <Space size={8} wrap>
+            <NavStatusTags systemInfo={systemInfo} isAdmin={isAdmin} />
+            {isAdmin && (
+              <Tooltip title="Who opened which page, when and from where - every account and visitors with no account">
+                <Button size="small" type={location.pathname === '/visitors' ? 'primary' : 'default'} onClick={() => go('/visitors')}>👥 Visitors</Button>
+              </Tooltip>
+            )}
+            <Typography.Text type="secondary" style={{ fontSize: 12 }} className="navbar-email">{auth.user.email}</Typography.Text>
+            <Button size="small" onClick={auth.logout}>Log out</Button>
+          </Space>
+        )}
+      </Space>
+    </>
   )
 }

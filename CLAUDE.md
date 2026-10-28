@@ -188,6 +188,13 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
+- The site NAVIGATION (`NavBar` in `shared.jsx`, `.oa-sidenav-*` in `index.css`): over 768 px a SIDEBAR down the left - the
+  name, the menu (an icon a page), the server's status tags, the email and Log out - portalled to <body> and fixed; the
+  page makes room with `body.oa-sidenav`'s padding (NavBar sets the class while it is mounted), and the page's own
+  "Option Analytics" title beside NavBar is hidden. Its fold button narrows it to the icons (64 px, `STORED_SIDENAV_COLLAPSED`).
+  At 768 px and under there is no sidebar: the ☰ drawer and the header row's status, as before. OI Replay's controls
+  card folds to one row (Live, index, expiry, day, timeframe, Load day, "More" - `STORED_CONTROLS_COLLAPSED`); its
+  warnings, errors and the load's progress show either way, and its own "Option Analytics" row is not shown over 768 px.
 - OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardGrid.jsx`, `DashboardCard.jsx`, the `.oi-dash-*` rules in
   `oiMobile.css`): on a wide screen the cards are a FREE 12-COLUMN GRID (`react-grid-layout`, its legacy API) - any card
   dragged by its ⠿ grip to any place, resized from its bottom-right corner. Each is `{ i, x, y, w, h }`, h in grid ROWS
