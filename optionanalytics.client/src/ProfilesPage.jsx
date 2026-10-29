@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Col, DatePicker, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import { CaretRightOutlined, PauseOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
@@ -10,10 +10,9 @@ import {
 import { createZoomableChart } from './chartZoom.js'
 import { VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
 import { TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
-import { fetchPreviousSession } from './profiles.js'
 import {
-  FETCH_ROWS, PROFILE_ROWS, PROFILE_ROW_CHOICES, barsKnownAt, candlesOf, dayMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, volumeZones,
+  FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
+  lastPeriodRunningAt, marketProfileZones, pastSessionsNeeded, profileSessions, volumeZones,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -48,6 +47,7 @@ const STORE = {
   timeframe: 'optionanalytics.profiles.timeframe',
   rows: 'optionanalytics.profiles.rows',
   of: 'optionanalytics.profiles.of',
+  days: 'optionanalytics.profiles.days',
   follow: 'optionanalytics.profiles.followOiReplay',
 }
 
@@ -89,19 +89,57 @@ function useFuturesDay(underlying, dateKey, live) {
   return state
 }
 
-/** The trading day before `dateKey` (a week back at most), only while it is asked for. */
-function usePreviousSession(underlying, dateKey, wanted) {
-  const [state, setState] = useState({ loading: false, day: null })
+// A past day's futures never change: kept here once fetched (this tab only), so changing "Days", the row or "Profile
+// of" asks the server nothing again. Only what came back is kept - a failure is asked again next time.
+const PAST_DAY_CACHE = new Map()
+const PAST_DAY_CACHE_MAX = 90
+async function fetchPastDay(underlying, dateKey) {
+  const key = `${underlying}|${dateKey}`
+  if (PAST_DAY_CACHE.has(key)) return PAST_DAY_CACHE.get(key)
+  const r = await fetch(`/api/order-flow/${underlying}/day/${dateKey}?rowSize=${FETCH_ROWS[underlying] ?? 1}&minTradeLots=100000&heatmapColumns=50`)
+  // No day there (a holiday) is an answer too: an empty session.
+  const day = r.ok ? await r.json().then((b) => ({ date: dateKey, bars: barsKnownAt(b.bars, null), source: b.source })) : r.status === 404 ? { date: dateKey, bars: [], source: null } : null
+  if (!day) throw new Error(`HTTP ${r.status}`)
+  PAST_DAY_CACHE.set(key, day)
+  if (PAST_DAY_CACHE.size > PAST_DAY_CACHE_MAX) PAST_DAY_CACHE.delete(PAST_DAY_CACHE.keys().next().value)
+  return day
+}
+
+/** The `count` trading sessions before `dateKey`, oldest first: weekdays walked back one at a time (one request at a
+ *  time - a past day the server did not record is built from Dhan's candles the first time), a day with no minutes (a
+ *  holiday) stepped over, `count` + 10 weekdays at most. Sessions come in as they load. */
+function usePastSessions(underlying, dateKey, count) {
+  const [state, setState] = useState({ key: null, loading: false, sessions: [], error: null })
   useEffect(() => {
-    if (!wanted || !underlying || !dateKey) return undefined
+    if (!underlying || !dateKey || count <= 0) return undefined
+    const key = `${underlying}|${dateKey}|${count}`
     let cancelled = false
-    setState({ loading: true, day: null })
-    fetchPreviousSession(underlying, dateKey, FETCH_ROWS[underlying] ?? 1)
-      .then((day) => { if (!cancelled) setState({ loading: false, day }) })
-      .catch(() => { if (!cancelled) setState({ loading: false, day: null }) })
+    setState({ key, loading: true, sessions: [], error: null })
+    ;(async () => {
+      const found = []
+      let day = dayjs(dateKey)
+      let error = null
+      for (let tries = 0; found.length < count && tries < count + 10;) {
+        day = day.subtract(1, 'day')
+        if (day.day() === 0 || day.day() === 6) continue
+        tries++
+        try {
+          const session = await fetchPastDay(underlying, day.format('YYYY-MM-DD'))
+          if (cancelled) return
+          if (session.bars.length) {
+            found.unshift(session)
+            setState({ key, loading: found.length < count, sessions: [...found], error: null })
+          }
+        } catch (err) {
+          if (cancelled) return
+          error = err.message
+        }
+      }
+      if (!cancelled) setState({ key, loading: false, sessions: found, error: found.length < count ? error : null })
+    })()
     return () => { cancelled = true }
-  }, [underlying, dateKey, wanted])
-  return state
+  }, [underlying, dateKey, count])
+  return state.key === `${underlying}|${dateKey}|${count}` ? state : { loading: count > 0, sessions: [], error: null }
 }
 
 // ---- the chart -------------------------------------------------------------------------------------------
@@ -246,6 +284,8 @@ export default function ProfilesPage() {
   const [timeframe, setTimeframe] = usePersistedState(STORE.timeframe, 5)
   const [rows, setRows] = usePersistedState(STORE.rows, PROFILE_ROWS)
   const [profileOf, setProfileOf] = usePersistedState(STORE.of, 'today')
+  // How many sessions the profiles cover - 1 is the day itself (or the one session before it).
+  const [days, setDays] = usePersistedState(STORE.days, 1)
   const [follow, setFollow] = usePersistedState(STORE.follow, true)
   const todayKey = istDateKey(new Date())
   const [live, setLive] = useState(true)
@@ -274,7 +314,8 @@ export default function ProfilesPage() {
 
   const effectiveDate = live ? todayKey : dateKey
   const futures = useFuturesDay(index, effectiveDate, live)
-  const previous = usePreviousSession(index, effectiveDate, profileOf === 'previous')
+  const dayCount = Math.max(1, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1))
+  const past = usePastSessions(index, effectiveDate, pastSessionsNeeded(dayCount, profileOf))
   const day = futures.day?.key === `${index}|${effectiveDate}` ? futures.day : null
 
   // The span a past day's own slider runs over: the first minute's start to the last minute's end.
@@ -294,16 +335,19 @@ export default function ProfilesPage() {
   }, [playing, live, following, span?.start, span?.end, speed]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const known = useMemo(() => barsKnownAt(day?.bars, clock), [day, clock])
-  const profileBars = useMemo(
-    () => (profileOf === 'previous' ? barsKnownAt(previous.day?.bars, null) : known),
-    [profileOf, previous.day, known],
+  // The sessions the profiles are built from, oldest first: the day so far and the ones before it, or only those before.
+  const sessions = useMemo(
+    () => profileSessions({ today: known, past: past.sessions.map((d) => d.bars), days: dayCount, of: profileOf }),
+    [known, past.sessions, dayCount, profileOf],
   )
+  const profileBars = useMemo(() => sessions.flat(), [sessions])
   const candles = useMemo(() => candlesOf(known, timeframe), [known, timeframe])
 
   const vp = useMemo(() => dayVolumeProfile(profileBars, row), [profileBars, row])
   const vz = useMemo(() => volumeZones(vp, row), [vp, row])
-  const tpo = useMemo(() => dayMarketProfile(profileBars, row), [profileBars, row])
-  const running = profileOf === 'today' && lastPeriodRunningAt(known, clock)
+  const tpo = useMemo(() => compositeMarketProfile(sessions, row), [sessions, row])
+  // "Forming" is read for a profile of the day alone - in a composite an older session's letter is the same letter.
+  const running = profileOf === 'today' && sessions.length === 1 && lastPeriodRunningAt(known, clock)
   const mz = useMemo(() => marketProfileZones(tpo, { lastPeriodRunning: running }), [tpo, running])
 
   const vpZones = useMemo(() => {
@@ -347,8 +391,11 @@ export default function ProfilesPage() {
   const makeTpo = useCallback(() => new TpoProfilePrimitive(), [])
   const resetKey = `${index}|${effectiveDate}|${timeframe}|${profileOf}`
 
-  const profileDate = profileOf === 'previous' ? previous.day?.date : effectiveDate
-  const estimated = profileOf === 'previous' ? previous.day?.source === 'estimated' : day?.source === 'estimated'
+  // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)".
+  const usedPast = past.sessions.slice(-pastSessionsNeeded(dayCount, profileOf))
+  const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && known.length ? [effectiveDate] : [])]
+  const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
+  const estimated = (profileOf === 'today' && day?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
   const asOf = live ? (futures.at ? `live · updated ${new Date(futures.at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}` : 'live') : clock ? `as of ${fmtClock(clock)}` : ''
   const noData = !futures.loading && day && sessionBars.length === 0
 
@@ -384,8 +431,14 @@ export default function ProfilesPage() {
               </Space>
               <Space size={4}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Profile of</Text>
-                <Segmented size="small" value={profileOf} onChange={setProfileOf} options={[{ value: 'today', label: live ? 'Today so far' : 'This day so far' }, { value: 'previous', label: 'Previous session' }]} />
+                <Segmented size="small" value={profileOf} onChange={setProfileOf} options={[{ value: 'today', label: live ? 'Today so far' : 'This day so far' }, { value: 'previous', label: dayCount > 1 ? 'Previous sessions' : 'Previous session' }]} />
               </Space>
+              <Tooltip title={`How many sessions both profiles are built from (a composite). 1 = the day alone. With "${live ? 'Today so far' : 'This day so far'}", the day so far and the sessions before it; with "Previous session", that many sessions before the day.`}>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Days</Text>
+                  <InputNumber size="small" min={1} max={MAX_PROFILE_DAYS} value={dayCount} onChange={(v) => { if (v >= 1) setDays(Math.round(v)) }} style={{ width: 64 }} />
+                </Space>
+              </Tooltip>
               <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. Nothing you do here moves OI Replay.">
                 <Space size={4}>
                   <Switch size="small" checked={follow} onChange={setFollow} />
@@ -410,12 +463,15 @@ export default function ProfilesPage() {
             <Space size={8} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {index} futures{day?.contract ? ` (${day.contract})` : ''} · {effectiveDate} {asOf && `· ${asOf}`}
-                {profileOf === 'previous' && (previous.loading ? ' · loading the previous session…' : profileDate ? ` · profile of ${profileDate}` : ' · no previous session found in the last week')}
+                {(dayCount > 1 || profileOf === 'previous') && (coverText ? ` · profile of ${coverText}` : '')}
+                {past.loading && ` · loading sessions… ${usedPast.length} of ${pastSessionsNeeded(dayCount, profileOf)}`}
+                {!past.loading && pastSessionsNeeded(dayCount, profileOf) > usedPast.length && ` · only ${usedPast.length} earlier session${usedPast.length === 1 ? '' : 's'} found`}
               </Text>
-              {estimated && <Tag color="orange" style={{ margin: 0 }}>estimated from 1-minute candles</Tag>}
+              {estimated && <Tag color="orange" style={{ margin: 0 }}>{dayCount > 1 ? 'some days ' : ''}estimated from 1-minute candles</Tag>}
               {futures.loading && <Tag style={{ margin: 0 }}>loading…</Tag>}
             </Space>
             {futures.error && <Alert type="warning" showIcon message={`The futures day is not available: ${futures.error}`} />}
+            {past.error && <Alert type="warning" showIcon message={`Not every earlier session could be loaded: ${past.error}`} />}
             {noData && <Alert type="info" showIcon message={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : 'No futures minutes for this day.'} />}
           </Space>
         </Card>
@@ -424,7 +480,7 @@ export default function ProfilesPage() {
           <Col xs={24} xl={12}>
             <Card
               size="small"
-              title="Volume profile"
+              title={`Volume profile${sessions.length > 1 ? ` · ${sessions.length} sessions` : ''}`}
               extra={<Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>}
             >
               <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -447,7 +503,8 @@ export default function ProfilesPage() {
                     is near); each names its HVN, its busiest row. RED boxes are where volume was thin inside the range - prices the market
                     moved through fast, which it tends to cross fast again: a break into one often runs to the far side. A thin edge at the
                     day&apos;s high or low is not a box (price only got there briefly). Busy = at least 1.3x the average row, thin = 0.6x or
-                    less (smoothed over three rows).
+                    less (smoothed over three rows). With Days above 1 it is every session&apos;s volume at each price added up - the levels
+                    several days agreed on.
                   </Text>
                 </FoldText>
               </Space>
@@ -456,7 +513,7 @@ export default function ProfilesPage() {
           <Col xs={24} xl={12}>
             <Card
               size="small"
-              title="Market profile (TPO)"
+              title={`Market profile (TPO)${sessions.length > 1 ? ` · ${sessions.length} sessions` : ''}`}
               extra={<Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>}
             >
               <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -481,7 +538,8 @@ export default function ProfilesPage() {
                     are single prints inside the range - one period only, a fast one-sided move; price often comes back to fill them, and
                     they act as support / resistance until it does. MAGENTA boxes are tails - single prints at the day&apos;s high (selling
                     tail) or low (buying tail), where the auction was rejected. &quot;Forming&quot; = made by the period still running: it
-                    can still be filled in.
+                    can still be filled in. With Days above 1 every session&apos;s TPOs are added up (each session lettered from A; blocks
+                    instead of letters once a row holds too many to read) and the initial balance is the latest session&apos;s.
                   </Text>
                 </FoldText>
               </Space>

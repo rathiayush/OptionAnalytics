@@ -1,5 +1,5 @@
 import { singlePrintGaps, tpoProfile, TPO_LETTERS } from './profiles.js'
-import { rebucketBar, volumeProfile, volumeProfileFromCandles } from './orderFlowMath.js'
+import { pocIndexOf, rebucketBar, valueAreaOf, volumeProfile, volumeProfileFromCandles } from './orderFlowMath.js'
 import { inMarketSession } from './marketSession.js'
 
 // The Profiles page's maths: a day's volume profile and market profile (TPO) up to a clock, and the
@@ -192,6 +192,49 @@ export const TPO_PERIOD_MINUTES = 30
 /** The day's market profile up to the clock, 30-minute periods (A = 09:15) in `rowSize` rows. */
 export function dayMarketProfile(bars, rowSize) {
   return tpoProfile(bars, rowSize, TPO_PERIOD_MINUTES)
+}
+
+/** How many sessions a profile may cover ("Days") - one is the day itself, as it always was. */
+export const MAX_PROFILE_DAYS = 20
+
+/** The sessions a profile of `days` sessions is built from, oldest first: `of` 'today' = the day so far (`today`, its
+ *  bars known at the clock) and the `days` - 1 sessions before it; 'previous' = the `days` sessions before the day.
+ *  `past`: the sessions before the day, oldest first, each an array of bars. Fewer when fewer were found. */
+export function profileSessions({ today = [], past = [], days = 1, of = 'today' }) {
+  const n = Math.max(1, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1))
+  const before = (past ?? []).filter((bars) => bars?.length)
+  if (of === 'previous') return before.slice(-n)
+  return [...(n > 1 ? before.slice(-(n - 1)) : []), ...(today?.length ? [today] : [])]
+}
+
+/** How many sessions BEFORE the day a profile of `days` needs. */
+export const pastSessionsNeeded = (days, of) => Math.max(0, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1) - (of === 'previous' ? 0 : 1))
+
+/** A market profile over several sessions - a composite: each session's own TPO profile (its periods lettered from A
+ *  at 09:15 - one session's A is not another's), added row by row: a row's TPOs are all the sessions' together, its
+ *  letters theirs one after another (oldest first). POC and value area from the summed counts (the same rules as one
+ *  session's); the initial balance is the LAST session's. One session = that session's own profile, unchanged. */
+export function compositeMarketProfile(sessions, rowSize) {
+  const profiles = (sessions ?? []).map((bars) => dayMarketProfile(bars, rowSize)).filter(Boolean)
+  if (profiles.length <= 1) return profiles[0] ?? null
+  const rows = new Map()
+  for (const tpo of profiles) {
+    for (const r of tpo.rows) {
+      const row = rows.get(r.price) ?? { price: r.price, letters: '', count: 0 }
+      row.letters += r.letters
+      row.count += r.count
+      rows.set(r.price, row)
+    }
+  }
+  const list = [...rows.values()].sort((a, b) => a.price - b.price)
+  const counts = list.map((r) => r.count)
+  const pocIndex = pocIndexOf(counts)
+  const { lo, hi } = valueAreaOf(counts, pocIndex, 0.7)
+  return {
+    rows: list, rowSize, poc: list[pocIndex].price, vah: list[hi].price, val: list[lo].price,
+    ib: profiles.at(-1).ib, singles: list.filter((r, i) => r.count === 1 && i > 0 && i < list.length - 1).map((r) => r.price),
+    periods: profiles.reduce((s, t) => s + (t.periods ?? 0), 0), sessions: profiles.length,
+  }
 }
 
 /** Whether the TPO period of the newest bar in `bars` is still running at `clockMs` (null = live: it is).

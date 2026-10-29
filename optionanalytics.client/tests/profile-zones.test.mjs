@@ -4,7 +4,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  ZONE_RULES, barsKnownAt, candlesOf, dayMarketProfile, dayVolumeProfile, lastPeriodRunningAt, marketProfileZones, volumeZones,
+  ZONE_RULES, barsKnownAt, candlesOf, compositeMarketProfile, dayMarketProfile, dayVolumeProfile, lastPeriodRunningAt, marketProfileZones,
+  pastSessionsNeeded, profileSessions, volumeZones,
 } from '../src/profileZones.js'
 
 const MIN = 60_000
@@ -157,4 +158,50 @@ test('no look-ahead: what comes after the clock changes nothing in the profiles 
   assert.ok(known.every((b) => Date.parse(b.time) + MIN <= clock))
   assert.deepEqual(volumeZones(dayVolumeProfile(later, 5), 5), volumeZones(dayVolumeProfile(known, 5), 5))
   assert.deepEqual(marketProfileZones(dayMarketProfile(later, 5)), marketProfileZones(dayMarketProfile(known, 5)))
+})
+
+test('"Days": the day so far and the sessions before it, or only the sessions before it', () => {
+  const past = [['d1'], ['d2'], ['d3'], ['d4']] // oldest first
+  const today = ['t']
+  assert.deepEqual(profileSessions({ today, past, days: 1, of: 'today' }), [today])
+  assert.deepEqual(profileSessions({ today, past, days: 3, of: 'today' }), [['d3'], ['d4'], today])
+  assert.deepEqual(profileSessions({ today, past, days: 1, of: 'previous' }), [['d4']])
+  assert.deepEqual(profileSessions({ today, past, days: 2, of: 'previous' }), [['d3'], ['d4']])
+  // Fewer found than asked: as many as there are. No minutes yet today: the earlier sessions alone.
+  assert.deepEqual(profileSessions({ today, past, days: 9, of: 'previous' }), past)
+  assert.deepEqual(profileSessions({ today: [], past, days: 2, of: 'today' }), [['d4']])
+  // An empty session (a holiday) never counts as one.
+  assert.deepEqual(profileSessions({ today, past: [['d1'], []], days: 3, of: 'today' }), [['d1'], today])
+  assert.equal(pastSessionsNeeded(1, 'today'), 0)
+  assert.equal(pastSessionsNeeded(5, 'today'), 4)
+  assert.equal(pastSessionsNeeded(5, 'previous'), 5)
+  assert.equal(pastSessionsNeeded(500, 'previous'), 20)
+})
+
+test('a composite market profile adds every session\'s own TPOs - one session\'s A is not another\'s', () => {
+  // Day 1: A 100-110, B 105-115. Day 2: A 100-105, B 110-120 - each day lettered from A.
+  const day1 = periodBars([[100, 110], [105, 115]])
+  const day2 = periodBars([[100, 105], [110, 120]]).map((b) => ({ ...b, time: new Date(Date.parse(b.time) + 86_400_000).toISOString() }))
+  // One session: exactly that session's profile.
+  assert.deepEqual(compositeMarketProfile([day1], 5), dayMarketProfile(day1, 5))
+  const c = compositeMarketProfile([day1, day2], 5)
+  const at = (price) => c.rows.find((r) => r.price === price)
+  // 100: day 1 A + day 2 A = two TPOs (a merge by letter would count one).
+  assert.deepEqual([at(100).letters, at(100).count], ['AA', 2])
+  assert.deepEqual([at(105).letters, at(105).count], ['ABA', 3])
+  assert.deepEqual([at(110).letters, at(110).count], ['ABB', 3])
+  assert.deepEqual([at(120).letters, at(120).count], ['B', 1])
+  assert.equal(c.sessions, 2)
+  assert.equal(c.periods, 4)
+  // The POC from the summed counts (105 and 110 tie - the one nearer the middle), the initial balance the last day's.
+  assert.ok([105, 110].includes(c.poc))
+  assert.deepEqual(c.ib, dayMarketProfile(day2, 5).ib)
+  assert.equal(compositeMarketProfile([], 5), null)
+})
+
+test('a composite volume profile is every session\'s volume at each price added up', () => {
+  const a = [{ time: iso(at(0)), open: 100, high: 101, low: 100, close: 101, levels: [{ price: 100, buy: 10, sell: 5 }] }]
+  const b = [{ time: iso(at(0) + 86_400_000), open: 100, high: 106, low: 100, close: 106, levels: [{ price: 101, buy: 1, sell: 1 }, { price: 106, buy: 4, sell: 0 }] }]
+  const vp = dayVolumeProfile([...a, ...b], 5)
+  assert.deepEqual(vp.rows.map((r) => [r.price, r.total]), [[100, 17], [105, 4]])
 })

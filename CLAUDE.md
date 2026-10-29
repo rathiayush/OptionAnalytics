@@ -358,8 +358,13 @@ When adding or changing a strategy:
   are too thin), POC / VAH / VAL / IB lines, and BOXES (`marketProfileZones`): the value area and the rows with >= 0.7x the POC
   row's TPOs (where the market spent its time - accepted), single prints inside the range (`singlePrintGaps`) and tails (>= 2
   single-print rows at the high / low, ending at a row of 2+ periods); one made only by the period still running is
-  "forming". Nothing for a one-period profile. "Profile of": the day so far, or the previous session (`fetchPreviousSession`)
-  over the day's candles. The time axis leaves the right of the plot empty for the profile. It FOLLOWS OI REPLAY by default,
+  "forming". Nothing for a one-period profile. "Profile of": the day so far, or the previous session(s), over the day's
+  candles. "DAYS" (1 - 20, default 1 = as before) makes both a COMPOSITE (`profileSessions` / `pastSessionsNeeded`): the day so
+  far and the N - 1 sessions before it, or the N sessions before the day; the volume profile adds each price's volume, the
+  market profile adds each SESSION'S own TPOs (`compositeMarketProfile` - every session lettered from A, so they are not merged
+  by letter; IB = the latest session's; "forming" only for the day alone). The sessions before the day are walked back one
+  weekday and one request at a time (a holiday's empty day stepped over, N + 10 weekdays at most) and kept for the tab's life
+  (`PAST_DAY_CACHE` - a past day never changes; failures are not kept). The time axis leaves the right of the plot empty for the profile. It FOLLOWS OI REPLAY by default,
   one way (`useReplayClockBroadcast` in `OiReplayPage` - always on, whatever the Sync switch - and `useFollowReplayClock`,
   `optionanalytics.replayClock` channel): OI Replay's index and day, live or at its replay clock (its own controls locked
   while it follows; nothing it does moves OI Replay); with no OI Replay tab open it is its own - Live, or a past day with its
