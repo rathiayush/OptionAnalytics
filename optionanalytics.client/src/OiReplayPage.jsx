@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, ConfigProvider, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
@@ -52,14 +52,14 @@ import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, anal
 import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
-import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
+import { CardFitBox, ChartGrow, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
-  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX,
+  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -751,6 +751,33 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
+// The cards' text kept small, so the charts are what fills a card: the numbers (Statistic) and the read boxes (an Alert
+// with a description - "Since open", "Day so far", Market Read) at about the size of the text around them, not antd's
+// headline sizes. The charts grow (ChartGrow, dashboardLayout.chartGrow).
+const COMPACT_TEXT_THEME = {
+  components: {
+    Statistic: { titleFontSize: 11, contentFontSize: 16 },
+    Alert: { withDescriptionPadding: '6px 12px', withDescriptionIconSize: 16, fontSizeLG: 13, fontSize: 12, marginXS: 2 },
+  },
+}
+
+// The window's height for the charts' growth - followed on a rotation or a new width only: a phone's browser bar
+// coming and going while the page scrolls changes the height, and the charts must not jump as it does.
+function useViewportHeight() {
+  const [height, setHeight] = useState(() => (typeof window === 'undefined' ? 0 : window.innerHeight))
+  useEffect(() => {
+    let width = window.innerWidth
+    const onResize = () => {
+      if (window.innerWidth === width) return
+      width = window.innerWidth
+      setHeight(window.innerHeight)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return height
+}
+
 const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
@@ -1526,7 +1553,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
   const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
   // Rows HEATMAP_ROW_HEIGHT tall - in a dashboard card the trader sized, taller or shorter so the card's content fills it
   // (useFitHeight; never under 8 px a row).
-  const plotHeight = useFitHeight(strikes.length * HEATMAP_ROW_HEIGHT, strikes.length * 8)
+  const plotHeight = useFitHeight(strikes.length * HEATMAP_ROW_HEIGHT, strikes.length * 8, { grow: false })
   const rowHeight = strikes.length ? plotHeight / strikes.length : HEATMAP_ROW_HEIGHT
 
   // Redraws the whole grid whenever the underlying matrix changes - a plain fillRect per cell, no
@@ -3644,6 +3671,10 @@ export default function OiReplayPage() {
   // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
   // every reading is worked out, which is worth reading once and in the way after that.
   const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
+  // The charts are the cards' main part: taller than they ask on the page, taller still in a quick-view popup.
+  const viewportHeight = useViewportHeight()
+  const pageChartGrow = useMemo(() => chartGrow(viewportHeight), [viewportHeight])
+  const popupChartGrow = useMemo(() => chartGrow(viewportHeight, { popup: true }), [viewportHeight])
   // The quick views' floating button, on every screen now - see QuickViewFab.
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
   // The controls card folded to one row: the day, the index and Load day - the rest (chart options, sections, quick
@@ -6035,7 +6066,7 @@ export default function OiReplayPage() {
   const quickViewDef = QUICK_VIEWS.find((v) => v.key === quickView) ?? null
   const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
 
-  return (
+  const page = (
     // The WHOLE window, however wide - unlike every other page's own 1280. This is the page carrying the charts, the
     // OI/IV ladder, the heatmaps and a dozen more cards at once, laid out as a dashboard (DashboardGrid): on a wide or
     // ultra-wide trading monitor the grid's twelve columns simply get wider, so more cards fit side by side ("Cards a
@@ -6872,7 +6903,7 @@ export default function OiReplayPage() {
       {result && (
         <Modal
           open={quickViewDef != null && quickView !== 'oiCharts'} onCancel={() => setQuickView(null)} footer={null} destroyOnHidden
-          width="96vw" style={{ top: 12, maxWidth: 1800 }}
+          width="96vw" style={{ top: 12, maxWidth: 1800 }} className="oa-quick-view"
           title={(
             <Space wrap size={[12, 4]}>
               <span>{quickViewDef?.title ?? ''}</span>
@@ -6883,53 +6914,63 @@ export default function OiReplayPage() {
                   options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
                 />
               </div>
-              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
+              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
             </Space>
           )}
         >
-          {quickView === 'dayOi' && (dayOiContent ?? <Empty description="No OI since the open yet." />)}
-          {quickView === 'oiHeatmap' && (
-            <OiChangeHeatmapSection
-              ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-              lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
-              spotBars={oneMinBars} step={step}
-            />
-          )}
-          {quickView === 'premium' && (
-            <Row gutter={[16, 16]}>
-              <Col span={24}><Space size={12} wrap>{premiumPickers}</Space></Col>
-              {premiumCharts}
-            </Row>
-          )}
-          {quickView === 'straddle' && (
-            <StraddleCard
-              cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
-              asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
-            />
-          )}
-          {quickView === 'futures' && (
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Space size={8} wrap>{futuresControls}</Space>
-              {futuresContent}
-            </Space>
-          )}
-          {quickView === 'gex' && (
-            <GexCard
-              days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
-              expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
-            />
-          )}
+          {/* One card in the popup: its charts take more of the window (chartGrow's popup share). */}
+          <ChartGrow value={popupChartGrow}>
+            {quickView === 'dayOi' && (dayOiContent ?? <Empty description="No OI since the open yet." />)}
+            {quickView === 'oiHeatmap' && (
+              <OiChangeHeatmapSection
+                ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+                lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
+                spotBars={oneMinBars} step={step}
+              />
+            )}
+            {quickView === 'premium' && (
+              <Row gutter={[16, 16]}>
+                <Col span={24}><Space size={12} wrap>{premiumPickers}</Space></Col>
+                {premiumCharts}
+              </Row>
+            )}
+            {quickView === 'straddle' && (
+              <StraddleCard
+                cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
+                asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+              />
+            )}
+            {quickView === 'futures' && (
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Space size={8} wrap>{futuresControls}</Space>
+                {futuresContent}
+              </Space>
+            )}
+            {quickView === 'gex' && (
+              <GexCard
+                days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+                expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+              />
+            )}
+          </ChartGrow>
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
       {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} />}
       {result && (
-        <OiTotalsChartsPopup
-          open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}
-          strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={quickTotalsTimeframe} dayKey={`quick-${underlying}-${result.date}`}
-          extra={<HeatmapBucketSelect value={quickTotalsTimeframe} onChange={setQuickTotalsTimeframe} />}
-        />
+        <ChartGrow value={popupChartGrow}>
+          <OiTotalsChartsPopup
+            open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}
+            strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={quickTotalsTimeframe} dayKey={`quick-${underlying}-${result.date}`}
+            extra={<HeatmapBucketSelect value={quickTotalsTimeframe} onChange={setQuickTotalsTimeframe} />}
+          />
+        </ChartGrow>
       )}
     </div>
+  )
+  return (
+    <ConfigProvider theme={COMPACT_TEXT_THEME}>
+      <ChartGrow value={pageChartGrow}>{page}</ChartGrow>
+    </ConfigProvider>
   )
 }

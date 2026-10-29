@@ -25,12 +25,14 @@
   line-height: clamp(14px, 4vw, 20px);
 }
 
+/* The numbers stay small on every screen - the charts are the cards' main part (COMPACT_TEXT_THEME in OiReplayPage.jsx
+   sets the same sizes for its popups, which are not under this class). */
 .oi-mobile-page .ant-statistic-title {
-  font-size: clamp(10px, 2.8vw, 14px);
+  font-size: clamp(10px, 2.8vw, 11px);
 }
 
 .oi-mobile-page .ant-statistic-content {
-  font-size: clamp(14px, 4vw, 24px);
+  font-size: clamp(14px, 4vw, 16px);
 }
 
 .oi-mobile-page .ant-btn {
@@ -102,3 +104,12 @@
 /* "Compact" - the long explanatory paragraphs under the cards are for learning the page, not for
    trading it; one class hides every one of them at once (they carry it, see the oa-note class). */
 .oi-dash-compact .oa-note { display: none; }
+
+/* The quick-view popup's keyboard hint means nothing on a touch screen or a phone - and its line is room for the chart.
+   On a phone the popup's own padding goes to the chart too. */
+@media (hover: none), (max-width: 768px) {
+  .oa-keyboard-hint { display: none; }
+}
+@media (max-width: 768px) {
+  .oa-quick-view .ant-modal-container { padding: 12px 10px; }
+}
