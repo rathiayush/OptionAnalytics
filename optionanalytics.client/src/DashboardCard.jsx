@@ -1,5 +1,5 @@
 import { createContext, isValidElement, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { nextFitScale } from './dashboardLayout.js'
+import { grownChartHeight, nextFitScale } from './dashboardLayout.js'
 
 // One card on the OI Replay dashboard. Thin on purpose: react-grid-layout owns where the card is and how
 // big it is - it CLONES this element with its own `ref`, `className` and `style` (the absolute position and
@@ -27,16 +27,27 @@ import { nextFitScale } from './dashboardLayout.js'
 // React context reaches through portals: a popup opened from INSIDE a sized card (a Modal in its content) would be
 // fitted with the card - render such a popup's charts outside the card, or under <FitContext value={null}>.
 const FitContext = createContext(null)
+// How much taller the charts stand where no card is sized (dashboardLayout.chartGrow) - the OI Replay page and its
+// popups set it; anywhere else (another page, the External page) a chart is the height it asks for.
+const ChartGrowContext = createContext(null)
+
+/** The charts inside grow by `value` ({ scale, cap } - chartGrow) wherever their card is not sized. */
+export function ChartGrow({ value, children }) {
+  return <ChartGrowContext.Provider value={value}>{children}</ChartGrowContext.Provider>
+}
 
 /** The height an element `px` tall (its own height anywhere else) takes in a card the trader has sized: `px` x the
  *  card's fit scale, never under `min` - so the card's content fills exactly the size it was given. Anywhere else (a
- *  card following its content, a narrow screen, a popup, another page) just `px`. */
-export function useFitHeight(px, min = 80) {
+ *  card following its content, a narrow screen, a popup) a chart grows by the page's ChartGrow - the charts are the
+ *  cards' main part - and `grow: false` (a table, the OI heatmap's rows) keeps just `px`. */
+export function useFitHeight(px, min = 80, { grow = true } = {}) {
   const fit = useContext(FitContext)
+  const growBy = useContext(ChartGrowContext)
   const id = useId()
   const register = fit?.register
   useEffect(() => (register && px > 0 ? register(id, px) : undefined), [register, id, px])
-  if (!fit || !(px > 0)) return px
+  if (!(px > 0)) return px
+  if (!fit) return grow ? grownChartHeight(px, growBy) : px
   return Math.max(Math.min(min, px), Math.round(px * fit.scale))
 }
 
@@ -54,7 +65,7 @@ export function CardFitBox({ children, min = 120, max = Infinity, style }) {
     observer.observe(element)
     return () => observer.disconnect()
   }, [])
-  const height = useFitHeight(Math.min(natural, max), min)
+  const height = useFitHeight(Math.min(natural, max), min, { grow: false })
   const box = fit && natural > 0 ? { height, overflowY: 'auto' }
     : Number.isFinite(max) ? { maxHeight: max, overflowY: 'auto' } : null
   return (

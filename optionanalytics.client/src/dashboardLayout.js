@@ -338,3 +338,24 @@ export const LAYOUT_VERSION = '2'
 // Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
 export const SECTIONS_VERSION = '2'
+
+// ---- Charts first ----
+// The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands
+// CHART_GROW times the height it asks for - up to a share of the window, so a phone still sees a whole chart and a bit
+// of what is around it, and never shorter than it asks. A quick-view popup shows one card, so its charts take more.
+export const CHART_GROW = 1.35
+export const POPUP_CHART_GROW = 2
+
+/** How much the charts grow in a window `viewportHeight` px tall: { scale, cap } - on the page, or in a popup. */
+export function chartGrow(viewportHeight, { popup = false } = {}) {
+  const tall = viewportHeight > 0 ? viewportHeight : 900
+  return popup
+    ? { scale: POPUP_CHART_GROW, cap: Math.round(Math.min(900, Math.max(360, tall * 0.72))) }
+    : { scale: CHART_GROW, cap: Math.round(Math.min(560, Math.max(360, tall * 0.62))) }
+}
+
+/** A chart asking for `px` grown by `grow` (chartGrow): taller up to the cap, never shorter than asked. */
+export function grownChartHeight(px, grow) {
+  if (!grow || !(px > 0)) return px
+  return Math.max(px, Math.min(Math.round(px * grow.scale), grow.cap))
+}

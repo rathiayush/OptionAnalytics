@@ -8,6 +8,7 @@ import {
   defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
   isStackedLayout, nextFitScale, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
   SECTION_SPLITS, withSplitSections, defaultSpan as spanOf, cardsARowChoices, SIX_A_ROW_PX,
+  CHART_GROW, POPUP_CHART_GROW, chartGrow, grownChartHeight,
 } from '../src/dashboardLayout.js'
 
 const IDS = ['topStats', 'marketRead', 'gex']
@@ -255,4 +256,25 @@ test('"anything to reset?" asks about the arrangement - not the heights the card
   assert.equal(isDefaultArrangement(hiddenMoved, IDS), false)
   assert.equal(isDefaultArrangement(hiddenMoved, IDS, null, ['marketRead', 'gex']), true)
   assert.equal(isDefaultArrangement(base.filter((it) => it.i !== 'gex'), IDS, null, ['marketRead', 'gex']), false)
+})
+
+test('the charts are the main part: taller than they ask, up to a share of the window, never shorter', () => {
+  const monitor = chartGrow(1000)                            // a 1080p monitor's browser window
+  assert.equal(monitor.scale, CHART_GROW)
+  assert.equal(grownChartHeight(320, monitor), Math.round(320 * CHART_GROW))   // the futures / premium charts
+  assert.equal(grownChartHeight(440, monitor), 560)          // the spot chart - up to the cap
+  assert.equal(grownChartHeight(600, monitor), 600)          // already over the cap: as asked, never shorter
+  assert.equal(grownChartHeight(320, chartGrow(700)), 432)  // a phone with its browser bars: the same growth
+  const small = chartGrow(640)                               // a small phone: up to its share of the window
+  assert.equal(grownChartHeight(320, small), Math.round(640 * 0.62))           // a whole chart and a bit around it
+  assert.ok(grownChartHeight(320, small) > 320)
+  // A quick-view popup shows one card: its charts take more of the window.
+  const popup = chartGrow(700, { popup: true })
+  assert.equal(popup.scale, POPUP_CHART_GROW)
+  assert.equal(grownChartHeight(320, popup), Math.round(700 * 0.72))
+  assert.equal(grownChartHeight(220, chartGrow(1000, { popup: true })), 440)
+  // Nothing set (another page, the External page) or nothing to grow: as asked.
+  assert.equal(grownChartHeight(320, null), 320)
+  assert.equal(grownChartHeight(0, monitor), 0)
+  assert.equal(chartGrow(0).cap, 558)                         // an unknown window reads as a common one
 })

@@ -284,6 +284,26 @@ When adding or changing a strategy:
   to count as typing, so after ticking VWAP or picking a timeframe B / S did nothing (`tests/quick-views.test.mjs`).
 - OI Replay's Day OI card: the "Day so far" read and the Total OI lookback table each fold to one line (the verdict and
   its reason; the shortest lookback's CE / PE change) - `STORED_DAY_READ_OPEN` / `STORED_LOOKBACK_OPEN`.
+- The cards' TEXT BLOCKS fold to one line and open again (`FoldText.jsx` - a ▸ / ▾ button, the folded line its `summary`
+  or its own text cut with an ellipsis, a click on it opens it; `useFold.js`; `foldText.js` the pure rules). The CHARTS
+  are the cards' main part, so EVERY block starts FOLDED - the reads (straddle read and numbers, GEX regime and the two
+  signs' verdict, the checklist's reasons, the live-order note) and the explanations (heatmap, ladder, futures chart
+  notes, liquidity map, profiles, footprint, Market Read, paper trades, the page intro, the chart captions) alike; the
+  GEX number row is not a text block and always shows. Each block keeps its own click (`optionanalytics.fold.<id>` -
+  an account preference like every other, `prefsSync.js`); the controls card's "Text: Fold all / Open all" sets
+  `optionanalytics.foldAll` and drops every block's own click, so blocks not on the page follow too. An explanation keeps
+  the `oa-note` class on its FoldText, so "Compact" still hides it whole. A new block of text on a card: wrap it in
+  `FoldText` with its own id (`tests/fold-text.test.mjs`).
+- CHARTS BIG, TEXT SMALL on OI Replay: where a card is not sized (a sized card's own fit decides), every chart stands
+  `CHART_GROW` (1.35) times the height it asks for, up to 62% of the window (360 - 560 px) and never shorter than asked;
+  in a quick-view popup `POPUP_CHART_GROW` (2), up to 72% (360 - 900 px) - `chartGrow` / `grownChartHeight` in
+  `dashboardLayout.js`, given by `<ChartGrow>` (`DashboardCard.jsx`) and applied in `useFitHeight`, which every chart
+  goes through (`{ grow: false }` for tables and the OI heatmap's rows). The window height is followed on a new width
+  only - a phone's browser bar coming and going must not make the charts jump. The text is small: the page's
+  `COMPACT_TEXT_THEME` (antd component tokens - Statistic 16 px numbers / 11 px titles, a compact Alert with a
+  description) wraps the page AND its popups (they are portalled outside `.oi-mobile-page`, whose own clamp() rules in
+  `oiMobile.css` cap at the same sizes); the popup's keyboard hint is hidden on a touch screen / phone. Another page
+  (the External page too) has no ChartGrow - its charts are as asked (`tests/dashboard-layout.test.mjs`).
 - OI Replay's Option CDV / OBV card IS the dashboard's: today, live, its own series (`dashboardFlow.js`); a past day, worked
   out from the day's 1-minute option bars with the server's formulas (`optionFlow.js` = `CdvUnderlyingState`: CDV weighted
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first

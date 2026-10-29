@@ -1,6 +1,6 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
-import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, message, notification } from 'antd'
+import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, ConfigProvider, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
@@ -52,12 +52,14 @@ import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, anal
 import { withBackfill, deltaMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
-import { CardFitBox, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
+import { CardFitBox, ChartGrow, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
+import { FoldText } from './FoldText.jsx'
+import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
-  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX,
+  isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
@@ -749,6 +751,33 @@ const DEFAULT_SECTION_VALUES = ALL_SECTION_VALUES.filter((v) => v !== 'topStats'
 // toggles visibility) - 'spotAndEntry' bundles three individually-titled Cards (Spot/Entry B/Entry
 // C) that already share one responsive Row (see its own doc comment on the wide-monitor 3-up
 // layout), and 'ladder' is never hidden by SECTION_OPTIONS at all but is still reorderable.
+// The cards' text kept small, so the charts are what fills a card: the numbers (Statistic) and the read boxes (an Alert
+// with a description - "Since open", "Day so far", Market Read) at about the size of the text around them, not antd's
+// headline sizes. The charts grow (ChartGrow, dashboardLayout.chartGrow).
+const COMPACT_TEXT_THEME = {
+  components: {
+    Statistic: { titleFontSize: 11, contentFontSize: 16 },
+    Alert: { withDescriptionPadding: '6px 12px', withDescriptionIconSize: 16, fontSizeLG: 13, fontSize: 12, marginXS: 2 },
+  },
+}
+
+// The window's height for the charts' growth - followed on a rotation or a new width only: a phone's browser bar
+// coming and going while the page scrolls changes the height, and the charts must not jump as it does.
+function useViewportHeight() {
+  const [height, setHeight] = useState(() => (typeof window === 'undefined' ? 0 : window.innerHeight))
+  useEffect(() => {
+    let width = window.innerWidth
+    const onResize = () => {
+      if (window.innerWidth === width) return
+      width = window.innerWidth
+      setHeight(window.innerHeight)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return height
+}
+
 const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
@@ -1524,7 +1553,7 @@ export function OiChangeHeatmapPlot({ label, byStrike, strikes, atmStrike, asOfM
   const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
   // Rows HEATMAP_ROW_HEIGHT tall - in a dashboard card the trader sized, taller or shorter so the card's content fills it
   // (useFitHeight; never under 8 px a row).
-  const plotHeight = useFitHeight(strikes.length * HEATMAP_ROW_HEIGHT, strikes.length * 8)
+  const plotHeight = useFitHeight(strikes.length * HEATMAP_ROW_HEIGHT, strikes.length * 8, { grow: false })
   const rowHeight = strikes.length ? plotHeight / strikes.length : HEATMAP_ROW_HEIGHT
 
   // Redraws the whole grid whenever the underlying matrix changes - a plain fillRect per cell, no
@@ -1753,15 +1782,17 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const serverSent = serverOiBreaks?.alerts?.sent ?? []
   const strikesPart = (
     <>
-      <Text className="oa-note" type="secondary" style={{ fontSize: 12 }}>
-        Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
-        (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
-        out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
-        the left; while live, the outlined column is the one filling right now. Hover a cell for the exact number. Scroll
-        right for earlier in the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
-        different meaning (which side, how heavy), so this uses its own separate color language for "added vs
-        removed."
-      </Text>
+      <FoldText id="oiHeatmap.note" label="how the heatmap reads" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          Every tracked strike's own OI change, bucketed to the timeframe below - color intensity is how much changed
+          (relative to this side's own typical large move today, so one outsized burst doesn't wash everything else
+          out), not an absolute scale, so a quiet day and a violent one both use the full range. Newest minute on
+          the left; while live, the outlined column is the one filling right now. Hover a cell for the exact number. Scroll
+          right for earlier in the day. Blue/orange here, not green/red - the chart's own R/S wall lines already use green/red for a
+          different meaning (which side, how heavy), so this uses its own separate color language for "added vs
+          removed."
+        </Text>
+      </FoldText>
       <Space size={16} wrap>
         <Text style={{ color: OI_ADDED_COLOR }}>■ OI added</Text>
         <Text style={{ color: OI_REMOVED_COLOR }}>■ OI removed</Text>
@@ -2837,27 +2868,31 @@ function PaperTradePanel({
           </>
         )}
         {isLiveMode ? (
-          <Text type="secondary" style={{ fontSize: 10 }}>
-            Live: each order is a Dhan Super Order (INTRADAY) - a LIMIT entry at the live ask (buy) or bid (sell)
-            plus the slippage above, with the SL and target measured from that ask/bid as its exit legs, which
-            Dhan itself manages after the fill. Positions are read from your Dhan account, so they come back
-            after a restart and include anything opened elsewhere; P&amp;L moves with the live tick feed.
-          </Text>
+          <FoldText id="tradePanel.liveNote" label="how live orders work">
+            <Text type="secondary" style={{ fontSize: 10 }}>
+              Live: each order is a Dhan Super Order (INTRADAY) - a LIMIT entry at the live ask (buy) or bid (sell)
+              plus the slippage above, with the SL and target measured from that ask/bid as its exit legs, which
+              Dhan itself manages after the fill. Positions are read from your Dhan account, so they come back
+              after a restart and include anything opened elsewhere; P&amp;L moves with the live tick feed.
+            </Text>
+          </FoldText>
         ) : (
-        <Text className="oa-note" type="secondary" style={{ fontSize: 10 }}>
-          Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
-          then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
-          open position once its own premium has moved that many points against/in its favor (0 disables
-          either), checked against every revealed minute bar's own high-low after the entry (or each live
-          tick, once today's live feed is ticking) - not just the latest price - so a real intra-bar touch
-          is caught even if price reverses before the next check. Each position keeps the levels it was
-          placed with (hover its Action); a change here reaches this index's open positions from the
-          minute it is made, never the minutes already passed, and never loosens a trailing stop already
-          earned. Exit all closes every open position
-          right now at its current price, without clearing the table the way Clear all does. Today's own
-          positions survive a page reload (saved locally in this browser); loading a historical day, a
-          different underlying, or clicking Clear all still resets them.
-        </Text>
+        <FoldText id="tradePanel.paperNote" label="how paper trades work" className="oa-note">
+          <Text type="secondary" style={{ fontSize: 10 }}>
+            Paper trade only - simulated against this replay's own premium series, no real order is ever placed. Buy (long) or Sell (short/write),
+            then Exit; lot size is a fixed per-underlying constant, not fetched live. SL/Target auto-exit an
+            open position once its own premium has moved that many points against/in its favor (0 disables
+            either), checked against every revealed minute bar's own high-low after the entry (or each live
+            tick, once today's live feed is ticking) - not just the latest price - so a real intra-bar touch
+            is caught even if price reverses before the next check. Each position keeps the levels it was
+            placed with (hover its Action); a change here reaches this index's open positions from the
+            minute it is made, never the minutes already passed, and never loosens a trailing stop already
+            earned. Exit all closes every open position
+            right now at its current price, without clearing the table the way Clear all does. Today's own
+            positions survive a page reload (saved locally in this browser); loading a historical day, a
+            different underlying, or clicking Clear all still resets them.
+          </Text>
+        </FoldText>
         )}
       </Space>
     </div>
@@ -3092,10 +3127,12 @@ function LiquidityMapTable({ rows, atmStrike, currentPrice, sudden = [] }) {
         scroll={{ x: 920, y: 360 }}
         onRow={(r) => (sudden.some((w) => w.strike === r.strike) ? { style: { background: '#faad1418' } } : {})}
       />
-      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-        Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
-        rest of the band) - not a prediction. "Nearest wall" is a distance fact; whether price actually reaches or holds it is not something OI alone can tell you.
-      </Text>
+      <FoldText id="oiLadder.note" label="the table's note" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
+          rest of the band) - not a prediction. "Nearest wall" is a distance fact; whether price actually reaches or holds it is not something OI alone can tell you.
+        </Text>
+      </FoldText>
     </Space>
   )
 }
@@ -3328,9 +3365,11 @@ function ReviewFootprint({ state, asOfMs, isLive }) {
         {estimated && <Tag color="orange">estimated from 1-min candles</Tag>}
       </Space>
       <FootprintChart bars={shown.last} rowSize={day.rowSize} lotSize={lotSize} showLots lastPrice={day.meta?.lastPrice} height={420} timeframe={timeframe} />
-      <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-        Each bar's rows are sell (at the bid) × buy (at the ask); Δ is the bar's buy minus sell and ΣΔ the running total. Built from Dhan's per-second snapshot ticks, so it can differ from a tick-by-tick chart.
-      </Text>
+      <FoldText id="footprint.note" label="the footprint's key" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          Each bar's rows are sell (at the bid) × buy (at the ask); Δ is the bar's buy minus sell and ΣΔ the running total. Built from Dhan's per-second snapshot ticks, so it can differ from a tick-by-tick chart.
+        </Text>
+      </FoldText>
     </Space>
   )
 }
@@ -3632,6 +3671,10 @@ export default function OiReplayPage() {
   // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
   // every reading is worked out, which is worth reading once and in the way after that.
   const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
+  // The charts are the cards' main part: taller than they ask on the page, taller still in a quick-view popup.
+  const viewportHeight = useViewportHeight()
+  const pageChartGrow = useMemo(() => chartGrow(viewportHeight), [viewportHeight])
+  const popupChartGrow = useMemo(() => chartGrow(viewportHeight, { popup: true }), [viewportHeight])
   // The quick views' floating button, on every screen now - see QuickViewFab.
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
   // The controls card folded to one row: the day, the index and Load day - the rest (chart options, sections, quick
@@ -5982,35 +6025,38 @@ export default function OiReplayPage() {
               deltaBars={futuresDeltaBars}
             />
           </ChartErrorBoundary>
-          {futuresDeltaBars?.length > 0 && (
-            <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
-              Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
-              {futuresFlow?.source === 'estimated'
-                ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
-                : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
-                  ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
-                  : ' - from the live tick feed'}.
-            </Text>
-          )}
-          {futuresProfile?.poc != null && (
-            <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
-              Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
-              {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
-              {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
-              {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
-            </Text>
-          )}
           {prevFuturesShown?.error && (
             <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Previous day&apos;s volume profile: {prevFuturesShown.error}</Text>
           )}
-          <Text className="oa-note" type="secondary" style={{ fontSize: 11, display: 'block' }}>
-            The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
-          </Text>
-          {result.futuresOiAvailable && (
-            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-              Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
+          {/* The chart's notes - what is drawn and how - fold to their first line together. */}
+          <FoldText id="futures.notes" label="the chart's notes" className="oa-note">
+            {futuresDeltaBars?.length > 0 && (
+              <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
+                {futuresFlow?.source === 'estimated'
+                  ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
+                  : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
+                    ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
+                    : ' - from the live tick feed'}.
+              </Text>
+            )}
+            {futuresProfile?.poc != null && (
+              <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                Previous day&apos;s volume profile{futuresProfileLabel}{futuresProfileOtherContract ? ` - ${prevFuturesShown.contract}` : ''}: POC {futuresProfile.poc + futuresProfileRow / 2} · value area {futuresProfile.val}–{futuresProfile.vah + futuresProfileRow} ·
+                {futuresProfile.hvnTop != null ? ` HVN ${futuresProfile.hvnTop + futuresProfileRow / 2} ·` : ''}{futuresProfile.lvnTop != null ? ` LVN ${futuresProfile.lvnTop + futuresProfileRow / 2} ·` : ''}
+                {' '}each minute&apos;s volume is spread over its high-low range (a candle cannot say exactly where it traded - the Order Flow page has the exact profile).
+                {prevFuturesShown?.note ? ` ${prevFuturesShown.note}` : ''}
+              </Text>
+            )}
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              The mouse wheel scrolls the page past this chart: Ctrl + wheel (or a pinch) zooms the time axis, Shift + wheel the prices, double-click resets.
             </Text>
-          )}
+            {result.futuresOiAvailable && (
+              <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+                Grey line (left axis) is Open Interest. Arrows mark where a Long Buildup/Short Buildup/Short Covering/Long Unwinding stretch began - green/up = bullish, red/down = bearish.
+              </Text>
+            )}
+          </FoldText>
         </>
       ) : (
         <Empty description={result.futuresError || 'No futures data for this day.'} />
@@ -6020,7 +6066,7 @@ export default function OiReplayPage() {
   const quickViewDef = QUICK_VIEWS.find((v) => v.key === quickView) ?? null
   const quickClock = isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000
 
-  return (
+  const page = (
     // The WHOLE window, however wide - unlike every other page's own 1280. This is the page carrying the charts, the
     // OI/IV ladder, the heatmaps and a dozen more cards at once, laid out as a dashboard (DashboardGrid): on a wide or
     // ultra-wide trading monitor the grid's twelve columns simply get wider, so more cards fit side by side ("Cards a
@@ -6046,12 +6092,14 @@ export default function OiReplayPage() {
         >
           <Space direction="vertical" size={controlsCollapsed ? 8 : 12} style={{ width: '100%' }}>
             {!controlsCollapsed && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Plays a trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
-                strike band alongside it. NIFTY/BANKNIFTY prefer your NiftyDataCollector database, falling back to a
-                live Dhan call when it's stale or unconfigured; SENSEX and futures always call Dhan live - there is no
-                stored source for either.
-              </Text>
+              <FoldText id="oiReplay.intro" label="what this page does">
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Plays a trading day back candle by candle, with the nearest-expiry OI/IV ladder across the whole
+                  strike band alongside it. NIFTY/BANKNIFTY prefer your NiftyDataCollector database, falling back to a
+                  live Dhan call when it's stale or unconfigured; SENSEX and futures always call Dhan live - there is no
+                  stored source for either.
+                </Text>
+              </FoldText>
             )}
             <Space wrap size={12}>
               {controlsCollapsed && <Text strong>OI Replay</Text>}
@@ -6211,6 +6259,13 @@ export default function OiReplayPage() {
                 <Tooltip title="Hides the long explanatory paragraphs under the cards - the ones that explain how each reading is worked out. Every number, chart and control stays.">
                   <Checkbox checked={compact} onChange={(e) => setCompact(e.target.checked)}>Compact</Checkbox>
                 </Tooltip>
+                <Text type="secondary" style={{ fontSize: 12 }}>Text:</Text>
+                <Tooltip title="Every text block on the cards - the reads, the checklist's reasons, the explanations under the charts - folded to its first line. Each one opens again with its ▸ (or a click on that line) and remembers it.">
+                  <Button size="small" onClick={() => foldAllText(false)}>Fold all</Button>
+                </Tooltip>
+                <Tooltip title="Every text block on the cards opened in full.">
+                  <Button size="small" onClick={() => foldAllText(true)}>Open all</Button>
+                </Tooltip>
               </Space>
             )}
             {isLive && liveExpiryFlag !== 'N1' && (
@@ -6348,9 +6403,11 @@ export default function OiReplayPage() {
                         : `Buy: ${marketRead.buyStrike} ${marketRead.buySide}. Sell: ${marketRead.sellStrike ?? '—'} ${marketRead.sellSide} (the wall on the side this move isn't expected to reach).`
                     }
                   />
-                  <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}>
-                    Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself. IV skew is read as a CHANGE since the open, not its raw level - index options almost always price puts richer than calls (a permanent structural premium, not a daily sentiment signal), so only the trend is informative.
-                  </Text>
+                  <FoldText id="marketRead.note" label="how it is read" className="oa-note">
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      Heuristic reading of the same PCR/OI/IV numbers shown above - three independent, naively-thresholded votes, not a signal or advice. Always cross-check against price action itself. IV skew is read as a CHANGE since the open, not its raw level - index options almost always price puts richer than calls (a permanent structural premium, not a daily sentiment signal), so only the trend is informative.
+                    </Text>
+                  </FoldText>
                 </Space>
               </Card>
               </LiveSection>
@@ -6846,7 +6903,7 @@ export default function OiReplayPage() {
       {result && (
         <Modal
           open={quickViewDef != null && quickView !== 'oiCharts'} onCancel={() => setQuickView(null)} footer={null} destroyOnHidden
-          width="96vw" style={{ top: 12, maxWidth: 1800 }}
+          width="96vw" style={{ top: 12, maxWidth: 1800 }} className="oa-quick-view"
           title={(
             <Space wrap size={[12, 4]}>
               <span>{quickViewDef?.title ?? ''}</span>
@@ -6857,53 +6914,63 @@ export default function OiReplayPage() {
                   options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
                 />
               </div>
-              <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
+              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
             </Space>
           )}
         >
-          {quickView === 'dayOi' && (dayOiContent ?? <Empty description="No OI since the open yet." />)}
-          {quickView === 'oiHeatmap' && (
-            <OiChangeHeatmapSection
-              ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-              lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
-              spotBars={oneMinBars} step={step}
-            />
-          )}
-          {quickView === 'premium' && (
-            <Row gutter={[16, 16]}>
-              <Col span={24}><Space size={12} wrap>{premiumPickers}</Space></Col>
-              {premiumCharts}
-            </Row>
-          )}
-          {quickView === 'straddle' && (
-            <StraddleCard
-              cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
-              asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
-            />
-          )}
-          {quickView === 'futures' && (
-            <Space direction="vertical" size={8} style={{ width: '100%' }}>
-              <Space size={8} wrap>{futuresControls}</Space>
-              {futuresContent}
-            </Space>
-          )}
-          {quickView === 'gex' && (
-            <GexCard
-              days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
-              expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
-            />
-          )}
+          {/* One card in the popup: its charts take more of the window (chartGrow's popup share). */}
+          <ChartGrow value={popupChartGrow}>
+            {quickView === 'dayOi' && (dayOiContent ?? <Empty description="No OI since the open yet." />)}
+            {quickView === 'oiHeatmap' && (
+              <OiChangeHeatmapSection
+                ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
+                lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
+                spotBars={oneMinBars} step={step}
+              />
+            )}
+            {quickView === 'premium' && (
+              <Row gutter={[16, 16]}>
+                <Col span={24}><Space size={12} wrap>{premiumPickers}</Space></Col>
+                {premiumCharts}
+              </Row>
+            )}
+            {quickView === 'straddle' && (
+              <StraddleCard
+                cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
+                asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+              />
+            )}
+            {quickView === 'futures' && (
+              <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                <Space size={8} wrap>{futuresControls}</Space>
+                {futuresContent}
+              </Space>
+            )}
+            {quickView === 'gex' && (
+              <GexCard
+                days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
+                expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+              />
+            )}
+          </ChartGrow>
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
       {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} />}
       {result && (
-        <OiTotalsChartsPopup
-          open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}
-          strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={quickTotalsTimeframe} dayKey={`quick-${underlying}-${result.date}`}
-          extra={<HeatmapBucketSelect value={quickTotalsTimeframe} onChange={setQuickTotalsTimeframe} />}
-        />
+        <ChartGrow value={popupChartGrow}>
+          <OiTotalsChartsPopup
+            open={quickView === 'oiCharts'} onClose={() => setQuickView(null)} ceByStrike={ceByStrike} peByStrike={peByStrike}
+            strikes={heatmapStrikes} asOfMs={asOfMs} timeframeMinutes={quickTotalsTimeframe} dayKey={`quick-${underlying}-${result.date}`}
+            extra={<HeatmapBucketSelect value={quickTotalsTimeframe} onChange={setQuickTotalsTimeframe} />}
+          />
+        </ChartGrow>
       )}
     </div>
+  )
+  return (
+    <ConfigProvider theme={COMPACT_TEXT_THEME}>
+      <ChartGrow value={pageChartGrow}>{page}</ChartGrow>
+    </ConfigProvider>
   )
 }

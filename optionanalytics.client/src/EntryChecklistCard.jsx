@@ -4,12 +4,15 @@ import { CE_COLOR, PE_COLOR } from './shared.jsx'
 import { entryChecklist, indexByStrike } from './entryChecklist.js'
 import { optionFlowSeries } from './optionFlow.js'
 import { gexUpTo } from './gex.js'
+import { FoldButton, FoldText } from './FoldText.jsx'
+import { useFold } from './useFold.js'
 
 const { Text } = Typography
 
 const MARK = { true: { sign: '✓', color: '#3ddc84' }, false: { sign: '✗', color: '#ff5c5c' }, null: { sign: '–', color: '#9aa4b2' } }
 
-function SideList({ name, color, side }) {
+// The reasons after each check fold away (one fold for both sides, remembered): folded, a check is its mark and name.
+function SideList({ name, color, side, reasonsOpen, setReasonsOpen }) {
   const n = side.checks.length
   const tagColor = side.passed >= n - 1 ? 'green' : side.passed >= Math.round((n * 4) / 7) ? 'gold' : 'default'
   return (
@@ -20,14 +23,18 @@ function SideList({ name, color, side }) {
         <Text type="secondary" style={{ fontSize: 12 }}>
           {side.strikes.map((s) => `${s.label} ${s.strike}${s.premium != null ? ` @ ${s.premium.toFixed(1)}` : ''}`).join(' · ')}
         </Text>
+        <span style={{ whiteSpace: 'nowrap', marginLeft: 8 }}>
+          <FoldButton open={reasonsOpen} onToggle={setReasonsOpen} label="the reasons" style={{ verticalAlign: 'middle' }} />
+          <Text type="secondary" style={{ fontSize: 11, cursor: 'pointer' }} onClick={() => setReasonsOpen(!reasonsOpen)}>reasons</Text>
+        </span>
       </div>
       {side.checks.map((c) => {
         const mark = MARK[String(c.pass)]
         return (
-          <div key={c.key} style={{ fontSize: 12, lineHeight: 1.6 }}>
+          <div key={c.key} style={{ fontSize: 12, lineHeight: 1.6 }} title={reasonsOpen ? undefined : c.detail}>
             <span style={{ color: mark.color, fontWeight: 700, display: 'inline-block', width: 16 }}>{mark.sign}</span>
             <Text style={{ fontSize: 12 }}>{c.label}</Text>
-            <Text type="secondary" style={{ fontSize: 11 }}> - {c.detail}</Text>
+            {reasonsOpen && <Text type="secondary" style={{ fontSize: 11 }}> - {c.detail}</Text>}
           </div>
         )
       })}
@@ -43,6 +50,7 @@ function SideList({ name, color, side }) {
  * alerts nothing.
  */
 export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints, step, profile, dashboardFlow = null, gexDays = null }) {
+  const [reasonsOpen, setReasonsOpen] = useFold('entryChecklist.reasons', false)
   const ceIndex = useMemo(() => indexByStrike(cePoints), [cePoints])
   const peIndex = useMemo(() => indexByStrike(pePoints), [pePoints])
   // Live, the option-flow check reads the dashboard's own CDV (the same numbers the CDV / OBV card shows).
@@ -69,13 +77,15 @@ export function EntryChecklistCard({ asOfMs, spotBars, vwap, cePoints, pePoints,
   return (
     <>
       <Row gutter={[24, 12]}>
-        <Col xs={24} md={12}><SideList name="CE" color={CE_COLOR} side={result.ce} /></Col>
-        <Col xs={24} md={12}><SideList name="PE" color={PE_COLOR} side={result.pe} /></Col>
+        <Col xs={24} md={12}><SideList name="CE" color={CE_COLOR} side={result.ce} reasonsOpen={reasonsOpen} setReasonsOpen={setReasonsOpen} /></Col>
+        <Col xs={24} md={12}><SideList name="PE" color={PE_COLOR} side={result.pe} reasonsOpen={reasonsOpen} setReasonsOpen={setReasonsOpen} /></Col>
       </Row>
-      <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 8 }}>
-        A checklist, not a signal - more ticks means more of the usual conditions line up, not that the trade will work. Use a
-        stop on the premium and on the index level. – means there is not enough data yet to judge.
-      </Text>
+      <FoldText id="entryChecklist.note" label="the note" style={{ marginTop: 8 }}>
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          A checklist, not a signal - more ticks means more of the usual conditions line up, not that the trade will work. Use a
+          stop on the premium and on the index level. – means there is not enough data yet to judge.
+        </Text>
+      </FoldText>
     </>
   )
 }

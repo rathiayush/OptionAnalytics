@@ -8,6 +8,7 @@ import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, straddleRead } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
 import { useFitHeight } from './DashboardCard.jsx'
+import { FoldText } from './FoldText.jsx'
 
 const { Text } = Typography
 
@@ -220,41 +221,58 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
   return (
     <>
       {controls}
-      <div style={{ borderLeft: '3px solid #4c9ffe', padding: '4px 10px', marginBottom: 8 }}>
-        <Tag color={verdictColor(verdict)} style={{ marginRight: 8 }}>{verdict.title}{verdict.side && verdict.kind !== 'early' ? (verdict.side === 'up' ? ' ↑' : ' ↓') : ''}</Tag>
-        <Text style={{ fontSize: 12 }}>{verdict.detail}</Text>
-        {verdict.note && <Text type="warning" style={{ fontSize: 12, display: 'block' }}>{verdict.note}</Text>}
-      </div>
-      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
-        <Text style={{ fontSize: 12 }}>
-          <Text strong style={{ fontSize: 12 }}>{hhmm(day.time)}</Text> ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> (to expiry)
-          {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text>{day.basis === 'expiry'
-            ? ` (${num(day.sessions, 1)} sessions to the ${dayjs(expiry).format('D MMM')} expiry)`
-            : ` (feed IV ${num(day.iv)} - no expiry date)`}</> : ''}
-          {' '}→ priced range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(day.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(day.upper, 0)}</Text> ({num(day.pct, 2)}% of spot)
-          {breaks.length ? ` · ${breaks.join(' · ')}` : ' · spot inside it so far'}
-        </Text>
-        <Text style={{ fontSize: 12 }}>
-          <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> Auto ATM {now.strike} straddle <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
-          {' '}· VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text> ({under ? 'under' : 'over'} it; under {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min)
-          {' '}· {signed(read.change)} in {holdMinutes} min
-          {now.iv != null && <> · {read.ivFrom === 'straddle' ? 'IV (from the straddle)' : 'ATM IV (feed)'} {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)})` : ''}</>}
-          {' '}· futures ≈ {num(now.forward, 0)}
-        </Text>
-        <Text style={{ fontSize: 12 }}>
-          {read.vsDecay != null
-            ? <>Time decay: with only time passing the {hhmm(day.time)} straddle would be <Text style={{ fontSize: 12, color: DECAY_COLOR }}>{num(now.decay)}</Text> now - the Auto ATM is <Text strong style={{ fontSize: 12, color: read.vsDecay >= 0 ? UP_COLOR : DOWN_COLOR }}>{signed(read.vsDecay)}</Text> {read.vsDecay >= 0 ? 'over it: premium bought beyond the decay (IV up)' : 'under it: sold faster than the decay (IV down)'}</>
-            : <Text type="secondary" style={{ fontSize: 12 }}>Time decay: the decay-only line needs the options&apos; expiry date.</Text>}
-        </Text>
-        <Text style={{ fontSize: 12 }}>
-          <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>Fixed {fixed.strike}</Text> straddle: sold at {hhmm(fixed.time)} for {num(fixed.entry)}
-          {fixed.now != null ? <> → now <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>{num(fixed.now)}</Text> ({signed(fixed.sellerPnl)} for a seller) · its VWAP {num(fixed.vwap)} ({fixed.now < fixed.vwap ? 'under it - its sellers winning' : 'over it - its sellers losing'})</> : ' → not quoted now'}
-        </Text>
-      </Space>
+      {/* The read and the numbers under it each fold to one line (FoldText - remembered, "Fold all" on the page). */}
+      <FoldText id="straddle.read" label="the read" style={{ marginBottom: 4 }}>
+        <div style={{ borderLeft: '3px solid #4c9ffe', padding: '4px 10px' }}>
+          <Tag color={verdictColor(verdict)} style={{ marginRight: 8 }}>{verdict.title}{verdict.side && verdict.kind !== 'early' ? (verdict.side === 'up' ? ' ↑' : ' ↓') : ''}</Tag>
+          <Text style={{ fontSize: 12 }}>{verdict.detail}</Text>
+          {verdict.note && <Text type="warning" style={{ fontSize: 12, display: 'block' }}>{verdict.note}</Text>}
+        </div>
+      </FoldText>
+      <FoldText
+        id="straddle.numbers" label="the straddle's numbers" style={{ marginBottom: 8 }}
+        summary={(
+          <Text style={{ fontSize: 12 }}>
+            <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> Auto ATM {now.strike} <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
+            {' '}· VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text> ({under ? 'under' : 'over'})
+            {' '}· priced range {num(day.lower, 0)} – {num(day.upper, 0)}
+            {' '}· Fixed {fixed.strike} {fixed.now != null ? `${signed(fixed.sellerPnl)} for a seller` : 'not quoted'}
+          </Text>
+        )}
+      >
+        <Space direction="vertical" size={2}>
+          <Text style={{ fontSize: 12 }}>
+            <Text strong style={{ fontSize: 12 }}>{hhmm(day.time)}</Text> ATM {day.strike} straddle <Text strong style={{ fontSize: 12 }}>{num(day.value)}</Text> (to expiry)
+            {day.today != null && scope === 'day' ? <> → today ± <Text strong style={{ fontSize: 12 }}>{num(day.width, 0)}</Text>{day.basis === 'expiry'
+              ? ` (${num(day.sessions, 1)} sessions to the ${dayjs(expiry).format('D MMM')} expiry)`
+              : ` (feed IV ${num(day.iv)} - no expiry date)`}</> : ''}
+            {' '}→ priced range <Text style={{ fontSize: 12, color: DOWN_COLOR }}>{num(day.lower, 0)}</Text> – <Text style={{ fontSize: 12, color: UP_COLOR }}>{num(day.upper, 0)}</Text> ({num(day.pct, 2)}% of spot)
+            {breaks.length ? ` · ${breaks.join(' · ')}` : ' · spot inside it so far'}
+          </Text>
+          <Text style={{ fontSize: 12 }}>
+            <Text strong style={{ fontSize: 12 }}>{hhmm(now.time)}</Text> Auto ATM {now.strike} straddle <Text strong style={{ fontSize: 12, color: STRADDLE_COLOR }}>{num(now.value)}</Text>
+            {' '}· VWAP <Text style={{ fontSize: 12, color: VWAP_COLOR }}>{num(now.vwap)}</Text> ({under ? 'under' : 'over'} it; under {Math.round(read.belowShare * 100)}% of the last {holdMinutes} min)
+            {' '}· {signed(read.change)} in {holdMinutes} min
+            {now.iv != null && <> · {read.ivFrom === 'straddle' ? 'IV (from the straddle)' : 'ATM IV (feed)'} {num(now.iv)}{read.ivChange != null ? ` (${signed(read.ivChange)})` : ''}</>}
+            {' '}· futures ≈ {num(now.forward, 0)}
+          </Text>
+          <Text style={{ fontSize: 12 }}>
+            {read.vsDecay != null
+              ? <>Time decay: with only time passing the {hhmm(day.time)} straddle would be <Text style={{ fontSize: 12, color: DECAY_COLOR }}>{num(now.decay)}</Text> now - the Auto ATM is <Text strong style={{ fontSize: 12, color: read.vsDecay >= 0 ? UP_COLOR : DOWN_COLOR }}>{signed(read.vsDecay)}</Text> {read.vsDecay >= 0 ? 'over it: premium bought beyond the decay (IV up)' : 'under it: sold faster than the decay (IV down)'}</>
+              : <Text type="secondary" style={{ fontSize: 12 }}>Time decay: the decay-only line needs the options&apos; expiry date.</Text>}
+          </Text>
+          <Text style={{ fontSize: 12 }}>
+            <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>Fixed {fixed.strike}</Text> straddle: sold at {hhmm(fixed.time)} for {num(fixed.entry)}
+            {fixed.now != null ? <> → now <Text strong style={{ fontSize: 12, color: FIXED_COLOR }}>{num(fixed.now)}</Text> ({signed(fixed.sellerPnl)} for a seller) · its VWAP {num(fixed.vwap)} ({fixed.now < fixed.vwap ? 'under it - its sellers winning' : 'over it - its sellers losing'})</> : ' → not quoted now'}
+          </Text>
+        </Space>
+      </FoldText>
       <Row gutter={[16, 12]}>
         <Col xs={24} lg={12}>
-          <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
-          <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
+          <FoldText id="straddle.chartNote" label="the chart's note">
+            <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
+            <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
+          </FoldText>
           <LinesChart lines={charts.straddle} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
         </Col>
         <Col xs={24} lg={12}>
