@@ -364,10 +364,13 @@ When adding or changing a strategy:
   together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
   each finished minute's from Dhan, so when the push turns to a new minute the page reads the feed's memory once,
   `/api/spot/{u}/volume-candles` - never Dhan - and `mergeSpotLive` keeps each minute's largest volume). The day is loaded
-  once (and again after a reconnect, for what it missed). NO MINUTE OF THE DAY YET (before the open, a holiday, a replay
-  clock at 09:15) while the profile holds earlier sessions ("Previous", or Days above 1): the latest of them stands in
-  for the candles, said on the card with the day's load error if any - a chart with no candles has no price scale, and
-  the profile, its boxes and lines were all blank. VOLUME PROFILE: POC / VAH / VAL lines, the bars
+  once (and again after a reconnect, for what it missed). LIVE with no minute of today yet (before the open, a holiday)
+  while the profile holds earlier sessions ("Previous", or Days above 1): the latest of them stands in for the candles,
+  said on the card with the day's load error if any - a chart with no candles has no price scale, and the profile, its
+  boxes and lines were all blank. Never for a past day: that starts fresh. A PAST DAY is REPLAYED AS OI REPLAY'S: it
+  opens FRESH at its first minute (the clock defaults to the day's start, not its end - nothing after the clock on any
+  chart), with OI Replay's controls - Start / Pause, Reset, Speed (`SPEED_OPTIONS`, ms a market minute, 0.5x - 10x,
+  `optionanalytics.profiles.speedMs`), Go to (a minute, shown), the slider - each labelled by the minute it shows. VOLUME PROFILE: POC / VAH / VAL lines, the bars
   at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
   the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
@@ -383,7 +386,9 @@ When adding or changing a strategy:
   (`PAST_DAY_CACHE` - a past day never changes; failures are not kept). The time axis leaves the right of the plot empty for the profile. It FOLLOWS OI REPLAY by default,
   one way (`useReplayClockBroadcast` in `OiReplayPage` - always on, whatever the Sync switch - and `useFollowReplayClock`,
   `optionanalytics.replayClock` channel): OI Replay's index and day, live or at its replay clock (its own controls locked
-  while it follows; nothing it does moves OI Replay); with no OI Replay tab open it is its own - Live, or a past day with its
+  while it follows; nothing it does moves OI Replay); the moment OI Replay STARTS loading a past day (`loadingDate` on its
+  message) this page switches to that day fresh - it used to keep the old day until OI Replay's load was done; the
+  earlier sessions of Days / Previous are counted back from the day replayed, not from today; with no OI Replay tab open it is its own - Live, or a past day with its
   own slider / play. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and

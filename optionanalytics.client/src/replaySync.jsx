@@ -203,8 +203,9 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
 // above (whose one switch is off by default and also moves the Order Flow page): OI Replay always says where
 // it is on its own channel, a follower listens when it wants to, and nothing a follower does moves OI Replay.
 //
-// The message: { type: 'clock', underlying, date ('YYYY-MM-DD' - null while a day is loading), ms (the
-// replay clock: the END of the newest minute shown - null when live), live, playing }.
+// The message: { type: 'clock', underlying, date ('YYYY-MM-DD' - null while a day is loading), loadingDate (the past
+// day being loaded, while it loads), ms (the replay clock: the END of the newest minute shown - null when live), live,
+// playing }.
 
 const CLOCK_CHANNEL = 'optionanalytics.replayClock'
 const CLOCK_HEARTBEAT_MS = 2000
@@ -233,7 +234,7 @@ export function useReplayClockBroadcast(state) {
   useEffect(() => {
     post()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.underlying, state?.date, state?.ms, state?.live, state?.playing])
+  }, [state?.underlying, state?.date, state?.loadingDate, state?.ms, state?.live, state?.playing])
 }
 
 /** A follower: while `enabled`, hands every OI Replay clock message to onClock. Returns { connected (an OI

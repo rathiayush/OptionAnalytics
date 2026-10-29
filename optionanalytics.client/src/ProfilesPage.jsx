@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
-import { CaretRightOutlined, PauseOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import * as signalR from '@microsoft/signalr'
 import { CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
@@ -56,7 +56,16 @@ const STORE = {
   days: 'optionanalytics.profiles.days',
   follow: 'optionanalytics.profiles.followOiReplay',
   vwap: 'optionanalytics.profiles.vwap',
+  speed: 'optionanalytics.profiles.speedMs',
 }
+// A past day's replay, as OI Replay's: milliseconds per market minute.
+const SPEED_OPTIONS = [
+  { value: 2000, label: '0.5x' },
+  { value: 1000, label: '1x' },
+  { value: 500, label: '2x' },
+  { value: 250, label: '4x' },
+  { value: 100, label: '10x' },
+]
 
 // The boxes' colours: the volume profile's busy areas green, thin ones red; the market profile's accepted
 // areas teal, single prints orange, tails magenta. The value area is a faint dashed frame on both.
@@ -343,16 +352,17 @@ const NO_BARS = []
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timeframe, showVwap, resetKey, neutral = false, empty = null, dayError = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, resetKey, neutral = false, empty = null, dayError = null }) {
   const sessions = useMemo(
     () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
-  // No minute of the day yet - before the open, a holiday, a replay clock still at 09:15 - while the profile is built
-  // from earlier sessions: a chart with no candles has no price scale, so the profile and its boxes could not be drawn
-  // at all. The latest earlier session's candles stand in until the day's first minute is done, and the card says so.
-  const standIn = known.length ? null : past.at(-1) ?? null
+  // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
+  // with no candles has no price scale, so the profile and its boxes could not be drawn at all. The latest earlier
+  // session's candles stand in until today's first minute, and the card says so. Never for a past day replayed: that
+  // day starts fresh, its own first minute, like OI Replay's.
+  const standIn = live && !known.length ? past.at(-1) ?? null : null
   const candleBars = known.length ? known : standIn?.bars ?? NO_BARS
   const candles = useMemo(() => candlesOf(candleBars, timeframe), [candleBars, timeframe])
   // The VWAP of the day drawn (VwapCalculator's way): typical price x volume over the 1-minute bars, then each candle's
@@ -509,10 +519,11 @@ export default function ProfilesPage() {
   const todayKey = istDateKey(new Date())
   const [live, setLive] = useState(true)
   const [dateKey, setDateKey] = useState(todayKey)
-  // A past day's own clock (epoch ms) - null = the whole day. OI Replay's while following it.
+  // A past day's replay clock (epoch ms: the END of the newest minute shown) - null = the day's FIRST minute, a fresh
+  // day as OI Replay loads one; OI Replay's own clock while following it.
   const [clockMs, setClockMs] = useState(null)
   const [playing, setPlaying] = useState(false)
-  const [speed, setSpeed] = useState(1)
+  const [speedMs, setSpeedMs] = usePersistedState(STORE.speed, 500)
 
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = rows?.[index] > 0 ? rows[index] : PROFILE_ROWS[index]
@@ -522,7 +533,12 @@ export default function ProfilesPage() {
     if (!UNDERLYINGS.includes(msg.underlying)) return
     setUnderlying(msg.underlying)
     if (msg.live) { setLive(true); setDateKey(istDateKey(new Date())); setClockMs(null); setPlaying(false); return }
-    if (!msg.date) return // a day still loading there
+    if (!msg.date) {
+      // OI Replay is loading a past day: this page starts the same day fresh at once - never the old day kept on
+      // screen until that load is done. Its clock follows once the day is there.
+      if (msg.loadingDate) { setLive(false); setDateKey(msg.loadingDate); setClockMs(null); setPlaying(false) }
+      return
+    }
     setLive(false)
     setDateKey(msg.date)
     setClockMs(msg.ms ?? null)
@@ -592,18 +608,30 @@ export default function ProfilesPage() {
   const spotSession = useMemo(() => barsKnownAt(spotDay?.bars, null), [spotDay])
   const ends = [futuresSession, spotSession].filter((b) => b.length)
   const span = ends.length ? { start: Math.min(...ends.map((b) => msOf(b[0].time))) + 60_000, end: Math.max(...ends.map((b) => msOf(b.at(-1).time))) + 60_000 } : null
-  const clock = live ? null : clockMs ?? span?.end ?? null
+  // A past day opens FRESH, as OI Replay's does: its first minute only, then played forward - nothing of the day after
+  // the clock is on any chart.
+  const clock = live ? null : clockMs ?? span?.start ?? null
+  const atEnd = !span || (clock ?? span.start) >= span.end
 
-  // Its own replay: a minute every 1 / speed seconds.
+  // Its own replay, as OI Replay's: one market minute every speedMs, stopping at the day's last minute.
   useEffect(() => {
     if (!playing || live || following || !span) return undefined
     const id = setInterval(() => setClockMs((ms) => {
       const next = (ms ?? span.start) + 60_000
       if (next >= span.end) { setPlaying(false); return span.end }
       return next
-    }), 1000 / speed)
+    }), speedMs)
     return () => clearInterval(id)
-  }, [playing, live, following, span?.start, span?.end, speed]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [playing, live, following, span?.start, span?.end, speedMs]) // eslint-disable-line react-hooks/exhaustive-deps
+  // "Go to": the end of that minute (it shown), held inside the day.
+  const goTo = (v) => {
+    if (!v || !span) return
+    const day = new Date(span.start - 60_000)
+    const ist = new Date(day.getTime() + 330 * 60_000)
+    const minuteStart = Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate(), v.hour(), v.minute()) - 330 * 60_000
+    setPlaying(false)
+    setClockMs(Math.max(span.start, Math.min(span.end, minuteStart + 60_000)))
+  }
 
   const futuresKnown = useMemo(() => barsKnownAt(futuresDay?.bars, clock), [futuresDay, clock])
   const spotKnown = useMemo(() => barsKnownAt(spotDay?.bars, clock), [spotDay, clock])
@@ -615,17 +643,18 @@ export default function ProfilesPage() {
   const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
   const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
-  const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `as of ${fmtClock(clock)}` : ''
+  // A replay is named by the minute it shows (as OI Replay's): the clock is that minute's END.
+  const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `replay · ${fmtClock(clock - 60_000)} candle` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
-  // Nothing of the day yet: the cards say so - unless the profile holds earlier sessions ("Previous", or Days above 1),
-  // which they show over the latest one's candles until the day's first minute (ProfilePair's stand-in).
+  // Nothing of the day yet: the cards say so - unless, live, the profile holds earlier sessions ("Previous", or Days
+  // above 1), which they show over the latest one's candles until today's first minute (ProfilePair's stand-in).
   const emptyFor = (state, session, past, what) => {
-    if (session.length || (pastCount > 0 && past.sessions.length)) return null
+    if (session.length || (live && pastCount > 0 && past.sessions.length)) return null
     if (state.loading) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Loading the ${what}…`} />
     if (state.error) return <Alert type="warning" showIcon message={`The ${what} is not available: ${state.error}`} />
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
   }
-  const pair = { dayCount, profileOf, clock, row, timeframe, showVwap, resetKey }
+  const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, resetKey }
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -677,18 +706,31 @@ export default function ProfilesPage() {
                 </Space>
               </Tooltip>
               {follow && (following
-                ? <Tag color="cyan" style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followed.clock?.live ? 'live' : `${followed.clock?.date ?? 'loading'}${followed.clock?.ms ? ` ${fmtClock(followed.clock.ms)}` : ''}`}</Tag>
+                ? <Tag color="cyan" style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followed.clock?.live ? 'live' : `${followed.clock?.date ?? 'loading'}${followed.clock?.ms ? ` ${fmtClock(followed.clock.ms - 60_000)}` : ''}`}</Tag>
                 : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
             </Space>
             {!live && !following && span && (
-              <Space size={10} style={{ width: '100%' }} wrap>
-                <Button size="small" icon={playing ? <PauseOutlined /> : <CaretRightOutlined />} onClick={() => { if (!playing && (clock ?? span.end) >= span.end) setClockMs(span.start); setPlaying((p) => !p) }} />
-                <Select size="small" value={speed} onChange={setSpeed} style={{ width: 92 }} options={[1, 2, 5, 10].map((s) => ({ value: s, label: `${s} min/s` }))} />
+              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <Space size={8} wrap align="center">
+                  <Button size="small" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)}>
+                    {playing ? 'Pause' : 'Start'}
+                  </Button>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setClockMs(span.start) }}>Reset</Button>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
+                  <Select size="small" value={speedMs} onChange={setSpeedMs} style={{ width: 80 }} options={SPEED_OPTIONS} />
+                  <Text type="secondary" style={{ fontSize: 12 }}>Go to</Text>
+                  <TimePicker
+                    size="small" format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false} style={{ width: 96 }}
+                    value={clock ? dayjs(`2000-01-01T${new Date(clock - 60_000 + 330 * 60_000).toISOString().slice(11, 16)}`) : null}
+                    disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
+                    onChange={goTo}
+                  />
+                  <Text strong style={{ fontSize: 12 }}>{clock ? fmtClock(clock - 60_000) : ''}</Text>
+                </Space>
                 <Slider
-                  style={{ flex: 1, minWidth: 220, margin: '0 8px' }} min={span.start} max={span.end} step={60_000} value={clock ?? span.end}
-                  tooltip={{ formatter: (v) => fmtClock(v) }} onChange={(v) => { setPlaying(false); setClockMs(v) }}
+                  style={{ margin: '0 8px' }} min={span.start} max={span.end} step={60_000} value={clock ?? span.start}
+                  tooltip={{ formatter: (v) => fmtClock(v - 60_000) }} onChange={(v) => { setPlaying(false); setClockMs(v) }}
                 />
-                <Text style={{ fontSize: 12 }}>{fmtClock(clock)}</Text>
               </Space>
             )}
             <Space size={8} wrap>

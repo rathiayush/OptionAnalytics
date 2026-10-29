@@ -5551,7 +5551,12 @@ export default function OiReplayPage() {
   }
   // The Profiles page follows this page one way, Sync switch or not (replaySync.jsx's clock channel): the same
   // index and day, at this replay's clock.
-  useReplayClockBroadcast({ underlying, date: isLive || loading ? null : result?.date ?? null, ms: isLive ? null : syncClockMs, live: isLive, playing })
+  // While a past day loads, the day being loaded (loadingDate) - so the Profiles page starts it fresh at once instead of
+  // keeping the old day on screen until this load is done.
+  useReplayClockBroadcast({
+    underlying, date: isLive || loading ? null : result?.date ?? null, loadingDate: !isLive && loading && date ? date.format('YYYY-MM-DD') : null,
+    ms: isLive ? null : syncClockMs, live: isLive, playing,
+  })
   const sync = useReplaySync({
     enabled: syncEnabled, active: !isLive, kind: 'oi',
     // No day while one is loading: until it lands, `result` is still the previous day's.
