@@ -106,6 +106,16 @@ public sealed class OiReplayController : ControllerBase
         return Ok(result);
     }
 
+    /// <summary>`date`'s 1-minute spot bars with the index's own volume - the Profiles page's spot volume and market profile
+    /// (OiReplayService.GetSpotDayAsync: today from the spot feed's memory, a past day from the stored database / Dhan, kept
+    /// on disk).</summary>
+    [HttpGet("{underlying}/spot-day")]
+    public async Task<ActionResult> GetSpotDay(string underlying, [FromQuery] DateOnly date, CancellationToken cancellationToken)
+    {
+        var result = await _service.GetSpotDayAsync(underlying.ToUpperInvariant(), date, cancellationToken);
+        return Ok(result);
+    }
+
     /// <summary>The previous trading day's 1-minute bars of the futures contract `expiry` (the chart's; omitted = that
     /// day's front month) before `date` - OI Replay's futures chart draws the previous session's volume profile from
     /// them (OiReplayService.GetPreviousDayFuturesAsync).</summary>

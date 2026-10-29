@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Col, DatePicker, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import { CaretRightOutlined, PauseOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
 import {
   NavBar, usePersistedState, POLL_HEADERS, UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   toChartTime, istTimeFormatter, istTickMarkFormatter, istDateKey,
@@ -16,10 +16,11 @@ import {
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
+import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 
-// The Profiles page: a whole page for the volume profile and the market profile (TPO) of an index's near
-// futures - one card each, over the futures candles in the timeframe picked, with the profile's levels and
-// its ZONES drawn as boxes (profileZones.js):
+// The Profiles page: a whole page for the volume profile and the market profile (TPO) of an index - its SPOT in
+// the top row and its near FUTURES below, one card each, over that instrument's candles in the timeframe picked,
+// with the profile's levels and its ZONES drawn as boxes (profileZones.js) and, ticked, the day's VWAP:
 //   Volume profile - POC, VAH / VAL; boxes where the most volume traded (each with its HVN) and where it was
 //     thin (each with its LVN); the profile's bars at the right edge (buy / sell).
 //   Market profile - the TPO letters at the right edge (A = 09:15, a letter each 30 minutes); boxes where the
@@ -29,8 +30,11 @@ import { FoldText } from './FoldText.jsx'
 // LIVE (today, refreshed every REFRESH_MS) or a PAST DAY at a clock - and by default it FOLLOWS OI Replay in
 // another tab (replaySync.jsx's clock channel, one way): the same index and day, live or at OI Replay's replay
 // clock, so the profiles replay along with it. Nothing after the clock is in either profile (barsKnownAt).
-// The data is the Order Flow server's futures day (footprint rows - the buy and sell at each price), the same
-// the Order Flow page replays; a past day the server did not record comes estimated from 1-minute candles.
+// The futures are the Order Flow server's futures day (footprint rows - the buy and sell at each price), the same
+// the Order Flow page replays; a past day the server did not record comes estimated from 1-minute candles. The
+// spot is the index's 1-minute bars with its own volume (GET /api/oi-replay/{u}/spot-day - today the spot feed's
+// memory, a past day kept on disk; live refreshed from the feed's memory, /api/spot/{u}/volume-candles, so a
+// refresh never asks Dhan). Index volume has no buy / sell side: the spot's bars are one colour.
 
 const { Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -49,6 +53,7 @@ const STORE = {
   of: 'optionanalytics.profiles.of',
   days: 'optionanalytics.profiles.days',
   follow: 'optionanalytics.profiles.followOiReplay',
+  vwap: 'optionanalytics.profiles.vwap',
 }
 
 // The boxes' colours: the volume profile's busy areas green, thin ones red; the market profile's accepted
@@ -63,58 +68,94 @@ const BOX = {
   tail: { fill: 'rgba(235,47,150,0.18)', stroke: 'rgba(235,47,150,0.85)', labelColor: '#ff85c0' },
 }
 const LINE = { poc: '#fadb14', va: '#9b8cff', ib: '#faad14' }
+const VWAP_COLOR = '#e072e8'
 
 // ---- data ------------------------------------------------------------------------------------------------
 
-/** The futures day from the Order Flow server, in the footprint's own rows; live, refreshed every REFRESH_MS
- *  (a page timer - the X-Poll header, so the server keeps it to market hours). */
-function useFuturesDay(underlying, dateKey, live) {
+const dayUrl = {
+  futures: (u, d) => `/api/order-flow/${u}/day/${d}?rowSize=${FETCH_ROWS[u] ?? 1}&minTradeLots=100000&heatmapColumns=50`,
+  spot: (u, d) => `/api/oi-replay/${u}/spot-day?date=${d}`,
+}
+const byTime = (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
+
+/** One instrument's day ("futures" | "spot"): { loading, error, at, day: { key, bars, source, contract } }. Live,
+ *  refreshed every REFRESH_MS - a page timer, sent with the X-Poll header: the futures day again (the live engine's
+ *  memory), the spot from the spot feed's memory (merged in by minute) - neither refresh reaches Dhan. */
+function useInstrumentDay(kind, underlying, dateKey, live) {
   const [state, setState] = useState({ loading: false, error: null, day: null, at: null })
   useEffect(() => {
     if (!underlying || !dateKey) return undefined
     let cancelled = false
-    const row = FETCH_ROWS[underlying] ?? 1
-    setState((s) => ({ loading: true, error: null, day: s.day?.key === `${underlying}|${dateKey}` ? s.day : null, at: s.at }))
-    const load = (poll) => fetch(`/api/order-flow/${underlying}/day/${dateKey}?rowSize=${row}&minTradeLots=100000&heatmapColumns=50`, poll ? { headers: POLL_HEADERS } : undefined)
+    const key = `${kind}|${underlying}|${dateKey}`
+    setState((s) => ({ loading: true, error: null, day: s.day?.key === key ? s.day : null, at: s.at }))
+    const fail = (err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) }
+    const load = () => fetch(dayUrl[kind](underlying, dateKey))
       .then((r) => (r.ok ? r.json() : r.json().catch(() => ({})).then((b) => Promise.reject(new Error(b?.error ?? `HTTP ${r.status}`)))))
       .then((body) => {
         if (cancelled) return
-        setState({ loading: false, error: null, at: Date.now(), day: { key: `${underlying}|${dateKey}`, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol, lastPrice: body.meta?.lastPrice } })
+        if (kind === 'spot' && !body.success) throw new Error(body.error ?? 'no spot candles')
+        setState({ loading: false, error: null, at: Date.now(), day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } })
       })
-      .catch((err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) })
-    load(false)
-    const id = live ? setInterval(() => load(true), REFRESH_MS) : null
+      .catch(fail)
+    const refresh = kind === 'futures'
+      ? () => fetch(dayUrl.futures(underlying, dateKey), { headers: POLL_HEADERS })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((body) => { if (!cancelled) setState({ loading: false, error: null, at: Date.now(), day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } }) })
+        .catch(fail)
+      : () => fetch(`/api/spot/${underlying}/volume-candles`, { headers: POLL_HEADERS })
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((feed) => {
+          if (cancelled) return
+          const today = (feed ?? []).filter((b) => istDateKey(b.time) === dateKey)
+          setState((s) => {
+            const merged = new Map((s.day?.key === key ? s.day.bars : []).map((b) => [new Date(b.time).getTime(), b]))
+            for (const b of today) merged.set(new Date(b.time).getTime(), b)
+            return { loading: false, error: null, at: Date.now(), day: { key, bars: [...merged.values()].sort(byTime), source: s.day?.source ?? 'feed' } }
+          })
+        })
+        .catch(() => { /* the next refresh tries again; what was loaded stays */ })
+    load()
+    const id = live ? setInterval(refresh, REFRESH_MS) : null
     return () => { cancelled = true; if (id) clearInterval(id) }
-  }, [underlying, dateKey, live])
+  }, [kind, underlying, dateKey, live])
   return state
 }
 
-// A past day's futures never change: kept here once fetched (this tab only), so changing "Days", the row or "Profile
-// of" asks the server nothing again. Only what came back is kept - a failure is asked again next time.
+// A past day never changes: kept here once fetched (this tab only), so changing "Days", the row or "Profile of" asks
+// the server nothing again. Only what came back is kept - a failure is asked again next time.
 const PAST_DAY_CACHE = new Map()
-const PAST_DAY_CACHE_MAX = 90
-async function fetchPastDay(underlying, dateKey) {
-  const key = `${underlying}|${dateKey}`
+const PAST_DAY_CACHE_MAX = 120
+async function fetchPastDay(kind, underlying, dateKey) {
+  const key = `${kind}|${underlying}|${dateKey}`
   if (PAST_DAY_CACHE.has(key)) return PAST_DAY_CACHE.get(key)
-  const r = await fetch(`/api/order-flow/${underlying}/day/${dateKey}?rowSize=${FETCH_ROWS[underlying] ?? 1}&minTradeLots=100000&heatmapColumns=50`)
-  // No day there (a holiday) is an answer too: an empty session.
-  const day = r.ok ? await r.json().then((b) => ({ date: dateKey, bars: barsKnownAt(b.bars, null), source: b.source })) : r.status === 404 ? { date: dateKey, bars: [], source: null } : null
-  if (!day) throw new Error(`HTTP ${r.status}`)
+  const r = await fetch(dayUrl[kind](underlying, dateKey))
+  let day = null
+  if (r.ok) {
+    const body = await r.json()
+    // The spot answers 200 with success false for a day with no candles (a holiday - or a failure: not kept).
+    if (kind === 'spot' && !body.success) return { date: dateKey, bars: [], source: null }
+    day = { date: dateKey, bars: barsKnownAt(body.bars, null), source: body.source }
+  } else if (r.status === 404) {
+    // No futures day there (a holiday) is an answer too: an empty session.
+    day = { date: dateKey, bars: [], source: null }
+  } else {
+    throw new Error(`HTTP ${r.status}`)
+  }
   PAST_DAY_CACHE.set(key, day)
   if (PAST_DAY_CACHE.size > PAST_DAY_CACHE_MAX) PAST_DAY_CACHE.delete(PAST_DAY_CACHE.keys().next().value)
   return day
 }
 
-/** The `count` trading sessions before `dateKey`, oldest first: weekdays walked back one at a time (one request at a
- *  time - a past day the server did not record is built from Dhan's candles the first time), a day with no minutes (a
- *  holiday) stepped over, `count` + 10 weekdays at most. Sessions come in as they load. */
-function usePastSessions(underlying, dateKey, count) {
+/** The `count` trading sessions of one instrument before `dateKey`, oldest first: weekdays walked back one at a time
+ *  (one request at a time - a past day the server does not hold is fetched from Dhan the first time), a day with no
+ *  minutes (a holiday) stepped over, `count` + 10 weekdays at most. Sessions come in as they load. */
+function usePastSessions(kind, underlying, dateKey, count) {
   const [state, setState] = useState({ key: null, loading: false, sessions: [], error: null })
+  const want = `${kind}|${underlying}|${dateKey}|${count}`
   useEffect(() => {
     if (!underlying || !dateKey || count <= 0) return undefined
-    const key = `${underlying}|${dateKey}|${count}`
     let cancelled = false
-    setState({ key, loading: true, sessions: [], error: null })
+    setState({ key: want, loading: true, sessions: [], error: null })
     ;(async () => {
       const found = []
       let day = dayjs(dateKey)
@@ -124,33 +165,34 @@ function usePastSessions(underlying, dateKey, count) {
         if (day.day() === 0 || day.day() === 6) continue
         tries++
         try {
-          const session = await fetchPastDay(underlying, day.format('YYYY-MM-DD'))
+          const session = await fetchPastDay(kind, underlying, day.format('YYYY-MM-DD'))
           if (cancelled) return
           if (session.bars.length) {
             found.unshift(session)
-            setState({ key, loading: found.length < count, sessions: [...found], error: null })
+            setState({ key: want, loading: found.length < count, sessions: [...found], error: null })
           }
         } catch (err) {
           if (cancelled) return
           error = err.message
         }
       }
-      if (!cancelled) setState({ key, loading: false, sessions: found, error: found.length < count ? error : null })
+      if (!cancelled) setState({ key: want, loading: false, sessions: found, error: found.length < count ? error : null })
     })()
     return () => { cancelled = true }
-  }, [underlying, dateKey, count])
-  return state.key === `${underlying}|${dateKey}|${count}` ? state : { loading: count > 0, sessions: [], error: null }
+  }, [want]) // eslint-disable-line react-hooks/exhaustive-deps
+  return state.key === want ? state : { loading: count > 0, sessions: [], error: null }
 }
 
 // ---- the chart -------------------------------------------------------------------------------------------
 
-/** Futures candles with a profile drawn at the right edge (`drawProfile(primitive)` sets it), zone boxes and
+/** Candles with a profile drawn at the right edge (`drawProfile(primitive)` sets it), zone boxes and
  *  price lines. The time axis keeps `room` of the plot empty on the right, so the newest candles never sit
  *  under the profile; wheel / drag take over the view, a double-click hands it back. */
-function ProfileChart({ candles, makePrimitive, drawProfile, zones, lines, priceRange, room, height = CHART_HEIGHT, resetKey }) {
+function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room, height = CHART_HEIGHT, resetKey }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
+  const vwapRef = useRef(null)
   const profileRef = useRef(null)
   const boxesRef = useRef(null)
   const linesRef = useRef([])
@@ -191,6 +233,8 @@ function ProfileChart({ candles, makePrimitive, drawProfile, zones, lines, price
         return { ...(base ?? {}), priceRange: { minValue: lo, maxValue: hi } }
       },
     })
+    // The day's VWAP - its points are the candles' own times (alignToBars), so it adds nothing to the time axis.
+    vwapRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP', crosshairMarkerVisible: false })
     boxesRef.current = new ZoneBoxesPrimitive()
     series.attachPrimitive(boxesRef.current)
     profileRef.current = makePrimitive()
@@ -224,6 +268,7 @@ function ProfileChart({ candles, makePrimitive, drawProfile, zones, lines, price
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
+      vwapRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -240,6 +285,7 @@ function ProfileChart({ candles, makePrimitive, drawProfile, zones, lines, price
     if (!userMovedRef.current) fit()
   }, [candles, fit])
 
+  useEffect(() => { vwapRef.current?.setData(vwap ?? []) }, [vwap])
   useEffect(() => { if (profileRef.current) drawProfile(profileRef.current) }, [drawProfile])
   useEffect(() => { boxesRef.current?.setZones(zones) }, [zones])
   useEffect(() => {
@@ -256,7 +302,8 @@ function ProfileChart({ candles, makePrimitive, drawProfile, zones, lines, price
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-// ---- the page --------------------------------------------------------------------------------------------
+
+// ---- one instrument's two cards --------------------------------------------------------------------------
 
 const zoneLabel = {
   high: (z) => `${z.poc ? 'POC area' : 'HVN'} ${fmt(z.node)} · ${Math.round(z.share * 100)}% of volume`,
@@ -279,6 +326,155 @@ function Legend({ items }) {
   )
 }
 
+const volumeOf = (b) => b.volume ?? (b.buy ?? 0) + (b.sell ?? 0)
+
+/** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
+ *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
+ *  the volume has no buy / sell side (the index's) - its bars are one colour. */
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timeframe, showVwap, resetKey, neutral = false, empty = null }) {
+  const sessions = useMemo(
+    () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
+    [known, past, dayCount, profileOf],
+  )
+  const profileBars = useMemo(() => sessions.flat(), [sessions])
+  const candles = useMemo(() => candlesOf(known, timeframe), [known, timeframe])
+  // The day's VWAP the way the server works it out (VwapCalculator): typical price x volume over the 1-minute bars,
+  // then each candle's value at its last minute.
+  const vwap = useMemo(() => {
+    if (!showVwap || !candles.length) return null
+    const minute = sessionVwapFromBars(known.map((b) => ({ time: toChartTime(b.time), high: b.high, low: b.low, close: b.close, volume: volumeOf(b) })))
+    return minute ? alignToBars(minute, candles.map((c) => ({ time: toChartTime(c.time) }))) : null
+  }, [showVwap, known, candles])
+
+  const vp = useMemo(() => dayVolumeProfile(profileBars, row), [profileBars, row])
+  const hasVolume = vp.rows.length > 0
+  const vz = useMemo(() => volumeZones(vp, row), [vp, row])
+  const tpo = useMemo(() => compositeMarketProfile(sessions, row), [sessions, row])
+  // "Forming" is read for a profile of the day alone - in a composite an older session's letter is the same letter.
+  const running = profileOf === 'today' && sessions.length === 1 && lastPeriodRunningAt(known, clock)
+  const mz = useMemo(() => marketProfileZones(tpo, { lastPeriodRunning: running }), [tpo, running])
+
+  const vpZones = useMemo(() => {
+    const out = []
+    if (vp.val != null) out.push({ ...BOX.value, low: vp.val, high: vp.vah + row, label: 'Value area (70% of volume)' })
+    for (const z of vz.high) out.push({ ...BOX.high, low: z.low, high: z.high, label: zoneLabel.high(z) })
+    for (const z of vz.low) out.push({ ...BOX.low, low: z.low, high: z.high, label: zoneLabel.low(z) })
+    return out
+  }, [vp, vz, row])
+  const mpZones = useMemo(() => {
+    const out = []
+    if (mz.value) out.push({ ...BOX.acceptedValue, low: mz.value.low, high: mz.value.high, label: 'Value area - accepted (70% of TPOs)' })
+    for (const z of mz.accepted) out.push({ ...BOX.accepted, low: z.low, high: z.high, label: zoneLabel.accepted(z) })
+    for (const z of mz.singles) out.push({ ...BOX.single, low: z.low, high: z.high, label: zoneLabel.single(z) })
+    for (const z of mz.tails) out.push({ ...BOX.tail, low: z.low, high: z.high, label: zoneLabel.tail(z) })
+    return out
+  }, [mz])
+  const vpLines = useMemo(() => (vp.poc == null ? [] : [
+    { price: vp.poc + row / 2, color: LINE.poc, title: 'POC', width: 2 },
+    { price: vp.vah + row, color: LINE.va, title: 'VAH', style: 2 },
+    { price: vp.val, color: LINE.va, title: 'VAL', style: 2 },
+  ]), [vp, row])
+  const mpLines = useMemo(() => (!tpo ? [] : [
+    { price: tpo.poc + row / 2, color: LINE.poc, title: 'TPO POC', width: 2 },
+    { price: tpo.vah + row, color: LINE.va, title: 'VAH', style: 2 },
+    { price: tpo.val, color: LINE.va, title: 'VAL', style: 2 },
+    ...(tpo.ib ? [{ price: tpo.ib.high, color: LINE.ib, title: 'IB high', style: 1 }, { price: tpo.ib.low, color: LINE.ib, title: 'IB low', style: 1 }] : []),
+  ]), [tpo, row])
+  const vpRange = useMemo(() => (hasVolume ? { low: vp.rows[0].price, high: vp.rows.at(-1).price + row } : null), [vp, row, hasVolume])
+  const tpoRange = useMemo(() => (tpo?.rows?.length ? { low: tpo.rows[0].price, high: tpo.rows.at(-1).price + row } : null), [tpo, row])
+  // The index's volume has no side: its rows drawn as one neutral bar each.
+  const drawVp = useCallback((p) => p.setProfile(hasVolume ? (neutral ? { ...vp, rows: vp.rows.map((r) => ({ price: r.price, buy: 0, sell: 0, total: r.total })) } : vp) : null, row), [vp, row, neutral, hasVolume])
+  const singlePrices = useMemo(() => {
+    const set = []
+    for (const z of [...mz.singles, ...mz.tails]) for (let p = z.low; p < z.high - 1e-9; p = Math.round((p + row) * 100) / 100) set.push(p)
+    return set
+  }, [mz, row])
+  const drawTpo = useCallback((p) => p.setProfile(tpo, singlePrices), [tpo, singlePrices])
+  const makeVp = useCallback(() => new VolumeProfilePrimitive(), [])
+  const makeTpo = useCallback(() => new TpoProfilePrimitive(), [])
+  const many = sessions.length > 1 ? ` · ${sessions.length} sessions` : ''
+  const extra = <Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>
+
+  return (
+    <Row gutter={[14, 14]}>
+      <Col xs={24} xl={12}>
+        <Card size="small" title={`${name} · Volume profile${many}`} extra={extra}>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
+              <span style={{ color: LINE.poc }}>POC {fmt(vp.poc == null ? null : vp.poc + row / 2)}</span>
+              <span style={{ color: LINE.va }}>VAH {fmt(vp.vah == null ? null : vp.vah + row)} · VAL {fmt(vp.val)}</span>
+              <span style={{ color: BOX.high.labelColor }}>HVN {vz.hvn.length ? vz.hvn.map(fmt).join(', ') : '—'}</span>
+              <span style={{ color: BOX.low.labelColor }}>LVN {vz.lvn.length ? vz.lvn.map(fmt).join(', ') : '—'}</span>
+            </Space>
+            <Legend items={[['high', 'Highest volume (HVN area)'], ['low', 'Thin volume (LVN area)'], ['value', 'Value area']]} />
+            {empty ?? (!hasVolume && profileBars.length > 0 && (
+              <Alert type="info" showIcon message={`No ${name.toLowerCase()} volume for ${sessions.length > 1 ? 'these sessions' : 'this day'} - Dhan sends the index's own volume from January 2026. The market profile (time, not volume) still shows.`} />
+            ))}
+            {empty ? null : (
+              <ProfileChart
+                candles={candles} vwap={vwap} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
+                priceRange={vpRange} room={PROFILE_ROOM.vp} resetKey={resetKey}
+              />
+            )}
+            <FoldText id="profiles.vp" label="how to read the volume profile" className="oa-note">
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                The bars at the right are the volume traded at each price ({row}-point rows; on the futures green bought at the
+                offer, red sold at the bid - the index&apos;s own volume has no side, so the spot&apos;s are one colour). POC = the
+                price that traded the most; VAH / VAL = the band holding 70% of the volume. GREEN boxes are where the most volume
+                traded - prices the market agreed on, which tend to hold price (support / resistance, a magnet when price is near);
+                each names its HVN, its busiest row. RED boxes are where volume was thin inside the range - prices the market moved
+                through fast, which it tends to cross fast again: a break into one often runs to the far side. A thin edge at the
+                day&apos;s high or low is not a box (price only got there briefly). Busy = at least 1.3x the average row, thin = 0.6x
+                or less (smoothed over three rows). With Days above 1 it is every session&apos;s volume at each price added up - the
+                levels several days agreed on. The pink line is the day&apos;s VWAP (the &quot;VWAP&quot; tick).
+              </Text>
+            </FoldText>
+          </Space>
+        </Card>
+      </Col>
+      <Col xs={24} xl={12}>
+        <Card size="small" title={`${name} · Market profile (TPO)${many}`} extra={extra}>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
+              <span style={{ color: LINE.poc }}>POC {fmt(tpo ? tpo.poc + row / 2 : null)}</span>
+              <span style={{ color: LINE.va }}>VAH {fmt(tpo ? tpo.vah + row : null)} · VAL {fmt(tpo?.val)}</span>
+              <span style={{ color: LINE.ib }}>IB {tpo?.ib ? `${fmt(tpo.ib.low)} – ${fmt(tpo.ib.high)}` : '—'}</span>
+              <span style={{ color: BOX.single.labelColor }}>Single prints {mz.singles.length ? mz.singles.map((z) => `${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
+              <span style={{ color: BOX.tail.labelColor }}>Tails {mz.tails.length ? mz.tails.map((z) => `${z.side} ${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
+            </Space>
+            <Legend items={[['accepted', 'Most time spent - accepted'], ['acceptedValue', 'Value area'], ['single', 'Single prints'], ['tail', 'Tail (rejected)']]} />
+            {empty ?? (
+              <ProfileChart
+                candles={candles} vwap={vwap} makePrimitive={makeTpo} drawProfile={drawTpo} zones={mpZones} lines={mpLines}
+                priceRange={tpoRange} room={PROFILE_ROOM.tpo} resetKey={resetKey}
+              />
+            )}
+            <FoldText id="profiles.tpo" label="how to read the market profile" className="oa-note">
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                Each letter at the right is a 30-minute period that traded at that price ({row}-point rows): A = 09:15, B = 09:45, C =
+                10:15 and so on (A and B, the initial balance, in amber; blocks instead of letters when the rows are too thin to read).
+                The more letters on a row, the more TIME the market spent there. TEAL boxes are where it spent the most - prices it
+                accepted (the busiest rows, with the value area, 70% of the TPOs, as a dashed frame): expect rotation there. ORANGE
+                boxes are single prints inside the range - one period only, a fast one-sided move; price often comes back to fill
+                them, and they act as support / resistance until it does. MAGENTA boxes are tails - single prints at the day&apos;s
+                high (selling tail) or low (buying tail), where the auction was rejected. &quot;Forming&quot; = made by the period
+                still running: it can still be filled in. With Days above 1 every session&apos;s TPOs are added up (each session
+                lettered from A; blocks instead of letters once a row holds too many to read) and the initial balance is the latest
+                session&apos;s.
+              </Text>
+            </FoldText>
+          </Space>
+        </Card>
+      </Col>
+    </Row>
+  )
+}
+
+// ---- the page --------------------------------------------------------------------------------------------
+
+const msOf = (t) => new Date(t).getTime()
+const updatedAt = (at) => new Date(at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
+
 export default function ProfilesPage() {
   const [underlying, setUnderlying] = usePersistedState(STORE.underlying, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORE.timeframe, 5)
@@ -287,6 +483,7 @@ export default function ProfilesPage() {
   // How many sessions the profiles cover - 1 is the day itself (or the one session before it).
   const [days, setDays] = usePersistedState(STORE.days, 1)
   const [follow, setFollow] = usePersistedState(STORE.follow, true)
+  const [showVwap, setShowVwap] = usePersistedState(STORE.vwap, true)
   const todayKey = istDateKey(new Date())
   const [live, setLive] = useState(true)
   const [dateKey, setDateKey] = useState(todayKey)
@@ -313,14 +510,20 @@ export default function ProfilesPage() {
   const following = follow && followed.connected
 
   const effectiveDate = live ? todayKey : dateKey
-  const futures = useFuturesDay(index, effectiveDate, live)
   const dayCount = Math.max(1, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1))
-  const past = usePastSessions(index, effectiveDate, pastSessionsNeeded(dayCount, profileOf))
-  const day = futures.day?.key === `${index}|${effectiveDate}` ? futures.day : null
+  const pastCount = pastSessionsNeeded(dayCount, profileOf)
+  const futures = useInstrumentDay('futures', index, effectiveDate, live)
+  const spot = useInstrumentDay('spot', index, effectiveDate, live)
+  const futuresPast = usePastSessions('futures', index, effectiveDate, pastCount)
+  const spotPast = usePastSessions('spot', index, effectiveDate, pastCount)
+  const futuresDay = futures.day?.key === `futures|${index}|${effectiveDate}` ? futures.day : null
+  const spotDay = spot.day?.key === `spot|${index}|${effectiveDate}` ? spot.day : null
 
-  // The span a past day's own slider runs over: the first minute's start to the last minute's end.
-  const sessionBars = useMemo(() => barsKnownAt(day?.bars, null), [day])
-  const span = sessionBars.length ? { start: new Date(sessionBars[0].time).getTime() + 60_000, end: new Date(sessionBars.at(-1).time).getTime() + 60_000 } : null
+  // The span a past day's own slider runs over: the first minute's start to the last minute's end, of either.
+  const futuresSession = useMemo(() => barsKnownAt(futuresDay?.bars, null), [futuresDay])
+  const spotSession = useMemo(() => barsKnownAt(spotDay?.bars, null), [spotDay])
+  const ends = [futuresSession, spotSession].filter((b) => b.length)
+  const span = ends.length ? { start: Math.min(...ends.map((b) => msOf(b[0].time))) + 60_000, end: Math.max(...ends.map((b) => msOf(b.at(-1).time))) + 60_000 } : null
   const clock = live ? null : clockMs ?? span?.end ?? null
 
   // Its own replay: a minute every 1 / speed seconds.
@@ -334,70 +537,26 @@ export default function ProfilesPage() {
     return () => clearInterval(id)
   }, [playing, live, following, span?.start, span?.end, speed]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const known = useMemo(() => barsKnownAt(day?.bars, clock), [day, clock])
-  // The sessions the profiles are built from, oldest first: the day so far and the ones before it, or only those before.
-  const sessions = useMemo(
-    () => profileSessions({ today: known, past: past.sessions.map((d) => d.bars), days: dayCount, of: profileOf }),
-    [known, past.sessions, dayCount, profileOf],
-  )
-  const profileBars = useMemo(() => sessions.flat(), [sessions])
-  const candles = useMemo(() => candlesOf(known, timeframe), [known, timeframe])
+  const futuresKnown = useMemo(() => barsKnownAt(futuresDay?.bars, clock), [futuresDay, clock])
+  const spotKnown = useMemo(() => barsKnownAt(spotDay?.bars, clock), [spotDay, clock])
+  const resetKey = `${index}|${effectiveDate}|${timeframe}|${profileOf}|${dayCount}`
 
-  const vp = useMemo(() => dayVolumeProfile(profileBars, row), [profileBars, row])
-  const vz = useMemo(() => volumeZones(vp, row), [vp, row])
-  const tpo = useMemo(() => compositeMarketProfile(sessions, row), [sessions, row])
-  // "Forming" is read for a profile of the day alone - in a composite an older session's letter is the same letter.
-  const running = profileOf === 'today' && sessions.length === 1 && lastPeriodRunningAt(known, clock)
-  const mz = useMemo(() => marketProfileZones(tpo, { lastPeriodRunning: running }), [tpo, running])
-
-  const vpZones = useMemo(() => {
-    const out = []
-    if (vp.val != null) out.push({ ...BOX.value, low: vp.val, high: vp.vah + row, label: 'Value area (70% of volume)' })
-    for (const z of vz.high) out.push({ ...BOX.high, low: z.low, high: z.high, label: zoneLabel.high(z) })
-    for (const z of vz.low) out.push({ ...BOX.low, low: z.low, high: z.high, label: zoneLabel.low(z) })
-    return out
-  }, [vp, vz, row])
-  const mpZones = useMemo(() => {
-    const out = []
-    if (mz.value) out.push({ ...BOX.acceptedValue, low: mz.value.low, high: mz.value.high, label: 'Value area - accepted (70% of TPOs)' })
-    for (const z of mz.accepted) out.push({ ...BOX.accepted, low: z.low, high: z.high, label: zoneLabel.accepted(z) })
-    for (const z of mz.singles) out.push({ ...BOX.single, low: z.low, high: z.high, label: zoneLabel.single(z) })
-    for (const z of mz.tails) out.push({ ...BOX.tail, low: z.low, high: z.high, label: zoneLabel.tail(z) })
-    return out
-  }, [mz])
-
-  const vpLines = useMemo(() => (vp.poc == null ? [] : [
-    { price: vp.poc + row / 2, color: LINE.poc, title: 'POC', width: 2 },
-    { price: vp.vah + row, color: LINE.va, title: 'VAH', style: 2 },
-    { price: vp.val, color: LINE.va, title: 'VAL', style: 2 },
-  ]), [vp, row])
-  const mpLines = useMemo(() => (!tpo ? [] : [
-    { price: tpo.poc + row / 2, color: LINE.poc, title: 'TPO POC', width: 2 },
-    { price: tpo.vah + row, color: LINE.va, title: 'VAH', style: 2 },
-    { price: tpo.val, color: LINE.va, title: 'VAL', style: 2 },
-    ...(tpo.ib ? [{ price: tpo.ib.high, color: LINE.ib, title: 'IB high', style: 1 }, { price: tpo.ib.low, color: LINE.ib, title: 'IB low', style: 1 }] : []),
-  ]), [tpo, row])
-
-  const vpRange = useMemo(() => (vp.rows.length ? { low: vp.rows[0].price, high: vp.rows.at(-1).price + row } : null), [vp, row])
-  const tpoRange = useMemo(() => (tpo?.rows?.length ? { low: tpo.rows[0].price, high: tpo.rows.at(-1).price + row } : null), [tpo, row])
-  const drawVp = useCallback((p) => p.setProfile(vp.rows.length ? vp : null, row), [vp, row])
-  const singlePrices = useMemo(() => {
-    const set = []
-    for (const z of [...mz.singles, ...mz.tails]) for (let p = z.low; p < z.high - 1e-9; p = Math.round((p + row) * 100) / 100) set.push(p)
-    return set
-  }, [mz, row])
-  const drawTpo = useCallback((p) => p.setProfile(tpo, singlePrices), [tpo, singlePrices])
-  const makeVp = useCallback(() => new VolumeProfilePrimitive(), [])
-  const makeTpo = useCallback(() => new TpoProfilePrimitive(), [])
-  const resetKey = `${index}|${effectiveDate}|${timeframe}|${profileOf}`
-
-  // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)".
-  const usedPast = past.sessions.slice(-pastSessionsNeeded(dayCount, profileOf))
-  const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && known.length ? [effectiveDate] : [])]
+  // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)" - the futures' sessions (the spot's
+  // are the same trading days).
+  const usedPast = futuresPast.sessions.slice(-pastCount)
+  const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
-  const estimated = (profileOf === 'today' && day?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
-  const asOf = live ? (futures.at ? `live · updated ${new Date(futures.at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })}` : 'live') : clock ? `as of ${fmtClock(clock)}` : ''
-  const noData = !futures.loading && day && sessionBars.length === 0
+  const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
+  const asOf = live ? `live${futures.at ? ` · updated ${updatedAt(futures.at)}` : ''}` : clock ? `as of ${fmtClock(clock)}` : ''
+  const loadingPast = futuresPast.loading || spotPast.loading
+  // Nothing of the day yet: the cards say so - unless they show earlier sessions only, which they can without it.
+  const emptyFor = (state, session, past, what) => {
+    if (session.length || (profileOf === 'previous' && past.sessions.length)) return null
+    if (state.loading) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Loading the ${what}…`} />
+    if (state.error) return <Alert type="warning" showIcon message={`The ${what} is not available: ${state.error}`} />
+    return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
+  }
+  const pair = { dayCount, profileOf, clock, row, timeframe, showVwap, resetKey }
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -433,11 +592,14 @@ export default function ProfilesPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Profile of</Text>
                 <Segmented size="small" value={profileOf} onChange={setProfileOf} options={[{ value: 'today', label: live ? 'Today so far' : 'This day so far' }, { value: 'previous', label: dayCount > 1 ? 'Previous sessions' : 'Previous session' }]} />
               </Space>
-              <Tooltip title={`How many sessions both profiles are built from (a composite). 1 = the day alone. With "${live ? 'Today so far' : 'This day so far'}", the day so far and the sessions before it; with "Previous session", that many sessions before the day.`}>
+              <Tooltip title={`How many sessions the profiles are built from (a composite). 1 = the day alone. With "${live ? 'Today so far' : 'This day so far'}", the day so far and the sessions before it; with "Previous session", that many sessions before the day.`}>
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Days</Text>
                   <InputNumber size="small" min={1} max={MAX_PROFILE_DAYS} value={dayCount} onChange={(v) => { if (v >= 1) setDays(Math.round(v)) }} style={{ width: 64 }} />
                 </Space>
+              </Tooltip>
+              <Tooltip title="The day's VWAP on every chart - typical price x volume over the 1-minute bars, as the server works it out (the spot's on the index's own volume).">
+                <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               </Tooltip>
               <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. Nothing you do here moves OI Replay.">
                 <Space size={4}>
@@ -462,90 +624,22 @@ export default function ProfilesPage() {
             )}
             <Space size={8} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {index} futures{day?.contract ? ` (${day.contract})` : ''} · {effectiveDate} {asOf && `· ${asOf}`}
+                {index} spot and futures{futuresDay?.contract ? ` (${futuresDay.contract})` : ''} · {effectiveDate} {asOf && `· ${asOf}`}
                 {(dayCount > 1 || profileOf === 'previous') && (coverText ? ` · profile of ${coverText}` : '')}
-                {past.loading && ` · loading sessions… ${usedPast.length} of ${pastSessionsNeeded(dayCount, profileOf)}`}
-                {!past.loading && pastSessionsNeeded(dayCount, profileOf) > usedPast.length && ` · only ${usedPast.length} earlier session${usedPast.length === 1 ? '' : 's'} found`}
+                {loadingPast && ` · loading sessions… ${usedPast.length} of ${pastCount}`}
+                {!loadingPast && pastCount > usedPast.length && ` · only ${usedPast.length} earlier session${usedPast.length === 1 ? '' : 's'} found`}
               </Text>
-              {estimated && <Tag color="orange" style={{ margin: 0 }}>{dayCount > 1 ? 'some days ' : ''}estimated from 1-minute candles</Tag>}
-              {futures.loading && <Tag style={{ margin: 0 }}>loading…</Tag>}
+              {estimated && <Tag color="orange" style={{ margin: 0 }}>futures {dayCount > 1 ? 'of some days ' : ''}estimated from 1-minute candles</Tag>}
+              {(futures.loading || spot.loading) && <Tag style={{ margin: 0 }}>loading…</Tag>}
             </Space>
-            {futures.error && <Alert type="warning" showIcon message={`The futures day is not available: ${futures.error}`} />}
-            {past.error && <Alert type="warning" showIcon message={`Not every earlier session could be loaded: ${past.error}`} />}
-            {noData && <Alert type="info" showIcon message={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : 'No futures minutes for this day.'} />}
+            {(futuresPast.error || spotPast.error) && <Alert type="warning" showIcon message={`Not every earlier session could be loaded: ${futuresPast.error ?? spotPast.error}`} />}
           </Space>
         </Card>
 
-        <Row gutter={[14, 14]}>
-          <Col xs={24} xl={12}>
-            <Card
-              size="small"
-              title={`Volume profile${sessions.length > 1 ? ` · ${sessions.length} sessions` : ''}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>}
-            >
-              <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
-                  <span style={{ color: LINE.poc }}>POC {fmt(vp.poc == null ? null : vp.poc + row / 2)}</span>
-                  <span style={{ color: LINE.va }}>VAH {fmt(vp.vah == null ? null : vp.vah + row)} · VAL {fmt(vp.val)}</span>
-                  <span style={{ color: BOX.high.labelColor }}>HVN {vz.hvn.length ? vz.hvn.map(fmt).join(', ') : '—'}</span>
-                  <span style={{ color: BOX.low.labelColor }}>LVN {vz.lvn.length ? vz.lvn.map(fmt).join(', ') : '—'}</span>
-                </Space>
-                <Legend items={[['high', 'Highest volume (HVN area)'], ['low', 'Thin volume (LVN area)'], ['value', 'Value area']]} />
-                <ProfileChart
-                  candles={candles} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
-                  priceRange={vpRange} room={PROFILE_ROOM.vp} resetKey={resetKey}
-                />
-                <FoldText id="profiles.vp" label="how to read the volume profile" className="oa-note">
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    The bars at the right are the volume traded at each price ({row}-point rows; green bought at the offer, red sold at the
-                    bid). POC = the price that traded the most; VAH / VAL = the band holding 70% of the volume. GREEN boxes are where the
-                    most volume traded - prices the market agreed on, which tend to hold price (support / resistance, a magnet when price
-                    is near); each names its HVN, its busiest row. RED boxes are where volume was thin inside the range - prices the market
-                    moved through fast, which it tends to cross fast again: a break into one often runs to the far side. A thin edge at the
-                    day&apos;s high or low is not a box (price only got there briefly). Busy = at least 1.3x the average row, thin = 0.6x or
-                    less (smoothed over three rows). With Days above 1 it is every session&apos;s volume at each price added up - the levels
-                    several days agreed on.
-                  </Text>
-                </FoldText>
-              </Space>
-            </Card>
-          </Col>
-          <Col xs={24} xl={12}>
-            <Card
-              size="small"
-              title={`Market profile (TPO)${sessions.length > 1 ? ` · ${sessions.length} sessions` : ''}`}
-              extra={<Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>}
-            >
-              <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
-                  <span style={{ color: LINE.poc }}>POC {fmt(tpo ? tpo.poc + row / 2 : null)}</span>
-                  <span style={{ color: LINE.va }}>VAH {fmt(tpo ? tpo.vah + row : null)} · VAL {fmt(tpo?.val)}</span>
-                  <span style={{ color: LINE.ib }}>IB {tpo?.ib ? `${fmt(tpo.ib.low)} – ${fmt(tpo.ib.high)}` : '—'}</span>
-                  <span style={{ color: BOX.single.labelColor }}>Single prints {mz.singles.length ? mz.singles.map((z) => `${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
-                  <span style={{ color: BOX.tail.labelColor }}>Tails {mz.tails.length ? mz.tails.map((z) => `${z.side} ${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
-                </Space>
-                <Legend items={[['accepted', 'Most time spent - accepted'], ['acceptedValue', 'Value area'], ['single', 'Single prints'], ['tail', 'Tail (rejected)']]} />
-                <ProfileChart
-                  candles={candles} makePrimitive={makeTpo} drawProfile={drawTpo} zones={mpZones} lines={mpLines}
-                  priceRange={tpoRange} room={PROFILE_ROOM.tpo} resetKey={resetKey}
-                />
-                <FoldText id="profiles.tpo" label="how to read the market profile" className="oa-note">
-                  <Text type="secondary" style={{ fontSize: 11 }}>
-                    Each letter at the right is a 30-minute period that traded at that price ({row}-point rows): A = 09:15, B = 09:45, C =
-                    10:15 and so on (A and B, the initial balance, in amber; blocks instead of letters when the rows are too thin to read).
-                    The more letters on a row, the more TIME the market spent there. TEAL boxes are where it spent the most - prices it
-                    accepted (the busiest rows, with the value area, 70% of the TPOs, as a dashed frame): expect rotation there. ORANGE boxes
-                    are single prints inside the range - one period only, a fast one-sided move; price often comes back to fill them, and
-                    they act as support / resistance until it does. MAGENTA boxes are tails - single prints at the day&apos;s high (selling
-                    tail) or low (buying tail), where the auction was rejected. &quot;Forming&quot; = made by the period still running: it
-                    can still be filled in. With Days above 1 every session&apos;s TPOs are added up (each session lettered from A; blocks
-                    instead of letters once a row holds too many to read) and the initial balance is the latest session&apos;s.
-                  </Text>
-                </FoldText>
-              </Space>
-            </Card>
-          </Col>
-        </Row>
+        <Text strong style={{ fontSize: 13 }}>Spot · {index} index</Text>
+        <ProfilePair {...pair} name="Spot" known={spotKnown} past={spotPast.sessions.slice(-pastCount)} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} />
+        <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`}</Text>
+        <ProfilePair {...pair} name="Futures" known={futuresKnown} past={futuresPast.sessions.slice(-pastCount)} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} />
       </Space>
     </div>
   )
