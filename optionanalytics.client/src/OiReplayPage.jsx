@@ -1836,7 +1836,22 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
               </Space>
             </Tooltip>
           )}
-          {alertUnderlying && breakAlertsOn && serverOiBreaks && (serverOiBreaks.covers ? (
+          {alertUnderlying && (
+            <Tooltip title="Send these to Telegram too - from the server, all day with no page open (or from this page when the server is not sending them). Off: they are the app's alerts only - this page's pop-up, chime and voice.">
+              <Space size={4}>
+                <Switch size="small" checked={!!alerts?.telegram} onChange={alerts?.setTelegram} disabled={!breakAlertsOn} aria-label="S/R and 🎯 alerts to Telegram" />
+                <Text style={{ fontSize: 12 }}>Telegram</Text>
+              </Space>
+            </Tooltip>
+          )}
+          {alertUnderlying && breakAlertsOn && !alerts?.telegram && (
+            <Tooltip title={serverSent.length
+              ? <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{serverSent.slice().reverse().map((m) => `${istTimeFormatter(toChartTime(m.t))} ${m.text}`).join('\n\n')}</div>
+              : 'These pop up on this page only (live, and on a replayed day) - nothing goes to Telegram. Switch Telegram on to have the server send them all day.'}>
+              <Tag style={{ margin: 0 }}>In the app only{serverSent.length ? ` · server saw today: ${serverSent.length}` : ''}</Tag>
+            </Tooltip>
+          )}
+          {alertUnderlying && breakAlertsOn && alerts?.telegram && serverOiBreaks && (serverOiBreaks.covers ? (
             <Tooltip title={serverSent.length
               ? <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{serverSent.slice().reverse().map((m) => `${istTimeFormatter(toChartTime(m.t))} ${m.text}`).join('\n\n')}</div>
               : `The server scanner watches ${alertUnderlying} all day and sends these to Telegram with no page open (1-min buckets). Nothing sent yet today.`}>
@@ -1946,11 +1961,11 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 // not the totals card - a card scrolled off-screen stops re-rendering (LiveSection) and a hidden one is not there, and
 // either used to silence these. The SERVER scanner runs the same step for every index with no page open
 // (scanner-runner/indexScanner.mjs) and sends the Telegram then - this page only chimes, speaks and shows them; live, it
-// sends Telegram itself only when the server is not covering this index (same keys either way, so a message goes once),
-// and a replay never sends Telegram.
+// sends Telegram itself only when their Telegram switch is on (off by default - they are the app's alerts) and the server
+// is not covering this index (same keys either way, so a message goes once); a replay never sends Telegram.
 function useOiBreakAlerts({
   underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, replayNowSec = null, dayKey, enabled,
-  hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false, types = DEFAULT_ALERT_TYPES,
+  hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false, types = DEFAULT_ALERT_TYPES, toTelegram = false,
 }) {
   // Never for the External account (its Market view shows no pop-ups and sends nothing), whatever a caller passes.
   const external = useAuth()?.user?.role === 'External'
@@ -1983,8 +1998,8 @@ function useOiBreakAlerts({
       peLevels: levels(peByStrike),
     }
   }, [active, ceByStrike, peByStrike, strikes, timeframeMinutes])
-  const latest = useRef({ atmStrike, serverCovers, types })
-  useEffect(() => { latest.current = { atmStrike, serverCovers, types } })
+  const latest = useRef({ atmStrike, serverCovers, types, toTelegram })
+  useEffect(() => { latest.current = { atmStrike, serverCovers, types, toTelegram } })
   useEffect(() => {
     if (!active || !day || boundary == null) return
     const data = { ce: day.ce, pe: day.pe, ceLevels: day.ceLevels, peLevels: day.peLevels, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike }
@@ -1994,7 +2009,8 @@ function useOiBreakAlerts({
     if (!breaks.length && !signals.length) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
-    const sendTelegram = live && cfg.telegram !== false && !latest.current.serverCovers
+    // Telegram only when switched on for these (the app's alerts otherwise), live, and the server is not sending them.
+    const sendTelegram = live && latest.current.toTelegram && cfg.telegram !== false && !latest.current.serverCovers
     const replayTag = live ? '' : ' · replay'
     for (const b of breaks) {
       const text = breakText(underlying, b, fmtOiNum, istTimeFormatter, timeframeMinutes)
@@ -2028,6 +2044,9 @@ function useOiBreakAlerts({
 // and keep their own) - and the totals' bucket size the alerts read.
 function useOiBreakAlertSettings(underlying) {
   const [on, setOnState] = usePersistedState('optionanalytics.oiReplay.breakAlerts', true)
+  // Whether they go to Telegram too (the server's, and this page's when the server is not covering): off - they are
+  // the app's alerts unless switched on here.
+  const [telegram, setTelegramState] = usePersistedState('optionanalytics.oiReplay.breakAlertsTelegram', false)
   // The window the high-probability signal's three conditions must fall in (minutes).
   const [windowMinutes, setWindowState] = usePersistedState('optionanalytics.oiReplay.hpWindowMinutes', 5)
   // How far the CE or PE OI at the ATM strike and the strike either side must shift over that window (% of its size).
@@ -2035,16 +2054,18 @@ function useOiBreakAlertSettings(underlying) {
   const [bucketMinutes, setBucketMinutes] = usePersistedState('optionanalytics.oiReplay.bucket.totals', 1)
   const server = useServerOiBreakAlerts(underlying, (fromServer) => {
     setOnState(fromServer.on !== false)
+    setTelegramState(fromServer.telegram === true)
     if (HIGH_PROBABILITY_WINDOWS.includes(fromServer.windowMinutes)) setWindowState(fromServer.windowMinutes)
     if (Number.isFinite(fromServer.atmShiftPct)) setAtmShiftState(fromServer.atmShiftPct)
   })
   const save = (patch) => {
-    const next = { on, bucketMinutes: 1, windowMinutes, atmShiftPct, ...patch }
+    const next = { on, telegram, bucketMinutes: 1, windowMinutes, atmShiftPct, ...patch }
     fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oiBreakAlerts: next }) }).catch(() => {})
   }
   return {
-    underlying, on, windowMinutes, atmShiftPct, bucketMinutes, setBucketMinutes, server,
+    underlying, on, telegram, windowMinutes, atmShiftPct, bucketMinutes, setBucketMinutes, server,
     setOn: (v) => { setOnState(v); save({ on: v }) },
+    setTelegram: (v) => { setTelegramState(v); save({ telegram: v }) },
     setWindowMinutes: (v) => { setWindowState(v); save({ windowMinutes: v }) },
     setAtmShiftPct: (v) => { setAtmShiftState(v); save({ atmShiftPct: v }) },
   }
@@ -4865,7 +4886,7 @@ export default function OiReplayPage() {
     replayNowSec: !isLive && currentBar ? currentBar.time + 60 : null,
     dayKey: result ? `${underlying}-${result.date}` : null, enabled: oiBreakAlertSettings.on && !!result,
     hpWindowMinutes: oiBreakAlertSettings.windowMinutes, hpAtmShiftPct: oiBreakAlertSettings.atmShiftPct,
-    serverCovers: !!oiBreakAlertSettings.server?.covers, types: alertTypes,
+    serverCovers: !!oiBreakAlertSettings.server?.covers, types: alertTypes, toTelegram: oiBreakAlertSettings.telegram,
   })
 
   // Sudden OI walls as of the replay's current point (suddenOi.js - the same rule as the Order Flow

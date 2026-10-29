@@ -70,8 +70,28 @@ test('the shared step is the page\'s break watch plus the high-probability watch
   assert.equal(signals[0].hp.bullish, true)
 })
 
-test('the server sends the break and the high-probability signal to Telegram, tagged and keyed, once each', async () => {
+test('by default they are the app\'s alerts: the server sends nothing to Telegram, only lists what it raised', async () => {
   const { scanner, io } = scannerWithIo()
+  await runMinutes(scanner, io, 19)
+  assert.equal(io.sent.length, 0, JSON.stringify(io.sent.map((m) => m.text)))
+  const status = scanner.status().oiBreakAlerts
+  assert.equal(status.telegram, false)
+  assert.ok(status.sent.some((m) => m.text.startsWith('🎯 HIGH PROBABILITY BULLISH')), JSON.stringify(status.sent))
+})
+
+test('the Telegram switch on mid-day sends what comes next - it does not start the watch again', async () => {
+  const { scanner, io } = scannerWithIo()
+  await runMinutes(scanner, io, 16)   // the minute before the break is in
+  scanner.setConfig({ settings: { telegram: true }, oiBreakAlerts: { telegram: true } })
+  for (let n = 17; n <= 19; n++) {
+    io.clock = T0 + n * MIN + 1000
+    await scanner.checkOiBreaks({ oi: oiAfter(n) }, io.clock)
+  }
+  assert.ok(io.sent.some((m) => m.text.startsWith(`${TAG} 🎯 HIGH PROBABILITY BULLISH`)), JSON.stringify(io.sent.map((m) => m.text)))
+})
+
+test('with its Telegram switch on, the server sends the break and the high-probability signal, tagged and keyed, once each', async () => {
+  const { scanner, io } = scannerWithIo({ oiBreakAlerts: { telegram: true } })
   await runMinutes(scanner, io, 19)
   const breaks = io.sent.filter((m) => m.text.startsWith(`${TAG} 🧱 NIFTY OI CE cumulative Δ broke below support`))
   assert.equal(breaks.length, 1, JSON.stringify(io.sent.map((m) => m.text)))
@@ -89,20 +109,20 @@ test('the server sends the break and the high-probability signal to Telegram, ta
 })
 
 test('switched off on the page (config.oiBreakAlerts.on false) the server sends nothing', async () => {
-  const { scanner, io } = scannerWithIo({ oiBreakAlerts: { on: false } })
+  const { scanner, io } = scannerWithIo({ oiBreakAlerts: { on: false, telegram: true } })
   await runMinutes(scanner, io, 19)
   assert.equal(io.sent.length, 0)
 })
 
 test('the page\'s window and % reach the server: the ATM ± 1 % decides whether the same break is a 🎯', async () => {
   // The ATM ± 1 CE fall peaks around -33% in the window: a 40% bar is never cleared, 20% is.
-  const strict = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, atmShiftPct: 40 } })
+  const strict = scannerWithIo({ oiBreakAlerts: { on: true, telegram: true, windowMinutes: 5, atmShiftPct: 40 } })
   await runMinutes(strict.scanner, strict.io, 19)
   assert.ok(strict.io.sent.some((m) => m.text.includes('🧱')))
   assert.ok(!strict.io.sent.some((m) => m.text.includes('🎯')), JSON.stringify(strict.io.sent.map((m) => m.text)))
   assert.deepEqual([strict.scanner.status().oiBreakAlerts.windowMinutes, strict.scanner.status().oiBreakAlerts.atmShiftPct], [5, 40])
 
-  const loose = scannerWithIo({ oiBreakAlerts: { on: true, windowMinutes: 5, atmShiftPct: 20 } })
+  const loose = scannerWithIo({ oiBreakAlerts: { on: true, telegram: true, windowMinutes: 5, atmShiftPct: 20 } })
   await runMinutes(loose.scanner, loose.io, 19)
   assert.ok(loose.io.sent.some((m) => m.text.includes('🎯')), JSON.stringify(loose.io.sent.map((m) => m.text)))
 
@@ -111,14 +131,14 @@ test('the page\'s window and % reach the server: the ATM ± 1 % decides whether 
 })
 
 test('a break already there when the day loads is not sent, and Telegram off in the scanner settings sends nothing', async () => {
-  const late = scannerWithIo()
+  const late = scannerWithIo({ oiBreakAlerts: { telegram: true } })
   late.io.clock = T0 + 19 * MIN + 1000
   await late.scanner.checkOiBreaks({ oi: oiAfter(19) }, late.io.clock)   // first look: the day so far is only remembered
   late.io.clock += MIN
   await late.scanner.checkOiBreaks({ oi: oiAfter(19) }, late.io.clock)
   assert.equal(late.io.sent.length, 0)
 
-  const quiet = scannerWithIo({ settings: { telegram: false } })
+  const quiet = scannerWithIo({ settings: { telegram: false }, oiBreakAlerts: { telegram: true } })
   await runMinutes(quiet.scanner, quiet.io, 19)
   assert.equal(quiet.io.sent.length, 0)
   assert.ok(quiet.scanner.status().oiBreakAlerts.sent.length >= 2, 'still logged for the page')

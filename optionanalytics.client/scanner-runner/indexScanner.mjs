@@ -242,12 +242,14 @@ export class IndexScanner {
   }
 
   // The OI Replay page's S/R break and high-probability alerts (oiLevelBreaks.js), on the server: the page's settings
-  // (config.oiBreakAlerts), on by default.
+  // (config.oiBreakAlerts), on by default - but to Telegram only when its Telegram switch is on (off by default: they
+  // are the app's alerts); either way what was raised is listed for the page.
   oiBreakSettings() {
     const c = { ...OI_BREAK_ALERT_DEFAULTS, ...(this.config.oiBreakAlerts ?? {}) }
     const clamp = (v, lo, hi, dflt) => (Number.isFinite(Number(v)) ? Math.min(hi, Math.max(lo, Number(v))) : dflt)
     return {
       on: c.on !== false,
+      telegram: c.telegram === true,
       bucketMinutes: clamp(c.bucketMinutes, 1, 15, 1),
       windowMinutes: clamp(c.windowMinutes, 1, 15, OI_BREAK_ALERT_DEFAULTS.windowMinutes),
       atmShiftPct: clamp(c.atmShiftPct, 1, 500, OI_BREAK_ALERT_DEFAULTS.atmShiftPct),
@@ -255,12 +257,13 @@ export class IndexScanner {
   }
 
   // A CE / PE / Net cumulative line breaking its support / resistance, and a break with the ATM +-1 CE or PE OI shifting
-  // the set % the same way within the window - Telegram, tagged [Server], with no page open. Keyed like the page's, so the two
-  // never send the same message twice. Completed buckets only; what was already broken when the day loaded is not sent.
+  // the set % the same way within the window - Telegram (when its switch is on), tagged [Server], with no page open. Keyed
+  // like the page's, so the two never send the same message twice. Completed buckets only; what was already broken when the day loaded is not sent.
   async checkOiBreaks(d, nowMs) {
     const set = this.oiBreakSettings()
     const ob = this.oiBreaks
-    const sig = JSON.stringify(set)
+    // The watch starts again when what is watched changes - not for the Telegram switch, which only says where they go.
+    const sig = JSON.stringify({ ...set, telegram: undefined })
     if (ob.settingsSig !== sig) { ob.state = newOiBreakAlertState(); ob.settingsSig = sig; ob.boundary = null }
     if (!set.on || !d.oi?.ce || !d.oi?.pe) return
     const bucketSeconds = set.bucketMinutes * 60
@@ -283,7 +286,7 @@ export class IndexScanner {
     const send = async (text, key) => {
       this.io.log(`${this.underlying}: ${text.replace(/\n/g, ' ')}`)
       ob.sent = [...ob.sent, { t: nowMs, text }].slice(-OI_BREAK_RECENT)
-      if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${text}`, key)
+      if (cfg.telegram !== false && set.telegram) await this.io.telegram(`${TAG} ${text}`, key)
     }
     for (const b of breaks) {
       await send(`🧱 ${breakText(this.underlying, b, fmtOiLakh, chartTimeHHmm, set.bucketMinutes)} ${breakMeaning(b.side.key, b.up) > 0 ? '🟢' : '🔴'}`,

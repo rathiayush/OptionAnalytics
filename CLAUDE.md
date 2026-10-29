@@ -126,7 +126,11 @@ When adding or changing a strategy:
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
   (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
-  index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). On the page they are run by the PAGE
+  index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). They are the APP'S alerts: Telegram
+  (the server's, and the page's own when the server is not covering) only when the OI totals card's "Telegram" switch is
+  on (`config.oiBreakAlerts.telegram`, OFF by default - a config saved before the switch has none and reads as off; the
+  card then says "In the app only"); the server still lists what it raised for the page, and the switch does not restart
+  its watch. On the page they are run by the PAGE
   (`useOiBreakAlerts` + `useOiBreakAlertSettings` in `OiReplayPage`), not by a card - a card scrolled off-screen stops
   re-rendering (`LiveSection`) and a hidden one is not there, and both used to silence them; the "OI totals" card
   (`oiTotals`: the CE / PE / Net Δ and cumulative Δ table, Charts, the bucket the alerts read and these settings -
@@ -141,8 +145,8 @@ When adding or changing a strategy:
   changed by that choice. 🎯 = a cumulative-line break AND the CE or PE
   OI at ATM ± 1 shifting `atmShiftPct` % (default 20) of its size the same way, within the window. Settings (on / window / %) are
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
-  `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
-  the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+  `highProbabilityAlertKey`), so a message goes once; with Telegram on, the page sends it itself only when the server is not
+  covering the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
 - OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
   (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
   default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,

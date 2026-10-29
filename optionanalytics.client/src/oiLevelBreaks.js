@@ -253,8 +253,10 @@ export function fmtOiLakh(v) {
 /** A chart time (IST-shifted seconds) as "HH:mm" IST. */
 export const chartTimeHHmm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16)
 
-/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). */
-export const OI_BREAK_ALERT_DEFAULTS = { on: true, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }
+/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). `telegram`:
+ *  whether they go to Telegram at all - off unless switched on: they are the app's alerts (the page's pop-up, chime and
+ *  voice), and a config saved before the switch existed has none, so it reads as off too. */
+export const OI_BREAK_ALERT_DEFAULTS = { on: true, telegram: false, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }
 
 // ---- Replay -----------------------------------------------------------------------------------------------------------
 // A past day replayed on the OI Replay page raises the same alerts as it goes, on the REPLAY'S clock: `nowSec` = the end
