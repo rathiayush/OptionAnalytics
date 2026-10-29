@@ -167,3 +167,35 @@ public class TodaySpotFromFeedTests
         Assert.Null(OiReplayService.TodaySpotBars(Bars(Ist(9, 15).AddDays(-1), Ist(15, 29).AddDays(-1)), Day, Ist(11, 3), wholeDay: false));
     }
 }
+
+/// <summary>The Profiles page's spot day (OiReplayService.PickSpotDayAsync) is picked in the run's own order: the feed's
+/// whole day with NO fetch at all, else what the stored database / Dhan brings, else the feed's partial day.</summary>
+public class SpotDayPickTests
+{
+    private static readonly DateTimeOffset At = new(2026, 10, 23, 9, 15, 0, IstClock.Offset);
+    private static IReadOnlyList<CandleWithVolume> Bars(int count) =>
+        Enumerable.Range(0, count).Select(i => new CandleWithVolume(At.AddMinutes(i), 100, 101, 99, 100, 1000)).ToList();
+
+    [Fact]
+    public async Task The_feeds_whole_day_is_used_and_nothing_is_fetched()
+    {
+        var fetched = false;
+        var picked = await OiReplayService.PickSpotDayAsync(Bars(5), () => { fetched = true; return Task.FromResult((Bars(9), (string?)null)); }, () => Bars(2));
+        Assert.False(fetched);
+        Assert.Equal(("feed", 5), (picked.Source, picked.Bars.Count));
+    }
+
+    [Fact]
+    public async Task Without_the_whole_day_the_fetch_is_used_then_the_feeds_partial_day()
+    {
+        var fromFetch = await OiReplayService.PickSpotDayAsync(null, () => Task.FromResult((Bars(9), (string?)null)), () => Bars(2));
+        Assert.Equal(("fetched", 9), (fromFetch.Source, fromFetch.Bars.Count));
+
+        var partial = await OiReplayService.PickSpotDayAsync(null, () => Task.FromResult((Bars(0), (string?)"Dhan said no")), () => Bars(2));
+        Assert.Equal(("feed-partial", 2), (partial.Source, partial.Bars.Count));
+
+        var none = await OiReplayService.PickSpotDayAsync(null, () => Task.FromResult((Bars(0), (string?)"Dhan said no")), () => null);
+        Assert.Empty(none.Bars);
+        Assert.Equal("Dhan said no", none.Error);
+    }
+}

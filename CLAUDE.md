@@ -348,10 +348,23 @@ When adding or changing a strategy:
   a real day. (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
   POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
   "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
-- The PROFILES page (`/profiles`, "Volume & Market Profile" - `ProfilesPage.jsx`, `profileZones.js`, `profilePrimitives.js`): two
-  cards over the near futures' candles (timeframe 1 - 30 min, profile row per index - `PROFILE_ROWS`), from the Order Flow
+- The PROFILES page (`/profiles`, "Volume & Market Profile" - `ProfilesPage.jsx`, `profileZones.js`, `profilePrimitives.js`): a
+  row of two cards (`ProfilePair`) for the index's SPOT and one below for its near FUTURES, each over its own candles (timeframe
+  1 - 30 min, profile row per index - `PROFILE_ROWS`), with the day's VWAP on every chart ("VWAP" tick, on by default - typical
+  price x volume over the 1-minute bars as `VwapCalculator`, `sessionVwapFromBars` + `alignToBars`). FUTURES: the Order Flow
   server's futures day (`/api/order-flow/{u}/day/{date}`, fetched in the footprint's row - `FETCH_ROWS` - and re-bucketed, so a
-  row change asks nothing; live refreshed every 15 s with the X-Poll header). VOLUME PROFILE: POC / VAH / VAL lines, the bars
+  row change asks nothing). SPOT: the index's 1-minute bars WITH its own volume (`GET /api/oi-replay/{u}/spot-day` -
+  `OiReplayService.GetSpotDayAsync`, the run's own order, `PickSpotDayAsync`: the spot feed's whole day with no Dhan call, else
+  the stored database / Dhan - kept on disk, today shared with the run's fetch - else the feed's partial day); index volume has
+  no side, so its bars are one colour; before January 2026 Dhan sent none (the card says so; the market profile still shows).
+  LIVE it is kept up to date the way OI Replay is - NO TIMER (`useLiveIndexFeed`): the "/hubs/spot" connection, group
+  "u:{U}", its conflated "liveBatch" - "futuresTicks" folded into minutes with the rise of Dhan's day volume
+  (`mergeLiveFuturesTicks` in `futuresLive.js`, OI Replay's own, shared) and joined to the loaded day (`mergeFuturesLive`;
+  those minutes are candles, their volume spread over their range - `dayVolumeProfile` takes footprint and candle minutes
+  together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
+  each finished minute's from Dhan, so when the push turns to a new minute the page reads the feed's memory once,
+  `/api/spot/{u}/volume-candles` - never Dhan - and `mergeSpotLive` keeps each minute's largest volume). The day is loaded
+  once (and again after a reconnect, for what it missed). VOLUME PROFILE: POC / VAH / VAL lines, the bars
   at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
   the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows

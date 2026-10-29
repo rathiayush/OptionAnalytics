@@ -43,15 +43,55 @@ export function barsKnownAt(bars, clockMs = null) {
   })
 }
 
-/** The volume profile of `bars` in `rowSize` rows: from their footprint levels (the buy and sell traded at
- *  each price) when they carry any, else each candle's volume spread over its range. Rows: [{ price (the
- *  row's bottom), buy, sell, total }] low to high, with poc / vah / val. */
+/** The volume profile of `bars` in `rowSize` rows: each bar's footprint levels (the buy and sell traded at each price)
+ *  where it carries them, else its volume spread evenly over the rows of its range (an up candle's as bought, a down
+ *  one's as sold - all a candle can say). A day can be both: its minutes loaded with their footprint, and the live
+ *  feed's minutes since, which are candles. Rows: [{ price (the row's bottom), buy, sell, total }] low to high, with
+ *  poc / vah / val. */
 export function dayVolumeProfile(bars, rowSize) {
   const list = bars ?? []
   if (!(rowSize > 0) || !list.length) return volumeProfile([])
-  const hasLevels = list.some((b) => b.levels?.some((l) => (l.buy ?? 0) + (l.sell ?? 0) > 0))
-  if (hasLevels) return volumeProfile(list.map((b) => rebucketBar(b, rowSize)))
-  return volumeProfileFromCandles(list.map((b) => ({ ...b, volume: b.volume ?? (b.buy ?? 0) + (b.sell ?? 0) })), rowSize)
+  const withRows = list.map((b) => (b.levels?.some((l) => (l.buy ?? 0) + (l.sell ?? 0) > 0) ? rebucketBar(b, rowSize) : { ...b, levels: spreadLevels(b, rowSize) }))
+  return volumeProfile(withRows)
+}
+
+/** A candle's volume as footprint levels: spread evenly over the `rowSize` rows its range covers (orderFlowMath's
+ *  volumeProfileFromCandles, one candle at a time). */
+function spreadLevels(c, rowSize) {
+  const volume = c.volume ?? (c.buy ?? 0) + (c.sell ?? 0)
+  if (!(volume > 0) || !(c.high >= c.low) || !(c.low > 0)) return []
+  const bottom = Math.floor(c.low / rowSize + 1e-9) * rowSize
+  const n = Math.round((Math.floor(c.high / rowSize + 1e-9) * rowSize - bottom) / rowSize) + 1
+  const share = volume / n
+  const up = c.close >= c.open
+  return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: up ? share : 0, sell: up ? 0 : share }))
+}
+
+/** The spot's day as it stands live, by minute: the loaded bars (with the index's volume); the spot feed's bars read
+ *  since (`feedBars` - its memory, where each finished minute's volume lands once the feed has re-read it from Dhan);
+ *  and the live pushes' forming minutes (`live` - OHLC only: Dhan's index ticks carry no volume). The newest source's
+ *  prices, the range widened and the open kept for a minute seen twice; a minute's volume the most any source has. */
+export function mergeSpotLive(bars, feedBars = [], live = []) {
+  const byMinute = new Map()
+  const put = (b, keepOpen) => {
+    const ms = msOf(b.time)
+    if (!Number.isFinite(ms) || !inMarketSession(ms)) return
+    const minute = Math.floor(ms / MIN) * MIN
+    const old = byMinute.get(minute)
+    if (!old) { byMinute.set(minute, { time: new Date(minute).toISOString(), open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0 }); return }
+    byMinute.set(minute, {
+      time: old.time,
+      open: keepOpen ? old.open : b.open,
+      high: Math.max(old.high, b.high),
+      low: Math.min(old.low, b.low),
+      close: b.close,
+      volume: Math.max(old.volume ?? 0, b.volume ?? 0),
+    })
+  }
+  for (const b of bars ?? []) put(b, false)
+  for (const b of feedBars ?? []) put(b, true)
+  for (const b of live ?? []) put(b, true)
+  return [...byMinute.entries()].sort((a, b) => a[0] - b[0]).map(([, bar]) => bar)
 }
 
 /** A profile's rows on a full price grid of `rowSize` (a price nobody traded is a row of 0), with each row's

@@ -5,8 +5,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ZONE_RULES, barsKnownAt, candlesOf, compositeMarketProfile, dayMarketProfile, dayVolumeProfile, lastPeriodRunningAt, marketProfileZones,
-  pastSessionsNeeded, profileSessions, volumeZones,
+  mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones,
 } from '../src/profileZones.js'
+import { mergeLiveFuturesTicks } from '../src/futuresLive.js'
 
 const MIN = 60_000
 const T915 = Date.parse('2026-10-05T03:45:00Z') // 09:15 IST
@@ -204,4 +205,51 @@ test('a composite volume profile is every session\'s volume at each price added 
   const b = [{ time: iso(at(0) + 86_400_000), open: 100, high: 106, low: 100, close: 106, levels: [{ price: 101, buy: 1, sell: 1 }, { price: 106, buy: 4, sell: 0 }] }]
   const vp = dayVolumeProfile([...a, ...b], 5)
   assert.deepEqual(vp.rows.map((r) => [r.price, r.total]), [[100, 17], [105, 4]])
+})
+
+test('live: footprint minutes (loaded) and candle minutes (the feed\'s since) make one volume profile', () => {
+  const loaded = { time: iso(at(0)), open: 100, high: 104, low: 100, close: 104, levels: [{ price: 100, buy: 10, sell: 0 }, { price: 103, buy: 0, sell: 6 }] }
+  const live = { time: iso(at(1)), open: 104, high: 109, low: 104, close: 108, volume: 20 } // no levels: spread over 100-105-row... 104 -> rows 100, 105
+  const vp = dayVolumeProfile([loaded, live], 5)
+  // Row 100: the footprint's 16 + half the live minute's 20 (it spans rows 100 and 105, an up candle - bought).
+  assert.deepEqual(vp.rows.map((r) => [r.price, r.buy, r.sell]), [[100, 20, 6], [105, 10, 0]])
+})
+
+test('live spot: the newest prices, the open kept, and a minute\'s volume the most any source has', () => {
+  const loaded = [
+    { time: iso(at(0)), open: 100, high: 102, low: 99, close: 101, volume: 500 },
+    { time: iso(at(1)), open: 101, high: 103, low: 100, close: 102, volume: 0 }, // the minute forming when it loaded
+  ]
+  // The feed's memory since: minute 1 finished, its volume re-read from Dhan; minute 2 from ticks - no volume yet.
+  const feed = [
+    { time: iso(at(1)), open: 101.5, high: 104, low: 100, close: 103, volume: 640 },
+    { time: iso(at(2)), open: 103, high: 103.5, low: 102, close: 102.5, volume: 0 },
+  ]
+  // The push's forming minute (OHLC only), then a newer one.
+  const live = [
+    { time: iso(at(2) + 20_000), open: 103, high: 106, low: 102, close: 105 },
+    { time: iso(at(3) + 5_000), open: 105, high: 105, low: 105, close: 105 },
+  ]
+  const day = mergeSpotLive(loaded, feed, live)
+  assert.deepEqual(day.map((b) => [b.time, b.open, b.high, b.low, b.close, b.volume]), [
+    [iso(at(0)), 100, 102, 99, 101, 500],
+    [iso(at(1)), 101, 104, 100, 103, 640],
+    [iso(at(2)), 103, 106, 102, 105, 0],
+    [iso(at(3)), 105, 105, 105, 105, 0],
+  ])
+  // Outside the session: dropped.
+  assert.equal(mergeSpotLive([{ time: iso(at(-30)), open: 1, high: 1, low: 1, close: 1, volume: 9 }]).length, 0)
+})
+
+test('the futures ticks fold into minutes, a minute\'s volume the rise of Dhan\'s day volume (OI Replay\'s fold)', () => {
+  const ticks = [
+    { underlying: 'NIFTY', time: iso(at(0) + 5_000), price: 100, open: 100, high: 100, low: 100, openInterest: 1, dayVolume: 1000 },
+    { underlying: 'NIFTY', time: iso(at(0) + 40_000), price: 102, high: 102, low: 100, openInterest: 1, dayVolume: 1300 },
+    { underlying: 'NIFTY', time: iso(at(1) + 10_000), price: 101, high: 101, low: 101, openInterest: 1, dayVolume: 1450 },
+  ]
+  const minutes = mergeLiveFuturesTicks([], ticks)
+  assert.deepEqual(minutes.map((m) => [m.time, m.open, m.high, m.low, m.close, m.volume]), [
+    [iso(at(0)), 100, 102, 100, 102, 300],
+    [iso(at(1)), 101, 101, 101, 101, 150],
+  ])
 })

@@ -81,6 +81,16 @@ public sealed record PreviousDayFuturesResult(
         new(false, error, underlying, null, null, null, Array.Empty<FuturesBar>(), null);
 }
 
+/// <summary>One day's 1-minute spot bars WITH the index's own volume (OiReplayService.GetSpotDayAsync) - the Profiles
+/// page's spot volume and market profile. Source: "feed" (today, the spot feed's memory), "fetched" (the stored database or
+/// Dhan - a past day kept on disk) or "feed-partial" (today, what the feed saw since the server started, when Dhan had
+/// nothing).</summary>
+public sealed record SpotDayResult(bool Success, string? Error, string Underlying, DateOnly Date, string? Source, IReadOnlyList<CandleWithVolume> Bars)
+{
+    public static SpotDayResult Failed(string underlying, DateOnly date, string error) =>
+        new(false, error, underlying, date, null, Array.Empty<CandleWithVolume>());
+}
+
 /// <summary>One bin of the previous day's volume profile: its middle price and the volume traded in it.</summary>
 public sealed record VolumeProfileBin(decimal Price, long Volume);
 

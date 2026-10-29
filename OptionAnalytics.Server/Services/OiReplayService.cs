@@ -567,6 +567,47 @@ public sealed class OiReplayService
     /// granular that a single stray tick's bar creates its own noisy little peak.</summary>
     private const int VolumeProfileBinCount = 60;
 
+    /// <summary>`date`'s 1-minute spot bars with the index's own volume, the way the day's run gets its spot: today from the
+    /// spot feed's memory when it holds the whole day so far (no Dhan call), else the stored database / Dhan (a past day kept on
+    /// disk - DhanDataCache; today's answer shared with the run's - TodayFetchShare, same key), else - today - what the feed saw
+    /// since the server started. For the Profiles page's spot volume and market profile.</summary>
+    public async Task<SpotDayResult> GetSpotDayAsync(string underlying, DateOnly date, CancellationToken cancellationToken)
+    {
+        if (!StrikeStepByUnderlying.ContainsKey(underlying))
+            return SpotDayResult.Failed(underlying, date, $"'{underlying}' is not supported - only NIFTY, BANKNIFTY, and SENSEX.");
+        var isAlwaysLive = AlwaysLiveUnderlyings.Contains(underlying);
+        if (!isAlwaysLive && !_storedSpot.IsConfigured && !_allowLiveDataFallback)
+            return SpotDayResult.Failed(underlying, date, "Stored data is not configured on this server (no NiftyDataCollector database connection) - see ConnectionStrings:NiftyDataCollectorTimescale.");
+
+        DhanSpotInstrument? instrument = null;
+        if (isAlwaysLive || _allowLiveDataFallback)
+        {
+            await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
+            instrument = _instrumentMaster.FindSpot(underlying);
+        }
+        var picked = await PickSpotDayAsync(
+            isAlwaysLive ? TodaySpotFromFeed(underlying, date, wholeDay: true) : null,
+            () => FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, () => Task.FromResult(instrument), cancellationToken),
+            () => TodaySpotFromFeed(underlying, date, wholeDay: false));
+        return picked.Bars.Count == 0
+            ? SpotDayResult.Failed(underlying, date, picked.Error ?? $"No {underlying} spot candles for {date:dd MMM yyyy}.")
+            : new SpotDayResult(true, null, underlying, date, picked.Source, picked.Bars);
+    }
+
+    /// <summary>Which spot bars a day gets - the run's own order: the feed's whole day (then nothing is fetched), else what
+    /// `fetch` brings (the stored database / Dhan), else the feed's partial day; with the fetch's error when there are none.</summary>
+    internal static async Task<(IReadOnlyList<CandleWithVolume> Bars, string? Source, string? Error)> PickSpotDayAsync(
+        IReadOnlyList<CandleWithVolume>? wholeDayFromFeed,
+        Func<Task<(IReadOnlyList<CandleWithVolume> Bars, string? Error)>> fetch,
+        Func<IReadOnlyList<CandleWithVolume>?> partialFromFeed)
+    {
+        if (wholeDayFromFeed is { Count: > 0 }) return (wholeDayFromFeed, "feed", null);
+        var (bars, error) = await fetch();
+        if (bars.Count > 0) return (bars, "fetched", null);
+        if (partialFromFeed() is { Count: > 0 } partial) return (partial, "feed-partial", null);
+        return (Array.Empty<CandleWithVolume>(), null, error);
+    }
+
     /// <summary>The standard value-area convention - the price band that captured 70% of the day's
     /// own traded volume, expanding outward from POC.</summary>
     private const decimal ValueAreaShare = 0.70m;
