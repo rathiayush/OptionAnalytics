@@ -1277,7 +1277,13 @@ export function NavBar() {
   const systemInfo = useSystemInfo(isAdmin ? FEED_HEALTH_POLL_MS : null)
   const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
 
-  const go = (key) => { navigate(key); setDrawerOpen(false) }
+  // Another page opens at its top - the router keeps the window's scroll, so on a phone a page opened from the ☰ menu
+  // after a long one (OI Replay) opened scrolled to its bottom.
+  const go = (key) => {
+    if (key !== location.pathname) window.scrollTo(0, 0)
+    navigate(key)
+    setDrawerOpen(false)
+  }
 
   // The page makes room for the sidebar (body.oa-sidenav's padding - over 768 px only), set before the first paint so
   // the page never draws under it first.

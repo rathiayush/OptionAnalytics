@@ -26,6 +26,7 @@ export const LOCAL_ONLY = new Set([
   'optionanalytics.visitorId',
   'optionanalytics.reloadedForBuild',
   'optionanalytics.replaySync',
+  'optionanalytics.replayClock.last',
   'optionanalytics.liveTradeEvents.seen.v1',
   'optionanalytics.strategyScanner.history.v2',
   'optionanalytics.strategyScanner.paper.v1',

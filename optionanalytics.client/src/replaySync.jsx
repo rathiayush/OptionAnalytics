@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { Space, Switch, Tag, Tooltip, Typography } from 'antd'
+import { LAST_CLOCK_KEY, lastClockRecord, readLastClock } from './replayClockStore.js'
 
 // Replay sync: keeps the OI Replay and Order Flow replays in step across browser tabs/windows of this
 // site (BroadcastChannel - nothing goes through the server). With Sync on, pressing Play/Pause,
@@ -206,6 +207,10 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
 // The message: { type: 'clock', underlying, date ('YYYY-MM-DD' - null while a day is loading), loadingDate (the past
 // day being loaded, while it loads), failedDate (the past day whose load failed), ms (the replay clock: the END of the
 // newest minute shown - null when live), live, playing }.
+//
+// The same state is also KEPT in this browser on every change (replayClockStore.js): a follower takes the last one up
+// when no OI Replay tab answers - on a phone the pages share one tab (OI Replay is closed while the Profiles page is
+// open) and a background tab is frozen, so the channel alone left the follower on its own day.
 
 const CLOCK_CHANNEL = 'optionanalytics.replayClock'
 const CLOCK_HEARTBEAT_MS = 2000
@@ -233,30 +238,68 @@ export function useReplayClockBroadcast(state) {
   }, [])
   useEffect(() => {
     post()
+    const record = lastClockRecord(stateRef.current)
+    try { if (record) window.localStorage.setItem(LAST_CLOCK_KEY, record) } catch { /* only a convenience */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state?.underlying, state?.date, state?.loadingDate, state?.failedDate, state?.ms, state?.live, state?.playing])
 }
 
+const readKeptClock = () => {
+  try { return readLastClock(window.localStorage.getItem(LAST_CLOCK_KEY)) } catch { return null }
+}
+
 /** A follower: while `enabled`, hands every OI Replay clock message to onClock. Returns { connected (an OI
- *  Replay tab heard from in the last few seconds), clock (its latest message) }. */
+ *  Replay tab heard from in the last few seconds), clock (its latest message), kept (OI Replay's LAST clock, kept in
+ *  this browser, when that is what the page was put on - no OI Replay tab answering) }. The kept clock is taken up
+ *  when following starts and whenever the page comes back into view, if OI Replay moved since what was last
+ *  followed - and never while an OI Replay tab is answering (its messages lead). */
 export function useFollowReplayClock(enabled, onClock) {
   const onClockRef = useRef(onClock)
   onClockRef.current = onClock
   const [clock, setClock] = useState(null)
+  const [kept, setKept] = useState(null)
   const [seenAt, setSeenAt] = useState(0)
   const [now, setNow] = useState(() => Date.now())
+  const seenAtRef = useRef(0)
+  // When OI Replay's state last reached this page (a message, or the kept clock's savedAt) - a kept clock no newer
+  // is not taken up again.
+  const followedAtRef = useRef(0)
   useEffect(() => {
-    if (!enabled || typeof BroadcastChannel === 'undefined') { setClock(null); return undefined }
-    const channel = new BroadcastChannel(CLOCK_CHANNEL)
-    channel.onmessage = ({ data }) => {
-      if (data?.type !== 'clock' || !data.underlying) return
-      setClock(data)
-      setSeenAt(Date.now())
-      onClockRef.current?.(data)
+    if (!enabled) { setClock(null); setKept(null); followedAtRef.current = 0; return undefined }
+    const takeUpKept = () => {
+      if (document.visibilityState === 'hidden' || Date.now() - seenAtRef.current < CLOCK_TIMEOUT_MS) return
+      const last = readKeptClock()
+      if (!last || last.savedAt <= followedAtRef.current) return
+      followedAtRef.current = last.savedAt
+      setKept(last)
+      onClockRef.current?.(last)
     }
-    channel.postMessage({ type: 'hello', from: tabId })
+    let channel = null
+    if (typeof BroadcastChannel !== 'undefined') {
+      channel = new BroadcastChannel(CLOCK_CHANNEL)
+      channel.onmessage = ({ data }) => {
+        if (data?.type !== 'clock' || !data.underlying) return
+        const at = Date.now()
+        seenAtRef.current = at
+        followedAtRef.current = at
+        setClock(data)
+        setKept(null)
+        setSeenAt(at)
+        onClockRef.current?.(data)
+      }
+      channel.postMessage({ type: 'hello', from: tabId })
+    }
+    takeUpKept()
+    document.addEventListener('visibilitychange', takeUpKept)
+    window.addEventListener('pageshow', takeUpKept)
     const tick = setInterval(() => setNow(Date.now()), CLOCK_HEARTBEAT_MS)
-    return () => { clearInterval(tick); channel.close() }
+    return () => {
+      clearInterval(tick)
+      channel?.close()
+      document.removeEventListener('visibilitychange', takeUpKept)
+      window.removeEventListener('pageshow', takeUpKept)
+    }
   }, [enabled])
-  return { connected: enabled && clock != null && now - seenAt < CLOCK_TIMEOUT_MS, clock }
+  const connected = enabled && clock != null && now - seenAt < CLOCK_TIMEOUT_MS
+  return { connected, clock, kept: connected ? null : kept }
 }

@@ -223,7 +223,9 @@ When adding or changing a strategy:
   name, the menu (an icon a page), the server's status tags, the email and Log out - portalled to <body> and fixed; the
   page makes room with `body.oa-sidenav`'s padding (NavBar sets the class while it is mounted), and the page's own
   "Option Analytics" title beside NavBar is hidden. Its fold button narrows it to the icons (64 px, `STORED_SIDENAV_COLLAPSED`).
-  At 768 px and under there is no sidebar: the ☰ drawer and the header row's status, as before. OI Replay's controls
+  At 768 px and under there is no sidebar: the ☰ drawer and the header row's status, as before. A page opened from the
+  menu opens at its TOP (`go` scrolls the window first - the router kept the scroll, so after OI Replay a page opened at
+  its bottom). OI Replay's controls
   card folds to one row (Live, index, expiry, day, timeframe, Load day, "More" - `STORED_CONTROLS_COLLAPSED`); its
   warnings, errors and the load's progress show either way, and its own "Option Analytics" row is not shown over 768 px.
 - OI Replay's DASHBOARD (`dashboardLayout.js`, `DashboardGrid.jsx`, `DashboardCard.jsx`, the `.oi-dash-*` rules in
@@ -398,7 +400,15 @@ When adding or changing a strategy:
   fetching it from Dhan / NSE) is asked again once by itself 10 s later, then by the card's Retry or the moment OI Replay
   has loaded that same day - never a loop; the Spot / Futures headings name the day their data is of; the
   earlier sessions of Days / Previous are counted back from the day replayed, not from today; with no OI Replay tab open it is its own - Live, or a past day with its
-  own slider / play. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
+  own slider / play. ON A PHONE no OI Replay tab answers (the pages share ONE tab - OI Replay is closed while this page is
+  open - and a background tab is frozen), so OI Replay also KEEPS its last clock in this browser on every change
+  (`replayClockStore.js`, `optionanalytics.replayClock.last` - LOCAL_ONLY; not kept: OI Replay just opened with no day yet)
+  and the follower takes it up - when following starts and when the page comes back into view, only if OI Replay moved
+  since, never while an OI Replay tab answers, none older than 2 h - opening there with its own controls ("Opened where
+  OI Replay was left", `tests/replay-clock-store.test.mjs`). Its charts let a finger moving up / down SCROLL THE PAGE
+  (`handleScroll.vertTouchDrag: false` - a phone's page is four charts, and a swipe on one moved its prices instead;
+  sideways still pans, pinch zooms) and stand 62% of the window, 360 - 560 px (`chartGrow`'s cap, the height read again
+  on a new width only). NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and

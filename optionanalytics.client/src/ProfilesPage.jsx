@@ -20,6 +20,7 @@ import {
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
+import { chartGrow } from './dashboardLayout.js'
 import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 
 // The Profiles page: a whole page for the volume profile and the market profile (TPO) of an index - its SPOT in
@@ -33,7 +34,9 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 //
 // LIVE (today, kept up to date by the same pushes OI Replay takes - useLiveIndexFeed) or a PAST DAY at a clock - and by default it FOLLOWS OI Replay in
 // another tab (replaySync.jsx's clock channel, one way): the same index and day, live or at OI Replay's replay
-// clock, so the profiles replay along with it. Nothing after the clock is in either profile (barsKnownAt).
+// clock, so the profiles replay along with it; with no OI Replay running (a phone: one tab, or OI Replay's frozen in
+// the background) it opens where OI Replay was last left (replayClockStore.js). Nothing after the clock is in either
+// profile (barsKnownAt).
 // The futures are the Order Flow server's futures day (footprint rows - the buy and sell at each price), the same
 // the Order Flow page replays; a past day the server did not record comes estimated from 1-minute candles. The
 // spot is the index's 1-minute bars with its own volume (GET /api/oi-replay/{u}/spot-day - today the spot feed's
@@ -42,7 +45,6 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 const { Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const TIMEFRAMES = [1, 3, 5, 15, 30]
-const CHART_HEIGHT = 560
 // The right part of the time axis left empty for the profile drawn there (a share of the plot).
 const PROFILE_ROOM = { vp: 0.3, tpo: 0.28 }
 const fmt = (v) => (v == null || !Number.isFinite(v) ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }))
@@ -230,7 +232,7 @@ function usePastSessions(kind, underlying, dateKey, count) {
 /** Candles with a profile drawn at the right edge (`drawProfile(primitive)` sets it), zone boxes and
  *  price lines. The time axis keeps `room` of the plot empty on the right, so the newest candles never sit
  *  under the profile; wheel / drag take over the view, a double-click hands it back. */
-function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room, height = CHART_HEIGHT, resetKey }) {
+function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room, height, resetKey }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -262,6 +264,9 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, shiftVisibleRangeOnNewBar: false },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
+      // A finger moving UP or DOWN on a chart scrolls the page (a phone's page is nearly all chart - four of them);
+      // sideways still pans the time axis, and pinch zooms.
+      handleScroll: { vertTouchDrag: false },
     })
     const series = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
@@ -371,6 +376,24 @@ function Legend({ items }) {
 const volumeOf = (b) => b.volume ?? (b.buy ?? 0) + (b.sell ?? 0)
 const NO_BARS = []
 
+/** The charts' height: 62% of the window, 360 - 560 px (OI Replay's own cap, chartGrow) - a phone sees a whole chart
+ *  and a bit of its card. The window's height is read again on a new WIDTH only: a phone's browser bar coming and
+ *  going must not make the charts jump. */
+function useChartHeight() {
+  const [height, setHeight] = useState(() => chartGrow(window.innerHeight).cap)
+  useEffect(() => {
+    let width = window.innerWidth
+    const onResize = () => {
+      if (window.innerWidth === width) return
+      width = window.innerWidth
+      setHeight(chartGrow(window.innerHeight).cap)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+  return height
+}
+
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
@@ -380,6 +403,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
+  const chartHeight = useChartHeight()
   // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
   // with no candles has no price scale, so the profile and its boxes could not be drawn at all. The latest earlier
   // session's candles stand in until today's first minute, and the card says so. Never for a past day replayed: that
@@ -466,7 +490,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             {empty ? null : (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
-                priceRange={vpRange} room={PROFILE_ROOM.vp} resetKey={resetKey}
+                priceRange={vpRange} room={PROFILE_ROOM.vp} height={chartHeight} resetKey={resetKey}
               />
             )}
             <FoldText id="profiles.vp" label="how to read the volume profile" className="oa-note">
@@ -500,7 +524,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             {empty ?? (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeTpo} drawProfile={drawTpo} zones={mpZones} lines={mpLines}
-                priceRange={tpoRange} room={PROFILE_ROOM.tpo} resetKey={resetKey}
+                priceRange={tpoRange} room={PROFILE_ROOM.tpo} height={chartHeight} resetKey={resetKey}
               />
             )}
             <FoldText id="profiles.tpo" label="how to read the market profile" className="oa-note">
@@ -535,6 +559,12 @@ const followClockText = (c) => {
   if (c.loadingDate) return `loading ${c.loadingDate}…`
   if (c.failedDate) return `${c.failedDate} did not load there - shown from this page's own data`
   return 'no day loaded'
+}
+// OI Replay's last clock, kept in this browser, that the page opened on (no OI Replay running to follow).
+const keptClockText = (c) => {
+  if (c.live) return 'live'
+  const day = c.date ?? c.loadingDate ?? c.failedDate
+  return day ? `${day}${c.date && c.ms ? ` ${fmtClock(c.ms - 60_000)}` : ''}` : 'no day loaded'
 }
 const updatedAt = (at) => new Date(at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
 
@@ -741,7 +771,7 @@ export default function ProfilesPage() {
               <Tooltip title="The day's VWAP on every chart - typical price x volume over the 1-minute bars, as the server works it out (the spot's on the index's own volume).">
                 <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               </Tooltip>
-              <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. Nothing you do here moves OI Replay.">
+              <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. With no OI Replay running (a phone: one tab, or OI Replay's tab in the background) this page opens where OI Replay was last left, and its own controls play on from there. Nothing you do here moves OI Replay.">
                 <Space size={4}>
                   <Switch size="small" checked={follow} onChange={setFollow} />
                   <Text style={{ fontSize: 12 }}>Follow OI Replay</Text>
@@ -749,7 +779,9 @@ export default function ProfilesPage() {
               </Tooltip>
               {follow && (following
                 ? <Tag color={followed.clock?.failedDate ? 'warning' : 'cyan'} style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followClockText(followed.clock)}</Tag>
-                : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
+                : followed.kept
+                  ? <Tag color="blue" style={{ margin: 0, whiteSpace: 'normal' }}>Opened where OI Replay was left · {followed.kept.underlying} {keptClockText(followed.kept)} · it is not running - play on here</Tag>
+                  : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
             </Space>
             {!live && !following && span && (
               <Space direction="vertical" size={6} style={{ width: '100%' }}>
