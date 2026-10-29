@@ -195,3 +195,67 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
     </Space>
   )
 }
+
+// ---- OI Replay's clock, for a page that FOLLOWS it (one way) ----------------------------------------------
+//
+// The Profiles page follows OI Replay by default: whichever index and day OI Replay shows - live, or a past
+// day at its replay clock - the profiles show the same. That is a different thing from the two-way Sync
+// above (whose one switch is off by default and also moves the Order Flow page): OI Replay always says where
+// it is on its own channel, a follower listens when it wants to, and nothing a follower does moves OI Replay.
+//
+// The message: { type: 'clock', underlying, date ('YYYY-MM-DD' - null while a day is loading), ms (the
+// replay clock: the END of the newest minute shown - null when live), live, playing }.
+
+const CLOCK_CHANNEL = 'optionanalytics.replayClock'
+const CLOCK_HEARTBEAT_MS = 2000
+const CLOCK_TIMEOUT_MS = 6000
+
+/** OI Replay: say where its replay is - on every change and every couple of seconds (a follower that
+ *  opens later hears it at once too: it asks with "hello"). */
+export function useReplayClockBroadcast(state) {
+  const channelRef = useRef(null)
+  const stateRef = useRef(state)
+  stateRef.current = state
+  const post = () => {
+    const s = stateRef.current
+    if (channelRef.current && s?.underlying) channelRef.current.postMessage({ type: 'clock', from: tabId, ...s })
+  }
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return undefined
+    const channel = new BroadcastChannel(CLOCK_CHANNEL)
+    channelRef.current = channel
+    channel.onmessage = ({ data }) => { if (data?.type === 'hello') post() }
+    const heartbeat = setInterval(post, CLOCK_HEARTBEAT_MS)
+    post()
+    return () => { clearInterval(heartbeat); channel.close(); channelRef.current = null }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  useEffect(() => {
+    post()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.underlying, state?.date, state?.ms, state?.live, state?.playing])
+}
+
+/** A follower: while `enabled`, hands every OI Replay clock message to onClock. Returns { connected (an OI
+ *  Replay tab heard from in the last few seconds), clock (its latest message) }. */
+export function useFollowReplayClock(enabled, onClock) {
+  const onClockRef = useRef(onClock)
+  onClockRef.current = onClock
+  const [clock, setClock] = useState(null)
+  const [seenAt, setSeenAt] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!enabled || typeof BroadcastChannel === 'undefined') { setClock(null); return undefined }
+    const channel = new BroadcastChannel(CLOCK_CHANNEL)
+    channel.onmessage = ({ data }) => {
+      if (data?.type !== 'clock' || !data.underlying) return
+      setClock(data)
+      setSeenAt(Date.now())
+      onClockRef.current?.(data)
+    }
+    channel.postMessage({ type: 'hello', from: tabId })
+    const tick = setInterval(() => setNow(Date.now()), CLOCK_HEARTBEAT_MS)
+    return () => { clearInterval(tick); channel.close() }
+  }, [enabled])
+  return { connected: enabled && clock != null && now - seenAt < CLOCK_TIMEOUT_MS, clock }
+}

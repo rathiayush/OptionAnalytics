@@ -62,7 +62,7 @@ import {
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
-import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
+import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS, useReplayClockBroadcast } from './replaySync.jsx'
 import { checkpoints } from './halfHourMarks.js'
 
 const { Text, Title } = Typography
@@ -5578,6 +5578,9 @@ export default function OiReplayPage() {
     }
     setPlaying(Boolean(msg.playing) && count < oneMinBars.length)
   }
+  // The Profiles page follows this page one way, Sync switch or not (replaySync.jsx's clock channel): the same
+  // index and day, at this replay's clock.
+  useReplayClockBroadcast({ underlying, date: isLive || loading ? null : result?.date ?? null, ms: isLive ? null : syncClockMs, live: isLive, playing })
   const sync = useReplaySync({
     enabled: syncEnabled, active: !isLive, kind: 'oi',
     // No day while one is loading: until it lands, `result` is still the previous day's.
