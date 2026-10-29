@@ -387,7 +387,9 @@ When adding or changing a strategy:
   one way (`useReplayClockBroadcast` in `OiReplayPage` - always on, whatever the Sync switch - and `useFollowReplayClock`,
   `optionanalytics.replayClock` channel): OI Replay's index and day, live or at its replay clock (its own controls locked
   while it follows; nothing it does moves OI Replay); the moment OI Replay STARTS loading a past day (`loadingDate` on its
-  message) this page switches to that day fresh - it used to keep the old day until OI Replay's load was done; the
+  message) this page switches to that day fresh - it used to keep the old day until OI Replay's load was done; a day
+  whose load FAILED there (`failedDate`) is shown from this page's own data, the tag saying so (it read "loading" for
+  ever); the
   earlier sessions of Days / Previous are counted back from the day replayed, not from today; with no OI Replay tab open it is its own - Live, or a past day with its
   own slider / play. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.

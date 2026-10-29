@@ -5553,8 +5553,11 @@ export default function OiReplayPage() {
   // index and day, at this replay's clock.
   // While a past day loads, the day being loaded (loadingDate) - so the Profiles page starts it fresh at once instead of
   // keeping the old day on screen until this load is done.
+  // A day whose load FAILED here is named too (failedDate), so the Profiles page neither shows "loading" for ever nor
+  // keeps another day: it shows that day itself, as far as its own data goes.
   useReplayClockBroadcast({
     underlying, date: isLive || loading ? null : result?.date ?? null, loadingDate: !isLive && loading && date ? date.format('YYYY-MM-DD') : null,
+    failedDate: !isLive && !loading && error && date ? date.format('YYYY-MM-DD') : null,
     ms: isLive ? null : syncClockMs, live: isLive, playing,
   })
   const sync = useReplaySync({

@@ -505,6 +505,15 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
 // ---- the page --------------------------------------------------------------------------------------------
 
 const msOf = (t) => new Date(t).getTime()
+// What OI Replay is on, for the "following" tag.
+const followClockText = (c) => {
+  if (!c) return ''
+  if (c.live) return 'live'
+  if (c.date) return `${c.date}${c.ms ? ` ${fmtClock(c.ms - 60_000)}` : ''}`
+  if (c.loadingDate) return `loading ${c.loadingDate}…`
+  if (c.failedDate) return `${c.failedDate} did not load there - shown from this page's own data`
+  return 'no day loaded'
+}
 const updatedAt = (at) => new Date(at).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
 
 export default function ProfilesPage() {
@@ -536,7 +545,9 @@ export default function ProfilesPage() {
     if (!msg.date) {
       // OI Replay is loading a past day: this page starts the same day fresh at once - never the old day kept on
       // screen until that load is done. Its clock follows once the day is there.
-      if (msg.loadingDate) { setLive(false); setDateKey(msg.loadingDate); setClockMs(null); setPlaying(false) }
+      // Its load failed: the same day here, as far as this page's own data goes - fresh, like any day opened.
+      const day = msg.loadingDate ?? msg.failedDate
+      if (day) { setLive(false); setDateKey(day); setClockMs(null); setPlaying(false) }
       return
     }
     setLive(false)
@@ -706,7 +717,7 @@ export default function ProfilesPage() {
                 </Space>
               </Tooltip>
               {follow && (following
-                ? <Tag color="cyan" style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followed.clock?.live ? 'live' : `${followed.clock?.date ?? 'loading'}${followed.clock?.ms ? ` ${fmtClock(followed.clock.ms - 60_000)}` : ''}`}</Tag>
+                ? <Tag color={followed.clock?.failedDate ? 'warning' : 'cyan'} style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followClockText(followed.clock)}</Tag>
                 : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
             </Space>
             {!live && !following && span && (
