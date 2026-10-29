@@ -4,6 +4,10 @@ import { ConfigProvider, theme } from 'antd'
 import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.jsx'
+import { NotificationClearAll, setUpNotifications } from './notificationStack.jsx'
+
+// The pop-up alerts: stacked, compact, one Clear all (notificationStack.jsx).
+setUpNotifications()
 
 // The last line of defense - every page already wraps its OWN charts in a per-chart error
 // boundary (see e.g. OiReplayPage's ChartErrorBoundary), but nothing previously caught an error
@@ -71,6 +75,7 @@ createRoot(document.getElementById('root')).render(
         <BrowserRouter>
           <App />
         </BrowserRouter>
+        <NotificationClearAll />
       </ConfigProvider>
     </AppErrorBoundary>
   </StrictMode>,

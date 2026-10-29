@@ -294,6 +294,15 @@ When adding or changing a strategy:
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
   opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
   EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+- The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals, the scanner's,
+  price / profile alerts, order errors) are set up ONCE in `main.jsx` (`notificationStack.jsx`, rules in
+  `notificationStackRules.js`): STACKED - past `notificationStackThreshold` (1 on a phone, 3 wider) they fold into one pile,
+  the newest in front, a tap / hover spreads it out (antd's own stack; the static API takes it only from an antd `App`
+  around its holder - `ConfigProvider.config({ holderRender })` - not from `notification.config`); COMPACT on a phone
+  (`.ant-notification` rules in `index.css`: tighter padding and type, a long text cut to three lines until the pile is
+  opened - one used to take a third of the screen); "CLEAR ALL (N)" over them while two or more are open
+  (`NotificationClearAll`, `notification.destroy()`; on a phone beside the ☰, not over it). A new alert needs nothing:
+  `notification.open` as before (`tests/notification-stack.test.mjs`).
 - OI Replay's keyboard order ticket (B / F1 buy, S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
   `quickViews.js`): a text / number / date box, a searchable or tags dropdown, a text area. A checkbox, a radio (antd's
   Segmented), a switch or a plain dropdown (antd marks its input read-only) only hold the focus after a click - they used
