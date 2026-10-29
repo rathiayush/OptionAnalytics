@@ -2,17 +2,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import { CaretRightOutlined, PauseOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
+import * as signalR from '@microsoft/signalr'
 import { CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
 import {
   NavBar, usePersistedState, POLL_HEADERS, UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   toChartTime, istTimeFormatter, istTickMarkFormatter, istDateKey,
+  RECONNECT_RETRY_POLICY, joinAllSignalRGroups, onLiveBatch, syncSignalRGroups,
 } from './shared.jsx'
+import { mergeFuturesLive, mergeLiveFuturesTicks } from './futuresLive.js'
+import { inMarketSession } from './marketSession.js'
 import { createZoomableChart } from './chartZoom.js'
 import { VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
 import { TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
 import {
   FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, pastSessionsNeeded, profileSessions, volumeZones,
+  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -27,19 +31,17 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 //     market accepted price (the value area and its busiest rows) and where it did not (single prints inside
 //     the range, buying / selling tails at its extremes); POC, VAH / VAL and the initial balance.
 //
-// LIVE (today, refreshed every REFRESH_MS) or a PAST DAY at a clock - and by default it FOLLOWS OI Replay in
+// LIVE (today, kept up to date by the same pushes OI Replay takes - useLiveIndexFeed) or a PAST DAY at a clock - and by default it FOLLOWS OI Replay in
 // another tab (replaySync.jsx's clock channel, one way): the same index and day, live or at OI Replay's replay
 // clock, so the profiles replay along with it. Nothing after the clock is in either profile (barsKnownAt).
 // The futures are the Order Flow server's futures day (footprint rows - the buy and sell at each price), the same
 // the Order Flow page replays; a past day the server did not record comes estimated from 1-minute candles. The
 // spot is the index's 1-minute bars with its own volume (GET /api/oi-replay/{u}/spot-day - today the spot feed's
-// memory, a past day kept on disk; live refreshed from the feed's memory, /api/spot/{u}/volume-candles, so a
-// refresh never asks Dhan). Index volume has no buy / sell side: the spot's bars are one colour.
+// memory, a past day kept on disk). Index volume has no buy / sell side: the spot's bars are one colour.
 
 const { Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const TIMEFRAMES = [1, 3, 5, 15, 30]
-const REFRESH_MS = 15_000
 const CHART_HEIGHT = 560
 // The right part of the time axis left empty for the profile drawn there (a share of the plot).
 const PROFILE_ROOM = { vp: 0.3, tpo: 0.28 }
@@ -76,49 +78,58 @@ const dayUrl = {
   futures: (u, d) => `/api/order-flow/${u}/day/${d}?rowSize=${FETCH_ROWS[u] ?? 1}&minTradeLots=100000&heatmapColumns=50`,
   spot: (u, d) => `/api/oi-replay/${u}/spot-day?date=${d}`,
 }
-const byTime = (a, b) => new Date(a.time).getTime() - new Date(b.time).getTime()
 
-/** One instrument's day ("futures" | "spot"): { loading, error, at, day: { key, bars, source, contract } }. Live,
- *  refreshed every REFRESH_MS - a page timer, sent with the X-Poll header: the futures day again (the live engine's
- *  memory), the spot from the spot feed's memory (merged in by minute) - neither refresh reaches Dhan. */
-function useInstrumentDay(kind, underlying, dateKey, live) {
-  const [state, setState] = useState({ loading: false, error: null, day: null, at: null })
+/** One instrument's day ("futures" | "spot"), loaded once: { loading, error, day: { key, bars, source, contract } }.
+ *  Nothing here refreshes it on a timer - live, the pushes carry it on (useLiveIndexFeed); `reload` loads it again
+ *  (after the live connection was lost, for the minutes it missed). */
+function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
+  const [state, setState] = useState({ loading: false, error: null, day: null })
   useEffect(() => {
     if (!underlying || !dateKey) return undefined
     let cancelled = false
     const key = `${kind}|${underlying}|${dateKey}`
-    setState((s) => ({ loading: true, error: null, day: s.day?.key === key ? s.day : null, at: s.at }))
-    const fail = (err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) }
-    const load = () => fetch(dayUrl[kind](underlying, dateKey))
+    setState((s) => ({ loading: true, error: null, day: s.day?.key === key ? s.day : null }))
+    fetch(dayUrl[kind](underlying, dateKey))
       .then((r) => (r.ok ? r.json() : r.json().catch(() => ({})).then((b) => Promise.reject(new Error(b?.error ?? `HTTP ${r.status}`)))))
       .then((body) => {
         if (cancelled) return
         if (kind === 'spot' && !body.success) throw new Error(body.error ?? 'no spot candles')
-        setState({ loading: false, error: null, at: Date.now(), day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } })
+        setState({ loading: false, error: null, day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } })
       })
-      .catch(fail)
-    const refresh = kind === 'futures'
-      ? () => fetch(dayUrl.futures(underlying, dateKey), { headers: POLL_HEADERS })
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then((body) => { if (!cancelled) setState({ loading: false, error: null, at: Date.now(), day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } }) })
-        .catch(fail)
-      : () => fetch(`/api/spot/${underlying}/volume-candles`, { headers: POLL_HEADERS })
-        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-        .then((feed) => {
-          if (cancelled) return
-          const today = (feed ?? []).filter((b) => istDateKey(b.time) === dateKey)
-          setState((s) => {
-            const merged = new Map((s.day?.key === key ? s.day.bars : []).map((b) => [new Date(b.time).getTime(), b]))
-            for (const b of today) merged.set(new Date(b.time).getTime(), b)
-            return { loading: false, error: null, at: Date.now(), day: { key, bars: [...merged.values()].sort(byTime), source: s.day?.source ?? 'feed' } }
-          })
-        })
-        .catch(() => { /* the next refresh tries again; what was loaded stays */ })
-    load()
-    const id = live ? setInterval(refresh, REFRESH_MS) : null
-    return () => { cancelled = true; if (id) clearInterval(id) }
-  }, [kind, underlying, dateKey, live])
+      .catch((err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) })
+    return () => { cancelled = true }
+  }, [kind, underlying, dateKey, reload])
   return state
+}
+
+/** The live feed OI Replay listens to: the "/hubs/spot" connection, group "u:{index}" while `enabled` (live), and its
+ *  conflated "liveBatch" (shared.jsx onLiveBatch - the newest state only, acknowledged after paint, so the page never
+ *  falls behind): "spotUpdate" (the index's forming minute - OHLC; Dhan's index ticks carry no volume) and
+ *  "futuresTicks" (the near futures, with Dhan's day volume). One connection for the page's life; only the group
+ *  follows the index. A reconnect joins again and says so (onReconnected - the day is loaded again for what it missed). */
+function useLiveIndexFeed(underlying, enabled, handlers) {
+  const handlersRef = useRef(handlers)
+  handlersRef.current = handlers
+  const connectionRef = useRef(null)
+  const groupsRef = useRef([])
+  useEffect(() => {
+    const connection = new signalR.HubConnectionBuilder().withUrl('/hubs/spot').withAutomaticReconnect(RECONNECT_RETRY_POLICY).build()
+    connectionRef.current = connection
+    onLiveBatch(connection, {
+      spotUpdate: (snapshot) => handlersRef.current.onSpot?.(snapshot),
+      futuresTicks: (ticks) => handlersRef.current.onFutures?.(ticks ?? []),
+    })
+    connection.onreconnected(() => { joinAllSignalRGroups(connection, groupsRef.current); handlersRef.current.onReconnected?.() })
+    connection.start()
+      .then(() => joinAllSignalRGroups(connection, groupsRef.current))
+      .catch((err) => { if (err?.name !== 'AbortError') console.error('Profiles live feed connection failed:', err) })
+    return () => { connectionRef.current = null; connection.stop() }
+  }, [])
+  useEffect(() => {
+    const groups = enabled && underlying ? [`u:${underlying}`] : []
+    syncSignalRGroups(connectionRef.current, groupsRef.current, groups)
+    groupsRef.current = groups
+  }, [underlying, enabled])
 }
 
 // A past day never changes: kept here once fetched (this tab only), so changing "Days", the row or "Profile of" asks
@@ -512,12 +523,58 @@ export default function ProfilesPage() {
   const effectiveDate = live ? todayKey : dateKey
   const dayCount = Math.max(1, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1))
   const pastCount = pastSessionsNeeded(dayCount, profileOf)
-  const futures = useInstrumentDay('futures', index, effectiveDate, live)
-  const spot = useInstrumentDay('spot', index, effectiveDate, live)
+  // Live: what the pushes brought since the day loaded, for this index, day and mode only.
+  const liveKey = live ? `${index}|${effectiveDate}` : null
+  const [reload, setReload] = useState(0)
+  const futures = useInstrumentDay('futures', index, effectiveDate, reload)
+  const spot = useInstrumentDay('spot', index, effectiveDate, reload)
+  const [liveData, setLiveData] = useState({ key: null, spot: [], feed: [], futures: [], at: null })
+  const pushed = liveData.key === liveKey ? liveData : { spot: [], feed: [], futures: [], at: null }
+  const updateLive = (change) => setLiveData((d) => {
+    const base = d.key === liveKey ? d : { key: liveKey, spot: [], feed: [], futures: [], at: null }
+    return { ...base, ...change(base), at: Date.now() }
+  })
+  // The index's volume is in no tick: the spot feed re-reads each finished minute's from Dhan. So when the push turns
+  // to a new minute, the volumes the feed holds are read from its memory - once a minute, never from Dhan.
+  const spotMinuteRef = useRef({ key: null, minute: null })
+  const readingFeedRef = useRef(false)
+  const readSpotFeed = () => {
+    if (readingFeedRef.current) return
+    readingFeedRef.current = true
+    const key = liveKey
+    fetch(`/api/spot/${index}/volume-candles`, { headers: POLL_HEADERS })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((bars) => {
+        const day = (bars ?? []).filter((b) => istDateKey(b.time) === effectiveDate && inMarketSession(b.time))
+        setLiveData((d) => (d.key === key ? { ...d, feed: day } : d))
+      })
+      .catch(() => { /* the next minute reads it again; what was loaded stays */ })
+      .finally(() => { readingFeedRef.current = false })
+  }
+  useLiveIndexFeed(index, live, {
+    onSpot: (snapshot) => {
+      const bar = snapshot?.currentBar
+      if (!live || snapshot?.underlying !== index || !bar || !inMarketSession(bar.time)) return
+      const minute = Math.floor(new Date(bar.time).getTime() / 60_000)
+      const seen = spotMinuteRef.current
+      if (seen.key === liveKey && seen.minute != null && minute > seen.minute) readSpotFeed()
+      spotMinuteRef.current = { key: liveKey, minute }
+      updateLive((d) => ({ spot: [...d.spot.filter((b) => b.time !== bar.time), bar] }))
+    },
+    onFutures: (ticks) => {
+      const mine = ticks.filter((t) => t?.underlying === index)
+      if (live && mine.length) updateLive((d) => ({ futures: mergeLiveFuturesTicks(d.futures, mine) }))
+    },
+    onReconnected: () => setReload((r) => r + 1),
+  })
   const futuresPast = usePastSessions('futures', index, effectiveDate, pastCount)
   const spotPast = usePastSessions('spot', index, effectiveDate, pastCount)
-  const futuresDay = futures.day?.key === `futures|${index}|${effectiveDate}` ? futures.day : null
-  const spotDay = spot.day?.key === `spot|${index}|${effectiveDate}` ? spot.day : null
+  const loadedFutures = futures.day?.key === `futures|${index}|${effectiveDate}` ? futures.day : null
+  const loadedSpot = spot.day?.key === `spot|${index}|${effectiveDate}` ? spot.day : null
+  // The day as it stands: loaded, plus - live - the pushes since (the futures' minutes after the load are candles, their
+  // volume spread over their range like OI Replay's futures profile; the loaded minutes keep their buy / sell rows).
+  const futuresDay = useMemo(() => (loadedFutures && live && pushed.futures.length ? { ...loadedFutures, bars: mergeFuturesLive(loadedFutures.bars, pushed.futures) } : loadedFutures), [loadedFutures, live, pushed.futures])
+  const spotDay = useMemo(() => (loadedSpot && live && (pushed.spot.length || pushed.feed.length) ? { ...loadedSpot, bars: mergeSpotLive(loadedSpot.bars, pushed.feed, pushed.spot) } : loadedSpot), [loadedSpot, live, pushed.spot, pushed.feed])
 
   // The span a past day's own slider runs over: the first minute's start to the last minute's end, of either.
   const futuresSession = useMemo(() => barsKnownAt(futuresDay?.bars, null), [futuresDay])
@@ -547,7 +604,7 @@ export default function ProfilesPage() {
   const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
   const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
-  const asOf = live ? `live${futures.at ? ` · updated ${updatedAt(futures.at)}` : ''}` : clock ? `as of ${fmtClock(clock)}` : ''
+  const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `as of ${fmtClock(clock)}` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
   // Nothing of the day yet: the cards say so - unless they show earlier sessions only, which they can without it.
   const emptyFor = (state, session, past, what) => {

@@ -20,7 +20,7 @@ import {
 } from './shared.jsx'
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
-import { mergeFuturesLive, oiAtCandleCloses } from './futuresLive.js'
+import { mergeFuturesLive, mergeLiveFuturesTicks, oiAtCandleCloses } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
 import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
 import { readoutPlacement } from './readoutPlacement.js'
@@ -330,35 +330,6 @@ export function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POIN
         volume: dayVolume != null ? Math.max(0, dayVolume - dayVolumeOpen) : null, dayVolume, dayVolumeOpen,
       })
       lastIndex.set(tick.strike, next.length - 1)
-    }
-  }
-  return next
-}
-
-// Futures entries folded into their own current MINUTE. A tick's dayVolume is Dhan's CUMULATIVE day
-// volume, so a minute's volume is its rise since the minute began: dayVolumeOpen is the cumulative
-// figure at the minute's start (the previous live minute's last one, else the minute's first tick -
-// which misses only the part of that first minute before the page started listening). Without
-// dayVolume (an older server) volume stays null, which futuresVolumeSoFar's own sum treats as 0.
-function mergeLiveFuturesTicks(prev, ticks) {
-  if (ticks.length === 0) return prev
-  const next = prev.slice()
-  const ordered = [...ticks].sort((a, b) => new Date(a.time) - new Date(b.time))
-  for (const tick of ordered) {
-    const bucketIso = new Date(Math.floor(new Date(tick.time).getTime() / 60_000) * 60_000).toISOString()
-    const high = Number.isFinite(tick.high) ? tick.high : tick.price
-    const low = Number.isFinite(tick.low) ? tick.low : tick.price
-    const last = next[next.length - 1]
-    const dayVolume = tick.dayVolume > 0 ? tick.dayVolume : null
-    if (last && last.time === bucketIso) {
-      const volume = dayVolume != null && last.dayVolumeOpen != null ? Math.max(0, dayVolume - last.dayVolumeOpen) : last.volume
-      next[next.length - 1] = { ...last, high: Math.max(last.high, high), low: Math.min(last.low, low), close: tick.price, openInterest: tick.openInterest, volume, dayVolume: dayVolume ?? last.dayVolume }
-    } else if (!last || bucketIso > last.time) {
-      const dayVolumeOpen = dayVolume == null ? null : last?.dayVolume ?? dayVolume
-      next.push({
-        time: bucketIso, open: Number.isFinite(tick.open) ? tick.open : tick.price, high, low, close: tick.price, openInterest: tick.openInterest,
-        volume: dayVolume != null ? Math.max(0, dayVolume - dayVolumeOpen) : null, dayVolume, dayVolumeOpen,
-      })
     }
   }
   return next

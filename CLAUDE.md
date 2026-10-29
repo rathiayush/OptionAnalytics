@@ -357,8 +357,14 @@ When adding or changing a strategy:
   `OiReplayService.GetSpotDayAsync`, the run's own order, `PickSpotDayAsync`: the spot feed's whole day with no Dhan call, else
   the stored database / Dhan - kept on disk, today shared with the run's fetch - else the feed's partial day); index volume has
   no side, so its bars are one colour; before January 2026 Dhan sent none (the card says so; the market profile still shows).
-  Live, both refresh every 15 s with the X-Poll header and neither refresh reaches Dhan: the futures day again (the live
-  engine's memory), the spot from the feed's memory (`/api/spot/{u}/volume-candles`, merged in by minute). VOLUME PROFILE: POC / VAH / VAL lines, the bars
+  LIVE it is kept up to date the way OI Replay is - NO TIMER (`useLiveIndexFeed`): the "/hubs/spot" connection, group
+  "u:{U}", its conflated "liveBatch" - "futuresTicks" folded into minutes with the rise of Dhan's day volume
+  (`mergeLiveFuturesTicks` in `futuresLive.js`, OI Replay's own, shared) and joined to the loaded day (`mergeFuturesLive`;
+  those minutes are candles, their volume spread over their range - `dayVolumeProfile` takes footprint and candle minutes
+  together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
+  each finished minute's from Dhan, so when the push turns to a new minute the page reads the feed's memory once,
+  `/api/spot/{u}/volume-candles` - never Dhan - and `mergeSpotLive` keeps each minute's largest volume). The day is loaded
+  once (and again after a reconnect, for what it missed). VOLUME PROFILE: POC / VAH / VAL lines, the bars
   at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
   the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
