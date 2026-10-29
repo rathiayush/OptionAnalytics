@@ -348,6 +348,23 @@ When adding or changing a strategy:
   a real day. (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
   POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
   "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
+- The PROFILES page (`/profiles`, "Volume & Market Profile" - `ProfilesPage.jsx`, `profileZones.js`, `profilePrimitives.js`): two
+  cards over the near futures' candles (timeframe 1 - 30 min, profile row per index - `PROFILE_ROWS`), from the Order Flow
+  server's futures day (`/api/order-flow/{u}/day/{date}`, fetched in the footprint's row - `FETCH_ROWS` - and re-bucketed, so a
+  row change asks nothing; live refreshed every 15 s with the X-Poll header). VOLUME PROFILE: POC / VAH / VAL lines, the bars
+  at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
+  HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
+  the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
+  are too thin), POC / VAH / VAL / IB lines, and BOXES (`marketProfileZones`): the value area and the rows with >= 0.7x the POC
+  row's TPOs (where the market spent its time - accepted), single prints inside the range (`singlePrintGaps`) and tails (>= 2
+  single-print rows at the high / low, ending at a row of 2+ periods); one made only by the period still running is
+  "forming". Nothing for a one-period profile. "Profile of": the day so far, or the previous session (`fetchPreviousSession`)
+  over the day's candles. The time axis leaves the right of the plot empty for the profile. It FOLLOWS OI REPLAY by default,
+  one way (`useReplayClockBroadcast` in `OiReplayPage` - always on, whatever the Sync switch - and `useFollowReplayClock`,
+  `optionanalytics.replayClock` channel): OI Replay's index and day, live or at its replay clock (its own controls locked
+  while it follows; nothing it does moves OI Replay); with no OI Replay tab open it is its own - Live, or a past day with its
+  own slider / play. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
+  It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
