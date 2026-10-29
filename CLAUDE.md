@@ -389,7 +389,9 @@ When adding or changing a strategy:
   while it follows; nothing it does moves OI Replay); the moment OI Replay STARTS loading a past day (`loadingDate` on its
   message) this page switches to that day fresh - it used to keep the old day until OI Replay's load was done; a day
   whose load FAILED there (`failedDate`) is shown from this page's own data, the tag saying so (it read "loading" for
-  ever); the
+  ever); a day whose load failed HERE (`useInstrumentDay` - a past futures day can fail while the server is still
+  fetching it from Dhan / NSE) is asked again once by itself 10 s later, then by the card's Retry or the moment OI Replay
+  has loaded that same day - never a loop; the Spot / Futures headings name the day their data is of; the
   earlier sessions of Days / Previous are counted back from the day replayed, not from today; with no OI Replay tab open it is its own - Live, or a past day with its
   own slider / play. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.

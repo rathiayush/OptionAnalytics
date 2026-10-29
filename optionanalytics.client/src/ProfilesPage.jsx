@@ -88,11 +88,24 @@ const dayUrl = {
   spot: (u, d) => `/api/oi-replay/${u}/spot-day?date=${d}`,
 }
 
-/** One instrument's day ("futures" | "spot"), loaded once: { loading, error, day: { key, bars, source, contract } }.
+/** One instrument's day ("futures" | "spot"), loaded once: { loading, error, day: { key, bars, source, contract }, retry }.
  *  Nothing here refreshes it on a timer - live, the pushes carry it on (useLiveIndexFeed); `reload` loads it again
- *  (after the live connection was lost, for the minutes it missed). */
+ *  (after the live connection was lost, for the minutes it missed).
+ *  A load that FAILED is asked again once by itself, 10 s later, and then only by `retry()` (the card's Retry, or OI
+ *  Replay having just loaded the same day): a past futures day can fail while the server is still fetching it from
+ *  Dhan / NSE - for OI Replay at the same moment - and without asking again the futures stayed on the error while the
+ *  spot had moved on. Once a day, never a loop of a failing request. */
 function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
   const [state, setState] = useState({ loading: false, error: null, day: null })
+  const [attempt, setAttempt] = useState(0)
+  const autoRetriedRef = useRef(null)
+  const retry = useCallback(() => setAttempt((a) => a + 1), [])
+  useEffect(() => {
+    const key = `${kind}|${underlying}|${dateKey}`
+    if (!state.error || autoRetriedRef.current === key) return undefined
+    const id = setTimeout(() => { autoRetriedRef.current = key; setAttempt((a) => a + 1) }, 10_000)
+    return () => clearTimeout(id)
+  }, [state.error, kind, underlying, dateKey])
   useEffect(() => {
     if (!underlying || !dateKey) return undefined
     let cancelled = false
@@ -107,8 +120,8 @@ function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
       })
       .catch((err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) })
     return () => { cancelled = true }
-  }, [kind, underlying, dateKey, reload])
-  return state
+  }, [kind, underlying, dateKey, reload, attempt])
+  return useMemo(() => ({ ...state, retry }), [state, retry])
 }
 
 /** The live feed OI Replay listens to: the "/hubs/spot" connection, group "u:{index}" while `enabled` (live), and its
@@ -605,6 +618,15 @@ export default function ProfilesPage() {
     },
     onReconnected: () => setReload((r) => r + 1),
   })
+  // OI Replay has just loaded the day this page failed on: the server has fetched it now - ask once more.
+  const retriedForRef = useRef(null)
+  const oiDay = following ? followed.clock?.date ?? null : null
+  useEffect(() => {
+    if (!oiDay || oiDay !== effectiveDate || retriedForRef.current === oiDay || (!futures.error && !spot.error)) return
+    retriedForRef.current = oiDay
+    if (futures.error) futures.retry()
+    if (spot.error) spot.retry()
+  }, [oiDay, effectiveDate, futures, spot])
   const futuresPast = usePastSessions('futures', index, effectiveDate, pastCount)
   const spotPast = usePastSessions('spot', index, effectiveDate, pastCount)
   const loadedFutures = futures.day?.key === `futures|${index}|${effectiveDate}` ? futures.day : null
@@ -661,8 +683,8 @@ export default function ProfilesPage() {
   // above 1), which they show over the latest one's candles until today's first minute (ProfilePair's stand-in).
   const emptyFor = (state, session, past, what) => {
     if (session.length || (live && pastCount > 0 && past.sessions.length)) return null
-    if (state.loading) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Loading the ${what}…`} />
-    if (state.error) return <Alert type="warning" showIcon message={`The ${what} is not available: ${state.error}`} />
+    if (state.loading) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Loading the ${what} of ${effectiveDate}…`} />
+    if (state.error) return <Alert type="warning" showIcon message={`The ${what} of ${effectiveDate} is not available: ${state.error}`} action={<Button size="small" onClick={state.retry}>Retry</Button>} />
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
   }
   const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, resetKey }
@@ -758,9 +780,9 @@ export default function ProfilesPage() {
           </Space>
         </Card>
 
-        <Text strong style={{ fontSize: 13 }}>Spot · {index} index</Text>
+        <Text strong style={{ fontSize: 13 }}>Spot · {index} index · {spotDay ? effectiveDate : spot.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
         <ProfilePair {...pair} name="Spot" known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
-        <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`}</Text>
+        <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`} · {futuresDay ? effectiveDate : futures.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
         <ProfilePair {...pair} name="Futures" known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
       </Space>
     </div>
