@@ -125,14 +125,28 @@ When adding or changing a strategy:
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
-  (`stepOiBreakAlerts`): the OI Replay page while it is open - in its own "OI totals" card (`oiTotals`: the CE / PE / Net
-  Δ and cumulative Δ table, Charts, its own bucket and these settings - `OiChangeHeatmapSection show="totals"` with
-  `alertUnderlying`; the heatmap card is `show="strikes"`, no alerts) - (pop-up, chime, voice) and the server scanner for every enabled
-  index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). 🎯 = a cumulative-line break AND the CE or PE
+  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
+  index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). They are the APP'S alerts: Telegram
+  (the server's, and the page's own when the server is not covering) only when the OI totals card's "Telegram" switch is
+  on (`config.oiBreakAlerts.telegram`, OFF by default - a config saved before the switch has none and reads as off; the
+  card then says "In the app only"); the server still lists what it raised for the page, and the switch does not restart
+  its watch. On the page they are run by the PAGE
+  (`useOiBreakAlerts` + `useOiBreakAlertSettings` in `OiReplayPage`), not by a card - a card scrolled off-screen stops
+  re-rendering (`LiveSection`) and a hidden one is not there, and both used to silence them; the "OI totals" card
+  (`oiTotals`: the CE / PE / Net Δ and cumulative Δ table, Charts, the bucket the alerts read and these settings -
+  `OiChangeHeatmapSection show="totals"` with the page's `alerts`; the heatmap card is `show="strikes"`, no alerts) only
+  shows the settings. A PAST DAY REPLAYED raises them too, on the replay's clock (`stepReplayOiBreakAlerts`: the end of
+  the last minute shown, completed buckets only - nothing after it; the slider taken back starts the watch again, a jump
+  announces only what is fresh), marked "replay", never to Telegram (`tests/oi-replay-alerts.test.mjs`). Which alerts
+  the page raises - live and replayed - is its "Alerts" dropdown in the controls (`oiAlertTypes.js`,
+  `optionanalytics.oiReplay.alertTypes`): by default 🎯 high probability and the CE / PE S/R breaks; Net S/R break, the
+  big OI shift near ATM (the beep and box over the spot chart, with its threshold) and the premium / discount zone (the
+  server's, live) are one click away (`pickOiAlerts` - the 🎯 watch still sees every break). The server's Telegram is not
+  changed by that choice. 🎯 = a cumulative-line break AND the CE or PE
   OI at ATM ± 1 shifting `atmShiftPct` % (default 20) of its size the same way, within the window. Settings (on / window / %) are
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
-  `highProbabilityAlertKey`), so a message goes once; the page sends Telegram itself only when the server is not covering
-  the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+  `highProbabilityAlertKey`), so a message goes once; with Telegram on, the page sends it itself only when the server is not
+  covering the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
 - OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
   (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
   default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,
@@ -271,7 +285,7 @@ When adding or changing a strategy:
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
   another digit switches; Ctrl + Shift because the browser keeps Ctrl + 1 - 8 for its tabs), or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
-  `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alertUnderlying` - so no
+  `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alerts` - so no
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
   its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button

@@ -3,7 +3,8 @@ import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, ConfigProvider, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
-import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts } from './oiLevelBreaks.js'
+import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, newReplayOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts, stepReplayOiBreakAlerts } from './oiLevelBreaks.js'
+import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
@@ -1748,37 +1749,22 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alertUnderlying = null, spotBars = null, step = null }) {
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null }) {
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
-  // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card - whose
-  // alerts read it - the quick view, the External page's tabs).
-  const [heatmapTimeframeMinutes, setHeatmapTimeframeMinutes] = usePersistedState(`optionanalytics.oiReplay.bucket.${show}`, 1)
+  // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card, the quick
+  // view, the External page's tabs). The totals card's is the page's (`alerts` - useOiBreakAlertSettings): its alerts
+  // read it, and they run on the page whether this card is on screen or not.
+  const [ownTimeframeMinutes, setOwnTimeframeMinutes] = usePersistedState(`optionanalytics.oiReplay.bucket.${show}`, 1)
+  const heatmapTimeframeMinutes = alerts ? alerts.bucketMinutes : ownTimeframeMinutes
+  const setHeatmapTimeframeMinutes = alerts ? alerts.setBucketMinutes : setOwnTimeframeMinutes
   // The totals (CE / PE / net) as numbers (default) or as a heatmap - remembered.
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
   const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
-  // Telegram / notification when a totals cumulative line breaks its support / resistance (only where the page
-  // passes alertUnderlying - OI Replay live).
-  const [breakAlertsOn, setBreakAlertsOn] = usePersistedState('optionanalytics.oiReplay.breakAlerts', true)
-  // The window the high-probability signal's three conditions must fall in (minutes).
-  const [hpWindowMinutes, setHpWindowMinutes] = usePersistedState('optionanalytics.oiReplay.hpWindowMinutes', 5)
-  // How far the CE or PE OI at the ATM strike and the strike either side must shift over that window (% of its size).
-  const [hpAtmShiftPct, setHpAtmShiftPct] = usePersistedState('optionanalytics.oiReplay.hpAtmShiftPct', 20)
-  // The server scanner sends these to Telegram with no page open; the settings are shared with it - the page shows the
-  // server's on load and saves a change back (an admin's - others get 403 and keep their own).
-  const serverOiBreaks = useServerOiBreakAlerts(alertUnderlying, (server) => {
-    setBreakAlertsOn(server.on !== false)
-    if (HIGH_PROBABILITY_WINDOWS.includes(server.windowMinutes)) setHpWindowMinutes(server.windowMinutes)
-    if (Number.isFinite(server.atmShiftPct)) setHpAtmShiftPct(server.atmShiftPct)
-  })
-  const saveOiBreaks = (patch) => {
-    const next = { on: breakAlertsOn, bucketMinutes: 1, windowMinutes: hpWindowMinutes, atmShiftPct: hpAtmShiftPct, ...patch }
-    fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oiBreakAlerts: next }) }).catch(() => {})
-  }
-  useOiBreakAlerts({
-    underlying: alertUnderlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes: heatmapTimeframeMinutes, live, dayKey, enabled: breakAlertsOn,
-    hpWindowMinutes, hpAtmShiftPct, serverCovers: !!serverOiBreaks?.covers,
-  })
+  // The S/R break and 🎯 alerts' settings (the page's - useOiBreakAlertSettings), shown with the totals.
+  const alertUnderlying = alerts?.underlying ?? null
+  const breakAlertsOn = !!alerts?.on
+  const serverOiBreaks = alerts?.server ?? null
   const serverSent = serverOiBreaks?.alerts?.sent ?? []
   const strikesPart = (
     <>
@@ -1825,9 +1811,9 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           </Tooltip>
           <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
           {alertUnderlying && (
-            <Tooltip title={`Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the strategy scanner's switches.${live ? '' : ' Live only.'}`}>
+            <Tooltip title={'Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts\' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the strategy scanner\'s switches. A replayed day raises them too, on the replay clock (no Telegram). Which ones pop up on this page: "Alerts" in the controls at the top - 🎯 and the CE / PE breaks by default.'}>
               <Space size={4}>
-                <Switch size="small" checked={breakAlertsOn} onChange={(v) => { setBreakAlertsOn(v); saveOiBreaks({ on: v }) }} aria-label="S/R break alerts" />
+                <Switch size="small" checked={breakAlertsOn} onChange={alerts?.setOn} aria-label="S/R break alerts" />
                 <Text style={{ fontSize: 12 }}>S/R break alerts</Text>
               </Space>
             </Tooltip>
@@ -1836,7 +1822,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
             <Tooltip title="🎯 High probability: the S/R break, the large CE − PE shift and the ATM ± 1 concentration must all fall within this many minutes (at least one bucket).">
               <Space size={4}>
                 <Text style={{ fontSize: 12 }}>🎯 within</Text>
-                <Select size="small" value={hpWindowMinutes} onChange={(v) => { setHpWindowMinutes(v); saveOiBreaks({ windowMinutes: v }) }} disabled={!breakAlertsOn} style={{ width: 82 }} aria-label="High probability window"
+                <Select size="small" value={alerts?.windowMinutes} onChange={alerts?.setWindowMinutes} disabled={!breakAlertsOn} style={{ width: 82 }} aria-label="High probability window"
                   options={HIGH_PROBABILITY_WINDOWS.map((m) => ({ value: m, label: `${m} min` }))} />
               </Space>
             </Tooltip>
@@ -1845,12 +1831,27 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
             <Tooltip title="🎯 High probability: at the ATM strike and the strike either side, the CE OI or the PE OI must shift by at least this % of its own size within the window (e.g. CE 50L → 40L = −20%: calls unwinding, bullish; PE 50L → 60L = +20%: put writing, bullish) - at the same time as a break on the cumulative charts, both the same way.">
               <Space size={4}>
                 <Text style={{ fontSize: 12 }}>ATM ±1 OI shift ≥</Text>
-                <InputNumber size="small" min={1} max={500} step={5} value={hpAtmShiftPct} onChange={(v) => { setHpAtmShiftPct(v ?? 20); saveOiBreaks({ atmShiftPct: v ?? 20 }) }} disabled={!breakAlertsOn}
+                <InputNumber size="small" min={1} max={500} step={5} value={alerts?.atmShiftPct} onChange={(v) => alerts?.setAtmShiftPct(v ?? 20)} disabled={!breakAlertsOn}
                   style={{ width: 90 }} addonAfter="%" aria-label="High probability ATM shift percent" />
               </Space>
             </Tooltip>
           )}
-          {alertUnderlying && breakAlertsOn && serverOiBreaks && (serverOiBreaks.covers ? (
+          {alertUnderlying && (
+            <Tooltip title="Send these to Telegram too - from the server, all day with no page open (or from this page when the server is not sending them). Off: they are the app's alerts only - this page's pop-up, chime and voice.">
+              <Space size={4}>
+                <Switch size="small" checked={!!alerts?.telegram} onChange={alerts?.setTelegram} disabled={!breakAlertsOn} aria-label="S/R and 🎯 alerts to Telegram" />
+                <Text style={{ fontSize: 12 }}>Telegram</Text>
+              </Space>
+            </Tooltip>
+          )}
+          {alertUnderlying && breakAlertsOn && !alerts?.telegram && (
+            <Tooltip title={serverSent.length
+              ? <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{serverSent.slice().reverse().map((m) => `${istTimeFormatter(toChartTime(m.t))} ${m.text}`).join('\n\n')}</div>
+              : 'These pop up on this page only (live, and on a replayed day) - nothing goes to Telegram. Switch Telegram on to have the server send them all day.'}>
+              <Tag style={{ margin: 0 }}>In the app only{serverSent.length ? ` · server saw today: ${serverSent.length}` : ''}</Tag>
+            </Tooltip>
+          )}
+          {alertUnderlying && breakAlertsOn && alerts?.telegram && serverOiBreaks && (serverOiBreaks.covers ? (
             <Tooltip title={serverSent.length
               ? <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{serverSent.slice().reverse().map((m) => `${istTimeFormatter(toChartTime(m.t))} ${m.text}`).join('\n\n')}</div>
               : `The server scanner watches ${alertUnderlying} all day and sends these to Telegram with no page open (1-min buckets). Nothing sent yet today.`}>
@@ -1954,25 +1955,38 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 
 // Alerts when an OI totals cumulative line (CE, PE or net) breaks its own support / resistance - the totals charts'
 // "broke S" / "broke R" arrows - and the high-probability signal (oiLevelBreaks.js), at the totals' bucket size, on
-// completed buckets, live only, while this page is open. The SERVER scanner runs the same step for every index with no
-// page open (scanner-runner/indexScanner.mjs) and sends the Telegram then - this page only chimes, speaks and shows
-// them; it sends Telegram itself only when the server is not covering this index. Same keys either way, so a message
-// goes once.
-function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, dayKey, enabled, hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false }) {
+// completed buckets, while this page is open: LIVE on the clock, and while a past day is REPLAYED on the replay's clock
+// (`replayNowSec` - the end of the last minute shown; stepReplayOiBreakAlerts: nothing after it, the slider taken back
+// starts the watch again). Which of them pop up: `types` (the page's "Alerts" choice, oiAlertTypes.js). Run by the PAGE,
+// not the totals card - a card scrolled off-screen stops re-rendering (LiveSection) and a hidden one is not there, and
+// either used to silence these. The SERVER scanner runs the same step for every index with no page open
+// (scanner-runner/indexScanner.mjs) and sends the Telegram then - this page only chimes, speaks and shows them; live, it
+// sends Telegram itself only when their Telegram switch is on (off by default - they are the app's alerts) and the server
+// is not covering this index (same keys either way, so a message goes once); a replay never sends Telegram.
+function useOiBreakAlerts({
+  underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, replayNowSec = null, dayKey, enabled,
+  hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false, types = DEFAULT_ALERT_TYPES, toTelegram = false,
+}) {
   // Never for the External account (its Market view shows no pop-ups and sends nothing), whatever a caller passes.
   const external = useAuth()?.user?.role === 'External'
-  const active = !!(live && enabled && underlying && !external)
+  const replaying = !live && replayNowSec != null
+  const active = !!((live || replaying) && enabled && underlying && !external)
   const [clock, setClock] = useState(() => Date.now())
   useEffect(() => {
-    if (!active) return undefined
+    if (!active || !live) return undefined
     const id = setInterval(() => setClock(Date.now()), 15_000)
     return () => clearInterval(id)
-  }, [active])
+  }, [active, live])
   const state = useRef(newOiBreakAlertState())
-  useEffect(() => { state.current = newOiBreakAlertState() }, [underlying, dayKey, timeframeMinutes, active, hpWindowMinutes, hpAtmShiftPct])
+  const replayState = useRef(newReplayOiBreakAlertState())
+  useEffect(() => {
+    state.current = newOiBreakAlertState()
+    replayState.current = newReplayOiBreakAlertState()
+  }, [underlying, dayKey, timeframeMinutes, active, live, hpWindowMinutes, hpAtmShiftPct])
   const bucketSeconds = timeframeMinutes * 60
   // Only the completed buckets: re-read when one completes (or the data changes), not on every clock tick.
-  const boundary = Math.floor(toChartTime(clock) / bucketSeconds) * bucketSeconds
+  const nowSec = live ? toChartTime(clock) : replayNowSec
+  const boundary = nowSec == null ? null : Math.floor(nowSec / bucketSeconds) * bucketSeconds
   const day = useMemo(() => {
     if (!active) return null
     // Each strike's OI level per bucket too - the ATM ± 1 shift reads levels, not changes.
@@ -1984,16 +1998,20 @@ function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStri
       peLevels: levels(peByStrike),
     }
   }, [active, ceByStrike, peByStrike, strikes, timeframeMinutes])
-  const latest = useRef({ atmStrike, serverCovers })
-  useEffect(() => { latest.current = { atmStrike, serverCovers } })
+  const latest = useRef({ atmStrike, serverCovers, types, toTelegram })
+  useEffect(() => { latest.current = { atmStrike, serverCovers, types, toTelegram } })
   useEffect(() => {
-    if (!active || !day) return
-    const { breaks, signals } = stepOiBreakAlerts(state.current, { ce: day.ce, pe: day.pe, ceLevels: day.ceLevels, peLevels: day.peLevels, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike },
-      { windowMinutes: hpWindowMinutes, atmShiftPct: hpAtmShiftPct })
+    if (!active || !day || boundary == null) return
+    const data = { ce: day.ce, pe: day.pe, ceLevels: day.ceLevels, peLevels: day.peLevels, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike }
+    const opts = { windowMinutes: hpWindowMinutes, atmShiftPct: hpAtmShiftPct }
+    const step = live ? stepOiBreakAlerts(state.current, data, opts) : stepReplayOiBreakAlerts(replayState.current, data, opts)
+    const { breaks, signals } = pickOiAlerts(step, latest.current.types)
     if (!breaks.length && !signals.length) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
-    const sendTelegram = cfg.telegram !== false && !latest.current.serverCovers
+    // Telegram only when switched on for these (the app's alerts otherwise), live, and the server is not sending them.
+    const sendTelegram = live && latest.current.toTelegram && cfg.telegram !== false && !latest.current.serverCovers
+    const replayTag = live ? '' : ' · replay'
     for (const b of breaks) {
       const text = breakText(underlying, b, fmtOiNum, istTimeFormatter, timeframeMinutes)
       const bullish = breakMeaning(b.side.key, b.up) > 0
@@ -2001,8 +2019,8 @@ function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStri
       if (cfg.voice !== false) speak(`${underlying} O I ${b.side.key === 'net' ? 'net' : b.side.label} cumulative broke ${b.up ? 'resistance' : 'support'}. ${bullish ? 'Bullish' : 'Bearish'}.`)
       if (sendTelegram) telegram(`🧱 ${text} ${bullish ? '🟢' : '🔴'}`, breakAlertKey(underlying, dayKey, timeframeMinutes, b))
       notification.open({
-        key: `oi-break-${underlying}-${b.key}`, placement: 'topRight', duration: 20,
-        message: <span style={{ color: bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🧱 {underlying} OI {b.side.label} broke {b.up ? 'resistance' : 'support'} · {bullish ? 'bullish' : 'bearish'}</span>,
+        key: `oi-break-${dayKey}-${b.key}`, placement: 'topRight', duration: 20,
+        message: <span style={{ color: bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🧱 {underlying} OI {b.side.label} broke {b.up ? 'resistance' : 'support'} · {bullish ? 'bullish' : 'bearish'}{replayTag}</span>,
         description: <span style={{ fontSize: 12 }}>{text}</span>,
       })
     }
@@ -2012,12 +2030,45 @@ function useOiBreakAlerts({ underlying, ceByStrike, peByStrike, strikes, atmStri
       if (cfg.voice !== false) speak(`High probability ${hp.bullish ? 'bullish' : 'bearish'} signal on ${underlying}.`)
       if (sendTelegram) telegram(`🎯 ${text}`, highProbabilityAlertKey(underlying, dayKey, timeframeMinutes, key))
       notification.open({
-        key: `oi-hp-${underlying}-${key}`, placement: 'topRight', duration: 0,
-        message: <span style={{ color: hp.bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🎯 High probability {hp.bullish ? 'BULLISH' : 'BEARISH'} · {underlying}</span>,
+        key: `oi-hp-${dayKey}-${key}`, placement: 'topRight', duration: 0,
+        message: <span style={{ color: hp.bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🎯 High probability {hp.bullish ? 'BULLISH' : 'BEARISH'} · {underlying}{replayTag ? ` · replay ${istTimeFormatter(hp.at)}` : ''}</span>,
         description: <span style={{ fontSize: 12, whiteSpace: 'pre-line' }}>{text.split('\n').slice(1).join('\n')}</span>,
       })
     }
-  }, [active, day, boundary, bucketSeconds, underlying, dayKey, timeframeMinutes, hpWindowMinutes, hpAtmShiftPct])
+  }, [active, live, day, boundary, bucketSeconds, underlying, dayKey, timeframeMinutes, hpWindowMinutes, hpAtmShiftPct])
+}
+
+// The S/R break and 🎯 alerts' settings for `underlying`, owned by the page (its alerts run there) and shown in the OI
+// totals card: on / off, the 🎯 window and ATM ± 1 shift % - shared with the server scanner, which sends these to
+// Telegram with no page open: the page shows the server's on load and saves a change back (an admin's - others get 403
+// and keep their own) - and the totals' bucket size the alerts read.
+function useOiBreakAlertSettings(underlying) {
+  const [on, setOnState] = usePersistedState('optionanalytics.oiReplay.breakAlerts', true)
+  // Whether they go to Telegram too (the server's, and this page's when the server is not covering): off - they are
+  // the app's alerts unless switched on here.
+  const [telegram, setTelegramState] = usePersistedState('optionanalytics.oiReplay.breakAlertsTelegram', false)
+  // The window the high-probability signal's three conditions must fall in (minutes).
+  const [windowMinutes, setWindowState] = usePersistedState('optionanalytics.oiReplay.hpWindowMinutes', 5)
+  // How far the CE or PE OI at the ATM strike and the strike either side must shift over that window (% of its size).
+  const [atmShiftPct, setAtmShiftState] = usePersistedState('optionanalytics.oiReplay.hpAtmShiftPct', 20)
+  const [bucketMinutes, setBucketMinutes] = usePersistedState('optionanalytics.oiReplay.bucket.totals', 1)
+  const server = useServerOiBreakAlerts(underlying, (fromServer) => {
+    setOnState(fromServer.on !== false)
+    setTelegramState(fromServer.telegram === true)
+    if (HIGH_PROBABILITY_WINDOWS.includes(fromServer.windowMinutes)) setWindowState(fromServer.windowMinutes)
+    if (Number.isFinite(fromServer.atmShiftPct)) setAtmShiftState(fromServer.atmShiftPct)
+  })
+  const save = (patch) => {
+    const next = { on, telegram, bucketMinutes: 1, windowMinutes, atmShiftPct, ...patch }
+    fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ oiBreakAlerts: next }) }).catch(() => {})
+  }
+  return {
+    underlying, on, telegram, windowMinutes, atmShiftPct, bucketMinutes, setBucketMinutes, server,
+    setOn: (v) => { setOnState(v); save({ on: v }) },
+    setTelegram: (v) => { setTelegramState(v); save({ telegram: v }) },
+    setWindowMinutes: (v) => { setWindowState(v); save({ windowMinutes: v }) },
+    setAtmShiftPct: (v) => { setAtmShiftState(v); save({ atmShiftPct: v }) },
+  }
 }
 
 // What the server scanner does with these alerts for `underlying` (GET /api/scanner-runner/status, every minute):
@@ -3671,6 +3722,13 @@ export default function OiReplayPage() {
   // Hides the cards' long explanatory paragraphs (COMPACT_NOTE / the .oa-note class) - the page explains how
   // every reading is worked out, which is worth reading once and in the way after that.
   const [compact, setCompact] = usePersistedState(STORED_COMPACT, false)
+  // The page's alerts (pop-up, chime, voice) - live, and while a past day is replayed: which ones, the "Alerts" choice in
+  // the controls (oiAlertTypes.js - 🎯 and the CE / PE S/R breaks by default; the rest one click away).
+  const [savedAlertTypes, setAlertTypes] = usePersistedState(STORED_ALERT_TYPES, DEFAULT_ALERT_TYPES)
+  const alertTypes = useMemo(() => reconcileAlertTypes(savedAlertTypes), [savedAlertTypes])
+  // Read by the server's zone alert handler, which the live feed holds on to.
+  const alertTypesRef = useRef(alertTypes)
+  useEffect(() => { alertTypesRef.current = alertTypes })
   // The charts are the cards' main part: taller than they ask on the page, taller still in a quick-view popup.
   const viewportHeight = useViewportHeight()
   const pageChartGrow = useMemo(() => chartGrow(viewportHeight), [viewportHeight])
@@ -4502,9 +4560,10 @@ export default function OiReplayPage() {
   }, [isLive])
 
   // Price moved for 3 minutes but the nearest strike's OI did not give way (the server's OiDivergenceMonitor,
-  // which also sends it to Telegram): a notification, a chime and the words - the scanner's switches apply.
+  // which also sends it to Telegram): a notification, a chime and the words - when "Premium / discount zone" is in the
+  // page's Alerts choice; the scanner's switches apply.
   const handleDivergenceAlert = (alert) => {
-    if (!alert?.zone) return
+    if (!alert?.zone || !alertTypesRef.current.includes('zone')) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
     if (cfg.alerts === false) return
@@ -4816,6 +4875,19 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+
+  // The OI totals S/R breaks and 🎯 run here, not in the totals card, so they keep going with that card off-screen or
+  // hidden (live, and on a replayed day's clock); its settings show there. Which ones pop up: alertTypes.
+  const oiBreakAlertSettings = useOiBreakAlertSettings(underlying)
+  useOiBreakAlerts({
+    underlying, ceByStrike, peByStrike, strikes: heatmapStrikes, atmStrike, timeframeMinutes: oiBreakAlertSettings.bucketMinutes,
+    live: isLive,
+    // The replay's clock: the end of the last minute it shows (a minute's point holds its close).
+    replayNowSec: !isLive && currentBar ? currentBar.time + 60 : null,
+    dayKey: result ? `${underlying}-${result.date}` : null, enabled: oiBreakAlertSettings.on && !!result,
+    hpWindowMinutes: oiBreakAlertSettings.windowMinutes, hpAtmShiftPct: oiBreakAlertSettings.atmShiftPct,
+    serverCovers: !!oiBreakAlertSettings.server?.covers, types: alertTypes, toTelegram: oiBreakAlertSettings.telegram,
+  })
 
   // Sudden OI walls as of the replay's current point (suddenOi.js - the same rule as the Order Flow
   // page and strategy #25): a strike adding 3%+ of its OI in 5 minutes at 3x+ its pace before. Read
@@ -5339,12 +5411,14 @@ export default function OiReplayPage() {
   // The beep is the one genuine side effect here (activeAlerts above is a plain derived value) -
   // fires at most once per NEW replay tick that has a breach, not once per render, so it doesn't
   // re-beep for the same tick if something unrelated causes a re-render.
+  // Only when "Big OI shift near ATM" is in the page's Alerts choice.
+  const oiShiftAlerts = alertTypes.includes('oiShift')
   const lastAlertedTickRef = useRef(-1)
   useEffect(() => {
     if (visibleCount === lastAlertedTickRef.current) return
     lastAlertedTickRef.current = visibleCount
-    if (activeAlerts.length > 0 && soundEnabled) playBeep()
-  }, [visibleCount, activeAlerts, soundEnabled])
+    if (oiShiftAlerts && activeAlerts.length > 0 && soundEnabled) playBeep()
+  }, [visibleCount, activeAlerts, soundEnabled, oiShiftAlerts])
 
   // Synthesizes PCR + OI buildup + IV skew into one heuristic read - three independent votes
   // (Bullish/Bearish/Neutral), combined into an overall bias and a candidate strike/side. This is a
@@ -5698,25 +5772,30 @@ export default function OiReplayPage() {
         )}
       </Space>
       <Space align="center" size={12} wrap style={{ marginBottom: 8 }}>
-        <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
-        <InputNumber
-          value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
-          min={0} step={100000} style={{ width: 140 }}
-          formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
-          parser={(v) => v.replace(/,/g, '')}
-        />
-        <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
-        <Switch
-          checked={soundEnabled} onChange={setSoundEnabled}
-          checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
-        />
+        {/* The "Big OI shift near ATM" alert's settings - shown while it is in the page's Alerts choice. */}
+        {oiShiftAlerts && (
+          <>
+            <Text type="secondary" style={{ fontSize: 12 }}>Alert when a strike near ATM shifts by</Text>
+            <InputNumber
+              value={alertThreshold} onChange={(v) => setAlertThreshold(v ?? 0)}
+              min={0} step={100000} style={{ width: 140 }}
+              formatter={(v) => `${v}`.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}
+              parser={(v) => v.replace(/,/g, '')}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>OI in one minute</Text>
+            <Switch
+              checked={soundEnabled} onChange={setSoundEnabled}
+              checkedChildren={<SoundOutlined />} unCheckedChildren="Muted"
+            />
+          </>
+        )}
         <Text type="secondary" style={{ fontSize: 12 }}>Top 5 walls only</Text>
         <Switch checked={top5WallsOnly} onChange={setTop5WallsOnly} />
         <Tooltip title="Wall labels show only the strike, Δ since the open and S-R - shorter, so they cover less of the chart.">
           <Checkbox checked={wallLabelsShort} onChange={(e) => setWallLabelsShort(e.target.checked)}>Δ and S-R only</Checkbox>
         </Tooltip>
       </Space>
-      {activeAlerts.length > 0 && (
+      {oiShiftAlerts && activeAlerts.length > 0 && (
         <Alert
           type="warning"
           showIcon
@@ -6207,6 +6286,23 @@ export default function OiReplayPage() {
                 </Button>
               </Space>
             )}
+            {/* Which alerts this page raises - a pop-up, a chime and the voice - live and while a day is replayed
+                (oiAlertTypes.js). Telegram from the server is not changed by this. */}
+            {!controlsCollapsed && (
+              <Space align="center" size={6} wrap>
+                <Tooltip title="The alerts this page raises - a pop-up, a chime and the voice - live and while a past day is replayed (on the replay's clock, as the replay reaches each minute; a replay never sends Telegram). 🎯 high probability and the CE / PE S/R breaks by default - add or remove any. The S/R and 🎯 settings are in the OI totals card; what the server sends to Telegram is not changed here.">
+                  <Text type="secondary" style={{ fontSize: 12 }}>Alerts</Text>
+                </Tooltip>
+                <Select
+                  mode="multiple" size="small" value={alertTypes} onChange={setAlertTypes} placeholder="No alerts"
+                  style={{ width: 460, maxWidth: '100%' }} allowClear aria-label="Alerts"
+                  options={ALERT_TYPES.map((t) => ({ value: t.value, label: t.label, title: t.title }))}
+                  optionRender={(o) => (
+                    <Tooltip title={o.data.title} placement="right"><span>{o.data.label}</span></Tooltip>
+                  )}
+                />
+              </Space>
+            )}
             {result && !controlsCollapsed && (
               <Space align="center" size={6} wrap>
                 <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 7 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
@@ -6454,15 +6550,15 @@ export default function OiReplayPage() {
             )}
 
             {/* The CE / PE / Net totals - each bucket's Δ and the cumulative Δ - with their charts and the S/R break and
-                🎯 alerts (alertUnderlying: the page's alerts run while THIS card is shown). Its own card, out of the
-                heatmap's: its own bucket too. */}
+                🎯 alerts' settings (alerts: the page's - the alerts themselves run on the page, card shown or not). Its own
+                card, out of the heatmap's: its own bucket too, which the alerts read. */}
             {visibleSections.includes('oiTotals') && (
               <DashboardCard key="oiTotals" {...dash('oiTotals')}>
               <LiveSection version={sectionVersion}>
               <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI totals: CE, PE and Net (CE − PE)</Space>}>
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
-                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alertUnderlying={underlying}
+                  lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alerts={oiBreakAlertSettings}
                   spotBars={oneMinBars} step={step}
                 />
               </Card>

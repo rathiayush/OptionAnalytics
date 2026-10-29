@@ -253,5 +253,23 @@ export function fmtOiLakh(v) {
 /** A chart time (IST-shifted seconds) as "HH:mm" IST. */
 export const chartTimeHHmm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16)
 
-/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). */
-export const OI_BREAK_ALERT_DEFAULTS = { on: true, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }
+/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). `telegram`:
+ *  whether they go to Telegram at all - off unless switched on: they are the app's alerts (the page's pop-up, chime and
+ *  voice), and a config saved before the switch existed has none, so it reads as off too. */
+export const OI_BREAK_ALERT_DEFAULTS = { on: true, telegram: false, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }
+
+// ---- Replay -----------------------------------------------------------------------------------------------------------
+// A past day replayed on the OI Replay page raises the same alerts as it goes, on the REPLAY'S clock: `nowSec` = the end
+// of the last minute the replay shows (a minute's point holds its close), so only buckets complete by then are read -
+// nothing after the clock. The clock can go back (the slider, a restart): the watch then starts again and, as at a live
+// page's opening, announces nothing until the clock moves on - what was already broken is not announced, and a jump
+// forward announces only what is fresh at the new clock.
+
+export const newReplayOiBreakAlertState = () => ({ state: newOiBreakAlertState(), nowSec: null })
+
+/** stepOiBreakAlerts on the replay clock (`data.nowSec`): `replay` = newReplayOiBreakAlertState(), kept between steps. */
+export function stepReplayOiBreakAlerts(replay, data, opts = {}) {
+  if (replay.nowSec == null || data.nowSec < replay.nowSec) replay.state = newOiBreakAlertState()
+  replay.nowSec = data.nowSec
+  return stepOiBreakAlerts(replay.state, data, opts)
+}
