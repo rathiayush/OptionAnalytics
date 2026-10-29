@@ -39,7 +39,7 @@ public sealed class OrderFlowHistory
 
     public sealed record Result(OrderFlowSnapshot? Snapshot, string? Error);
 
-    public async Task<Result> DayAsync(string underlying, DateOnly date, DateOnly? expiry, decimal rowSize, int minTradeLots, int heatmapColumns, CancellationToken cancellationToken, decimal? heatmapRowSize = null)
+    public async Task<Result> DayAsync(string underlying, DateOnly date, DateOnly? expiry, decimal rowSize, int minTradeLots, int heatmapColumns, CancellationToken cancellationToken, decimal? heatmapRowSize = null, bool backfillBars = false)
     {
         var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, date, cancellationToken);
         if (contract is null)
@@ -55,7 +55,7 @@ public sealed class OrderFlowHistory
             ? live
             : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, date);
         if (exact is not null)
-            return new Result(await WithBackfillAsync(exact, exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns, heatmapRowSize), cancellationToken), null);
+            return new Result(await WithBackfillAsync(exact, exact.Snapshot(rowSize, Math.Max(1, minTradeLots) * (long)exact.LotSize, heatmapColumns, heatmapRowSize), cancellationToken, backfillBars), null);
 
         // Rebuilt from TrueData's tick history (TrueData:Enabled only, recent days only) - else the estimate.
         string? trueDataNote = null;
@@ -105,22 +105,18 @@ public sealed class OrderFlowHistory
 
     // The estimated minutes before the engine started recording, per contract day. The cut-off never
     // moves for an engine run, so what was fetched stays right for the rest of the day.
-    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (DateTimeOffset RecordedFrom, IReadOnlyList<OrderFlowBackfillMinute> Minutes)> _backfill = new();
+    private readonly ConcurrentDictionary<(uint SecurityId, DateOnly Day), (DateTimeOffset RecordedFrom, IReadOnlyList<OrderFlowBackfillMinute> Minutes, IReadOnlyList<OrderFlowBar> Bars)> _backfill = new();
 
     /// <summary>The exact snapshot of a day the server only started recording partway through (a restart,
     /// a deploy, a late start), plus the minutes from the 09:15 open up to then ESTIMATED from Dhan's
     /// 1-minute candles, so delta and cumulative delta can run from the open. The bars themselves are
-    /// untouched - the estimate rides separately in Backfill. If the candles cannot be had the snapshot is
-    /// returned as it was.</summary>
-    public async Task<OrderFlowSnapshot> WithBackfillAsync(OrderFlowEngine engine, OrderFlowSnapshot snapshot, CancellationToken cancellationToken)
+    /// untouched - the estimate rides separately in Backfill (and, with `includeBars`, as whole bars in BackfillBars). If
+    /// the candles cannot be had the snapshot is returned as it was.</summary>
+    public async Task<OrderFlowSnapshot> WithBackfillAsync(OrderFlowEngine engine, OrderFlowSnapshot snapshot, CancellationToken cancellationToken, bool includeBars = false)
     {
         if (engine.RecordedFrom() is not { } recordedFrom || engine.ExportDayDate() is not { } day) return snapshot;
-        var ist = recordedFrom.ToOffset(IstClock.Offset);
         var open = new DateTimeOffset(day.Year, day.Month, day.Day, 9, 15, 0, IstClock.Offset);
-        // A minute the engine joined part-way is incomplete too, so the estimate runs up to the next one.
-        var minuteStart = new DateTimeOffset(ist.Year, ist.Month, ist.Day, ist.Hour, ist.Minute, 0, IstClock.Offset);
-        var cutoff = ist - minuteStart < TimeSpan.FromSeconds(2) ? minuteStart : minuteStart.AddMinutes(1);
-        if (cutoff <= open) return snapshot;
+        if (BackfillCutoff(recordedFrom, day) is not { } cutoff) return snapshot;
 
         var key = (engine.SecurityId, day);
         if (!_backfill.TryGetValue(key, out var cached) || cached.RecordedFrom != recordedFrom)
@@ -134,7 +130,7 @@ public sealed class OrderFlowHistory
                 var candles = fetched.Bars.Select(b => b.Bar).Where(c => c.Time >= open && c.Time < cutoff).ToList();
                 var estimate = OrderFlowEstimator.Build(engine.Underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment,
                     contract.TickSize, contract.LotSize, contract.Expiry, day, candles, 1, long.MaxValue);
-                cached = (recordedFrom, estimate.Bars.Select(b => new OrderFlowBackfillMinute(b.Time, b.Buy, b.Sell)).ToList());
+                cached = (recordedFrom, estimate.Bars.Select(b => new OrderFlowBackfillMinute(b.Time, b.Buy, b.Sell)).ToList(), estimate.Bars);
                 // Nothing yet (candles not published) is asked again next time.
                 if (cached.Minutes.Count > 0) _backfill[key] = cached;
             }
@@ -143,8 +139,26 @@ public sealed class OrderFlowHistory
                 return snapshot;
             }
         }
-        return snapshot with { Backfill = cached.Minutes, RecordedFrom = recordedFrom };
+        return AttachBackfill(snapshot, recordedFrom, cached.Minutes, cached.Bars, includeBars);
     }
+
+    /// <summary>Up to when a day recorded from `recordedFrom` needs the estimate: the start of the minute it joined, or of
+    /// the next when it joined part way through one (that minute is incomplete too). Null when it was recording from the
+    /// 09:15 open - nothing to estimate. A server started after the close recorded none of the session: all of it.</summary>
+    internal static DateTimeOffset? BackfillCutoff(DateTimeOffset recordedFrom, DateOnly day)
+    {
+        var ist = recordedFrom.ToOffset(IstClock.Offset);
+        var open = new DateTimeOffset(day.Year, day.Month, day.Day, 9, 15, 0, IstClock.Offset);
+        var minuteStart = new DateTimeOffset(ist.Year, ist.Month, ist.Day, ist.Hour, ist.Minute, 0, IstClock.Offset);
+        var cutoff = ist - minuteStart < TimeSpan.FromSeconds(2) ? minuteStart : minuteStart.AddMinutes(1);
+        return cutoff <= open ? null : cutoff;
+    }
+
+    /// <summary>The estimate on a snapshot: the minutes' buy / sell always (the delta views), the whole bars only when asked
+    /// (the Profiles page) - every other caller's answer stays the size it was.</summary>
+    internal static OrderFlowSnapshot AttachBackfill(OrderFlowSnapshot snapshot, DateTimeOffset recordedFrom,
+        IReadOnlyList<OrderFlowBackfillMinute> minutes, IReadOnlyList<OrderFlowBar> bars, bool includeBars) =>
+        snapshot with { Backfill = minutes, BackfillBars = includeBars ? bars : Array.Empty<OrderFlowBar>(), RecordedFrom = recordedFrom };
 
     /// <summary>Whether Dhan serves a day's 1-minute candles for the futures contract listed then - an
     /// expired one included (resolved through NSE's contract file). Always asks Dhan afresh.</summary>

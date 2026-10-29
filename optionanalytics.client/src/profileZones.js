@@ -67,6 +67,17 @@ function spreadLevels(c, rowSize) {
   return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: up ? share : 0, sell: up ? 0 : share }))
 }
 
+/** A futures day the server recorded only from part way (it restarted - a deploy - during or after the session): its
+ *  recorded minutes, and every session minute it did not record from `backfillBars` - the minutes ESTIMATED from Dhan's
+ *  1-minute candles (the server's BackfillBars). Each minute once; the recorded one wherever both have it. */
+export function withBackfillBars(bars, backfillBars) {
+  const recorded = bars ?? []
+  if (!backfillBars?.length) return recorded
+  const have = new Set(recorded.map((b) => Math.floor(msOf(b.time) / MIN)))
+  const fill = backfillBars.filter((b) => !have.has(Math.floor(msOf(b.time) / MIN)))
+  return fill.length ? [...fill, ...recorded].sort((a, b) => msOf(a.time) - msOf(b.time)) : recorded
+}
+
 /** The spot's day as it stands live, by minute: the loaded bars (with the index's volume); the spot feed's bars read
  *  since (`feedBars` - its memory, where each finished minute's volume lands once the feed has re-read it from Dhan);
  *  and the live pushes' forming minutes (`live` - OHLC only: Dhan's index ticks carry no volume). The newest source's

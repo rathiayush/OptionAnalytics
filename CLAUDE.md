@@ -353,7 +353,12 @@ When adding or changing a strategy:
   1 - 30 min, profile row per index - `PROFILE_ROWS`), with the day's VWAP on every chart ("VWAP" tick, on by default - typical
   price x volume over the 1-minute bars as `VwapCalculator`, `sessionVwapFromBars` + `alignToBars`). FUTURES: the Order Flow
   server's futures day (`/api/order-flow/{u}/day/{date}`, fetched in the footprint's row - `FETCH_ROWS` - and re-bucketed, so a
-  row change asks nothing). SPOT: the index's 1-minute bars WITH its own volume (`GET /api/oi-replay/{u}/spot-day` -
+  row change asks nothing) with `backfillBars=true`: the Order Flow engine records a day in MEMORY from when the server
+  starts, so after a restart / deploy - part way, or after the close (then none of the session) - the day's minutes before
+  it come as the estimate from Dhan's 1-minute candles as WHOLE bars (`OrderFlowSnapshot.BackfillBars`, only when asked -
+  the Order Flow page and the scanner read the recorded `Bars` only, untouched; `OrderFlowHistory.BackfillCutoff` /
+  `AttachBackfill`, `OrderFlowBackfillTests.cs`) and `withBackfillBars` fills exactly the minutes not recorded, tagged "futures
+  before HH:MM estimated" (without it the card had no futures of the day and fell back to the day before's). SPOT: the index's 1-minute bars WITH its own volume (`GET /api/oi-replay/{u}/spot-day` -
   `OiReplayService.GetSpotDayAsync`, the run's own order, `PickSpotDayAsync`: the spot feed's whole day with no Dhan call, else
   the stored database / Dhan - kept on disk, today shared with the run's fetch - else the feed's partial day); index volume has
   no side, so its bars are one colour; before January 2026 Dhan sent none (the card says so; the market profile still shows).

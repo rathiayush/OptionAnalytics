@@ -756,6 +756,10 @@ public sealed record OrderFlowSnapshot(
     /// the delta / cumulative delta views use them, so they start at 09:15 like a chart that saw the
     /// whole session.</summary>
     public IReadOnlyList<OrderFlowBackfillMinute> Backfill { get; init; } = Array.Empty<OrderFlowBackfillMinute>();
+    /// <summary>The same estimated minutes as whole bars - prices and the volume at each price (1-point rows) - only when
+    /// asked for (GET .../day/{date}?backfillBars=true): the Profiles page draws the minutes the engine did not record
+    /// with them. Never part of Bars - the Order Flow page and the strategy scanner read only what was recorded.</summary>
+    public IReadOnlyList<OrderFlowBar> BackfillBars { get; init; } = Array.Empty<OrderFlowBar>();
     public DateTimeOffset? RecordedFrom { get; init; }
     public IReadOnlyList<OrderFlowSweep> Sweeps { get; init; } = Array.Empty<OrderFlowSweep>();
 }

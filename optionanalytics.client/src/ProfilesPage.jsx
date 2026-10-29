@@ -16,7 +16,7 @@ import { VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
 import { TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
 import {
   FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones,
+  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, withBackfillBars,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -84,7 +84,8 @@ const VWAP_COLOR = '#e072e8'
 // ---- data ------------------------------------------------------------------------------------------------
 
 const dayUrl = {
-  futures: (u, d) => `/api/order-flow/${u}/day/${d}?rowSize=${FETCH_ROWS[u] ?? 1}&minTradeLots=100000&heatmapColumns=50`,
+  // backfillBars: a day the server recorded only from part way (a restart) comes with the minutes before as estimated bars.
+  futures: (u, d) => `/api/order-flow/${u}/day/${d}?rowSize=${FETCH_ROWS[u] ?? 1}&minTradeLots=100000&heatmapColumns=50&backfillBars=true`,
   spot: (u, d) => `/api/oi-replay/${u}/spot-day?date=${d}`,
 }
 
@@ -116,7 +117,7 @@ function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
       .then((body) => {
         if (cancelled) return
         if (kind === 'spot' && !body.success) throw new Error(body.error ?? 'no spot candles')
-        setState({ loading: false, error: null, day: { key, bars: body.bars ?? [], source: body.source, contract: body.meta?.contractSymbol } })
+        setState({ loading: false, error: null, day: { key, ...dayBars(kind, body), source: body.source, contract: body.meta?.contractSymbol } })
       })
       .catch((err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) })
     return () => { cancelled = true }
@@ -154,6 +155,13 @@ function useLiveIndexFeed(underlying, enabled, handlers) {
   }, [underlying, enabled])
 }
 
+/** A day's bars from its answer: the futures' recorded minutes with, where the server only recorded from part way (it
+ *  restarted), the minutes before filled from its estimate - `estimatedBefore` then says from when it recorded. */
+function dayBars(kind, body) {
+  const backfill = kind === 'futures' ? body.backfillBars ?? [] : []
+  return { bars: withBackfillBars(body.bars ?? [], backfill), estimatedBefore: backfill.length ? body.recordedFrom ?? null : null }
+}
+
 // A past day never changes: kept here once fetched (this tab only), so changing "Days", the row or "Profile of" asks
 // the server nothing again. Only what came back is kept - a failure is asked again next time.
 const PAST_DAY_CACHE = new Map()
@@ -167,7 +175,8 @@ async function fetchPastDay(kind, underlying, dateKey) {
     const body = await r.json()
     // The spot answers 200 with success false for a day with no candles (a holiday - or a failure: not kept).
     if (kind === 'spot' && !body.success) return { date: dateKey, bars: [], source: null }
-    day = { date: dateKey, bars: barsKnownAt(body.bars, null), source: body.source }
+    const { bars, estimatedBefore } = dayBars(kind, body)
+    day = { date: dateKey, bars: barsKnownAt(bars, null), source: estimatedBefore ? 'estimated' : body.source }
   } else if (r.status === 404) {
     // No futures day there (a holiday) is an answer too: an empty session.
     day = { date: dateKey, bars: [], source: null }
@@ -774,6 +783,15 @@ export default function ProfilesPage() {
                 {!loadingPast && pastCount > usedPast.length && ` · only ${usedPast.length} earlier session${usedPast.length === 1 ? '' : 's'} found`}
               </Text>
               {estimated && <Tag color="orange" style={{ margin: 0 }}>futures {dayCount > 1 ? 'of some days ' : ''}estimated from 1-minute candles</Tag>}
+              {futuresDay?.estimatedBefore && (
+                <Tooltip title="The server started recording this day's futures order flow part way - a restart or a deploy - so the minutes before are estimated from Dhan's 1-minute candles (each minute's volume spread over its range), as the Order Flow page's delta does.">
+                  <Tag color="orange" style={{ margin: 0 }}>
+                    {inMarketSession(futuresDay.estimatedBefore)
+                      ? `futures before ${fmtClock(new Date(futuresDay.estimatedBefore).getTime())} estimated from 1-minute candles`
+                      : 'futures of the whole session estimated from 1-minute candles (the server restarted after the close)'}
+                  </Tag>
+                </Tooltip>
+              )}
               {(futures.loading || spot.loading) && <Tag style={{ margin: 0 }}>loading…</Tag>}
             </Space>
             {(futuresPast.error || spotPast.error) && <Alert type="warning" showIcon message={`Not every earlier session could be loaded: ${futuresPast.error ?? spotPast.error}`} />}

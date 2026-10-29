@@ -5,7 +5,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ZONE_RULES, barsKnownAt, candlesOf, compositeMarketProfile, dayMarketProfile, dayVolumeProfile, lastPeriodRunningAt, marketProfileZones,
-  mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones,
+  mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, withBackfillBars,
 } from '../src/profileZones.js'
 import { mergeLiveFuturesTicks } from '../src/futuresLive.js'
 
@@ -252,4 +252,18 @@ test('the futures ticks fold into minutes, a minute\'s volume the rise of Dhan\'
     [iso(at(0)), 100, 102, 100, 102, 300],
     [iso(at(1)), 101, 101, 101, 101, 150],
   ])
+})
+
+test('a futures day recorded only from part way: the minutes it did not record come from the estimate, each minute once', () => {
+  const bar = (m, tag) => ({ time: iso(at(m)), open: 1, high: 2, low: 1, close: 2, tag })
+  const estimate = [0, 1, 2, 3].map((m) => bar(m, 'estimated'))
+  // A restart at 09:17: recorded from 09:17 on - the estimate fills 09:15 and 09:16 only.
+  const day = withBackfillBars([bar(2, 'recorded'), bar(3, 'recorded'), bar(4, 'recorded')], estimate)
+  assert.deepEqual(day.map((b) => [b.time, b.tag]), [[iso(at(0)), 'estimated'], [iso(at(1)), 'estimated'], [iso(at(2)), 'recorded'], [iso(at(3)), 'recorded'], [iso(at(4)), 'recorded']])
+  // A restart after the close recorded none of the session: all of it from the estimate.
+  assert.deepEqual(withBackfillBars([], estimate).map((b) => b.tag), ['estimated', 'estimated', 'estimated', 'estimated'])
+  // Nothing estimated: the recorded day as it is.
+  const recorded = [bar(0, 'recorded')]
+  assert.equal(withBackfillBars(recorded, []), recorded)
+  assert.equal(withBackfillBars(recorded, undefined), recorded)
 })

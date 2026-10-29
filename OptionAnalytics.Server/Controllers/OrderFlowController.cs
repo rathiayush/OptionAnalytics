@@ -79,12 +79,14 @@ public sealed class OrderFlowController : ControllerBase
 
     /// <summary>One day for replay, in the live snapshot's shape - Source "live" when the server has the
     /// day, "estimated" when it was rebuilt from Dhan's 1-minute candles. The heatmap can be asked for in
-    /// more columns (up to 12000, i.e. every 2s snapshot) so a replay stays detailed.</summary>
+    /// more columns (up to 12000, i.e. every 2s snapshot) so a replay stays detailed. backfillBars: a day recorded only from
+    /// part way (a restart) also carries the minutes before as estimated whole bars (BackfillBars - the Profiles page).</summary>
     [HttpGet("{underlying}/day/{date}")]
     public async Task<ActionResult<OrderFlowSnapshot>> Day(string underlying, DateOnly date, [FromQuery] DateOnly? expiry = null, [FromQuery] decimal rowSize = 1,
-        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000, [FromQuery] decimal? heatmapRowSize = null, CancellationToken cancellationToken = default)
+        [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000, [FromQuery] decimal? heatmapRowSize = null, [FromQuery] bool backfillBars = false,
+        CancellationToken cancellationToken = default)
     {
-        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 12000), cancellationToken, HeatRow(heatmapRowSize));
+        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 12000), cancellationToken, HeatRow(heatmapRowSize), backfillBars);
         return result.Snapshot is null ? NotFound(new { error = result.Error }) : result.Snapshot;
     }
 
