@@ -338,24 +338,33 @@ function Legend({ items }) {
 }
 
 const volumeOf = (b) => b.volume ?? (b.buy ?? 0) + (b.sell ?? 0)
+const NO_BARS = []
 
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timeframe, showVwap, resetKey, neutral = false, empty = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timeframe, showVwap, resetKey, neutral = false, empty = null, dayError = null }) {
   const sessions = useMemo(
     () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
-  const candles = useMemo(() => candlesOf(known, timeframe), [known, timeframe])
-  // The day's VWAP the way the server works it out (VwapCalculator): typical price x volume over the 1-minute bars,
-  // then each candle's value at its last minute.
+  // No minute of the day yet - before the open, a holiday, a replay clock still at 09:15 - while the profile is built
+  // from earlier sessions: a chart with no candles has no price scale, so the profile and its boxes could not be drawn
+  // at all. The latest earlier session's candles stand in until the day's first minute is done, and the card says so.
+  const standIn = known.length ? null : past.at(-1) ?? null
+  const candleBars = known.length ? known : standIn?.bars ?? NO_BARS
+  const candles = useMemo(() => candlesOf(candleBars, timeframe), [candleBars, timeframe])
+  // The VWAP of the day drawn (VwapCalculator's way): typical price x volume over the 1-minute bars, then each candle's
+  // value at its last minute.
   const vwap = useMemo(() => {
     if (!showVwap || !candles.length) return null
-    const minute = sessionVwapFromBars(known.map((b) => ({ time: toChartTime(b.time), high: b.high, low: b.low, close: b.close, volume: volumeOf(b) })))
+    const minute = sessionVwapFromBars(candleBars.map((b) => ({ time: toChartTime(b.time), high: b.high, low: b.low, close: b.close, volume: volumeOf(b) })))
     return minute ? alignToBars(minute, candles.map((c) => ({ time: toChartTime(c.time) }))) : null
-  }, [showVwap, known, candles])
+  }, [showVwap, candleBars, candles])
+  const standInNote = standIn && !empty && (
+    <Text type="secondary" style={{ fontSize: 11 }}>No minute of the day yet{dayError ? ` (${dayError})` : ''} - the candles are {standIn.date}&apos;s, the last session in the profile.</Text>
+  )
 
   const vp = useMemo(() => dayVolumeProfile(profileBars, row), [profileBars, row])
   const hasVolume = vp.rows.length > 0
@@ -421,6 +430,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timef
             {empty ?? (!hasVolume && profileBars.length > 0 && (
               <Alert type="info" showIcon message={`No ${name.toLowerCase()} volume for ${sessions.length > 1 ? 'these sessions' : 'this day'} - Dhan sends the index's own volume from January 2026. The market profile (time, not volume) still shows.`} />
             ))}
+            {standInNote}
             {empty ? null : (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
@@ -454,6 +464,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, row, timef
               <span style={{ color: BOX.tail.labelColor }}>Tails {mz.tails.length ? mz.tails.map((z) => `${z.side} ${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
             </Space>
             <Legend items={[['accepted', 'Most time spent - accepted'], ['acceptedValue', 'Value area'], ['single', 'Single prints'], ['tail', 'Tail (rejected)']]} />
+            {standInNote}
             {empty ?? (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeTpo} drawProfile={drawTpo} zones={mpZones} lines={mpLines}
@@ -606,9 +617,10 @@ export default function ProfilesPage() {
   const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
   const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `as of ${fmtClock(clock)}` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
-  // Nothing of the day yet: the cards say so - unless they show earlier sessions only, which they can without it.
+  // Nothing of the day yet: the cards say so - unless the profile holds earlier sessions ("Previous", or Days above 1),
+  // which they show over the latest one's candles until the day's first minute (ProfilePair's stand-in).
   const emptyFor = (state, session, past, what) => {
-    if (session.length || (profileOf === 'previous' && past.sessions.length)) return null
+    if (session.length || (pastCount > 0 && past.sessions.length)) return null
     if (state.loading) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={`Loading the ${what}…`} />
     if (state.error) return <Alert type="warning" showIcon message={`The ${what} is not available: ${state.error}`} />
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
@@ -694,9 +706,9 @@ export default function ProfilesPage() {
         </Card>
 
         <Text strong style={{ fontSize: 13 }}>Spot · {index} index</Text>
-        <ProfilePair {...pair} name="Spot" known={spotKnown} past={spotPast.sessions.slice(-pastCount)} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} />
+        <ProfilePair {...pair} name="Spot" known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
         <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`}</Text>
-        <ProfilePair {...pair} name="Futures" known={futuresKnown} past={futuresPast.sessions.slice(-pastCount)} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} />
+        <ProfilePair {...pair} name="Futures" known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
       </Space>
     </div>
   )

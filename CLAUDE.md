@@ -364,7 +364,10 @@ When adding or changing a strategy:
   together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
   each finished minute's from Dhan, so when the push turns to a new minute the page reads the feed's memory once,
   `/api/spot/{u}/volume-candles` - never Dhan - and `mergeSpotLive` keeps each minute's largest volume). The day is loaded
-  once (and again after a reconnect, for what it missed). VOLUME PROFILE: POC / VAH / VAL lines, the bars
+  once (and again after a reconnect, for what it missed). NO MINUTE OF THE DAY YET (before the open, a holiday, a replay
+  clock at 09:15) while the profile holds earlier sessions ("Previous", or Days above 1): the latest of them stands in
+  for the candles, said on the card with the day's load error if any - a chart with no candles has no price scale, and
+  the profile, its boxes and lines were all blank. VOLUME PROFILE: POC / VAH / VAL lines, the bars
   at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
   the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
