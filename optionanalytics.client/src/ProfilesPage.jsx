@@ -231,7 +231,8 @@ function usePastSessions(kind, underlying, dateKey, count) {
 
 /** Candles with a profile drawn at the right edge (`drawProfile(primitive)` sets it), zone boxes and
  *  price lines. The time axis keeps `room` of the plot empty on the right, so the newest candles never sit
- *  under the profile; wheel / drag take over the view, a double-click hands it back. */
+ *  under the profile; a drag, a pinch, the wheel, the zoom buttons or the price axis take over the view - live updates
+ *  leave it where it was put - and a double-click (a double tap, ⟲) hands it back. */
 function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room, height, resetKey }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -243,6 +244,9 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
   const rangeRef = useRef(priceRange)
   rangeRef.current = priceRange
   const userMovedRef = useRef(false)
+  // The pointers down on the chart now (a finger, two for a pinch, the mouse): while any is, an update does not fit the
+  // view. Live, a push came every second and put the chart back under the finger - it could not be dragged at all.
+  const pointersRef = useRef(new Set())
   const countRef = useRef(0)
 
   const fit = useCallback(() => {
@@ -291,25 +295,43 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
 
     const observer = new ResizeObserver(([entry]) => chart.applyOptions({ width: Math.floor(entry.contentRect.width) }))
     observer.observe(element)
-    // The viewer moved the view (wheel, drag): leave it there. A double-click fits the day again.
+    // The viewer moved the view - the time axis dragged, pinched or zoomed, or the prices zoomed / dragged (their
+    // auto-scale off): leave it there, live updates included. A double-click (a double tap, ⟲) fits the day again.
     const visible = () => chart.timeScale().getVisibleLogicalRange()
-    let before = null
-    const press = () => { before = visible() }
-    const release = () => {
+    const pointers = pointersRef.current
+    let before = null, moved = false, resetSincePress = false
+    const onRange = () => { if (pointers.size) moved = true }
+    chart.timeScale().subscribeVisibleLogicalRangeChange(onRange)
+    const press = (e) => {
+      if (!pointers.size) { before = visible(); moved = false; resetSincePress = false }
+      pointers.add(e.pointerId)
+    }
+    const release = (e) => {
+      if (!pointers.delete(e.pointerId) || pointers.size) return
       const after = visible()
-      if (before && after && (Math.abs(after.from - before.from) > 0.5 || Math.abs(after.to - before.to) > 0.5)) userMovedRef.current = true
+      const shifted = before && after && (Math.abs(after.from - before.from) > 0.5 || Math.abs(after.to - before.to) > 0.5)
+      if (!resetSincePress && (moved || shifted || chart.priceScale('right').options().autoScale === false)) userMovedRef.current = true
       before = null
     }
     const wheel = () => { userMovedRef.current = true }
-    const reset = () => { userMovedRef.current = false; requestAnimationFrame(() => { chart.priceScale('right').applyOptions({ autoScale: true }); fit() }) }
+    const reset = () => {
+      userMovedRef.current = false
+      resetSincePress = true
+      requestAnimationFrame(() => { chart.priceScale('right').applyOptions({ autoScale: true }); fit() })
+    }
     element.addEventListener('pointerdown', press, true)
+    // A finger's gesture the browser takes over (scrolling the page) ends in pointercancel, not pointerup.
     window.addEventListener('pointerup', release, true)
+    window.addEventListener('pointercancel', release, true)
     element.addEventListener('wheel', wheel, { passive: true, capture: true })
     element.addEventListener('dblclick', reset, true)
     return () => {
       observer.disconnect()
+      chart.timeScale().unsubscribeVisibleLogicalRangeChange(onRange)
+      pointers.clear()
       element.removeEventListener('pointerdown', press, true)
       window.removeEventListener('pointerup', release, true)
+      window.removeEventListener('pointercancel', release, true)
       element.removeEventListener('wheel', wheel, { capture: true })
       element.removeEventListener('dblclick', reset, true)
       chart.remove()
@@ -329,7 +351,7 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
     if (!series) return
     series.setData(candles.map((c) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })))
     countRef.current = candles.length
-    if (!userMovedRef.current) fit()
+    if (!userMovedRef.current && !pointersRef.current.size) fit()
   }, [candles, fit])
 
   useEffect(() => { vwapRef.current?.setData(vwap ?? []) }, [vwap])
@@ -343,8 +365,10 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
       price: l.price, color: l.color, title: l.title, lineWidth: l.width ?? 1, lineStyle: l.style ?? 0, axisLabelVisible: true,
     }))
   }, [lines])
-  // A new profile range: fit the prices to it again (unless the viewer is holding the view).
-  useEffect(() => { if (!userMovedRef.current) chartRef.current?.priceScale('right').applyOptions({ autoScale: true }) }, [priceRange])
+  // A new profile range: fit the prices to it again (unless the viewer took the view, or has a finger on it).
+  useEffect(() => {
+    if (!userMovedRef.current && !pointersRef.current.size) chartRef.current?.priceScale('right').applyOptions({ autoScale: true })
+  }, [priceRange])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }

@@ -422,7 +422,10 @@ When adding or changing a strategy:
   OI Replay was left", `tests/replay-clock-store.test.mjs`). Its charts let a finger moving up / down SCROLL THE PAGE
   (`handleScroll.vertTouchDrag: false` - a phone's page is four charts, and a swipe on one moved its prices instead;
   sideways still pans, pinch zooms) and stand 62% of the window, 360 - 560 px (`chartGrow`'s cap, the height read again
-  on a new width only). NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
+  on a new width only). The VIEWER'S VIEW IS KEPT through live updates: no update fits the chart while a pointer is down
+  on it (`pointersRef` - live, a push every second put the chart back under the finger, so it could not be dragged or
+  zoomed at all), and a drag / pinch / zoom button / price-axis drag (the time range moved, or the price scale's
+  auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
