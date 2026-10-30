@@ -20,7 +20,7 @@ setUpNotifications()
 class AppErrorBoundary extends Component {
   constructor(props) {
     super(props)
-    this.state = { error: null }
+    this.state = { error: null, componentStack: null }
   }
 
   static getDerivedStateFromError(error) {
@@ -29,6 +29,9 @@ class AppErrorBoundary extends Component {
 
   componentDidCatch(error, info) {
     console.error('Uncaught render error - the app would otherwise have gone blank with no trace:', error, info)
+    // The call stack of an update loop (React #185) is only React's own and the library effect the 51st update came
+    // from; the component stack names WHICH component it was (minified, with a file:line:column a source map reads).
+    this.setState({ componentStack: info?.componentStack ?? null })
   }
 
   render() {
@@ -52,6 +55,14 @@ class AppErrorBoundary extends Component {
               <p style={{ color: '#9a9a9a', fontSize: 12, marginBottom: 4 }}>Where (call stack):</p>
               <pre style={{ background: '#15161c', padding: 12, borderRadius: 6, overflow: 'auto', whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#9a9a9a', fontSize: 12 }}>
                 {String(err.stack)}
+              </pre>
+            </>
+          )}
+          {this.state.componentStack && (
+            <>
+              <p style={{ color: '#9a9a9a', fontSize: 12, marginBottom: 4 }}>Which component (component stack):</p>
+              <pre style={{ background: '#15161c', padding: 12, borderRadius: 6, overflow: 'auto', maxHeight: 320, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#9a9a9a', fontSize: 12 }}>
+                {String(this.state.componentStack).trim()}
               </pre>
             </>
           )}

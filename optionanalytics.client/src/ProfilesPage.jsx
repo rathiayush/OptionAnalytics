@@ -831,9 +831,12 @@ export default function ProfilesPage() {
                   />
                   <Text strong style={{ fontSize: 12 }}>{clock ? fmtClock(clock - 60_000) : ''}</Text>
                 </Space>
+                {/* No tooltip on the handle - the minute is shown beside Go to. On a phone a tap left it open (a tap is a
+                    hover there), and it re-aligned at every replay step: an update chain that ran into React's limit on
+                    an iPhone ("Minified React error #185", the page gone). */}
                 <Slider
                   style={{ margin: '0 8px' }} min={span.start} max={span.end} step={60_000} value={clock ?? span.start}
-                  tooltip={{ formatter: (v) => fmtClock(v - 60_000) }} onChange={(v) => { setPlaying(false); setClockMs(v) }}
+                  tooltip={{ open: false }} onChange={(v) => { setPlaying(false); setClockMs(v) }}
                 />
               </Space>
             )}
