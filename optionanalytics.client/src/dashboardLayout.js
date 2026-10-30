@@ -55,6 +55,7 @@ const CARD_ROWS = {
   optionFlow: 14,
   straddle: 19,
   gex: 19,
+  dex: 17,
   ladder: 16,
   liquidityMap: 14,
   futures: 21,
@@ -292,9 +293,10 @@ export function nextFitScale(state, { scale, content, box, width, charts }) {
   return { scale: next, state: { prev: here, size, steps: steps + 1 } }
 }
 
-// Cards split out of another since a trader's "Sections shown" was saved: the new card -> the card it came out of.
-// The OI totals (CE / PE / Net cumulative Δ and their S/R break alerts) were part of the OI change heatmap card.
-export const SECTION_SPLITS = { oiTotals: 'oiHeatmap' }
+// Cards split out of another - or added beside it - since a trader's "Sections shown" was saved: the new card -> the
+// card it goes with. The OI totals (CE / PE / Net cumulative Δ and their S/R break alerts) were part of the OI change
+// heatmap card; the DEX (delta exposure) is worked out with the GEX and shown wherever the GEX is.
+export const SECTION_SPLITS = { oiTotals: 'oiHeatmap', dex: 'gex' }
 
 /** A saved choice of cards with each card split out since added wherever the card it came out of is shown (right
  *  after it) - it holds what that card used to, so someone who showed the heatmap keeps seeing the totals (and their
@@ -337,7 +339,7 @@ export const STORED_LAYOUT_VERSION = 'optionanalytics.oiReplay.gridLayoutVersion
 export const LAYOUT_VERSION = '2'
 // Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '2'
+export const SECTIONS_VERSION = '3'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands

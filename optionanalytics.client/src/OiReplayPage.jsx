@@ -38,6 +38,7 @@ import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
+import { DexCard } from './DexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { QUICK_VIEWS, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
@@ -708,6 +709,7 @@ const SECTION_OPTIONS = [
   { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'straddle', label: 'ATM straddle' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
+  { value: 'dex', label: 'DEX (delta exposure)' },
   { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
@@ -750,7 +752,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'dex', 'ladder', 'liquidityMap', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -4386,10 +4388,12 @@ export default function OiReplayPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
-  // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
+  // The day's GEX and DEX (both signs), worked out once for the GEX and DEX cards, the entry checklist's gamma check and
+  // their quick views.
   const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
     expiry: result?.optionExpiry ?? null, live: isLive,
-    enabled: visibleSections.includes('gex') || visibleSections.includes('entryChecklist') || quickView === 'gex',
+    enabled: visibleSections.includes('gex') || visibleSections.includes('dex') || visibleSections.includes('entryChecklist')
+      || quickView === 'gex' || quickView === 'dex',
   })
   // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
   const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
@@ -6747,6 +6751,29 @@ export default function OiReplayPage() {
               </DashboardCard>
             )}
 
+            {/* DEX (delta exposure) from the same minutes as the GEX: the dealers' delta (short every contract), by strike,
+                through the day against spot, the decay to the close and the delta added - up to the replay clock (gex.js). */}
+            {visibleSections.includes('dex') && (
+              <DashboardCard key="dex" {...dash('dex')}>
+              <LiveSection version={sectionVersion}>
+              <Row gutter={16}>
+                <Col span={24}>
+                  <Card
+                    size="small"
+                    title={<Space size={4}><CardDragHandle className="oa-dash-grip" />DEX - delta exposure (dealers&apos; delta, decay, delta added){isLive ? ' · live' : ''}</Space>}
+                  >
+                    <DexCard
+                      days={gexDays}
+                      asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
+                      dayKey={`${underlying}-${result.date}`}
+                    />
+                  </Card>
+                </Col>
+              </Row>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
             <DashboardCard key="ladder" {...dash('ladder')}>
             <Row gutter={16}>
               <Col span={24}>
@@ -6992,7 +7019,7 @@ export default function OiReplayPage() {
                   options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
                 />
               </div>
-              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
+              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 8 switches · Esc closes</Text>
             </Space>
           )}
         >
@@ -7030,6 +7057,7 @@ export default function OiReplayPage() {
                 expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
               />
             )}
+            {quickView === 'dex' && <DexCard days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`} />}
           </ChartGrow>
         </Modal>
       )}

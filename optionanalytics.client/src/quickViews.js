@@ -9,9 +9,10 @@ export const QUICK_VIEWS = [
   { key: 'straddle', digit: 5, label: 'Straddle', title: 'ATM straddle' },
   { key: 'gex', digit: 6, label: 'GEX', title: 'GEX - gamma exposure' },
   { key: 'futures', digit: 7, label: 'Futures', title: 'Futures - candles, OI, VWAP and the previous day\'s profile' },
+  { key: 'dex', digit: 8, label: 'DEX', title: 'DEX - delta exposure' },
 ]
 
-/** The quick view a key press opens (Ctrl + Shift + 1 - 7, top row or numpad), else null. */
+/** The quick view a key press opens (Ctrl + Shift + 1 - 8, top row or numpad), else null. */
 export function quickViewForKey(e) {
   if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null
   return QUICK_VIEWS.find((v) => e.code === `Digit${v.digit}` || e.code === `Numpad${v.digit}`) ?? null

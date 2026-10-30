@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
+import { AimOutlined, AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
 import { usePersistedState } from './shared.jsx'
 import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
@@ -7,7 +7,7 @@ import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, pl
 // remembered): a tap opens the views as small icons with their names, a tap on one opens its popup, a tap elsewhere closes
 // them. On a phone it is the only way in (no keyboard for Ctrl + Shift + 1 - 7, and scrolling to each card is slow); on a
 // monitor it saves the same scroll, so it shows there too - `enabled` (the page's "Quick button" tick) turns it off.
-const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
+const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined, dex: AimOutlined }
 // Over the floating panels (900+), under the popups (1000).
 const FAB_Z = 960
 const ACCENT = '#1677ff'

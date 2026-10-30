@@ -90,11 +90,12 @@ test('a card split out of another lands where its content was - everything below
   assert.deepEqual([at('dayOi').y, at('gex').y, at('oiHeatmap').y], [0, 0, 13])   // above it: untouched
 })
 
-test('a saved choice of cards that showed the heatmap shows the totals split out of it - once', () => {
-  assert.deepEqual(SECTION_SPLITS, { oiTotals: 'oiHeatmap' })
-  assert.deepEqual(withSplitSections(['dayOi', 'oiHeatmap', 'gex']), ['dayOi', 'oiHeatmap', 'oiTotals', 'gex'])
-  // The heatmap hidden: the totals stay hidden too (nothing of it was on the page).
-  assert.deepEqual(withSplitSections(['dayOi', 'gex']), ['dayOi', 'gex'])
+test('a saved choice of cards that showed the heatmap shows the totals split out of it, the GEX the DEX beside it - once', () => {
+  assert.deepEqual(SECTION_SPLITS, { oiTotals: 'oiHeatmap', dex: 'gex' })
+  assert.deepEqual(withSplitSections(['dayOi', 'oiHeatmap', 'gex']), ['dayOi', 'oiHeatmap', 'oiTotals', 'gex', 'dex'])
+  // The heatmap hidden: the totals stay hidden too (nothing of it was on the page); the GEX shown: the DEX right after it.
+  assert.deepEqual(withSplitSections(['dayOi', 'gex']), ['dayOi', 'gex', 'dex'])
+  assert.deepEqual(withSplitSections(['dayOi', 'futures']), ['dayOi', 'futures'])
   // Already there: nothing doubled; nothing saved: nothing to do.
   assert.deepEqual(withSplitSections(['oiHeatmap', 'oiTotals']), ['oiHeatmap', 'oiTotals'])
   assert.equal(withSplitSections(null), null)
