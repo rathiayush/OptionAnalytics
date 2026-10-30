@@ -1,7 +1,7 @@
 // Sudden OI walls: option writers putting on a lot of OI at one strike within a few minutes - far
 // faster than they had been writing there before. One definition, used by the strategy engine (#25),
 // the Order Flow page (chart lines, the liquidity map, signals, alerts), the scanner's OI read and OI
-// Replay's liquidity map.
+// Replay's ladder.
 
 const MIN = 60_000
 

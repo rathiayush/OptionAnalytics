@@ -281,7 +281,7 @@ When adding or changing a strategy:
   is null there, so the charts stand at their own height - that is what stops measure / fill chasing each other.
   SIZED - its corner was dragged (`onResizeStop` -> `STORED_SIZED`): it keeps that width and height and its CONTENT
   FOLLOWS - every chart's height (`useFitHeight`: lightweight charts, the SVG GEX profile, the OI heatmap's row height)
-  and every table box (`CardFitBox`: the ladder, the liquidity map, GEX by strike - the box scrolls inside, the card does
+  and every table box (`CardFitBox`: the ladder, GEX / DEX by strike - the box scrolls inside, the card does
   not) is its own height x ONE scale for the card, measured until the content is the card's height (`nextFitScale`:
   secant steps, the first by the heights that scale; 0.25 - 4x; at most 8 steps a size). Only text (a checklist) cannot
   stretch - a card of it made taller has room under it. A chart's new height is APPLIED to the chart there is
@@ -298,7 +298,10 @@ When adding or changing a strategy:
   `oa-note` class). The WHOLE structure is saved, not just the grid: which cards are shown too (`STORED_SECTIONS`,
   `reconcileSections` - anything saved that no longer exists is dropped, and an empty set falls back rather than
   leaving a blank page), and the page starts on `DEFAULT_SECTION_VALUES` - every card but Snapshot and Market Read,
-  whose numbers all appear on the cards below them; both are one tick away in "Sections shown".
+  whose numbers all appear on the cards below them; both are one tick away in "Sections shown". (OI Replay's own
+  "Liquidity map" card - the per-strike imbalance / zone / bias table - was removed on request, code and all; a saved
+  layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which strategies read, is a
+  different thing and stays.)
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
   4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart, 8 DEX (top row or numpad; the same again or Esc closes,

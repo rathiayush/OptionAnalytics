@@ -57,7 +57,6 @@ const CARD_ROWS = {
   gex: 19,
   dex: 17,
   ladder: 16,
-  liquidityMap: 14,
   futures: 21,
 }
 export const defaultRows = (id) => CARD_ROWS[id] ?? DEFAULT_ROWS

@@ -710,7 +710,6 @@ const SECTION_OPTIONS = [
   { value: 'straddle', label: 'ATM straddle' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
   { value: 'dex', label: 'DEX (delta exposure)' },
-  { value: 'liquidityMap', label: 'Liquidity map' },
   { value: 'futures', label: 'Futures' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -752,7 +751,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'dex', 'ladder', 'liquidityMap', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'dex', 'ladder', 'futures']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -3018,146 +3017,6 @@ function OiLadder({ rows, atmStrike, sudden = [] }) {
       })}
     </div>
     </div>
-  )
-}
-
-// Inside this band, CE and PE OI at a strike are considered close enough to call the level
-// "Balanced" rather than one side outright dominating - a strike sitting only barely call-heavy
-// isn't a real resistance read, it's noise around a 50/50 split.
-const IMBALANCE_NEUTRAL_BAND = 0.15
-// Liquidity strength buckets - a strike's OWN dominant side (whichever of CE/PE is larger there),
-// read as a fraction of the WHOLE band's own heaviest single side anywhere - the same "how does
-// this compare to the strongest wall on the chain" read the chart's own price lines already use
-// (see ReplayChart's own t = value/maxOi), just bucketed into three labels instead of a continuous
-// line thickness, since a table row needs a word, not a gradient.
-const LIQUIDITY_STRONG_THRESHOLD = 0.66
-const LIQUIDITY_MEDIUM_THRESHOLD = 0.33
-
-function biasTagColor(bias) {
-  return bias === 'Bullish' ? 'success' : bias === 'Bearish' ? 'error' : 'default'
-}
-
-// Per-strike liquidity/imbalance/bias read across the WHOLE fetched band (not just the 5 strongest
-// levels ReplayChart draws) - the user's own "table which shows price imbalance and liquidity level
-// and where price can likely go" ask. Each row answers three questions at that ONE strike:
-//   - Zone: which side (if either) actually dominates there (Resistance=call-heavy, Support=
-//     put-heavy, Balanced=neither, inside IMBALANCE_NEUTRAL_BAND)
-//   - Liquidity: how heavy that dominant side is, relative to the single heaviest side ANYWHERE in
-//     the band - "is this a real wall or a minor bump"
-//   - Bias: reads the dominant side's own OI change since today's open, same rule ReplayChart's own
-//     left-side CE/PE delta tags already use (rising CE OI = bearish call-writing defending
-//     resistance, rising PE OI = bullish put-writing defending support) - applied here per level
-//     instead of just the single strongest one.
-// This is a mechanical relabeling of numbers already shown elsewhere on this page (the ladder, the
-// chart, Market Read) into one glanceable table, not a new prediction - see the summary row below
-// the table for the plain "nearest wall each way" read of "where price can likely go".
-function LiquidityMapTable({ rows, atmStrike, currentPrice, sudden = [] }) {
-  if (rows.length === 0) return <Empty description="No stored OI/IV data yet at this point in the replay." />
-
-  const bandMaxOi = Math.max(1, ...rows.map((r) => r.ceOi ?? 0), ...rows.map((r) => r.peOi ?? 0))
-
-  const enriched = rows.map((row) => {
-    const ce = row.ceOi ?? 0
-    const pe = row.peOi ?? 0
-    const total = ce + pe
-    const imbalance = total > 0 ? (ce - pe) / total : 0
-    const zone = total === 0 ? 'No OI' : imbalance > IMBALANCE_NEUTRAL_BAND ? 'Resistance' : imbalance < -IMBALANCE_NEUTRAL_BAND ? 'Support' : 'Balanced'
-    const dominantOi = Math.max(ce, pe)
-    const liquidityFrac = dominantOi / bandMaxOi
-    const liquidity = dominantOi === 0 ? 'None' : liquidityFrac >= LIQUIDITY_STRONG_THRESHOLD ? 'Strong' : liquidityFrac >= LIQUIDITY_MEDIUM_THRESHOLD ? 'Medium' : 'Weak'
-
-    let bias = 'Neutral'
-    if (zone === 'Resistance' && row.ceOiSinceOpen != null && row.ceOiSinceOpen !== 0) bias = row.ceOiSinceOpen > 0 ? 'Bearish' : 'Bullish'
-    else if (zone === 'Support' && row.peOiSinceOpen != null && row.peOiSinceOpen !== 0) bias = row.peOiSinceOpen > 0 ? 'Bullish' : 'Bearish'
-
-    const distance = currentPrice != null ? row.strike - currentPrice : null
-    return { ...row, zone, imbalance, liquidity, bias, distance }
-  })
-
-  // "Where price can likely go" - the nearest REAL wall (Medium/Strong liquidity, not a Weak/
-  // Balanced blip) on each side of the current price. A trader reads this as "the move needs to
-  // clear THIS many points to reach the next real resistance/support" - a plain distance-to-wall
-  // fact, not a forecast of whether it will.
-  const above = enriched.filter((r) => r.distance != null && r.distance > 0 && r.zone === 'Resistance' && r.liquidity !== 'Weak')
-    .sort((a, b) => a.distance - b.distance)
-  const below = enriched.filter((r) => r.distance != null && r.distance < 0 && r.zone === 'Support' && r.liquidity !== 'Weak')
-    .sort((a, b) => b.distance - a.distance)
-  const nearestResistance = above[0] ?? null
-  const nearestSupport = below[0] ?? null
-
-  const columns = [
-    {
-      title: 'Strike', dataIndex: 'strike', key: 'strike', width: 90,
-      render: (strike) => <Text strong={strike === atmStrike}>{strike.toLocaleString()}{strike === atmStrike ? ' (ATM)' : ''}</Text>,
-    },
-    { title: 'Distance', dataIndex: 'distance', key: 'distance', width: 90, render: (d) => (d == null ? '—' : `${d >= 0 ? '+' : ''}${d.toFixed(0)}`) },
-    { title: 'CE OI', dataIndex: 'ceOi', key: 'ceOi', width: 90, render: (v) => formatOiMillions(v) },
-    { title: 'PE OI', dataIndex: 'peOi', key: 'peOi', width: 90, render: (v) => formatOiMillions(v) },
-    {
-      title: 'Imbalance', dataIndex: 'imbalance', key: 'imbalance', width: 130,
-      render: (v, r) => (r.zone === 'No OI' ? '—' : `${(Math.abs(v) * 100).toFixed(0)}% ${v >= 0 ? 'call' : 'put'}-heavy`),
-    },
-    { title: 'Zone', dataIndex: 'zone', key: 'zone', width: 100, render: (z) => <Tag color={z === 'Resistance' ? 'error' : z === 'Support' ? 'success' : 'default'}>{z}</Tag> },
-    { title: 'Liquidity', dataIndex: 'liquidity', key: 'liquidity', width: 90, render: (l) => <Tag color={l === 'Strong' ? 'red' : l === 'Medium' ? 'orange' : 'default'}>{l}</Tag> },
-    { title: 'Bias', dataIndex: 'bias', key: 'bias', width: 90, render: (b) => <Tag color={biasTagColor(b)}>{b}</Tag> },
-    {
-      title: <Tooltip title="A sudden OI wall in the last 5 minutes: the strike added 3%+ of its OI at 3x+ its pace before.">Sudden (5m)</Tooltip>, key: 'sudden', width: 150,
-      render: (_, r) => {
-        const here = sudden.filter((w) => w.strike === r.strike)
-        return here.length ? here.map((w) => (
-          <Tooltip key={w.side} title={suddenWallText(w)}>
-            <Tag color={w.side === 'PE' ? 'green' : 'red'} style={{ marginBottom: 2 }}>🧱 {w.side === 'PE' ? 'PUT' : 'CALL'} +{(w.add / 1e5).toFixed(1)}L</Tag>
-          </Tooltip>
-        )) : null
-      },
-    },
-  ]
-
-  return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
-      <Row gutter={24}>
-        <Col>
-          <Statistic
-            title="Nearest resistance above"
-            value={nearestResistance ? `${nearestResistance.strike} (+${nearestResistance.distance.toFixed(0)} pts)` : '— none in range'}
-            valueStyle={{ fontSize: 16, color: nearestResistance ? DOWN_COLOR : undefined }}
-          />
-          {nearestResistance && <Text type="secondary" style={{ fontSize: 11 }}>{nearestResistance.liquidity} liquidity, {nearestResistance.bias.toLowerCase()} bias</Text>}
-        </Col>
-        <Col>
-          <Statistic
-            title="Nearest support below"
-            value={nearestSupport ? `${nearestSupport.strike} (-${Math.abs(nearestSupport.distance).toFixed(0)} pts)` : '— none in range'}
-            valueStyle={{ fontSize: 16, color: nearestSupport ? UP_COLOR : undefined }}
-          />
-          {nearestSupport && <Text type="secondary" style={{ fontSize: 11 }}>{nearestSupport.liquidity} liquidity, {nearestSupport.bias.toLowerCase()} bias</Text>}
-        </Col>
-      </Row>
-      <div aria-label="Sudden OI walls">
-        <Text strong style={{ fontSize: 12 }}>Sudden OI walls (last 5 min): </Text>
-        {sudden.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>none</Text>}
-        {sudden.map((w) => (
-          <Tooltip key={`${w.side}${w.strike}`} title={suddenWallText(w)}>
-            <Tag color={w.side === 'PE' ? 'green' : 'red'} style={{ marginBottom: 4 }}>
-              🧱 {w.side === 'PE' ? 'PUT' : 'CALL'} {w.strike} +{(w.add / 1e5).toFixed(1)}L ({(w.pct * 100).toFixed(1)}%) · {w.side === 'PE' ? 'support' : 'resistance'}
-            </Tag>
-          </Tooltip>
-        ))}
-      </div>
-      {/* scroll.x - these columns' own widths sum past a phone's viewport, so the table needs to
-          scroll horizontally there rather than squash columns or overflow the page. */}
-      <Table
-        dataSource={enriched} columns={columns} rowKey="strike" size="small" pagination={false}
-        scroll={{ x: 920, y: 360 }}
-        onRow={(r) => (sudden.some((w) => w.strike === r.strike) ? { style: { background: '#faad1418' } } : {})}
-      />
-      <FoldText id="oiLadder.note" label="the table's note" className="oa-note">
-        <Text type="secondary" style={{ fontSize: 11 }}>
-          Zone/Liquidity/Bias are a mechanical read of the OI already shown in the ladder above (CE vs PE at each strike, and how that compares to the
-          rest of the band) - not a prediction. "Nearest wall" is a distance fact; whether price actually reaches or holds it is not something OI alone can tell you.
-        </Text>
-      </FoldText>
-    </Space>
   )
 }
 
@@ -6789,22 +6648,6 @@ export default function OiReplayPage() {
               </Col>
             </Row>
             </DashboardCard>
-
-            {visibleSections.includes('liquidityMap') && (
-              <DashboardCard key="liquidityMap" {...dash('liquidityMap')}>
-              <LiveSection version={sectionVersion}>
-              <Row gutter={16}>
-                <Col span={24}>
-                  <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Liquidity map (imbalance &amp; likely levels, whole band)</Space>}>
-                    <CardFitBox>
-                      <LiquidityMapTable rows={ladderRows} atmStrike={atmStrike} currentPrice={currentBar?.close} sudden={suddenWalls} />
-                    </CardFitBox>
-                  </Card>
-                </Col>
-              </Row>
-              </LiveSection>
-              </DashboardCard>
-            )}
 
             {visibleSections.includes('futures') && (
               <DashboardCard key="futures" {...dash('futures')}>
