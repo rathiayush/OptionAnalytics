@@ -55,7 +55,6 @@ const CARD_ROWS = {
   optionFlow: 14,
   straddle: 19,
   gex: 19,
-  dex: 17,
   ladder: 16,
   futures: 21,
 }
@@ -292,10 +291,9 @@ export function nextFitScale(state, { scale, content, box, width, charts }) {
   return { scale: next, state: { prev: here, size, steps: steps + 1 } }
 }
 
-// Cards split out of another - or added beside it - since a trader's "Sections shown" was saved: the new card -> the
-// card it goes with. The OI totals (CE / PE / Net cumulative Δ and their S/R break alerts) were part of the OI change
-// heatmap card; the DEX (delta exposure) is worked out with the GEX and shown wherever the GEX is.
-export const SECTION_SPLITS = { oiTotals: 'oiHeatmap', dex: 'gex' }
+// Cards split out of another since a trader's "Sections shown" was saved: the new card -> the card it came out of.
+// The OI totals (CE / PE / Net cumulative Δ and their S/R break alerts) were part of the OI change heatmap card.
+export const SECTION_SPLITS = { oiTotals: 'oiHeatmap' }
 
 /** A saved choice of cards with each card split out since added wherever the card it came out of is shown (right
  *  after it) - it holds what that card used to, so someone who showed the heatmap keeps seeing the totals (and their
@@ -336,7 +334,9 @@ export const STORED_SIZED = 'optionanalytics.oiReplay.sizedCards'
 // Bumped when the DEFAULT layout changes in a way a saved one should pick up - see the page's migration.
 export const STORED_LAYOUT_VERSION = 'optionanalytics.oiReplay.gridLayoutVersion'
 export const LAYOUT_VERSION = '2'
-// Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration.
+// Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration. Never taken back down: '3'
+// added the DEX card (since removed - a saved "dex" is just dropped); going back to '2' would run the migration again
+// and bring back an OI totals card someone hid.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
 export const SECTIONS_VERSION = '3'
 

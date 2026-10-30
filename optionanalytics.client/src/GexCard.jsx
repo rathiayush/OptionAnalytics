@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Button, Col, Popover, Row, Segmented, Space, Tag, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
-import { BaselineSeries, CrosshairMode, LineSeries, LineStyle } from 'lightweight-charts'
+import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
@@ -33,9 +33,8 @@ const EXPIRY_SOURCES = { dhan: 'Dhan', calendar: 'weekday rule', 'calendar-holid
 
 const gexColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : AXIS_COLOR)
 
-// The net GEX through the day around zero: green above (dealers long gamma), red below (short gamma). The DEX card draws
-// its net DEX with it too (`title`, its own colours, and spot on the left scale to read the two against each other).
-export function NetGexChart({ data, dayKey, height: givenHeight, title = 'Net GEX (₹ Cr)', upColor = UP_COLOR, downColor = DOWN_COLOR, spot = null }) {
+// The net GEX through the day around zero: green above (dealers long gamma), red below (short gamma).
+function NetGexChart({ data, dayKey, height: givenHeight }) {
   // Fitted to its dashboard card when that card was sized (useFitHeight); the height asked for anywhere else.
   const height = useFitHeight(givenHeight)
   // Read once, at creation - a later height is applied to the chart there is (useChartHeight).
@@ -43,8 +42,6 @@ export function NetGexChart({ data, dayKey, height: givenHeight, title = 'Net GE
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
-  const spotRef = useRef(null)
-  const withSpot = spot != null
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
@@ -53,7 +50,6 @@ export function NetGexChart({ data, dayKey, height: givenHeight, title = 'Net GE
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
-      leftPriceScale: { visible: withSpot, borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 4 },
       crosshair: { mode: CrosshairMode.Normal },
       localization: { timeFormatter: istTimeFormatter },
@@ -61,16 +57,11 @@ export function NetGexChart({ data, dayKey, height: givenHeight, title = 'Net GE
     chartRef.current = chart
     seriesRef.current = chart.addSeries(BaselineSeries, {
       baseValue: { type: 'price', price: 0 },
-      topLineColor: upColor, topFillColor1: `${upColor}55`, topFillColor2: `${upColor}08`,
-      bottomLineColor: downColor, bottomFillColor1: `${downColor}08`, bottomFillColor2: `${downColor}55`,
-      lineWidth: 2, priceLineVisible: false, title,
+      topLineColor: UP_COLOR, topFillColor1: `${UP_COLOR}55`, topFillColor2: `${UP_COLOR}08`,
+      bottomLineColor: DOWN_COLOR, bottomFillColor1: `${DOWN_COLOR}08`, bottomFillColor2: `${DOWN_COLOR}55`,
+      lineWidth: 2, priceLineVisible: false, title: 'Net GEX (₹ Cr)',
       priceFormat: { type: 'price', precision: 0, minMove: 1 },
     })
-    if (withSpot) {
-      spotRef.current = chart.addSeries(LineSeries, {
-        color: SPOT_COLOR, lineWidth: 1, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: true, title: 'Spot', crosshairMarkerVisible: false,
-      })
-    }
     const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
     resize.observe(containerRef.current)
     return () => {
@@ -78,18 +69,13 @@ export function NetGexChart({ data, dayKey, height: givenHeight, title = 'Net GE
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
-      spotRef.current = null
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   // A new height is applied to the chart there is - drawn again it had no data until the next update.
   useChartHeight(chartRef, height)
   useEffect(() => {
     seriesRef.current?.setData(sanitizeLine(data.map((p) => ({ time: toChartTime(p.time), value: p.value }))))
   }, [data])
-  useEffect(() => {
-    spotRef.current?.setData(sanitizeLine((spot ?? []).map((p) => ({ time: toChartTime(p.time), value: p.value }))))
-  }, [spot])
   useFitContentAsDataGrows(chartRef, data.length, dayKey)
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }

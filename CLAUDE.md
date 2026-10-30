@@ -204,23 +204,8 @@ When adding or changing a strategy:
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
   check was removed on request.)
-  DEX (delta exposure) is worked out in the SAME minutes (`gexDay`'s `dex` and each strike's `delta` / `dexCall` / `dexPut`
-  / `dexNet` - the same forward, time to expiry and strike IVs): Black-76 delta (a call N(d1), a put N(d1) - 1, `bsDelta`)
-  x the dealers' OI x S, rupees of index. Its sign is the one DEX tools publish (FlashAlpha, Options Analysis Suite): the
-  dealers SHORT every contract - DEX = -sum(delta x OI x S), calls negative, puts positive (GEX's standard, dealers long
-  the calls, would make every strike's DEX positive and say nothing); negative = CALL-heavy (the dealers' hedge long
-  futures), positive = PUT-heavy; 'buildup' = short at the first reading plus each minute's OI change signed by the
-  premium, as GEX's. Also each minute: `decayToClose` (charm - the dealers' options delta change to 15:30 today from time
-  alone, spot / OI / IVs kept; they trade the opposite in futures; null after the close) and `added` (the delta of the OI
-  added or cut over the last `DEX_WINDOW` (15) minutes at this minute's deltas, with `spotFrom`); `dexDivergence` reads
-  price against it (confirms / diverges / flat under 0.1%) and `dexAgreement` the two signs' lean. Delta does not fade
-  away from the money like gamma, so with ATM +/- 10 strikes the LEVEL is partial - the card says read the change. Checked
-  against an independent textbook (Black-Scholes with a rate, skewed IVs, Dhan's IV field 50% off): within 0.2%. The DEX
-  CARD (`DexCard.jsx`, section `dex`, quick view Ctrl + Shift + 8, its own Sign switch `optionanalytics.oiReplay.dexSign`)
-  shows the lean, the decay hedge, the delta added against spot, the two signs, DEX by strike (with each call's delta)
-  and the net DEX through the day with spot on the left scale (`NetGexChart`, shared). It is added once to a saved
-  "Sections shown" wherever the GEX is (`SECTION_SPLITS`, `SECTIONS_VERSION` 3). It feeds no strategy
-  (`tests/gex.test.mjs`).
+  (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
+  reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
   `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and
   User only - the External account never reaches it, `ExternalAccessTests`): every `optionanalytics.*` localStorage key a
@@ -268,7 +253,7 @@ When adding or changing a strategy:
   futures charts; the rest half) and wraps; a layout saved as the old all-full-width stack (`isStackedLayout`) is dropped
   once (`LAYOUT_VERSION`) so this default takes over. A card added since a layout was saved goes RIGHT UNDER the card
   before it in the page's order, everything below moving down (`reconcileGridLayout`) - with none of those saved, at the
-  bottom. A card SPLIT OUT of another, or added beside it (`SECTION_SPLITS`: the OI totals out of the heatmap, the DEX beside the GEX) is added to a saved "Sections
+  bottom. A card SPLIT OUT of another (`SECTION_SPLITS`: the OI totals out of the heatmap) is added to a saved "Sections
   shown" wherever its old card is shown, ONCE (`withSplitSections`, `SECTIONS_VERSION`) - hiding it afterwards sticks;
   without it the totals and their alerts would have vanished for anyone with a saved choice. Reset is offered only when something was arranged:
   `isDefaultArrangement` (each SHOWN card's column, width and order down its column - not its height, which follows the
@@ -281,7 +266,7 @@ When adding or changing a strategy:
   is null there, so the charts stand at their own height - that is what stops measure / fill chasing each other.
   SIZED - its corner was dragged (`onResizeStop` -> `STORED_SIZED`): it keeps that width and height and its CONTENT
   FOLLOWS - every chart's height (`useFitHeight`: lightweight charts, the SVG GEX profile, the OI heatmap's row height)
-  and every table box (`CardFitBox`: the ladder, GEX / DEX by strike - the box scrolls inside, the card does
+  and every table box (`CardFitBox`: the ladder, GEX by strike - the box scrolls inside, the card does
   not) is its own height x ONE scale for the card, measured until the content is the card's height (`nextFitScale`:
   secant steps, the first by the heights that scale; 0.25 - 4x; at most 8 steps a size). Only text (a checklist) cannot
   stretch - a card of it made taller has room under it. A chart's new height is APPLIED to the chart there is
@@ -304,15 +289,15 @@ When adding or changing a strategy:
   different thing and stays.)
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
-  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart, 8 DEX (top row or numpad; the same again or Esc closes,
+  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
   another digit switches; Ctrl + Shift because the browser keeps Ctrl + 1 - 8 for its tabs), or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alerts` - so no
-  second set of alerts - `StraddleCard`, `GexCard` / `DexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
+  second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
   its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
-  opens the eight views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
+  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
   EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
 - The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals, the scanner's,
   price / profile alerts, order errors) are set up ONCE in `main.jsx` (`notificationStack.jsx`, rules in

@@ -47,24 +47,6 @@
 //    through only once spot is that far past it - spot wiggling across a big strike does not swap the walls every minute
 //    (a strike at the money is the magnet, not a wall).
 //
-// DEX (delta exposure), worked out in the same minute from the same forward, time to expiry and strike IVs:
-//  - Delta (Black-76 on the forward, as the gamma): a call N(d1), a put N(d1) - 1.
-//  - DEX of a strike's call or put = delta x the dealers' OI x S: the rupees of index the dealers' options are long (+) or
-//    short (-) - what their futures hedge holds the other way. Summed: the net DEX; calls and puts apart.
-//  - Its sign is the one the DEX tools publish (FlashAlpha, Options Analysis Suite): the dealers SHORT every contract -
-//    customers hold the calls and the puts - so DEX = -sum(delta x OI x S): calls count negative, puts positive.
-//    (GEX's standard - dealers long the calls - would make every strike's DEX positive and say nothing.) Negative = the
-//    open options lean CALL-heavy (customers net long delta; the dealers' hedge is long futures), positive = PUT-heavy.
-//    'buildup': short at the first reading, then each minute's OI change signed by the premium, as GEX's build-up.
-//  - DECAY TO THE CLOSE (charm): how the dealers' options delta changes from now to 15:30 today with time alone - spot, OI
-//    and IVs kept; the hedge they trade is the opposite (options delta up = they sell futures). On expiry day every
-//    out-of-the-money delta runs to 0 by the close, so it is the day's biggest.
-//  - DELTA ADDED: the delta of the OI added or cut over the last DEX_WINDOW minutes, at this minute's deltas - the
-//    positioning that came in, with how far spot went over the same minutes (`dexDivergence` reads the two together).
-//  Delta does NOT fade away from the money like gamma - a deep in-the-money option carries a delta near 1 - so with only
-//  ATM +/- 10 strikes the net DEX is more partial than the GEX: read its CHANGE (through the day, added, decay) more than
-//  its level.
-//
 // Only the strikes the run has (ATM +/- 10 - Dhan's rolling option data) count, so the totals are partial; gamma fades
 // fast away from the money, so they hold most of it. A minute uses only readings up to that minute (each option point
 // holds its minute's close, a leg is read at its last reading within 5 minutes) - nothing after it.
@@ -78,7 +60,6 @@ const WALL_ZONE = 0.25     // the dead zone around spot for the walls, in strike
 const IV_BAND = [0.5, 2]   // an option's own IV is used within this share of the ATM IV, else the ATM IV
 
 export const GEX_RANGE_PCT = 3
-export const DEX_WINDOW = 15  // minutes the "delta added" is read over
 const YEAR_MS = 365 * 24 * 3600_000
 
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN
@@ -98,15 +79,6 @@ export function bsGamma(S, K, sigma, T, F = S) {
   const v = sigma * Math.sqrt(T)
   const d1 = (Math.log(F / K) + v * v / 2) / v
   return pdf(d1) / (S * v)
-}
-
-/** A call's Black-76 delta, N(d1), on the forward `F` (a put's is this less 1); at expiry (`T` 0) the intrinsic one - 1 in
- * the money, 0 out of it, 0.5 at it. */
-export function bsDelta(F, K, sigma, T) {
-  if (!(F > 0 && K > 0)) return 0
-  if (!(T > 0 && sigma > 0)) return F > K ? 1 : F < K ? 0 : 0.5
-  const v = sigma * Math.sqrt(T)
-  return cdf((Math.log(F / K) + v * v / 2) / v)
 }
 
 /** Black-Scholes call + put at one strike, on the forward `F` (undiscounted - the discount over days is negligible). */
@@ -209,12 +181,6 @@ function readingAt(rows, t) {
 
 // The dealers' OI of one reading (+ = dealers long), call side `+1` / put side `-1` as standard.
 const dealerOi = (row, standard, sign) => (sign === 'buildup' ? standard * row.firstOi + row.change : standard * row.oi)
-// The dealers' OI for DEX: short every contract (DEX's own standard - see the top), or short at the first reading and
-// the build-up since.
-const dexDealerOi = (row, sign) => (sign === 'buildup' ? -row.firstOi + row.change : -row.oi)
-// 15:30 IST of the day `t` (epoch ms) is in.
-const IST_MS = 330 * MIN
-const closeOf = (t) => Date.parse(`${new Date(t + IST_MS).toISOString().slice(0, 10)}T15:30:00+05:30`)
 
 // The strike holding a level this minute: the one with the most weight (gamma x OI) among the candidates - unless the
 // one holding it last minute is still a candidate and the leader is not WALL_SWITCH ahead of it.
@@ -250,9 +216,8 @@ function flipOf(options, spot, years, lo, hi, carry) {
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
  * Each minute: `{ time, spot, forward, carry (forward / spot), years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
  * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, sigma, dealerOi }],
- * strikes: [{ strike, call, put, net, ceOi, peOi, gamma, delta, dexCall, dexPut, dexNet }], dex: { net, calls, puts,
- * decayToClose, added, addedFrom, spotFrom } }` (GEX in rupees per 1% move; DEX in rupees of index - see the top; `delta`
- * the strike's call delta; `strikes` high to low; `options` what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
+ * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
+ * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
  * leaves the flip out (null) - the costly part - for a caller that needs only the net and the walls.
  */
 export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true } = {}) {
@@ -266,8 +231,6 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
   const held = { call: null, put: null, max: null }   // the strikes holding the levels, minute to minute
   const expiryMs = expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null
   const minutes = []
-  const spotAt = new Map(spots.map((b) => [b.t, b.spot]))
-  const firstT = spots[0]?.t
   let implied = null
   for (const { t, spot } of spots) {
     const readings = strikes.map((strike) => ({ strike, c: readingAt(ce.get(strike), t), p: readingAt(pe.get(strike), t) }))
@@ -304,11 +267,6 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     const options = []
     const rows = []
     let calls = 0, puts = 0
-    // DEX: the net, calls and puts; the time decay to 15:30 today; the delta of the OI added since `addedFrom`.
-    let dexCalls = 0, dexPuts = 0, decay = 0, added = 0, addedLegs = 0
-    const close = closeOf(t)
-    const yearsAtClose = t < close ? Math.max(0, years - (close - t) / YEAR_MS) : null
-    const addedFrom = Math.max(t - DEX_WINDOW * MIN, firstT)
     const callWeights = new Map(), putWeights = new Map(), gammaWeights = new Map()
     const zone = WALL_ZONE * strikeStep
     let lowStrike = Infinity, highStrike = -Infinity
@@ -333,30 +291,7 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       gammaWeights.set(strike, cWeight + pWeight)
       lowStrike = Math.min(lowStrike, strike)
       highStrike = Math.max(highStrike, strike)
-      // DEX - delta x the dealers' OI x S (a put's delta is the call's less 1).
-      const callDelta = bsDelta(forward, strike, sigma, years)
-      const dexCall = c ? callDelta * dexDealerOi(c, sign) * spot : null
-      const dexPut = p ? (callDelta - 1) * dexDealerOi(p, sign) * spot : null
-      dexCalls += dexCall ?? 0
-      dexPuts += dexPut ?? 0
-      // Time alone to 15:30: both legs' deltas change by the same amount.
-      if (yearsAtClose != null) {
-        const change = bsDelta(forward, strike, sigma, yearsAtClose) - callDelta
-        decay += change * ((c ? dexDealerOi(c, sign) : 0) + (p ? dexDealerOi(p, sign) : 0)) * spot
-      }
-      // The OI added or cut since `addedFrom`, at this minute's delta (a strike not read then counts from its first reading).
-      if (addedFrom < t) {
-        for (const [now, leg, d] of [[c, ce.get(strike), callDelta], [p, pe.get(strike), callDelta - 1]]) {
-          const then = now ? readingAt(leg, addedFrom) : null
-          if (!now || !then) continue
-          added += (dexDealerOi(now, sign) - dexDealerOi(then, sign)) * d * spot
-          addedLegs++
-        }
-      }
-      rows.push({
-        strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi: c?.oi ?? null, peOi: p?.oi ?? null, gamma: (cWeight + pWeight) * unit,
-        delta: callDelta, dexCall, dexPut, dexNet: (dexCall ?? 0) + (dexPut ?? 0),
-      })
+      rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi: c?.oi ?? null, peOi: p?.oi ?? null, gamma: (cWeight + pWeight) * unit })
     }
     held.call = holdLevel(callWeights, held.call)
     held.put = holdLevel(putWeights, held.put)
@@ -371,11 +306,6 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       flip, flipEdge: flip != null && (flip - lowStrike < edge || highStrike - flip < edge),
       callWall: held.call, putWall: held.put, maxGamma: held.max,
       band: [lowStrike, highStrike], options, strikes: rows,
-      dex: {
-        net: dexCalls + dexPuts, calls: dexCalls, puts: dexPuts,
-        decayToClose: yearsAtClose != null ? decay : null,
-        added: addedLegs ? added : null, addedFrom: addedLegs ? addedFrom : null, spotFrom: addedLegs ? spotAt.get(addedFrom) ?? null : null,
-      },
     })
   }
   return minutes
@@ -411,28 +341,4 @@ export function gexAgreement(standardMinute, buildupMinute) {
   const buildup = regimeOf(buildupMinute)
   const agree = standard != null && standard === buildup
   return { standard, buildup, agree, regime: agree ? standard : null }
-}
-
-/** The two signs' DEX lean at one minute, side by side: `{ standard, buildup, agree, lean }` - each 'call-heavy' (net DEX
- * below zero: the dealers short delta) / 'put-heavy' (null without a reading); `lean` the one they agree on, else null. */
-export function dexAgreement(standardMinute, buildupMinute) {
-  const leanOf = (m) => (m?.dex && Number.isFinite(m.dex.net) ? (m.dex.net < 0 ? 'call-heavy' : 'put-heavy') : null)
-  const standard = leanOf(standardMinute)
-  const buildup = leanOf(buildupMinute)
-  const agree = standard != null && standard === buildup
-  return { standard, buildup, agree, lean: agree ? standard : null }
-}
-
-/** Price against the positioning that came in over the DEX window (a minute of `gexDay`): `{ spotChange, customers (the
- * delta customers added - the dealers' less: + = bullish positions), verdict }` - 'confirms' (both the same way),
- * 'diverges' (price one way, the new positions the other: the move is not backed by them), 'flat' (spot moved less than
- * `minMovePct` % or no delta came in); null without a window yet. Context, not a trigger. */
-export function dexDivergence(minute, { minMovePct = 0.1 } = {}) {
-  const dex = minute?.dex
-  if (!dex || dex.added == null || !(dex.spotFrom > 0)) return null
-  const spotChange = minute.spot - dex.spotFrom
-  const customers = -dex.added
-  const moved = Math.abs(spotChange) >= (minMovePct / 100) * dex.spotFrom
-  const verdict = !moved || customers === 0 ? 'flat' : Math.sign(spotChange) === Math.sign(customers) ? 'confirms' : 'diverges'
-  return { spotChange, customers, verdict, minutes: Math.round((minute.time - dex.addedFrom) / MIN) }
 }

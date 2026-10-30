@@ -1,10 +1,9 @@
 // OI Replay's GEX (gex.js): Black-Scholes gamma, the time to expiry implied from the ATM straddle, GEX per strike =
 // gamma x the dealers' OI x S^2 x 1%, the standard and the OI build-up signs, the gamma flip, the walls - and nothing
-// after the minute read. And DEX from the same minute: delta x the dealers' OI x S, the dealers short every contract,
-// the decay to the close, the delta added and price against it.
+// after the minute read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEX_WINDOW, bsDelta, bsGamma, bsStraddle, dexAgreement, dexDivergence, gexAgreement, gexDay, gexProfile, gexUpTo, impliedVol, impliedYears, netGexAt, parityForward } from '../src/gex.js'
+import { bsGamma, bsStraddle, gexAgreement, gexDay, gexProfile, gexUpTo, impliedVol, impliedYears, netGexAt, parityForward } from '../src/gex.js'
 
 const MIN = 60_000
 const OPEN = Date.parse('2026-10-20T09:15:00+05:30')
@@ -344,97 +343,3 @@ test('parityForward: the middle of the three nearest strikes; spot when there is
   assert.equal(parityForward([{ strike: 25000, call: 120, put: 100 }, { strike: 25050, call: 95, put: 120 }], 25010), 25022.5)
 })
 
-
-// ---- DEX (delta exposure) ------------------------------------------------------------------------------------------
-
-test('delta is the change of the call price per point; at expiry the intrinsic one', () => {
-  const F = 25000, K = 25100, s = 0.12
-  // Over +/- 10 points: the price approximation's own error (the normal cdf to 1e-7 of a 25000 price) stays well inside 1e-3.
-  assert.ok(close(bsDelta(F, K, s, YEARS), (call(F + 10, K, s, YEARS) - call(F - 10, K, s, YEARS)) / 20, 1e-3))
-  assert.equal(bsDelta(25200, K, s, 0), 1)
-  assert.equal(bsDelta(24900, K, s, 0), 0)
-  assert.equal(bsDelta(K, K, s, 0), 0.5)
-})
-
-test('DEX of a strike = -(delta x OI x S): calls negative, puts positive - the dealers short every contract', () => {
-  const d = day({ ceOi: (k) => (k === 25100 ? 3e6 : 1e6), peOi: (k) => (k === 24900 ? 2e6 : 1e6) })
-  const [m] = gexDay(d.ce, d.pe, d.spots)
-  const row = m.strikes.find((r) => r.strike === 25100)
-  const delta = bsDelta(25000, 25100, 0.12, m.years)
-  assert.ok(close(row.delta, delta, 1e-9))
-  assert.ok(close(row.dexCall, -delta * 3e6 * 25000, 1))
-  assert.ok(close(row.dexPut, -(delta - 1) * 1e6 * 25000, 1))
-  assert.ok(row.dexCall < 0 && row.dexPut > 0)
-  assert.ok(close(m.dex.net, m.dex.calls + m.dex.puts, 1e-3))
-  assert.ok(close(m.dex.net, m.strikes.reduce((a, r) => a + r.dexNet, 0), 1))
-})
-
-test('a call-heavy chain has a negative DEX, a put-heavy one a positive DEX; the two signs agree or say they do not', () => {
-  const calls = day({ minutes: 1, ceOi: () => 4e6, peOi: () => 1e6 })
-  const puts = day({ minutes: 1, ceOi: () => 1e6, peOi: () => 4e6 })
-  const [c] = gexDay(calls.ce, calls.pe, calls.spots)
-  const [p] = gexDay(puts.ce, puts.pe, puts.spots)
-  assert.ok(c.dex.net < 0)
-  assert.ok(p.dex.net > 0)
-  assert.deepEqual(dexAgreement(c, c), { standard: 'call-heavy', buildup: 'call-heavy', agree: true, lean: 'call-heavy' })
-  assert.deepEqual(dexAgreement(c, p), { standard: 'call-heavy', buildup: 'put-heavy', agree: false, lean: null })
-  assert.deepEqual(dexAgreement(null, p), { standard: null, buildup: 'put-heavy', agree: false, lean: null })
-})
-
-test('OI build-up DEX: calls written (premium falling) make the dealers less short - the DEX rises; calls bought, it falls', () => {
-  const dexOf = (premium) => {
-    const d = day({ minutes: 5, ceOi: (k, m) => (k === 25100 ? 1e6 + 2e6 * m : 1e6), price: (side, k, m) => (side === 'ce' && k === 25100 ? premium(m) : null) })
-    const last = gexDay(d.ce, d.pe, d.spots, { sign: 'buildup' }).at(-1)
-    return { row: last.strikes.find((r) => r.strike === 25100), delta: last.strikes.find((r) => r.strike === 25100).delta }
-  }
-  // Short 1M at the first reading; +8M written: the dealers bought it -> long 7M.
-  const written = dexOf((m) => 60 - m)
-  assert.ok(close(written.row.dexCall, written.delta * 7e6 * 25000, 10))
-  // +8M bought by customers: the dealers sold it -> short 9M.
-  const bought = dexOf((m) => 60 + m)
-  assert.ok(close(bought.row.dexCall, -bought.delta * 9e6 * 25000, 10))
-})
-
-test('the decay to 15:30: on expiry day the out-of-the-money deltas run to 0 - short OTM puts mean dealers buying', () => {
-  // Expiry today; only the puts below spot hold OI: the dealers short them (DEX +); by 15:30 their delta is 0 - the
-  // dealers' options delta falls (decay < 0), so they buy back their futures hedge.
-  const d = day({ minutes: 2, ceOi: () => 0, peOi: (k) => (k < 25000 ? 2e6 : 0), years: () => 6 / 24 / 365 })
-  const [m] = gexDay(d.ce, d.pe, d.spots, { expiry: '2026-10-20' })
-  assert.ok(m.dex.net > 0)
-  assert.ok(close(m.dex.decayToClose, -m.dex.net, Math.abs(m.dex.net) * 1e-6))
-  // Only OTM calls: the dealers short them (DEX -); their delta runs to 0 - decay > 0, the dealers sell.
-  const c = day({ minutes: 2, ceOi: (k) => (k > 25000 ? 2e6 : 0), peOi: () => 0, years: () => 6 / 24 / 365 })
-  const [mc] = gexDay(c.ce, c.pe, c.spots, { expiry: '2026-10-20' })
-  assert.ok(mc.dex.net < 0 && mc.dex.decayToClose > 0)
-  // Three days out the same puts lose far less delta by the close than on expiry day.
-  const far = day({ minutes: 2, ceOi: () => 0, peOi: (k) => (k < 25000 ? 2e6 : 0) })
-  const [mf] = gexDay(far.ce, far.pe, far.spots, { expiry: '2026-10-23' })
-  assert.ok(mf.dex.decayToClose < 0 && Math.abs(mf.dex.decayToClose) < 0.5 * mf.dex.net)
-  // After the close: none.
-  const late = gexDay(d.ce.map((x) => ({ ...x, time: new Date(Date.parse(x.time) + 7 * 3600_000).toISOString() })),
-    d.pe.map((x) => ({ ...x, time: new Date(Date.parse(x.time) + 7 * 3600_000).toISOString() })),
-    d.spots.map((b) => ({ ...b, time: b.time + 7 * 3600_000 })))
-  assert.equal(late[0]?.dex.decayToClose ?? null, null)
-})
-
-test('delta added over the window: calls bought while spot rises confirm; puts bought while it rises diverge', () => {
-  const minutes = DEX_WINDOW + 5
-  const run = ({ ce = () => 0, pe = () => 0, spotMove = 2 }) => {
-    const d = day({ minutes, spot: (m) => 25000 + spotMove * m, ceOi: (k, m) => (k === 25100 ? 1e6 + ce(m) : 1e6), peOi: (k, m) => (k === 24900 ? 1e6 + pe(m) : 1e6) })
-    return gexDay(d.ce, d.pe, d.spots).at(-1)
-  }
-  // 15 minutes of +40 points, 25100 calls added (standard: customers bought them) - bullish positions, price up.
-  const up = run({ ce: (m) => 1e5 * m })
-  assert.equal(up.dex.addedFrom, up.time - DEX_WINDOW * MIN)
-  const row = up.strikes.find((r) => r.strike === 25100)
-  assert.ok(close(up.dex.added, -(1e5 * DEX_WINDOW) * row.delta * up.spot, 1))
-  assert.equal(dexDivergence(up).verdict, 'confirms')
-  assert.ok(dexDivergence(up).customers > 0 && dexDivergence(up).spotChange > 0)
-  // Puts bought instead while price rises: the new positions are bearish - divergence.
-  assert.equal(dexDivergence(run({ pe: (m) => 1e5 * m })).verdict, 'diverges')
-  // Price flat (under 0.1% in the window): nothing to read.
-  assert.equal(dexDivergence(run({ ce: (m) => 1e5 * m, spotMove: 0.5 })).verdict, 'flat')
-  // The first minute has no window yet.
-  const d = day({ minutes: 1 })
-  assert.equal(dexDivergence(gexDay(d.ce, d.pe, d.spots)[0]), null)
-})
