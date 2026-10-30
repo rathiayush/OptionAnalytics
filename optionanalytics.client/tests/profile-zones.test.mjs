@@ -65,11 +65,31 @@ test('two busy areas with a thin one between: two HVN boxes, one LVN box, the PO
   // HVN = the busy area that is not the POC's; LVN = the gap's node.
   assert.deepEqual(z.hvn, [185])
   assert.deepEqual(z.lvn, [155])
+  assert.equal(z.topHvn, 185)
+  assert.equal(z.thinLvn, 155)
+})
+
+test('the chart lines: ONE HVN - its row the busiest (not the biggest area) - and ONE LVN - the thinnest row', () => {
+  // POC area 110-130. A wide busy area 210-250 (the most volume) whose busiest row is 230 (210); a narrow one 290-300
+  // whose row 300 (260) traded more. A wide shallow gap 150-200 (the biggest gap) and a narrow dead one 260-280 - the
+  // thinnest row of all.
+  const vp = vpOf([[100, 5], [110, 200], [120, 300], [130, 200], [140, 50], [150, 45], [160, 40], [170, 45], [180, 40], [190, 45], [200, 50],
+    [210, 200], [220, 205], [230, 210], [240, 205], [250, 200], [260, 5], [270, 0], [280, 5], [290, 250], [300, 260], [310, 5]])
+  const z = volumeZones(vp, 10)
+  assert.deepEqual(z.hvn, [235, 305])   // the boxes, biggest first
+  assert.deepEqual(z.lvn, [165, 275])
+  assert.equal(z.topHvn, 305)
+  assert.equal(z.thinLvn, 275)
+  // Only the POC's busy area: no HVN line (the POC has its own); no gap: no LVN line.
+  const one = volumeZones(vpOf([[100, 5], [110, 200], [120, 300], [130, 200], [140, 5]]), 10)
+  assert.equal(one.topHvn, null)
+  assert.equal(one.thinLvn, null)
 })
 
 test('a flat profile has no zones; at most maxZones of each', () => {
-  assert.deepEqual(volumeZones(vpOf([[100, 10], [110, 10], [120, 10], [130, 10]]), 10), { high: [], low: [], hvn: [], lvn: [] })
-  assert.deepEqual(volumeZones(null, 10), { high: [], low: [], hvn: [], lvn: [] })
+  const none = { high: [], low: [], hvn: [], lvn: [], topHvn: null, thinLvn: null }
+  assert.deepEqual(volumeZones(vpOf([[100, 10], [110, 10], [120, 10], [130, 10]]), 10), none)
+  assert.deepEqual(volumeZones(null, 10), none)
   // Four separate busy areas with gaps between them, kept to two.
   const pairs = []
   for (let k = 0; k < 4; k++) pairs.push([100 + k * 60, 5], [110 + k * 60, 100 - k], [120 + k * 60, 5], [130 + k * 60, 2], [140 + k * 60, 2], [150 + k * 60, 5])

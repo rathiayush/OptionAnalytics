@@ -391,8 +391,10 @@ When adding or changing a strategy:
   boxes and lines were all blank. Never for a past day: that starts fresh. A PAST DAY is REPLAYED AS OI REPLAY'S: it
   opens FRESH at its first minute (the clock defaults to the day's start, not its end - nothing after the clock on any
   chart), with OI Replay's controls - Start / Pause, Reset, Speed (`SPEED_OPTIONS`, ms a market minute, 0.5x - 10x,
-  `optionanalytics.profiles.speedMs`), Go to (a minute, shown), the slider - each labelled by the minute it shows. VOLUME PROFILE: POC / VAH / VAL lines, a dashed line
-  at each HVN (green) and LVN (red) labelled on the price axis, the bars at the right (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
+  `optionanalytics.profiles.speedMs`), Go to (a minute, shown), the slider - each labelled by the minute it shows. VOLUME PROFILE: POC / VAH / VAL lines, ONE dashed
+  HVN line (green - `topHvn`, the busiest row of the busy areas, the POC's aside) and ONE LVN line (red - `thinLvn`, the
+  thinnest row of the thin areas), each labelled on the price axis and named in the header, the bars at the right
+  (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
   the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
   are too thin), POC / VAH / VAL / IB lines, and BOXES (`marketProfileZones`): the value area and the rows with >= 0.7x the POC

@@ -144,9 +144,11 @@ const rowMiddle = (price, rowSize) => round2(price + rowSize / 2)
  *           run touching the top or bottom row is the day's edge, not a gap, and is left out.
  *  Box edges are price edges: `low` the bottom of its first row, `high` the top of its last. The strongest
  *  `maxZones` of each: the high ones by volume, the low ones by how thin and how wide. hvn / lvn: the node
- *  prices (row middles) of the high zones that are not the POC's, and of the low zones, strongest first. */
+ *  prices (row middles) of the high zones that are not the POC's, and of the low zones, strongest first.
+ *  topHvn / thinLvn: the ONE of each the chart draws a line at - the HVN whose own row traded the most (the POC has its
+ *  own line), the LVN whose row is the thinnest; null when there is none. */
 export function volumeZones(vp, rowSize, rules = ZONE_RULES) {
-  const empty = { high: [], low: [], hvn: [], lvn: [] }
+  const empty = { high: [], low: [], hvn: [], lvn: [], topHvn: null, thinLvn: null }
   const g = gridOf(vp?.rows, rowSize, (r) => r.total ?? (r.buy ?? 0) + (r.sell ?? 0))
   if (!g || g.n < 3 || !(g.mean > 0)) return empty
   const total = g.values.reduce((s, v) => s + v, 0)
@@ -158,7 +160,7 @@ export function volumeZones(vp, rowSize, rules = ZONE_RULES) {
     const volume = g.values.slice(a, b + 1).reduce((s, v) => s + v, 0)
     return {
       kind: 'high', low: g.prices[a], high: round2(g.prices[b] + rowSize), node: rowMiddle(g.prices[peak], rowSize),
-      share: total > 0 ? volume / total : 0, volume, poc: pocIndex >= a && pocIndex <= b,
+      nodeVolume: g.values[peak], share: total > 0 ? volume / total : 0, volume, poc: pocIndex >= a && pocIndex <= b,
     }
   }).sort((x, y) => y.volume - x.volume).slice(0, rules.maxZones)
 
@@ -170,14 +172,20 @@ export function volumeZones(vp, rowSize, rules = ZONE_RULES) {
       const volume = g.values.slice(a, b + 1).reduce((s, v) => s + v, 0)
       // Thinner and wider = a bigger gap: the room it leaves below the mean, over its rows.
       const depth = (b - a + 1) * g.mean - g.smooth.slice(a, b + 1).reduce((s, v) => s + v, 0)
-      return { kind: 'low', low: g.prices[a], high: round2(g.prices[b] + rowSize), node: rowMiddle(g.prices[trough], rowSize), share: total > 0 ? volume / total : 0, volume, depth }
+      return {
+        kind: 'low', low: g.prices[a], high: round2(g.prices[b] + rowSize), node: rowMiddle(g.prices[trough], rowSize),
+        nodeVolume: g.smooth[trough], share: total > 0 ? volume / total : 0, volume, depth,
+      }
     })
     .sort((x, y) => y.depth - x.depth).slice(0, rules.maxZones)
 
+  const hvnZones = high.filter((z) => !z.poc)
   return {
     high, low,
-    hvn: high.filter((z) => !z.poc).map((z) => z.node),
+    hvn: hvnZones.map((z) => z.node),
     lvn: low.map((z) => z.node),
+    topHvn: hvnZones.length ? hvnZones.reduce((best, z) => (z.nodeVolume > best.nodeVolume ? z : best)).node : null,
+    thinLvn: low.length ? low.reduce((best, z) => (z.nodeVolume < best.nodeVolume ? z : best)).node : null,
   }
 }
 
