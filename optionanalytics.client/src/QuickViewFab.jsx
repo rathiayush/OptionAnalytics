@@ -5,7 +5,7 @@ import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, pl
 
 // The quick views as a small round button that floats over the page and can be dragged anywhere (where it was left is
 // remembered): a tap opens the views as small icons with their names, a tap on one opens its popup, a tap elsewhere closes
-// them. On a phone it is the only way in (no keyboard for Ctrl + Shift + 1 - 7, and scrolling to each card is slow); on a
+// them. On a phone it is the only way in (no keyboard for Alt + Z X C V B N M, and scrolling to each card is slow); on a
 // monitor it saves the same scroll, so it shows there too - `enabled` (the page's "Quick button" tick) turns it off.
 const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
 // Over the floating panels (900+), under the popups (1000).

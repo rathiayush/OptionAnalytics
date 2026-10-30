@@ -288,9 +288,12 @@ When adding or changing a strategy:
   layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which strategies read, is a
   different thing and stays.)
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
-  Ctrl + Shift + 1 Day OI since the open, 2 the OI totals charts (CE / PE / Net), 3 the OI change heatmap and totals,
-  4 the option premium charts (ATM by default), 5 the ATM straddle, 6 GEX, 7 the futures chart (top row or numpad; the same again or Esc closes,
-  another digit switches; Ctrl + Shift because the browser keeps Ctrl + 1 - 8 for its tabs), or the "Quick view" buttons
+  ALT + Z Day OI since the open, X the OI totals charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart,
+  N the OI change heatmap and totals, M the option premium charts (ATM by default) - the bottom row of the keyboard (the
+  same again or Esc closes, another letter switches; not from a box being typed in). ALT, not Ctrl: Ctrl + N is the
+  browser's new window (a page cannot take it) and Ctrl + Z / X / C / V are undo / cut / copy / paste. Alt + B is
+  Futures, never the order ticket's buy (the ticket takes a plain B / S only). The old Ctrl + Shift + 1 - 7 (`digit`)
+  still open the same views. Or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alerts` - so no
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -

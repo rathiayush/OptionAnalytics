@@ -39,7 +39,7 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
-import { QUICK_VIEWS, quickViewForKey, isTypingField } from './quickViews.js'
+import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
@@ -4231,8 +4231,8 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
-  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Ctrl + Shift + 1 - 7 open one, the same
-  // again closes it, another switches. Works while typing in a box too (Ctrl + Shift + a digit types nothing).
+  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Alt + Z X C V B N M (or the old Ctrl +
+  // Shift + 1 - 7) open one, the same again closes it, another switches.
   const [quickView, setQuickView] = useState(null)
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
   useEffect(() => {
@@ -5651,7 +5651,7 @@ export default function OiReplayPage() {
     </>
   )
 
-  // ---- Shared between the page's cards and the quick views (Ctrl + Shift + 1 - 7): the same elements, rendered in both.
+  // ---- Shared between the page's cards and the quick views (Alt + Z X C V B N M): the same elements, rendered in both.
   const dayOiContent = dayOiSummary ? (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       {dayReadOpen ? (
@@ -5865,7 +5865,7 @@ export default function OiReplayPage() {
   )
 
   // The futures card's controls (but the DOM button - its side panel would open under a popup) and content, shared by
-  // the card and its quick view (Ctrl + Shift + 7). Only with a loaded day - the content reads result.
+  // the card and its quick view (Alt + B). Only with a loaded day - the content reads result.
   const futuresControls = result ? (
     <>
       <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
@@ -6146,12 +6146,12 @@ export default function OiReplayPage() {
             )}
             {result && !controlsCollapsed && (
               <Space align="center" size={6} wrap>
-                <Tooltip title="Open a card in a popup for a quick scan - keyboard: Ctrl + Shift + 1 - 7 (the same again or Esc closes it, another digit switches). Shown even when the card is hidden on the page.">
-                  <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Ctrl + Shift + …)</Text>
+                <Tooltip title={`Open a card in a popup for a quick scan - keyboard: ${QUICK_VIEW_KEYS_TEXT} (the same again or Esc closes it, another letter switches). Shown even when the card is hidden on the page.`}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Alt + …)</Text>
                 </Tooltip>
                 {QUICK_VIEWS.map((v) => (
-                  <Tooltip key={v.key} title={`${v.title} - Ctrl + Shift + ${v.digit}`}>
-                    <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.digit} · {v.label}</Button>
+                  <Tooltip key={v.key} title={`${v.title} - Alt + ${v.letter}`}>
+                    <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.letter} · {v.label}</Button>
                   </Tooltip>
                 ))}
                 <Tooltip title="The same seven views from a small round button floating over the page - drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
@@ -6832,10 +6832,10 @@ export default function OiReplayPage() {
               <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
                 <Segmented
                   size="small" value={quickView ?? undefined} onChange={setQuickView}
-                  options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.digit} ${v.label}` }))}
+                  options={QUICK_VIEWS.map((v) => ({ value: v.key, label: `${v.letter} ${v.label}` }))}
                 />
               </div>
-              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>Ctrl + Shift + 1 - 7 switches · Esc closes</Text>
+              <Text className="oa-keyboard-hint" type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>{QUICK_VIEW_KEYS_TEXT} switches · Esc closes</Text>
             </Space>
           )}
         >

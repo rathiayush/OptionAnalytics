@@ -1,13 +1,26 @@
-// The OI Replay quick views (quickViews.js): Ctrl + Shift + 1 - 7 (top row or numpad) open the seven popups; anything
-// else - Ctrl alone (the browser's tab keys), Alt, Cmd, other keys - opens nothing.
+// The OI Replay quick views (quickViews.js): Alt + Z X C V B N M open the seven popups (the old Ctrl + Shift + 1 - 7, top
+// row or numpad, too); anything else - Ctrl alone (undo / cut / copy / paste, the browser's tab keys), Cmd, a plain letter
+// (the order ticket's B / S) - opens nothing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, isFabDrag, isTypingField, placeFab, quickViewForKey } from '../src/quickViews.js'
 
 const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, ...mods })
 
-test('Ctrl + Shift + 1 - 7 open the seven quick views in order', () => {
-  assert.deepEqual(QUICK_VIEWS.map((v) => v.key), ['dayOi', 'oiCharts', 'oiHeatmap', 'premium', 'straddle', 'gex', 'futures'])
+const alt = (code, mods = {}) => ({ code, ctrlKey: false, shiftKey: false, altKey: true, metaKey: false, ...mods })
+
+test('Alt + Z X C V B N M open the seven quick views: Day OI, OI charts, GEX, straddle, futures, OI heatmap, premium', () => {
+  assert.deepEqual(QUICK_VIEWS.map((v) => [v.letter, v.key]), [
+    ['Z', 'dayOi'], ['X', 'oiCharts'], ['C', 'gex'], ['V', 'straddle'], ['B', 'futures'], ['N', 'oiHeatmap'], ['M', 'premium'],
+  ])
+  for (const v of QUICK_VIEWS) assert.equal(quickViewForKey(alt(`Key${v.letter}`)).key, v.key)
+  // Not from a box being typed in (Option + a letter types a character on a Mac); a checkbox holding the focus is fine.
+  assert.equal(quickViewForKey(alt('KeyZ', { target: { tagName: 'INPUT', type: 'text' } })), null)
+  assert.equal(quickViewForKey(alt('KeyZ', { target: { tagName: 'INPUT', type: 'checkbox' } })).key, 'dayOi')
+})
+
+test('the old Ctrl + Shift + 1 - 7 still open the same views', () => {
+  assert.deepEqual(QUICK_VIEWS.map((v) => v.digit).sort(), [1, 2, 3, 4, 5, 6, 7])
   for (const v of QUICK_VIEWS) {
     assert.equal(quickViewForKey(key(`Digit${v.digit}`)).key, v.key)
     assert.equal(quickViewForKey(key(`Numpad${v.digit}`)).key, v.key)
@@ -21,6 +34,14 @@ test('nothing else opens one', () => {
   assert.equal(quickViewForKey(key('Digit1', { metaKey: true })), null)
   assert.equal(quickViewForKey(key('Digit8')), null)
   assert.equal(quickViewForKey(key('KeyB')), null)
+  // Ctrl + Z / C (undo / copy), AltGr (Ctrl + Alt), Alt + Shift, a plain B (the order ticket's buy), Alt + another letter.
+  assert.equal(quickViewForKey(alt('KeyZ', { altKey: false, ctrlKey: true })), null)
+  assert.equal(quickViewForKey(alt('KeyC', { altKey: false, ctrlKey: true })), null)
+  assert.equal(quickViewForKey(alt('KeyZ', { ctrlKey: true })), null)
+  assert.equal(quickViewForKey(alt('KeyZ', { shiftKey: true })), null)
+  assert.equal(quickViewForKey(alt('KeyB', { altKey: false })), null)
+  assert.equal(quickViewForKey(alt('KeyQ')), null)
+  assert.equal(quickViewForKey(alt('KeyZ', { metaKey: true })), null)
 })
 
 // The phone's floating quick-view button: dragged anywhere but always kept on the screen; a small move is still a tap.
