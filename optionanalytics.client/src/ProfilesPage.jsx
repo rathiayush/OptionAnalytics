@@ -20,6 +20,7 @@ import {
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
+import { PREV_PROFILE } from './profileColors.js'
 import { chartGrow } from './dashboardLayout.js'
 import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 
@@ -80,7 +81,8 @@ const BOX = {
   single: { fill: 'rgba(255,122,69,0.2)', stroke: 'rgba(255,122,69,0.85)', labelColor: '#ff9c6e' },
   tail: { fill: 'rgba(235,47,150,0.18)', stroke: 'rgba(235,47,150,0.85)', labelColor: '#ff85c0' },
 }
-const LINE = { poc: '#fadb14', va: '#9b8cff', ib: '#faad14', hvn: '#73d13d', lvn: '#ff4d4f' }
+// The HVN / LVN lines as OI Replay's entry charts draw theirs: thin, dotted, orange / light blue (profileColors.js).
+const LINE = { poc: '#fadb14', va: '#9b8cff', ib: '#faad14', hvn: PREV_PROFILE.hvn, lvn: PREV_PROFILE.lvn }
 const VWAP_COLOR = '#e072e8'
 
 // ---- data ------------------------------------------------------------------------------------------------
@@ -475,8 +477,8 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
     { price: vp.poc + row / 2, color: LINE.poc, title: 'POC', width: 2 },
     { price: vp.vah + row, color: LINE.va, title: 'VAH', style: 2 },
     { price: vp.val, color: LINE.va, title: 'VAL', style: 2 },
-    ...(vz.topHvn != null ? [{ price: vz.topHvn, color: LINE.hvn, title: 'HVN', style: 3 }] : []),
-    ...(vz.thinLvn != null ? [{ price: vz.thinLvn, color: LINE.lvn, title: 'LVN', style: 3 }] : []),
+    ...(vz.topHvn != null ? [{ price: vz.topHvn, color: LINE.hvn, title: 'HVN', style: 1 }] : []),
+    ...(vz.thinLvn != null ? [{ price: vz.thinLvn, color: LINE.lvn, title: 'LVN', style: 1 }] : []),
   ]), [vp, vz, row])
   const mpLines = useMemo(() => (!tpo ? [] : [
     { price: tpo.poc + row / 2, color: LINE.poc, title: 'TPO POC', width: 2 },
@@ -507,8 +509,8 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
               <span style={{ color: LINE.poc }}>POC {fmt(vp.poc == null ? null : vp.poc + row / 2)}</span>
               <span style={{ color: LINE.va }}>VAH {fmt(vp.vah == null ? null : vp.vah + row)} · VAL {fmt(vp.val)}</span>
-              <span style={{ color: BOX.high.labelColor }}>HVN {fmt(vz.topHvn)}</span>
-              <span style={{ color: BOX.low.labelColor }}>LVN {fmt(vz.thinLvn)}</span>
+              <span style={{ color: LINE.hvn }}>HVN {fmt(vz.topHvn)}</span>
+              <span style={{ color: LINE.lvn }}>LVN {fmt(vz.thinLvn)}</span>
             </Space>
             <Legend items={[['high', 'Highest volume (HVN area)'], ['low', 'Thin volume (LVN area)'], ['value', 'Value area']]} />
             {empty ?? (!hasVolume && profileBars.length > 0 && (
@@ -527,8 +529,8 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
                 offer, red sold at the bid - the index&apos;s own volume has no side, so the spot&apos;s are one colour). POC = the
                 price that traded the most; VAH / VAL = the band holding 70% of the volume. GREEN boxes are where the most volume
                 traded - prices the market agreed on, which tend to hold price (support / resistance, a magnet when price is near);
-                each names its HVN, its busiest row; the green dashed HVN line marks the busiest of them (the POC aside). RED boxes are where volume was thin inside the range - prices the market moved
-                through fast, which it tends to cross fast again: a break into one often runs to the far side; the red dashed LVN line marks the thinnest row of them. A thin edge at the
+                each names its HVN, its busiest row; the orange dotted HVN line marks the busiest of them (the POC aside), as on OI Replay's entry charts. RED boxes are where volume was thin inside the range - prices the market moved
+                through fast, which it tends to cross fast again: a break into one often runs to the far side; the blue dotted LVN line marks the thinnest row of them. A thin edge at the
                 day&apos;s high or low is not a box (price only got there briefly). Busy = at least 1.3x the average row, thin = 0.6x
                 or less (smoothed over three rows). With Days above 1 it is every session&apos;s volume at each price added up - the
                 levels several days agreed on. The pink line is the day&apos;s VWAP (the &quot;VWAP&quot; tick).
