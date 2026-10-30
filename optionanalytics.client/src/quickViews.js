@@ -1,7 +1,8 @@
-// Quick views - a popup for a quick scan of one card, by keyboard (Alt + a letter of the bottom row, Z X C V B N M; the
-// same again or Esc closes, another letter switches) or by the "Quick view" buttons. Alt, not Ctrl: Ctrl + N is the
-// browser's new window (a page cannot take it) and Ctrl + Z / X / C / V are undo / cut / copy / paste. The old Ctrl +
-// Shift + 1 - 7 still open them (`digit`). The popup shows the card's own content, live with the page (replay clock or live).
+// Quick views - a popup for a quick scan of one card, by keyboard (a SINGLE key of the bottom row, Z X C V B N M - no
+// Ctrl / Alt / Shift; the same again or Esc closes, another letter switches) or by the "Quick view" buttons. A key held
+// with Ctrl / Cmd is the browser's or the text box's (Ctrl + C copies, Ctrl + N opens a window). B is Futures here - the
+// order ticket's buy is F1 (S / F2 still sell). The old Ctrl + Shift + 1 - 7 still open them (`digit`). The popup shows
+// the card's own content, live with the page (replay clock or live).
 export const QUICK_VIEWS = [
   { key: 'dayOi', letter: 'Z', digit: 1, label: 'Day OI', title: 'Day OI since the open' },
   { key: 'oiCharts', letter: 'X', digit: 2, label: 'OI charts', title: 'OI totals charts - CE, PE and Net' },
@@ -11,14 +12,14 @@ export const QUICK_VIEWS = [
   { key: 'oiHeatmap', letter: 'N', digit: 3, label: 'OI heatmap', title: 'OI change heatmap (all strikes) and the totals' },
   { key: 'premium', letter: 'M', digit: 4, label: 'Premium', title: 'Option premium - CE and PE (ATM by default)' },
 ]
-export const QUICK_VIEW_KEYS_TEXT = `Alt + ${QUICK_VIEWS.map((v) => v.letter).join(' ')}`
+export const QUICK_VIEW_KEYS_TEXT = QUICK_VIEWS.map((v) => v.letter).join(' ')
 
-/** The quick view a key press opens (Alt + Z X C V B N M; or the old Ctrl + Shift + 1 - 7, top row or numpad), else null.
- *  Alt + a letter is not taken from a box being typed in (on a Mac, Option + a letter types a character). The order
- *  ticket's B / S keys are plain letters: Alt + B is Futures, never a buy. */
+/** The quick view a key press opens (Z X C V B N M alone; or the old Ctrl + Shift + 1 - 7, top row or numpad), else null.
+ *  A letter typed in a box is the box's, never a quick view. (The page also leaves them alone while its order ticket is
+ *  open - its own C / P pick the option.) */
 export function quickViewForKey(e) {
-  if (e.metaKey) return null
-  if (e.altKey && !e.ctrlKey && !e.shiftKey) {
+  if (e.metaKey || e.repeat) return null
+  if (!e.altKey && !e.ctrlKey && !e.shiftKey) {
     if (isTypingField(e.target)) return null
     return QUICK_VIEWS.find((v) => e.code === `Key${v.letter}`) ?? null
   }

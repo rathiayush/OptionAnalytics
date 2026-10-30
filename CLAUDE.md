@@ -288,12 +288,13 @@ When adding or changing a strategy:
   layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which strategies read, is a
   different thing and stays.)
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
-  ALT + Z Day OI since the open, X the OI totals charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart,
-  N the OI change heatmap and totals, M the option premium charts (ATM by default) - the bottom row of the keyboard (the
-  same again or Esc closes, another letter switches; not from a box being typed in). ALT, not Ctrl: Ctrl + N is the
-  browser's new window (a page cannot take it) and Ctrl + Z / X / C / V are undo / cut / copy / paste. Alt + B is
-  Futures, never the order ticket's buy (the ticket takes a plain B / S only). The old Ctrl + Shift + 1 - 7 (`digit`)
-  still open the same views. Or the "Quick view" buttons
+  a SINGLE KEY (no Ctrl / Alt / Shift - the user's ask; Alt was tried first): Z Day OI since the open, X the OI totals
+  charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart, N the OI change heatmap and totals, M the option
+  premium charts (ATM by default) - the bottom row of the keyboard (the same again or Esc closes, another letter switches;
+  not from a box being typed in, not a key held down, not while the order ticket or its review is open - the ticket's own
+  C / P pick the option). With Ctrl / Cmd a letter stays the browser's (Ctrl + C copies, Ctrl + N a new window). B is
+  Futures, so the order ticket's BUY is F1 only (S / F2 still sell). The old Ctrl + Shift + 1 - 7 (`digit`) still open
+  the same views. Or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alerts` - so no
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
@@ -311,7 +312,7 @@ When adding or changing a strategy:
   opened - one used to take a third of the screen); "CLEAR ALL (N)" over them while two or more are open
   (`NotificationClearAll`, `notification.destroy()`; on a phone beside the ☰, not over it). A new alert needs nothing:
   `notification.open` as before (`tests/notification-stack.test.mjs`).
-- OI Replay's keyboard order ticket (B / F1 buy, S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
+- OI Replay's keyboard order ticket (F1 buy - B is the Futures quick view; S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
   `quickViews.js`): a text / number / date box, a searchable or tags dropdown, a text area. A checkbox, a radio (antd's
   Segmented), a switch or a plain dropdown (antd marks its input read-only) only hold the focus after a click - they used
   to count as typing, so after ticking VWAP or picking a timeframe B / S did nothing (`tests/quick-views.test.mjs`).

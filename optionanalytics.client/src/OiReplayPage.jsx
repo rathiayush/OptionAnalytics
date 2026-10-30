@@ -2869,7 +2869,7 @@ function PaperTradePanel({
           )}
         </Space>
         {isLiveMode && liveBlockReason && <Text type="warning" style={{ fontSize: 12 }}>{liveBlockReason}</Text>}
-        <Text type="secondary" style={{ fontSize: 11 }}>Keyboard: B or F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
+        <Text type="secondary" style={{ fontSize: 11 }}>Keyboard: F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
         {isLiveMode && liveContent}
         {!isLiveMode && positions.length > 0 && (
           <>
@@ -3107,7 +3107,7 @@ function biasColor(bias) {
 }
 
 // ---- Keyboard order ticket ----------------------------------------------------------------------------
-// Opened with B / F1 (buy) or S / F2 (sell). The cursor starts in Lots; Enter (or Tab) moves to Stop-loss,
+// Opened with F1 (buy) or S / F2 (sell). The cursor starts in Lots; Enter (or Tab) moves to Stop-loss,
 // Target and Place order; Esc closes. C / P switch the option and the arrow keys its strike - only before
 // the cursor is in a box. Values start from the panel (the index's trade settings).
 function OrderTicket({ ticket, onClose, onPlace, underlying, atmStrike, step, live, initial, premiumOf, slippage, blockReason }) {
@@ -4231,20 +4231,10 @@ export default function OiReplayPage() {
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
-  // Quick views (QUICK_VIEWS): which popup is open, and its keyboard shortcuts - Alt + Z X C V B N M (or the old Ctrl +
-  // Shift + 1 - 7) open one, the same again closes it, another switches.
+  // Quick views (QUICK_VIEWS): which popup is open - its keyboard shortcuts (Z X C V B N M) are set up with the order
+  // ticket's below.
   const [quickView, setQuickView] = useState(null)
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
-  useEffect(() => {
-    const onKey = (e) => {
-      const view = quickViewForKey(e)
-      if (!view) return
-      e.preventDefault()
-      setQuickView((open) => (open === view.key ? null : view.key))
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
   // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
   const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
     expiry: result?.optionExpiry ?? null, live: isLive,
@@ -4929,9 +4919,9 @@ export default function OiReplayPage() {
     if (liveTradeActive) handleLivePunch()
     else handlePaperPunch()
   }
-  // ---- Keyboard order ticket - like a broker terminal: B or F1 buys, S or F2 sells (not while typing in a
-  // box). It opens on Lots; Enter (or Tab) goes on to SL, Target and Place order; Esc closes it. The order goes
-  // straight out from the ticket - paper, or LIVE when the panel is in Live mode.
+  // ---- Keyboard order ticket - like a broker terminal: F1 buys, S or F2 sells (not while typing in a box; B is the
+  // Futures quick view). It opens on Lots; Enter (or Tab) goes on to SL, Target and Place order; Esc closes it. The order
+  // goes straight out from the ticket - paper, or LIVE when the panel is in Live mode.
   const [ticket, setTicket] = useState(null)
   const ticketBlockedRef = useRef(false)
   ticketBlockedRef.current = Boolean(ticket) || reviewOpenRef.current
@@ -4940,10 +4930,23 @@ export default function OiReplayPage() {
       if (e.ctrlKey || e.metaKey || e.altKey || ticketBlockedRef.current) return
       // Not while typing in a box - but a ticked checkbox, a toggle or a dropdown still holding the focus is not typing.
       if (isTypingField(e.target)) return
-      const direction = e.key === 'F1' || e.key === 'b' || e.key === 'B' ? 'BUY' : e.key === 'F2' || e.key === 's' || e.key === 'S' ? 'SELL' : null
+      const direction = e.key === 'F1' ? 'BUY' : e.key === 'F2' || e.key === 's' || e.key === 'S' ? 'SELL' : null
       if (!direction) return
       e.preventDefault()
       setTicket({ direction })
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+  // The quick views' keys - Z X C V B N M alone (or the old Ctrl + Shift + 1 - 7) open one, the same again closes it,
+  // another switches. Not while the order ticket (its C / P pick the option) or the order review is open.
+  useEffect(() => {
+    const onKey = (e) => {
+      if (ticketBlockedRef.current) return
+      const view = quickViewForKey(e)
+      if (!view) return
+      e.preventDefault()
+      setQuickView((open) => (open === view.key ? null : view.key))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -5651,7 +5654,7 @@ export default function OiReplayPage() {
     </>
   )
 
-  // ---- Shared between the page's cards and the quick views (Alt + Z X C V B N M): the same elements, rendered in both.
+  // ---- Shared between the page's cards and the quick views (Z X C V B N M): the same elements, rendered in both.
   const dayOiContent = dayOiSummary ? (
     <Space direction="vertical" size={12} style={{ width: '100%' }}>
       {dayReadOpen ? (
@@ -5865,7 +5868,7 @@ export default function OiReplayPage() {
   )
 
   // The futures card's controls (but the DOM button - its side panel would open under a popup) and content, shared by
-  // the card and its quick view (Alt + B). Only with a loaded day - the content reads result.
+  // the card and its quick view (B). Only with a loaded day - the content reads result.
   const futuresControls = result ? (
     <>
       <Select value={futuresTimeframe} onChange={setFuturesTimeframe} size="small" style={{ width: 90 }} options={TIMEFRAME_OPTIONS} />
@@ -6147,10 +6150,10 @@ export default function OiReplayPage() {
             {result && !controlsCollapsed && (
               <Space align="center" size={6} wrap>
                 <Tooltip title={`Open a card in a popup for a quick scan - keyboard: ${QUICK_VIEW_KEYS_TEXT} (the same again or Esc closes it, another letter switches). Shown even when the card is hidden on the page.`}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Quick view (Alt + …)</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Quick view (keys {QUICK_VIEW_KEYS_TEXT})</Text>
                 </Tooltip>
                 {QUICK_VIEWS.map((v) => (
-                  <Tooltip key={v.key} title={`${v.title} - Alt + ${v.letter}`}>
+                  <Tooltip key={v.key} title={`${v.title} - key ${v.letter}`}>
                     <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.letter} · {v.label}</Button>
                   </Tooltip>
                 ))}
