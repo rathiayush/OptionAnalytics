@@ -80,7 +80,7 @@ const BOX = {
   single: { fill: 'rgba(255,122,69,0.2)', stroke: 'rgba(255,122,69,0.85)', labelColor: '#ff9c6e' },
   tail: { fill: 'rgba(235,47,150,0.18)', stroke: 'rgba(235,47,150,0.85)', labelColor: '#ff85c0' },
 }
-const LINE = { poc: '#fadb14', va: '#9b8cff', ib: '#faad14' }
+const LINE = { poc: '#fadb14', va: '#9b8cff', ib: '#faad14', hvn: '#73d13d', lvn: '#ff4d4f' }
 const VWAP_COLOR = '#e072e8'
 
 // ---- data ------------------------------------------------------------------------------------------------
@@ -469,11 +469,15 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
     for (const z of mz.tails) out.push({ ...BOX.tail, low: z.low, high: z.high, label: zoneLabel.tail(z) })
     return out
   }, [mz])
+  // POC, VAH / VAL - and a line at each HVN (the busiest row of each busy box, the POC's own aside) and each LVN (the
+  // thinnest row of each thin box), labelled on the price axis like the others.
   const vpLines = useMemo(() => (vp.poc == null ? [] : [
     { price: vp.poc + row / 2, color: LINE.poc, title: 'POC', width: 2 },
     { price: vp.vah + row, color: LINE.va, title: 'VAH', style: 2 },
     { price: vp.val, color: LINE.va, title: 'VAL', style: 2 },
-  ]), [vp, row])
+    ...vz.hvn.map((price) => ({ price, color: LINE.hvn, title: 'HVN', style: 3 })),
+    ...vz.lvn.map((price) => ({ price, color: LINE.lvn, title: 'LVN', style: 3 })),
+  ]), [vp, vz, row])
   const mpLines = useMemo(() => (!tpo ? [] : [
     { price: tpo.poc + row / 2, color: LINE.poc, title: 'TPO POC', width: 2 },
     { price: tpo.vah + row, color: LINE.va, title: 'VAH', style: 2 },
@@ -523,8 +527,8 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
                 offer, red sold at the bid - the index&apos;s own volume has no side, so the spot&apos;s are one colour). POC = the
                 price that traded the most; VAH / VAL = the band holding 70% of the volume. GREEN boxes are where the most volume
                 traded - prices the market agreed on, which tend to hold price (support / resistance, a magnet when price is near);
-                each names its HVN, its busiest row. RED boxes are where volume was thin inside the range - prices the market moved
-                through fast, which it tends to cross fast again: a break into one often runs to the far side. A thin edge at the
+                each names its HVN, its busiest row, and a green dashed line marks it. RED boxes are where volume was thin inside the range - prices the market moved
+                through fast, which it tends to cross fast again: a break into one often runs to the far side; a red dashed line marks each LVN, its thinnest row. A thin edge at the
                 day&apos;s high or low is not a box (price only got there briefly). Busy = at least 1.3x the average row, thin = 0.6x
                 or less (smoothed over three rows). With Days above 1 it is every session&apos;s volume at each price added up - the
                 levels several days agreed on. The pink line is the day&apos;s VWAP (the &quot;VWAP&quot; tick).
