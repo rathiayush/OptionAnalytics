@@ -367,9 +367,11 @@ When adding or changing a strategy:
   the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`). TRADE IN ANOTHER
   INDEX than the charts on a REPLAYED day (`tradeIndex.js`; "Trade in" beside Load day, the panel's index picker - in
   replay it picks the TRADE index, the charts stay; `optionanalytics.oiReplay.tradeIndex`): NIFTY on screen, the paper
-  trades in SENSEX. Load day asks for the trade index's day too, alongside the charts' (the same `/run`, 1-minute, its
-  series = the charts' Weekly / Monthly, BANKNIFTY Monthly - `tradeRuns`, kept per index and day, that day's only; picked
-  after a load it is fetched at once); the panel and the order ticket take ITS ATM (`tradeAtmAt` - its spot bar of the
+  trades in SENSEX. Its day (the same `/run`, 1-minute, its series = the charts' Weekly / Monthly, BANKNIFTY Monthly -
+  `tradeRuns`, kept per index and day, the day loaded's only) is fetched ONLY WHEN ASKED - never by picking the index:
+  its "Load SENSEX" button, or Load day with "Load SENSEX with the day" ticked (`optionanalytics.oiReplay.tradeIndexPrefetch`,
+  off by default; a day held is not asked again - today replayed is); until then nothing can be punched in it. The
+  panel and the order ticket take ITS ATM (`tradeAtmAt` - its spot bar of the
   minute shown, nothing after the clock), step, premiums, lot size and SL / target / lots / trail (`paperUnderlying` -
   a change reaches that index's open positions); each position is priced and exited from its own index's loaded day at
   the replay clock (`chainOfPosition`), one with none loaded waits (never the wall clock). Live it is always the index
