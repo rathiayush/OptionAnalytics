@@ -407,7 +407,9 @@ When adding or changing a strategy:
   boxes and lines were all blank. Never for a past day: that starts fresh. A PAST DAY is REPLAYED AS OI REPLAY'S: it
   opens FRESH at its first minute (the clock defaults to the day's start, not its end - nothing after the clock on any
   chart), with OI Replay's controls - Start / Pause, Reset, Speed (`SPEED_OPTIONS`, ms a market minute, 0.5x - 10x,
-  `optionanalytics.profiles.speedMs`), Go to (a minute, shown), the slider - each labelled by the minute it shows. VOLUME PROFILE: POC / VAH / VAL lines, ONE dotted
+  `optionanalytics.profiles.speedMs`), Go to (a minute, shown), the slider - each labelled by the minute it shows. The slider has NO handle tooltip
+  (`tooltip={{ open: false }}`): on an iPhone a tap left it open, it re-aligned at every replay step and the page died with
+  React error #185 (an update chain past 50); the crash screen (`AppErrorBoundary`, `main.jsx`) shows the component stack. VOLUME PROFILE: POC / VAH / VAL lines, ONE dotted
   HVN line (orange - `topHvn`, the busiest row of the busy areas, the POC's aside) and ONE LVN line (light blue -
   `thinLvn`, the thinnest row of the thin areas) - as OI Replay's entry charts draw theirs (`PREV_PROFILE` colours), each labelled on the price axis and named in the header, the bars at the right
   (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
