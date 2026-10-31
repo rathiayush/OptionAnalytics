@@ -286,15 +286,111 @@ function edges(d, cond, from = 0) {
 
 const sideWord = (dir) => (dir > 0 ? 'bullish' : 'bearish')
 
+// ---- The indicators' votes and how accurate each one is --------------------------------------------------------------
+// Each indicator's direction at every minute (+1 / -1 / 0), from the day's features up to that minute - what the weighted
+// vote adds up. An indicator's ACCURACY: of the minutes it voted, how often spot moved its way by at least `minMovePct` %
+// over the next `horizon` minutes (a smaller move counts neither way). The weighted vote's weights come from the days
+// BEFORE the one traded (walk-forward - `simulateRun`), never from the day itself.
+
+const latestWithin = (events, i, span) => {
+  let dir = 0
+  for (const e of events) if (e.i <= i && e.i > i - span) dir = e.dir
+  return dir
+}
+const moveOver = (d, i, minutes) => d.spot.c[i] - d.spot.c[Math.max(0, i - minutes)]
+
+export const INDICATORS = [
+  { id: 'oi', name: 'OI since open', vote: (d, i) => { const b = oiBias(d, i); return Math.abs(b) >= 0.1 ? Math.sign(b) : 0 } },
+  { id: 'netCum', name: 'Net cumulative Δ', vote: (d, i) => (Number.isFinite(d.netCum[i]) && d.netCum[i] !== 0 ? -Math.sign(d.netCum[i]) : 0) },
+  { id: 'break', name: 'Cumulative Δ break', vote: (d, i) => latestWithin(d.breaks, i, 15) },
+  { id: 'hp', name: '🎯 signal', vote: (d, i) => latestWithin(d.hp, i, 15) },
+  {
+    id: 'walls', name: 'OI walls (room)',
+    vote: (d, i) => { const { support, resistance } = d.walls[i]; const c = d.spot.c[i]; return support != null && resistance != null ? Math.sign((resistance - c) - (c - support)) : 0 },
+  },
+  {
+    // Short gamma: moves run - the last 15 minutes' way. Long gamma: pulled back between the walls - toward their middle.
+    id: 'gex', name: 'GEX',
+    vote: (d, i) => {
+      const g = d.gex[i]
+      if (!g) return 0
+      if (g.net < 0) return Math.sign(moveOver(d, i, 15))
+      return g.callWall != null && g.putWall != null ? Math.sign((g.callWall + g.putWall) / 2 - d.spot.c[i]) : 0
+    },
+  },
+  { id: 'vwap', name: 'VWAP', vote: (d, i) => above(d, i) },
+  {
+    id: 'straddle', name: 'Straddle',
+    vote: (d, i) => { const p = d.straddle[i], back = d.straddle[Math.max(0, i - 15)]; return p && back && p.value > p.vwap ? Math.sign(p.forward - back.forward) : 0 },
+  },
+  {
+    id: 'profile', name: 'IB / POC',
+    vote: (d, i) => {
+      const c = d.price.c[i]
+      if (d.ib && i > d.ib.done) { if (c > d.ib.high) return 1; if (c < d.ib.low) return -1 }
+      const p = d.profile[i]
+      return p ? Math.sign(c - p.poc) : 0
+    },
+  },
+]
+export const INDICATOR_IDS = INDICATORS.map((k) => k.id)
+export const equalWeights = () => Object.fromEntries(INDICATOR_IDS.map((id) => [id, 1]))
+
+/** Every indicator's vote at each minute of a prepared day: { [id]: Int8Array(n) } (worked out once a day). */
+export function indicatorVotes(d) {
+  if (d.votes) return d.votes
+  const out = {}
+  for (const k of INDICATORS) {
+    const v = new Int8Array(d.n)
+    for (let i = 0; i < d.n; i++) v[i] = k.vote(d, i) || 0
+    out[k.id] = v
+  }
+  Object.defineProperty(d, 'votes', { value: out, enumerable: false })
+  return out
+}
+
+/** How each indicator's votes on a day came out: { [id]: { right, wrong } } - a vote at minute j judged by spot's move
+ *  over the next `horizon` minutes (only votes from 09:30, and only where that move is known). */
+export function indicatorOutcomes(d, { horizon = 15, minMovePct = 0.05 } = {}) {
+  const votes = indicatorVotes(d)
+  const out = Object.fromEntries(INDICATOR_IDS.map((id) => [id, { right: 0, wrong: 0 }]))
+  for (let j = 0; j + horizon < d.n; j++) {
+    if (istMinute(d.t[j]) < 9 * 60 + 30) continue
+    const move = d.spot.c[j + horizon] - d.spot.c[j]
+    if (Math.abs(move) < (minMovePct / 100) * d.spot.c[j]) continue
+    for (const id of INDICATOR_IDS) {
+      const v = votes[id][j]
+      if (!v) continue
+      if (Math.sign(move) === v) out[id].right++; else out[id].wrong++
+    }
+  }
+  return out
+}
+
+/** The weights from the outcomes so far: accuracy (smoothed toward 50% by `prior` votes a side) and weight = how far it is
+ *  above 50% (none at or below). No outcomes yet: every indicator weighs the same. */
+export function accuracyWeights(stats, prior = 10) {
+  const judged = INDICATOR_IDS.reduce((a, id) => a + (stats?.[id]?.right ?? 0) + (stats?.[id]?.wrong ?? 0), 0)
+  const table = {}
+  for (const id of INDICATOR_IDS) {
+    const right = stats?.[id]?.right ?? 0
+    const wrong = stats?.[id]?.wrong ?? 0
+    const accuracy = right + wrong > 0 ? right / (right + wrong) : null
+    const smoothed = (right + prior) / (right + wrong + 2 * prior)
+    table[id] = { right, wrong, accuracy, weight: judged ? Math.max(0, smoothed - 0.5) : 1 }
+  }
+  return table
+}
+
 export const SIGNAL_STRATEGIES = [
   {
     id: 'dayOi', name: 'OI since open + VWAP',
-    rule: 'Chain-wide OI added since 09:15: put writing beats call writing by 25% of the OI added (PE added − CE added ≥ 0.25 × both) with price above VWAP = bullish; call writing ahead and price below VWAP = bearish. From 09:45 (enough OI to read).',
+    rule: 'Chain-wide OI added since 09:15: put writing ahead of call writing by 15% of the OI added (PE added − CE added ≥ 0.15 × both) with price above VWAP = bullish; call writing ahead and price below VWAP = bearish. From 09:45 (enough OI to read).',
     signals: (d) => edges(d, (i) => {
       if (istMinute(d.t[i]) < 9 * 60 + 45) return 0
       const b = oiBias(d, i)
       const side = above(d, i)
-      const dir = b >= 0.25 && side > 0 ? 1 : b <= -0.25 && side < 0 ? -1 : 0
+      const dir = b >= 0.15 && side > 0 ? 1 : b <= -0.15 && side < 0 ? -1 : 0
       return dir ? { dir, why: `OI since open CE ${fmtL(d.oi[i].ce)} · PE ${fmtL(d.oi[i].pe)} (bias ${(b * 100).toFixed(0)}%), price ${dir > 0 ? 'above' : 'below'} VWAP` } : 0
     }),
   },
@@ -381,27 +477,28 @@ export const SIGNAL_STRATEGIES = [
     }, d.ib.done + 1)),
   },
   {
-    id: 'confluence', name: 'Confluence (all of them)',
-    rule: 'All four directions agree - OI since open (bias ≥ 15%), the net cumulative Δ (put writers ahead = bullish), room to the OI walls (more room to the resistance than to the support = bullish) and price vs VWAP - and the two gates pass for the mode: GEX (buying needs dealers short gamma, selling long gamma) and the straddle (buying needs it over its VWAP - premium expanding, selling under it - premium melting).',
-    signals: (d, s) => edges(d, (i) => {
-      if (istMinute(d.t[i]) < 9 * 60 + 45) return 0
-      const b = oiBias(d, i)
-      const votes = [
-        Math.abs(b) >= 0.15 ? Math.sign(b) : 0,
-        Number.isFinite(d.netCum[i]) && d.netCum[i] !== 0 ? -Math.sign(d.netCum[i]) : 0,
-        (() => { const { support, resistance } = d.walls[i]; const c = d.spot.c[i]; return support != null && resistance != null ? Math.sign((resistance - c) - (c - support)) : 0 })(),
-        above(d, i),
-      ]
-      const sum = votes.reduce((a, v) => a + v, 0)
-      if (Math.abs(sum) < 4) return 0
-      const g = d.gex[i]
-      const st = d.straddle[i]
-      if (!g || !st) return 0
-      const buying = s?.mode !== 'sell'
-      if (buying ? !(g.net < 0) : !(g.net >= 0)) return 0
-      if (buying ? !(st.value > st.vwap) : !(st.value < st.vwap)) return 0
-      return { dir: Math.sign(sum), why: `OI since open, cumulative Δ, OI walls and VWAP all ${sideWord(sum)}; GEX ${g.net < 0 ? 'short' : 'long'} gamma, straddle ${st.value > st.vwap ? 'over' : 'under'} its VWAP` }
-    }),
+    id: 'weighted', name: 'Weighted vote (by accuracy)',
+    rule: 'Every indicator votes each minute - OI since open, the net cumulative Δ, a fresh cumulative Δ break, a fresh 🎯, room to the OI walls, GEX, VWAP, the straddle and the IB / POC - each weighted by how often its direction was RIGHT over the next 15 minutes on the earlier days of the run (the first day: all equal). Where they disagree, the more accurate ones win: a signal when the weighted vote reaches the "Vote" share of all the weight (30% by default) one way.',
+    signals: (d, s) => {
+      const weights = s?.weights ?? equalWeights()
+      const total = INDICATORS.reduce((a, k) => a + (weights[k.id] ?? 0), 0)
+      if (!(total > 0)) return []
+      const votes = indicatorVotes(d)
+      const bar = Math.max(0.05, Math.min(1, s?.voteThreshold ?? BACKTEST_DEFAULTS.voteThreshold))
+      return edges(d, (i) => {
+        if (istMinute(d.t[i]) < 9 * 60 + 30) return 0
+        let score = 0
+        for (const k of INDICATORS) score += (weights[k.id] ?? 0) * votes[k.id][i]
+        const share = score / total
+        const dir = share >= bar ? 1 : share <= -bar ? -1 : 0
+        if (!dir) return 0
+        // Why: the indicators on the winning side, the weightiest first.
+        const lead = INDICATORS.filter((k) => votes[k.id][i] === dir && weights[k.id] > 0)
+          .sort((a, b) => weights[b.id] - weights[a.id]).slice(0, 4).map((k) => k.name)
+        const against = INDICATORS.filter((k) => votes[k.id][i] === -dir && weights[k.id] > 0).map((k) => k.name)
+        return { dir, why: `weighted vote ${(share * 100).toFixed(0)}% ${sideWord(dir)}: ${lead.join(', ')}${against.length ? ` (against: ${against.join(', ')})` : ''}` }
+      })
+    },
   },
 ]
 export const SIGNAL_STRATEGY_IDS = SIGNAL_STRATEGIES.map((s) => s.id)
@@ -410,7 +507,7 @@ export const SIGNAL_STRATEGY_IDS = SIGNAL_STRATEGIES.map((s) => s.id)
 
 export const BACKTEST_DEFAULTS = {
   mode: 'buy', moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
-  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true,
+  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, voteThreshold: 0.3,
 }
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
@@ -510,6 +607,30 @@ export function simulateDay(d, settings = {}) {
   }
   trades.sort((a, b) => a.entryTime - b.entryTime)
   return { trades, signals }
+}
+
+/**
+ * The whole run, day by day in date order: each day traded with the weighted vote's weights learned from the days BEFORE
+ * it (walk-forward - the first day weighs every indicator the same), then its own outcomes added for the next day.
+ * Returns { trades, signals, accuracy (the weights after the last day), daysWeights: { [date]: weights used } }.
+ */
+export function simulateRun(days, settings = {}) {
+  const list = [...(days ?? [])].filter((d) => d?.ok).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+  const stats = Object.fromEntries(INDICATOR_IDS.map((id) => [id, { right: 0, wrong: 0 }]))
+  const trades = []
+  const signals = []
+  const daysWeights = {}
+  for (const d of list) {
+    const table = accuracyWeights(stats)
+    const weights = Object.fromEntries(INDICATOR_IDS.map((id) => [id, table[id].weight]))
+    daysWeights[d.date] = weights
+    const out = simulateDay(d, { ...settings, weights })
+    trades.push(...out.trades)
+    signals.push(...out.signals)
+    const outcome = indicatorOutcomes(d)
+    for (const id of INDICATOR_IDS) { stats[id].right += outcome[id].right; stats[id].wrong += outcome[id].wrong }
+  }
+  return { trades, signals, accuracy: accuracyWeights(stats), daysWeights }
 }
 
 // ---- The report -----------------------------------------------------------------------------------------------------

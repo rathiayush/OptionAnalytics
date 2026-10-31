@@ -5,7 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, istMinute, optionFor, prepareDay, simulateDay, simulateTrade, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, INDICATOR_IDS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, accuracyWeights, equalWeights, indicatorOutcomes, indicatorVotes, istMinute, optionFor,
+  prepareDay, simulateDay, simulateRun, simulateTrade, summarize, tradesCsv,
 } from '../src/signalBacktest.js'
 
 const MIN = 60_000
@@ -119,6 +120,7 @@ test('OI since open: put writing ahead with price over VWAP is bullish - from 09
   assert.deepEqual(fires.map((s) => [s.i, s.dir]), [[30, 1]])   // 09:45 - not at 09:35 when it first held
   assert.deepEqual(strategy('dayOi').signals(fakeDay({ oi, vwap: () => 25010 })), [])        // price under VWAP
   assert.deepEqual(strategy('dayOi').signals(fakeDay({ oi: () => ({ ce: 2e6, pe: 2.2e6 }) })), [])   // bias 5%: not enough
+  assert.deepEqual(strategy('dayOi').signals(fakeDay({ oi: () => ({ ce: 2e6, pe: 2.8e6 }) })).map((s) => s.dir), [1])   // 17%: enough
   const bear = strategy('dayOi').signals(fakeDay({ oi: () => ({ ce: 3e6, pe: 1e6 }), vwap: () => 25010 }))
   assert.deepEqual(bear.map((s) => s.dir), [-1])
 })
@@ -175,18 +177,51 @@ test('IB / value-area breakout: two closes over the IB high and over the POC, af
   assert.deepEqual(strategy('profile').signals(fakeDay({ ib, price, profile: () => ({ poc: 25080, vah: 25100, val: 25000 }) })), [])
 })
 
-test('confluence: all four directions agree, and the gates follow the mode - buying needs short gamma, selling long', () => {
-  const base = {
-    oi: () => ({ ce: 1e6, pe: 3e6 }), netCum: () => -5e5, walls: () => ({ support: 24900, resistance: 25200 }), vwap: () => 24990,
-    straddle: () => ({ value: 120, vwap: 110, decay: 100, forward: 25000 }),
-  }
-  const shortGamma = fakeDay({ ...base, gex: () => ({ net: -1, callWall: 25200, putWall: 24900 }) })
-  assert.deepEqual(strategy('confluence').signals(shortGamma, { mode: 'buy' }).map((s) => [s.i, s.dir]), [[30, 1]])
-  assert.deepEqual(strategy('confluence').signals(shortGamma, { mode: 'sell' }), [])   // selling needs long gamma
-  const longGamma = fakeDay({ ...base, gex: () => ({ net: 1, callWall: 25200, putWall: 24900 }), straddle: () => ({ value: 100, vwap: 110, decay: 90, forward: 25000 }) })
-  assert.deepEqual(strategy('confluence').signals(longGamma, { mode: 'sell' }).map((s) => s.dir), [1])
-  // One direction against (price under VWAP): nothing.
-  assert.deepEqual(strategy('confluence').signals(fakeDay({ ...base, vwap: () => 25010, gex: () => ({ net: -1 }) }), { mode: 'buy' }), [])
+test('weighted vote: each indicator votes; where they disagree the more accurate side wins', () => {
+  // VWAP says bullish (price over it); OI since open says bearish (call writing ahead); nothing else votes.
+  const d = fakeDay({ vwap: () => 24990, oi: () => ({ ce: 3e6, pe: 1e6 }) })
+  const votes = indicatorVotes(d)
+  assert.equal(votes.vwap[50], 1)
+  assert.equal(votes.oi[50], -1)
+  const none = Object.fromEntries(INDICATOR_IDS.map((id) => [id, 0]))
+  const bull = strategy('weighted').signals(d, { weights: { ...none, vwap: 0.2, oi: 0.05 } })
+  assert.deepEqual(bull.map((s) => [s.i, s.dir]), [[15, 1]])   // from 09:30
+  assert.match(bull[0].why, /VWAP.*against: OI since open/)
+  const bear = strategy('weighted').signals(d, { weights: { ...none, vwap: 0.05, oi: 0.2 } })
+  assert.deepEqual(bear.map((s) => s.dir), [-1])
+  // Equal weights and the two cancel out: no signal. A higher bar needs more of the weight one way.
+  assert.deepEqual(strategy('weighted').signals(d, { weights: { ...none, vwap: 1, oi: 1 } }), [])
+  assert.deepEqual(strategy('weighted').signals(d, { weights: { ...none, vwap: 0.2, oi: 0.05 }, voteThreshold: 0.7 }), [])
+  // No weight anywhere (nothing predicted better than a coin): nothing.
+  assert.deepEqual(strategy('weighted').signals(d, { weights: none }), [])
+})
+
+test('an indicator\'s accuracy: its vote judged by spot\'s move over the next 15 minutes; weight = how far above 50%', () => {
+  // Spot rising 2 points a minute all day, price over VWAP: the VWAP vote (bullish) is right every time it is judged.
+  const d = fakeDay({ spot: (i) => 25000 + 2 * i, vwap: () => 1 })
+  const out = indicatorOutcomes(d)
+  assert.ok(out.vwap.right > 300 && out.vwap.wrong === 0)
+  assert.deepEqual(out.oi, { right: 0, wrong: 0 })   // never voted
+  // A flat day: no move big enough to judge.
+  assert.deepEqual(indicatorOutcomes(fakeDay({ vwap: () => 1 })).vwap, { right: 0, wrong: 0 })
+  const table = accuracyWeights({ vwap: { right: 90, wrong: 10 }, oi: { right: 40, wrong: 60 } })
+  assert.equal(table.vwap.accuracy, 0.9)
+  assert.ok(table.vwap.weight > 0.3)                  // smoothed: (90 + 10) / 120 - 0.5
+  assert.equal(table.oi.weight, 0)                    // under 50%: no say
+  assert.equal(accuracyWeights({}).vwap.weight, 1)    // nothing judged yet: all the same
+  assert.deepEqual(equalWeights().gex, 1)
+})
+
+test('walk-forward: a day is traded with the weights of the days BEFORE it - never its own outcome', () => {
+  const up = (date) => ({ ...fakeDay({ spot: (i) => 25000 + 2 * i, vwap: () => 1, legs: { ce: { 25000: flat(100) } } }), date })
+  const days = [up('2026-10-07'), up('2026-10-05'), up('2026-10-06')]
+  const run = simulateRun(days, { strategies: ['weighted'], lotSize: 65 })
+  assert.deepEqual(Object.keys(run.daysWeights), ['2026-10-05', '2026-10-06', '2026-10-07'])   // in date order
+  assert.deepEqual(run.daysWeights['2026-10-05'], equalWeights())                              // the first day: equal
+  assert.ok(run.daysWeights['2026-10-06'].vwap > 0)                                             // learned from the 5th
+  assert.equal(run.daysWeights['2026-10-06'].oi, 0)                                             // never voted: no say
+  assert.ok(run.daysWeights['2026-10-07'].vwap > run.daysWeights['2026-10-06'].vwap)            // two days of it
+  assert.ok(run.accuracy.vwap.accuracy === 1)
 })
 
 test('a day\'s trades: entries 09:30 - 14:45, one at a time per strategy, a cooldown after it, at most N a day', () => {

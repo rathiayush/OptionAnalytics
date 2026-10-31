@@ -6,7 +6,9 @@ import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
-import { BACKTEST_DEFAULTS, MAX_BACKTEST_DAYS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, backtestDays, istMinute, prepareDay, simulateDay, summarize, tradesCsv } from './signalBacktest.js'
+import {
+  BACKTEST_DEFAULTS, INDICATORS, MAX_BACKTEST_DAYS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, backtestDays, istMinute, prepareDay, simulateRun, summarize, tradesCsv,
+} from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
 // The SIGNAL BACKTEST page: pick an index, a range of past days and option BUYING or SELLING; each day is loaded as OI
@@ -31,6 +33,7 @@ const STORE = {
   lots: 'optionanalytics.signalBacktest.lots',
   charges: 'optionanalytics.signalBacktest.charges',
   strategies: 'optionanalytics.signalBacktest.strategies',
+  voteThreshold: 'optionanalytics.signalBacktest.voteThreshold',
   equity: 'optionanalytics.signalBacktest.equityView',
 }
 const COLORS = ['#4096ff', '#fa8c16', '#36cfc9', '#f759ab', '#9254de', '#fadb14', '#73d13d', '#ff7875', '#69c0ff']
@@ -126,6 +129,7 @@ export default function SignalBacktestPage() {
   const [lots, setLots] = usePersistedState(STORE.lots, BACKTEST_DEFAULTS.lots)
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
   const [chosen, setChosen] = usePersistedState(STORE.strategies, SIGNAL_STRATEGY_IDS)
+  const [voteThreshold, setVoteThreshold] = usePersistedState(STORE.voteThreshold, BACKTEST_DEFAULTS.voteThreshold)
   const [equityView, setEquityView] = usePersistedState(STORE.equity, 'each')
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const strategies = (Array.isArray(chosen) ? chosen : SIGNAL_STRATEGY_IDS).filter((id) => SIGNAL_STRATEGY_IDS.includes(id))
@@ -161,17 +165,15 @@ export default function SignalBacktestPage() {
 
   // The report - worked out again, in an instant, whenever a setting changes.
   const settings = useMemo(() => ({
-    mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, lotSize,
-  }), [mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, lotSize])
+    mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold,
+    lotSize: PAPER_TRADE_LOT_SIZE[run.underlying] ?? lotSize,
+  }), [mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, lotSize, run.underlying])
   const report = useMemo(() => {
     const okDays = run.results.filter((r) => r.day?.ok)
-    const trades = []
-    const signals = []
-    for (const r of okDays) {
-      const out = simulateDay(r.day, { ...settings, lotSize: PAPER_TRADE_LOT_SIZE[r.day.underlying] ?? settings.lotSize })
-      trades.push(...out.trades)
-      signals.push(...out.signals)
-    }
+    // Day by day in date order - the weighted vote learning each indicator's accuracy from the days before (simulateRun).
+    const { trades, signals, accuracy } = simulateRun(okDays.map((r) => r.day), settings)
+    const accuracyRows = INDICATORS.map((k) => ({ key: k.id, name: k.name, ...accuracy[k.id] }))
+      .sort((a, b) => b.weight - a.weight || (b.accuracy ?? 0) - (a.accuracy ?? 0))
     const rows = SIGNAL_STRATEGIES.filter((s) => strategies.includes(s.id)).map((s) => ({
       key: s.id, id: s.id, name: s.name, signals: signals.filter((x) => x.strategy === s.id).length, ...summarize(trades.filter((t) => t.strategy === s.id)),
     })).sort((a, b) => (b.trades > 0) - (a.trades > 0) || b.net - a.net)   // the best first; those with no trade last
@@ -191,7 +193,7 @@ export default function SignalBacktestPage() {
     const lines = equityView === 'all'
       ? [lineOf('all', 'All', '#e6e6e6', (ts) => ts.reduce((a, t) => a + t.net, 0))]
       : rows.filter((s) => s.trades > 0).map((s) => lineOf(s.id, s.name, colorOf(s.id), (ts) => ts.filter((t) => t.strategy === s.id).reduce((a, t) => a + t.net, 0)))
-    return { trades, rows, all, dayRows, lines, okDays: okDays.length }
+    return { trades, rows, all, dayRows, lines, okDays: okDays.length, accuracyRows }
   }, [run.results, settings, strategies, equityView])
 
   const [tradeFilter, setTradeFilter] = useState('all')
@@ -295,6 +297,11 @@ export default function SignalBacktestPage() {
                 <Space size={4}><Switch size="small" checked={charges} onChange={setCharges} /><Text style={{ fontSize: 12 }}>Charges</Text></Space>
               </Tooltip>
             </Space>
+            <Space wrap size={[12, 6]} align="center">
+              <Tooltip title="The weighted vote: a signal when the votes, each weighted by its indicator's accuracy on the earlier days, add up to at least this share of all the weight one way. Lower = more signals.">
+                <Space size={4}><Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Weighted vote ≥</Text><InputNumber size="small" min={5} max={100} step={5} value={Math.round(voteThreshold * 100)} onChange={(v) => setVoteThreshold((v ?? 30) / 100)} addonAfter="%" style={{ width: 100 }} /></Space>
+              </Tooltip>
+            </Space>
             <Checkbox.Group
               value={strategies}
               onChange={(v) => setChosen(v.length ? v : SIGNAL_STRATEGY_IDS)}
@@ -332,6 +339,26 @@ export default function SignalBacktestPage() {
               extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
             >
               <Table size="small" pagination={false} scroll={{ x: 1300 }} columns={summaryColumns} dataSource={[report.all, ...report.rows]} />
+            </Card>
+            <Card size="small" title="Indicator accuracy - who has the say in the weighted vote">
+              <Table
+                size="small" pagination={false} scroll={{ x: 560 }} dataSource={report.accuracyRows}
+                columns={[
+                  { title: 'Indicator', dataIndex: 'name', key: 'name', width: 170 },
+                  { title: 'Right', dataIndex: 'right', key: 'right', width: 80, align: 'right' },
+                  { title: 'Wrong', dataIndex: 'wrong', key: 'wrong', width: 80, align: 'right' },
+                  { title: 'Accuracy', dataIndex: 'accuracy', key: 'accuracy', width: 90, align: 'right', render: (v) => (v == null ? '—' : <span style={{ color: v > 0.5 ? UP_COLOR : v < 0.5 ? DOWN_COLOR : undefined }}>{(v * 100).toFixed(1)}%</span>) },
+                  { title: 'Weight', dataIndex: 'weight', key: 'weight', width: 140, render: (v) => <Space size={6}><div style={{ width: Math.round(Math.min(1, v * 2) * 80), height: 8, background: '#4096ff', borderRadius: 2 }} /><Text style={{ fontSize: 12 }}>{v > 0 ? (v * 100).toFixed(1) : 'no say'}</Text></Space> },
+                ]}
+              />
+              <FoldText id="signalBacktest.accuracy" label="how it is measured" className="oa-note">
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  Each indicator&apos;s direction every minute from 09:30, judged by where spot went over the next 15 minutes (a move under
+                  0.05% counts neither way). Weight = how far its accuracy is above 50% (smoothed toward 50% while it has few votes) - an
+                  indicator no better than a coin has no say. Shown over all the days run; each day itself was traded with the weights of
+                  only the days BEFORE it (the first day: all equal), so a day is never weighted by its own outcome.
+                </Text>
+              </FoldText>
             </Card>
             <Card
               size="small" title="Running P&L, day by day"

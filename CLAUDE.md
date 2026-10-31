@@ -476,9 +476,16 @@ When adding or changing a strategy:
   kept for the tab's life, so a change of mode / levels / strategies re-runs at once (`simulateDay`). The STRATEGIES
   (`SIGNAL_STRATEGIES`, each rule shown on the page): OI since open + VWAP, cumulative Δ S/R break (with VWAP), 🎯 high
   probability, OI S-R wall bounce, GEX walls (short gamma: through a wall; long gamma: faded at it), VWAP cross (2 closes),
-  straddle expansion (the straddle card's trade-idea rule), IB / value-area breakout, and Confluence (OI since open, net
-  cumulative Δ, room to the OI walls and VWAP all agreeing, GEX and the straddle as gates for the mode); a condition that
-  stays true signals once, when it becomes true (`edges`). A trade: the option's close at the signal minute, then its own
+  straddle expansion (the straddle card's trade-idea rule), IB / value-area breakout, and the WEIGHTED VOTE - not an
+  all-agree confluence (that was too tight, asked to be loosened): every indicator (`INDICATORS` - OI since open, the net
+  cumulative Δ, a fresh cumulative Δ break / 🎯, room to the OI walls, GEX - short gamma with the move, long gamma toward
+  the walls' middle - VWAP, the straddle, IB / POC) votes each minute (`indicatorVotes`), weighted by its ACCURACY (its
+  vote judged by spot's move over the next 15 minutes, a move under 0.05% counting neither way - `indicatorOutcomes`;
+  weight = smoothed accuracy above 50%, none at or below - `accuracyWeights`), so where they disagree the more accurate side
+  wins; a signal when the weighted vote reaches "Weighted vote ≥" (30%) of all the weight one way. WALK-FORWARD: each day
+  is traded with the weights learned from the days BEFORE it only (`simulateRun`; the first day all equal) - never its
+  own outcome; the page's "Indicator accuracy" table shows each one's right / wrong / accuracy / weight. The OI since open
+  bias is 15%. A condition that stays true signals once, when it becomes true (`edges`). A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
   time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
   report (`summarize`): per strategy and all together - trades, win %, net / gross P&L, points, average win / loss, profit
