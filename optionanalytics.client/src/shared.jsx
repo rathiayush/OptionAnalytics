@@ -2,7 +2,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
-  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, HistoryOutlined, LineChartOutlined,
+  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined, HistoryOutlined, LineChartOutlined,
   LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -1111,6 +1111,7 @@ const NAV_ITEMS = [
   { key: '/oi-replay', label: 'OI Replay', icon: <LineChartOutlined /> },
   { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
+  { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
   { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
   { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
   { key: '/contracts', label: 'Contracts', icon: <FileTextOutlined /> },

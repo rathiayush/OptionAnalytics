@@ -464,6 +464,28 @@ When adding or changing a strategy:
   zoomed at all), and a drag / pinch / zoom button / price-axis drag (the time range moved, or the price scale's
   auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
+- The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
+  weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`), option BUY (a bullish signal buys the call, a bearish the put)
+  or SELL (sells the put / the call), the strike (ATM / 1 ITM / 1 OTM), SL / target % of the premium, a time stop, at most
+  N trades a day per strategy and a cooldown, lots and charges; each day is loaded as OI Replay loads it
+  (`/api/oi-replay/{u}/run`, one day at a time, a click - not polling; a day the server has not kept comes from Dhan once)
+  and PREPARED once (`prepareDay` - every feature at each minute from data up to the END of that minute: OI since the open
+  (`chainOiTotalsAt`), the OI totals' cumulative Δ breaks and the 🎯 signal (`completedLevelReads` / `watchBreaks` /
+  `watchHighProbability` stepped minute by minute), the OI walls (`oiWalls`), GEX (`gexDay`, standard sign), the straddle
+  (`straddleRead`), VWAP (the futures', else the index's own), the Initial Balance and the developing volume profile),
+  kept for the tab's life, so a change of mode / levels / strategies re-runs at once (`simulateDay`). The STRATEGIES
+  (`SIGNAL_STRATEGIES`, each rule shown on the page): OI since open + VWAP, cumulative Δ S/R break (with VWAP), 🎯 high
+  probability, OI S-R wall bounce, GEX walls (short gamma: through a wall; long gamma: faded at it), VWAP cross (2 closes),
+  straddle expansion (the straddle card's trade-idea rule), IB / value-area breakout, and Confluence (OI since open, net
+  cumulative Δ, room to the OI walls and VWAP all agreeing, GEX and the straddle as gates for the mode); a condition that
+  stays true signals once, when it becomes true (`edges`). A trade: the option's close at the signal minute, then its own
+  1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
+  time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
+  report (`summarize`): per strategy and all together - trades, win %, net / gross P&L, points, average win / loss, profit
+  factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
+  trade with why it went in and out, and a CSV (`tradesCsv`). A backtest of fixed rules, not a tuning; it places nothing
+  and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - the features of a day cut part way equal the whole
+  day's up to the cut).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
