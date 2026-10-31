@@ -31,7 +31,7 @@ import { chainOiDay, chainOiTotalsAt } from './chainOiTotals.js'
 import { nearAtmOiChange, oiWalls } from './marketRead.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
-import { TRADE_INDEXES, effectiveTradeIndex, tradeAtmAt, tradeExpiryFlag, tradeRunKey } from './tradeIndex.js'
+import { TRADE_INDEXES, alsoLoadIndexes, barsShownAt, effectiveTradeIndex, tradeAtmAt, tradeExpiryFlag, tradeRunKey } from './tradeIndex.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
@@ -3848,10 +3848,14 @@ export default function OiReplayPage() {
   // screen keeps its last price, shown until its own chain's live ticks arrive (see markOf).
   const rememberMarksRef = useRef(null)
   const selectUnderlying = (value) => {
-    if (value !== underlying) rememberMarksRef.current?.()
+    if (value === underlying) return
+    // A replayed day loaded: the charts move to that index's day at the same replay minute - the paper trades stay.
+    if (!isLive && result?.success && heldDateRef.current) { switchReplayIndexRef.current?.(value); return }
+    rememberMarksRef.current?.()
     setUnderlying(value)
     if (value === 'BANKNIFTY' && expiryFlag === 'WEEK') setExpiryFlag('MONTH')
   }
+  const switchReplayIndexRef = useRef(null)
 
   const canLoad = Boolean(underlying && date)
   // The index to trade on a replayed day (tradeIndex.js) - the charts' own clears the choice.
@@ -3984,31 +3988,32 @@ export default function OiReplayPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedExpiries.expiries])
 
-  // The trade index's day (tradeIndex.js - trading another index than the charts on a replayed day): the same /run the
-  // charts' index loads - fetched ONLY when asked: its "Load SENSEX" button, or Load day with "Load SENSEX with the day"
-  // ticked (tradePrefetch, off by default). Picking the trade index fetches nothing. Kept per index, day and series - the
-  // day loaded's only - so switching the trade index back costs nothing.
-  const [tradePrefetch, setTradePrefetch] = usePersistedState('optionanalytics.oiReplay.tradeIndexPrefetch', false)
-  const [tradeLoadDate, setTradeLoadDate] = useState(null)
-  const tradeLoadDateRef = useRef(null)
-  tradeLoadDateRef.current = tradeLoadDate
-  const [tradeRuns, setTradeRuns] = useState({})   // tradeRunKey -> { loading } | { run } | { error }
-  const tradeRunsRef = useRef(tradeRuns)
-  tradeRunsRef.current = tradeRuns
-  const tradeInFlightRef = useRef(new Set())
-  const tradeKey = !isLive && paperUnderlying !== underlying && tradeLoadDate
-    ? tradeRunKey(paperUnderlying, tradeLoadDate, tradeExpiryFlag(paperUnderlying, expiryFlag)) : null
+  // MORE THAN ONE INDEX on a replayed day (tradeIndex.js): every index's day the page holds - the charts' own (stored when
+  // it loads) and those picked in "Also load" - one /run each (calls, puts, spot, futures), kept per index and day (the
+  // day loaded's only). They are fetched ONLY when asked: Load day (the charts' index and the "Also load" ones), an index
+  // added to "Also load" with a day loaded, the paper panel's "Load X", or the charts switched to an index not held. The
+  // page switches between held days at the same replay minute (switchReplayIndex) and each paper trade is priced and
+  // exited from its own index's day.
+  const [alsoLoadChoice, setAlsoLoadChoice] = usePersistedState('optionanalytics.oiReplay.alsoLoad', [])
+  const alsoLoad = alsoLoadIndexes(alsoLoadChoice, underlying)
+  const [heldDate, setHeldDate] = useState(null)
+  const heldDateRef = useRef(null)
+  heldDateRef.current = heldDate
+  const [dayRuns, setDayRuns] = useState({})   // tradeRunKey -> { loading } | { run } | { error }
+  const dayRunsRef = useRef(dayRuns)
+  dayRunsRef.current = dayRuns
+  const dayInFlightRef = useRef(new Set())
+  // Only the days in use are kept: this one's and the day held.
+  const setDayRun = useCallback((key, entry) => setDayRuns((all) => ({
+    ...Object.fromEntries(Object.entries(all).filter(([k]) => k !== key && (k.split('|')[1] === key.split('|')[1] || k.split('|')[1] === heldDateRef.current))),
+    [key]: entry,
+  })), [])
   // `fresh`: asked again even when held (today replayed again - it has grown since).
-  const fetchTradeRun = useCallback((key, { fresh = false } = {}) => {
-    if (!key || tradeInFlightRef.current.has(key) || (!fresh && tradeRunsRef.current[key]?.run)) return
-    tradeInFlightRef.current.add(key)
-    const [u, day, flag] = key.split('|')
-    // Only the days in use are kept: this one's and the day loaded's.
-    const setEntry = (entry) => setTradeRuns((all) => ({
-      ...Object.fromEntries(Object.entries(all).filter(([k]) => k !== key && (k.split('|')[1] === day || k.split('|')[1] === tradeLoadDateRef.current))),
-      [key]: entry,
-    }))
-    setEntry({ loading: true })
+  const fetchDayRun = useCallback((u, day, flag, { fresh = false } = {}) => {
+    const key = tradeRunKey(u, day)
+    if (!u || !day || dayInFlightRef.current.has(key) || (!fresh && dayRunsRef.current[key]?.run)) return
+    dayInFlightRef.current.add(key)
+    setDayRun(key, { loading: true })
     const params = new URLSearchParams({ date: day, timeframeMinutes: '1', expiryFlag: flag, ...(day === istDateKey(new Date()) ? { forceLive: 'true' } : {}) })
     fetch(`/api/oi-replay/${u}/run?${params.toString()}`)
       .then(async (r) => {
@@ -4016,37 +4021,54 @@ export default function OiReplayPage() {
         if (!r.ok || !body?.success) throw new Error(body?.error || `Request failed (HTTP ${r.status}).`)
         return body
       })
-      .then((run) => setEntry({ run }))
-      .catch((err) => setEntry({ error: err.message || `Failed to load ${u}.` }))
-      .finally(() => tradeInFlightRef.current.delete(key))
-  }, [])
-  // Not asked for yet: idle - the note offers its Load button.
-  const tradeEntry = tradeKey ? tradeRuns[tradeKey] ?? { idle: true } : null
-  // Trading another index on a replayed day - what the controls and the paper panel say: the charts' and the traded
-  // index, and its day: not loaded (its Load button - or load a day first), loading, loaded, failed (Retry).
+      .then((run) => setDayRun(key, { run }))
+      .catch((err) => setDayRun(key, { error: err.message || `Failed to load ${u}.` }))
+      .finally(() => dayInFlightRef.current.delete(key))
+  }, [setDayRun])
+  const heldEntryOf = (u) => (u === underlying ? null : heldDate ? dayRuns[tradeRunKey(u, heldDate)] ?? { idle: true } : null)
+  const loadHeld = (u) => fetchDayRun(u, heldDate, tradeExpiryFlag(u, expiryFlag))
+  // "Also load" changed: an index added while a day is loaded is fetched now - the click is the ask.
+  const changeAlsoLoad = (next) => {
+    setAlsoLoadChoice(next)
+    if (isLive || !heldDate) return
+    for (const u of alsoLoadIndexes(next, underlying)) if (!alsoLoad.includes(u)) loadHeld(u)
+  }
+  // One index's day held: its tag - loaded, loading, failed (Retry) or not loaded (its Load button).
+  const heldTag = (u) => {
+    const entry = heldEntryOf(u)
+    if (!entry) return null
+    if (entry.run) return <Tag key={u} color="success" style={{ margin: 0 }}>{u} ✓</Tag>
+    if (entry.loading) return <Tag key={u} color="processing" style={{ margin: 0 }}>{u} loading…</Tag>
+    if (entry.error) {
+      return (
+        <Tooltip key={u} title={entry.error}>
+          <Button size="small" danger onClick={() => loadHeld(u)}>{u} failed - Retry</Button>
+        </Tooltip>
+      )
+    }
+    return (
+      <Tooltip key={u} title={`Fetch ${u}'s day (${heldDate}) - its calls, puts and spot - so it can be shown and traded at the same replay minute. Asked only now, never by itself.`}>
+        <Button size="small" type="primary" ghost onClick={() => loadHeld(u)}>Load {u}</Button>
+      </Tooltip>
+    )
+  }
+  // Trading another index than the charts: what the controls and the paper panel say.
   const tradeIndexNote = !isLive && paperUnderlying !== underlying ? (
     <Space size={6} wrap>
       <Tag color="purple" style={{ margin: 0 }}>Charts {underlying} · trading {paperUnderlying}</Tag>
-      {!tradeLoadDate && (
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {tradePrefetch ? `Load day loads ${paperUnderlying}'s day too` : `Load the day, then load ${paperUnderlying} to punch in it`}
-        </Text>
-      )}
-      {tradeEntry?.idle && (
-        <Tooltip title={`Fetch ${paperUnderlying}'s day (${tradeLoadDate}) so its options can be punched at the replay clock - asked only now, never by itself.`}>
-          <Button size="small" type="primary" ghost onClick={() => fetchTradeRun(tradeKey)}>Load {paperUnderlying}</Button>
-        </Tooltip>
-      )}
-      {tradeEntry?.loading && <Tag color="processing" style={{ margin: 0 }}>loading {paperUnderlying}…</Tag>}
-      {tradeEntry?.run && <Tag color="success" style={{ margin: 0 }}>{paperUnderlying} {tradeLoadDate} loaded</Tag>}
-      {tradeEntry?.error && (
-        <>
-          <Tag color="error" style={{ margin: 0, whiteSpace: 'normal' }}>{paperUnderlying}: {tradeEntry.error}</Tag>
-          <Button size="small" onClick={() => fetchTradeRun(tradeKey)}>Retry</Button>
-        </>
-      )}
+      {heldDate ? heldTag(paperUnderlying) : <Text type="secondary" style={{ fontSize: 12 }}>Load the day first</Text>}
     </Space>
   ) : null
+  // The charts switched to another index on a replayed day: to its held day at the same replay minute, the paper trades
+  // kept (each priced from its own index's day) - or, not held, fetched first (pendingSwitch) and switched when it comes.
+  const [pendingSwitch, setPendingSwitch] = useState(null)
+  const applyReplayIndexRef = useRef(null)
+  useEffect(() => {
+    if (!pendingSwitch || !heldDate) return
+    const entry = dayRuns[tradeRunKey(pendingSwitch, heldDate)]
+    if (entry?.run) applyReplayIndexRef.current?.(pendingSwitch, entry.run)
+    else if (entry?.error) setPendingSwitch(null)
+  }, [pendingSwitch, dayRuns, heldDate])
 
   // Takes an optional explicit date rather than only ever reading the `date` state, so goLive below
   // can set today's date AND kick off the fetch in one click - setDate(today) followed immediately
@@ -4063,11 +4085,10 @@ export default function OiReplayPage() {
     // `live` is passed by the buttons that just switched todayMode (the state hasn't landed yet).
     const effectiveLive = effectiveIsToday && (live ?? todayMode === 'live')
     const dateKey = effectiveDate.format('YYYY-MM-DD')
-    // A replayed day: the trade index's day goes with it only when "Load ... with the day" is ticked (tradePrefetch) -
-    // otherwise its own Load button asks for it. Live, none.
-    setTradeLoadDate(effectiveLive ? null : dateKey)
-    const tradeU = effectiveTradeIndex(tradeIndexChoice, underlying, effectiveLive)
-    if (!effectiveLive && tradePrefetch && tradeU !== underlying) fetchTradeRun(tradeRunKey(tradeU, dateKey, tradeExpiryFlag(tradeU, expiryFlag)), { fresh: effectiveIsToday })
+    // A replayed day: the "Also load" indices' days are fetched alongside this one (held - dayRuns). Live, none.
+    setHeldDate(effectiveLive ? null : dateKey)
+    setPendingSwitch(null)
+    if (!effectiveLive) for (const u of alsoLoad) fetchDayRun(u, dateKey, tradeExpiryFlag(u, expiryFlag), { fresh: effectiveIsToday })
 
     // Paints instantly from cache when one exists, but NEVER as a substitute for the real fetch
     // below - only as a head start on it. A page can sit closed/reloading for minutes; skipping the
@@ -4180,6 +4201,8 @@ export default function OiReplayPage() {
       .then((body) => {
         if (!body?.success) throw new Error(body?.error || 'This run did not succeed.')
         setResult(usesRunsCePeData ? body : { ...body, cePoints: [], pePoints: [] })
+        // A replayed day is held too, so the page can switch away and back - and price this index's trades - at once.
+        if (!effectiveLive) setDayRun(tradeRunKey(underlying, dateKey), { run: body })
         // A replayed day's VWAP comes with the day (the server's, off the spot's own index volume); today's live
         // VWAP is the vwap-series fetch above, grown by the live feed.
         if (!effectiveLive) setVwapSeries((body.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
@@ -4592,6 +4615,26 @@ export default function OiReplayPage() {
   // server's receive time, so a plain Date.now() cutoff would hide the newest ones until this
   // device's clock caught up.
   const asOfMs = isLive ? Math.max(Date.now(), latestLiveMs) : (currentBar ? fromChartTime(currentBar.time) * 1000 : null)
+  // The charts moved to another index's held day (a replay): its run becomes the page's at the same replay minute, its own
+  // Weekly / Monthly with it; the paper trades are untouched (each priced from its own index's day), and the index left
+  // stays loaded - it joins "Also load", the one now shown leaves it.
+  applyReplayIndexRef.current = (u, run) => {
+    setPendingSwitch(null)
+    setUnderlying(u)
+    if (run.expiryFlag === 'WEEK' || run.expiryFlag === 'MONTH') setExpiryFlag(run.expiryFlag)
+    setResult(run)
+    setError(null)
+    setVwapSeries((run.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+    setManualVisibleCount(barsShownAt((run.spotCandlesOneMinute ?? []).filter((c) => inMarketSession(c.time)), asOfMs))
+    setTradeIndexChoice('')
+    setAlsoLoadChoice(alsoLoadIndexes([...alsoLoad, underlying], u))
+  }
+  switchReplayIndexRef.current = (u) => {
+    const held = dayRuns[tradeRunKey(u, heldDate)]?.run
+    if (held) { applyReplayIndexRef.current(u, held); return }
+    setPendingSwitch(u)
+    loadHeld(u)
+  }
   paperClockRef.current = asOfMs
 
   // Purely for the ladder's OWN "stale" flag below (ceStale/peStale) - NOT used for asOfMs itself,
@@ -4791,7 +4834,7 @@ export default function OiReplayPage() {
   // Trading another index (tradeIndex.js): each loaded trade day's chain (grouped once a run - tradeChainOf), the one
   // traded now, and its step and ATM at the replay clock - the paper panel and the order ticket read these (paperCe /
   // paperPe / paperAtm / paperStep); the charts keep the index on screen.
-  const tradeChainFor = (u) => (isLive || !tradeLoadDate ? null : tradeChainOf(tradeRuns[tradeRunKey(u, tradeLoadDate, tradeExpiryFlag(u, expiryFlag))]?.run))
+  const tradeChainFor = (u) => (isLive || !heldDate ? null : tradeChainOf(dayRuns[tradeRunKey(u, heldDate)]?.run))
   const tradingOther = paperUnderlying !== underlying
   const tradeChain = tradingOther ? tradeChainFor(paperUnderlying) : null
   const paperCe = tradingOther ? tradeChain?.ce ?? EMPTY_CHAIN : ceByStrike
@@ -4894,7 +4937,7 @@ export default function OiReplayPage() {
     if (u === underlying && (!isLive || !p.expiryFlag || p.expiryFlag === liveExpiryFlag)) return { ce: ceByStrike, pe: peByStrike }
     return tradeChainFor(u)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [underlying, isLive, liveExpiryFlag, ceByStrike, peByStrike, tradeRuns, tradeLoadDate, expiryFlag])
+  }, [underlying, isLive, liveExpiryFlag, ceByStrike, peByStrike, dayRuns, heldDate])
   const ownChainOf = useCallback((p) => chainOfPosition(p) != null, [chainOfPosition])
   const seriesOf = useCallback((p) => {
     const chain = chainOfPosition(p)
@@ -6191,16 +6234,23 @@ export default function OiReplayPage() {
                 <Button type="primary" onClick={loadDayAndAnnounce} loading={loading} disabled={!canLoad}>Load day</Button>
               </Tooltip>
               {!isLive && (
-                <Tooltip title={`Trade another index than the charts: the paper panel and the order ticket (F1 / S) take its ATM strike, premiums, lot size and SL / target at the replay clock, while every chart stays on ${underlying}. Its day is fetched only when you ask - its Load button, or Load day with "Load ... with the day" ticked. Replay only - live orders stay on the index on screen.`}>
+                <Tooltip title={`Load other indices' days with ${underlying}'s - their calls, puts, spot and futures, as the charts' own. Load day fetches them all; one added after a load is fetched at once. Then the index picker switches the charts between them at the same replay minute with no reload, and your paper trades stay - each punched, priced and exited in its own index. Nothing is fetched unless picked here. Replay only.`}>
                   <Select
-                    value={paperUnderlying} onChange={pickTradeIndex} style={{ width: 150 }} aria-label="Trade in"
-                    options={TRADE_INDEXES.map((u) => ({ value: u, label: u === underlying ? `Trade in ${u}` : `Trade in ${u} ⇄` }))}
+                    mode="multiple" value={alsoLoad} onChange={changeAlsoLoad} style={{ minWidth: 170 }} aria-label="Also load"
+                    placeholder="Also load…" maxTagCount="responsive"
+                    options={TRADE_INDEXES.filter((u) => u !== underlying).map((u) => ({ value: u, label: u }))}
                   />
                 </Tooltip>
               )}
-              {!isLive && tradingOther && (
-                <Tooltip title={`Ticked, Load day fetches ${paperUnderlying}'s day together with ${underlying}'s, ready to punch. Unticked, nothing is fetched by itself - its Load button does it when you want it.`}>
-                  <Checkbox checked={tradePrefetch} onChange={(e) => setTradePrefetch(e.target.checked)}>Load {paperUnderlying} with the day</Checkbox>
+              {!isLive && heldDate && alsoLoad.map((u) => heldTag(u))}
+              {!isLive && pendingSwitch && <Tag color="processing" style={{ margin: 0 }}>switching to {pendingSwitch}…</Tag>}
+              {!isLive && (alsoLoad.length > 0 || tradingOther) && (
+                <Tooltip title={`The index the paper trades go to (the order ticket F1 / S and the paper panel) - its ATM strike, premiums, lot size and SL / target at the replay clock. The charts stay on ${underlying}.`}>
+                  <Select
+                    value={paperUnderlying} onChange={pickTradeIndex} style={{ width: 150 }} aria-label="Trade in"
+                    options={[underlying, ...alsoLoad.filter((u) => u !== underlying), ...(tradingOther && !alsoLoad.includes(paperUnderlying) ? [paperUnderlying] : [])]
+                      .map((u) => ({ value: u, label: u === underlying ? `Trade in ${u}` : `Trade in ${u} ⇄` }))}
+                  />
                 </Tooltip>
               )}
               {!isLive && tradingOther && tradeIndexNote}
@@ -6926,7 +6976,7 @@ export default function OiReplayPage() {
           <PaperTradePanel
             atmStrike={paperAtm} step={paperStep}
             underlying={paperUnderlying} onUnderlyingChange={isLive ? selectUnderlying : pickTradeIndex}
-            indexHint={isLive ? null : `Pick the index to TRADE - the charts stay on ${underlying}. Another index's day is fetched when you load it (its Load button below) and its options are priced at the same replay clock.`}
+            indexHint={isLive ? null : `Pick the index to TRADE - the charts stay on ${underlying}. Another index's day is fetched when you load it ("Also load", or its Load button below) and its options are priced at the same replay clock.`}
             indexNote={tradeIndexNote}
             side={paperSide} onSideChange={setPaperSide}
             direction={paperDirection} onDirectionChange={setPaperDirection}
