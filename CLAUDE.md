@@ -364,18 +364,21 @@ When adding or changing a strategy:
   change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
   position is squared off at 15:15 (`tests/paper-stops.test.mjs`). Each position keeps its entry and exit time (`entryTime` /
   `exitTime`, shown HH:MM:SS under its prices): the clock at a punch or a manual exit (live, to the second); an auto exit's
-  the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`). TRADE IN ANOTHER
-  INDEX than the charts on a REPLAYED day (`tradeIndex.js`; "Trade in" beside Load day, the panel's index picker - in
-  replay it picks the TRADE index, the charts stay; `optionanalytics.oiReplay.tradeIndex`): NIFTY on screen, the paper
-  trades in SENSEX. Its day (the same `/run`, 1-minute, its series = the charts' Weekly / Monthly, BANKNIFTY Monthly -
-  `tradeRuns`, kept per index and day, the day loaded's only) is fetched ONLY WHEN ASKED - never by picking the index:
-  its "Load SENSEX" button, or Load day with "Load SENSEX with the day" ticked (`optionanalytics.oiReplay.tradeIndexPrefetch`,
-  off by default; a day held is not asked again - today replayed is); until then nothing can be punched in it. The
-  panel and the order ticket take ITS ATM (`tradeAtmAt` - its spot bar of the
-  minute shown, nothing after the clock), step, premiums, lot size and SL / target / lots / trail (`paperUnderlying` -
-  a change reaches that index's open positions); each position is priced and exited from its own index's loaded day at
-  the replay clock (`chainOfPosition`), one with none loaded waits (never the wall clock). Live it is always the index
-  on screen - a live order is never sent for another index from here (`tests/trade-index.test.mjs`).
+  the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`). MORE THAN ONE INDEX
+  on a REPLAYED day (`tradeIndex.js`): "Also load" beside Load day (a multi-select, `optionanalytics.oiReplay.alsoLoad`)
+  holds other indices' days with the charts' - the same `/run` (calls, puts, spot, futures), 1-minute, their series =
+  the charts' Weekly / Monthly, BANKNIFTY Monthly - in `dayRuns`, one per index and day (the day loaded's only; the charts'
+  own run is stored there too when it loads). FETCHED ONLY WHEN ASKED: Load day (the charts' index + the "Also load"
+  ones), an index added to "Also load" with a day loaded, the paper panel's "Load X", or the charts switched to an index
+  not held - never by picking a trade index. The INDEX PICKER on a replayed day SWITCHES THE CHARTS to that index's held
+  day at the SAME replay minute (`switchReplayIndex` / `applyReplayIndex`: its run becomes `result`, `barsShownAt` keeps
+  the minute, its own Weekly / Monthly with it, NO reload, the paper trades untouched; not held: "switching to X…" while
+  it is fetched) and the index left joins "Also load". The paper trades go to the index on screen by default ("Trade in"
+  / the panel's picker choose another held one - `paperUnderlying`), each takes ITS ATM (`tradeAtmAt` - its spot bar of
+  the minute shown, nothing after the clock), step, premiums, lot size and SL / target / lots / trail, and each position
+  is priced and exited from ITS OWN index's held day at the replay clock (`chainOfPosition`) whatever the charts show;
+  one with none held waits (never the wall clock). Live it is always the index on screen - a live order is never sent
+  for another index from here (`tests/trade-index.test.mjs`).
 - Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
   page's chain chart): the band follows spot, so a strike that joins it after the open counts from its first reading -
   counted in full, its whole OI showed up as "added since the open" (`tests/chain-oi-totals.test.mjs`). Market Read
