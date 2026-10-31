@@ -215,7 +215,10 @@ When adding or changing a strategy:
   each under it and a second table in the tooltip): spot within 0.15% of the PUT WALL (support), the CALL WALL
   (resistance) or MAX GAMMA (the magnet), read by the net GEX's sign now - positive: support / resistance likely to hold,
   the magnet pins; negative: a break can accelerate, the magnet is weak; "weak" when the net GEX is near zero. A read,
-  not a signal - it feeds no strategy or alert.
+  not a signal - it feeds no strategy or alert. The tables open as a hover TOOLTIP with a mouse (70vh, scrolls) and, on a
+  touch screen / phone ((hover: none) or <= 768 px), as a POPUP a tap opens - full width, its body scrolling, closed by its
+  ✕ (a tooltip there ran past the bottom of the screen with no way to scroll or close it); both start with what it
+  reads NOW (the read and the levels spot is at).
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under

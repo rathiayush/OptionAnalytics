@@ -1,10 +1,10 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Button, Col, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { Button, Col, Modal, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
-import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
+import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, useMediaQuery, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
@@ -225,10 +225,18 @@ const TONE_COLOR = { bull: 'green', bear: 'red', neutral: 'gold' }
 const TONE_TEXT = { bull: UP_COLOR, bear: DOWN_COLOR, neutral: FLIP_COLOR }
 
 // The truth table the smart detection reads (gexTrend.js), the row matched now lit, and how each behaviour is told.
-function GexTrendTable({ trend, windowMin, levels }) {
+function GexTrendTable({ trend, windowMin, levels, fontSize = 11 }) {
   const cell = { padding: '3px 6px', borderBottom: '1px solid rgba(255,255,255,0.15)', verticalAlign: 'top', textAlign: 'left' }
+  const read = trend && !trend.warming ? trend.read ?? `Not in the table (GEX ${trend.gexLabel}, price ${trend.priceLabel})` : null
   return (
-    <div style={{ fontSize: 11 }}>
+    <div style={{ fontSize }}>
+      {/* What it reads now, first - on a phone the tables below run past the screen. */}
+      {(read || levels?.length > 0) && (
+        <div style={{ marginBottom: 6, padding: '4px 6px', background: 'rgba(22,119,255,0.18)', borderRadius: 4 }}>
+          {read && <div><b>Now:</b> <span style={{ color: TONE_TEXT[trend.tone] ?? undefined }}>{read}</span></div>}
+          {levels?.map((l) => <div key={l.level}><b>Near {l.label} {l.price}:</b> <span style={{ color: TONE_TEXT[l.tone] }}>{l.read}</span></div>)}
+        </div>
+      )}
       <table style={{ borderCollapse: 'collapse', width: '100%' }}>
         <thead>
           <tr>{['GEX behaviour', 'Price behaviour', 'Interpretation'].map((h) => <th key={h} style={{ ...cell, fontWeight: 600 }}>{h}</th>)}</tr>
@@ -312,6 +320,10 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   const trend = useMemo(() => gexTrend(minutes, { window: trendWindow }), [minutes, trendWindow])
   // ... and the GEX levels spot is at now: the put wall (support), the call wall (resistance), the max gamma (magnet).
   const levelsNear = useMemo(() => gexLevelsNear(now), [now])
+  // The tables: a hover tooltip with a mouse; on a touch screen / phone a popup opened by a tap, scrolling inside and
+  // closed by its ✕ - as a tooltip they ran past the bottom of a phone's screen with no way to scroll or close them.
+  const touchOrNarrow = useMediaQuery('(hover: none), (max-width: 768px)')
+  const [tableOpen, setTableOpen] = useState(false)
   const both = useMemo(() => {
     const standardNow = gexUpTo(days?.standard ?? [], asOfMs).at(-1)
     const buildupNow = gexUpTo(days?.buildup ?? [], asOfMs).at(-1)
@@ -364,9 +376,26 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   const trendRow = (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 8px', marginBottom: 8, fontSize: 12 }}>
       <Text strong style={{ fontSize: 12 }}>Smart detection</Text>
-      <Tooltip title={<GexTrendTable trend={trend} windowMin={trendWindow} levels={levelsNear} />} styles={{ root: { maxWidth: 'min(560px, calc(100vw - 24px))' } }}>
-        <InfoCircleOutlined aria-label="The GEX and price table" style={{ fontSize: 13, color: AXIS_COLOR, cursor: 'help' }} />
-      </Tooltip>
+      {touchOrNarrow ? (
+        <Button
+          type="text" size="small" icon={<InfoCircleOutlined style={{ fontSize: 15, color: AXIS_COLOR }} />}
+          aria-label="The GEX and price table" onClick={() => setTableOpen(true)} style={{ width: 28, height: 28 }}
+        />
+      ) : (
+        <Tooltip
+          title={<div style={{ maxHeight: '70vh', overflowY: 'auto' }}><GexTrendTable trend={trend} windowMin={trendWindow} levels={levelsNear} /></div>}
+          styles={{ root: { maxWidth: 'min(560px, calc(100vw - 24px))' } }}
+        >
+          <InfoCircleOutlined aria-label="The GEX and price table" style={{ fontSize: 13, color: AXIS_COLOR, cursor: 'help' }} />
+        </Tooltip>
+      )}
+      <Modal
+        open={tableOpen && touchOrNarrow} onCancel={() => setTableOpen(false)} footer={null} title="GEX smart detection"
+        width="calc(100vw - 16px)" style={{ top: 8, maxWidth: 640, paddingBottom: 8 }} destroyOnHidden
+        styles={{ body: { maxHeight: 'calc(100dvh - 90px)', overflowY: 'auto', overscrollBehavior: 'contain' } }}
+      >
+        <GexTrendTable trend={trend} windowMin={trendWindow} levels={levelsNear} fontSize={12} />
+      </Modal>
       {trend?.warming && <Text type="secondary" style={{ fontSize: 12 }}>needs {trendWindow} min of GEX - from {istHhmm(trend.needFrom)}</Text>}
       {trend && !trend.warming && (
         <>
