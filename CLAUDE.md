@@ -211,7 +211,11 @@ When adding or changing a strategy:
   near zero (within 10% of the gross GEX, every strike's call and put counted positive), increasing / decreasing (10% of
   its size further from / nearer zero), else steady; price rising / falling = spot moved 0.1%, else sideways. A pair the
   table has no row for is NAMED, no read made up. Each minute from its own window only (`tests/gex-trend.test.mjs`); it
-  says since when the read holds and the one before it ("was"). A read, not a signal - it feeds no strategy or alert.
+  says since when the read holds and the one before it ("was"). AT THE LEVELS (`gexLevelsNear`, `GEX_LEVEL_TABLE`, a line
+  each under it and a second table in the tooltip): spot within 0.15% of the PUT WALL (support), the CALL WALL
+  (resistance) or MAX GAMMA (the magnet), read by the net GEX's sign now - positive: support / resistance likely to hold,
+  the magnet pins; negative: a break can accelerate, the magnet is weak; "weak" when the net GEX is near zero. A read,
+  not a signal - it feeds no strategy or alert.
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under

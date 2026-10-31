@@ -129,3 +129,47 @@ export function gexTrend(minutes, options = {}) {
     netFrom: start.net, netTo: now.net, spotFrom: start.spot, spotTo: now.spot,
   }
 }
+
+// ---- price at the GEX levels ------------------------------------------------------------------------------------------
+// Spot NEAR a level (within `nearPct` % of spot - 0.15%: ~37 points on NIFTY) and what that level usually does in the
+// gamma regime now (the net GEX of the Sign shown), as the GEX tools read it: the PUT WALL (support - dealers long gamma
+// buy the dip there; short gamma, a break can run), the CALL WALL (resistance - long gamma, dealers sell the rally there;
+// short gamma, a break can squeeze), MAX GAMMA (the magnet - long gamma pins price there; short gamma, its pull is weak).
+// With the net GEX near zero (within 10% of the gross) the read is the same with "weak" - little gamma either way.
+
+export const GEX_LEVEL_DEFAULTS = { nearPct: 0.15 }
+
+export const GEX_LEVELS = {
+  putWall: 'Put wall (support)',
+  callWall: 'Call wall (resistance)',
+  maxGamma: 'Max gamma (magnet)',
+}
+
+export const GEX_LEVEL_TABLE = [
+  { level: 'putWall', regime: 'positive', read: 'Support likely to hold - dealers buy the dip (bounce)', tone: 'bull' },
+  { level: 'putWall', regime: 'negative', read: 'Support at risk - a break can accelerate lower', tone: 'bear' },
+  { level: 'callWall', regime: 'positive', read: 'Resistance likely to hold - dealers sell the rally (rejection)', tone: 'bear' },
+  { level: 'callWall', regime: 'negative', read: 'Resistance at risk - a break can accelerate higher (squeeze)', tone: 'bull' },
+  { level: 'maxGamma', regime: 'positive', read: 'Pin - price tends to stick around the magnet (chop)', tone: 'neutral' },
+  { level: 'maxGamma', regime: 'negative', read: 'Weak magnet - moves can run through it', tone: 'neutral' },
+]
+
+/**
+ * The GEX levels spot is near at a minute (`gexDay`'s): `[{ level, label, price, distance, regime, weak, row, read, tone }]`
+ * - `distance` = level - spot (points), `regime` 'positive' / 'negative' (the net GEX's sign), `weak` = the net GEX near
+ * zero; nearest first. Empty when spot is near none.
+ */
+export function gexLevelsNear(minute, options = {}) {
+  const { nearPct, zeroShare } = { ...GEX_LEVEL_DEFAULTS, zeroShare: GEX_TREND_DEFAULTS.zeroShare, ...options }
+  if (!minute || !(minute.spot > 0) || !Number.isFinite(minute.net)) return []
+  const regime = minute.net >= 0 ? 'positive' : 'negative'
+  const weak = Math.abs(minute.net) <= zeroShare * grossGex(minute)
+  const reach = (nearPct / 100) * minute.spot
+  return Object.keys(GEX_LEVELS)
+    .filter((level) => Number.isFinite(minute[level]) && Math.abs(minute[level] - minute.spot) <= reach)
+    .map((level) => {
+      const row = GEX_LEVEL_TABLE.find((r) => r.level === level && r.regime === regime)
+      return { level, label: GEX_LEVELS[level], price: minute[level], distance: minute[level] - minute.spot, regime, weak, row, read: row.read, tone: row.tone }
+    })
+    .sort((a, b) => Math.abs(a.distance) - Math.abs(b.distance))
+}

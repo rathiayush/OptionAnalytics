@@ -3,7 +3,7 @@
 // the minute read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { GEX_TREND_TABLE, gexTrend, gexTrendDay, grossGex } from '../src/gexTrend.js'
+import { GEX_TREND_TABLE, gexLevelsNear, gexTrend, gexTrendDay, grossGex } from '../src/gexTrend.js'
 import { gexDay } from '../src/gex.js'
 
 const MIN = 60_000
@@ -156,4 +156,27 @@ test('on gexDay\'s minutes: call OI building over put OI while spot rises reads 
   assert.equal(t.gex, 'negToPos')
   assert.equal(t.price, 'rising')
   assert.equal(t.read, 'Potential bullish transition')
+})
+
+test('price near the GEX levels: put wall support, call wall resistance, the max gamma magnet - read by the regime now', () => {
+  const minute = (net, spot, levels) => ({ time: OPEN, net: net * CR, spot, calls: 500 * CR, puts: -500 * CR, ...levels })
+  // 0.15% of 25000 = 37.5 points.
+  const support = gexLevelsNear(minute(300, 25020, { putWall: 25000, callWall: 25200, maxGamma: 25100 }))
+  assert.deepEqual(support.map((l) => l.level), ['putWall'])
+  assert.equal(support[0].read, 'Support likely to hold - dealers buy the dip (bounce)')
+  assert.equal(support[0].distance, -20)
+  assert.equal(gexLevelsNear(minute(-300, 25020, { putWall: 25000 }))[0].read, 'Support at risk - a break can accelerate lower')
+  assert.equal(gexLevelsNear(minute(300, 25170, { callWall: 25200 }))[0].read, 'Resistance likely to hold - dealers sell the rally (rejection)')
+  assert.equal(gexLevelsNear(minute(-300, 25170, { callWall: 25200 }))[0].read, 'Resistance at risk - a break can accelerate higher (squeeze)')
+  assert.equal(gexLevelsNear(minute(300, 25110, { maxGamma: 25100 }))[0].read, 'Pin - price tends to stick around the magnet (chop)')
+  assert.equal(gexLevelsNear(minute(-300, 25110, { maxGamma: 25100 }))[0].read, 'Weak magnet - moves can run through it')
+  // Not near: 50 points from 25000 is past 0.15%.
+  assert.deepEqual(gexLevelsNear(minute(300, 25050, { putWall: 25000, callWall: 25200 })), [])
+  assert.equal(gexLevelsNear(minute(300, 25050, { putWall: 25000 }), { nearPct: 0.25 }).length, 1)
+  // A put wall that is also the max gamma strike: both, nearest first; GEX near zero marks the read weak.
+  const both = gexLevelsNear(minute(30, 25010, { putWall: 25000, maxGamma: 25000, callWall: 25040 }))
+  assert.deepEqual(both.map((l) => l.level).sort(), ['callWall', 'maxGamma', 'putWall'])
+  assert.equal(both[0].price, 25000)
+  assert.ok(both.every((l) => l.weak))
+  assert.deepEqual(gexLevelsNear(null), [])
 })
