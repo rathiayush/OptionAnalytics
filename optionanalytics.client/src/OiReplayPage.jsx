@@ -2885,7 +2885,7 @@ function PaperTradePanel({
           )}
         </Space>
         {isLiveMode && liveBlockReason && <Text type="warning" style={{ fontSize: 12 }}>{liveBlockReason}</Text>}
-        <Text type="secondary" style={{ fontSize: 11 }}>Keyboard: F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
+        <Text type="secondary" className="oa-keyboard-hint" style={{ fontSize: 11 }}>Keyboard: F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
         {isLiveMode && liveContent}
         {!isLiveMode && positions.length > 0 && (
           <>
@@ -6236,8 +6236,8 @@ export default function OiReplayPage() {
               {!isLive && (
                 <Tooltip title={`Load other indices' days with ${underlying}'s - their calls, puts, spot and futures, as the charts' own. Load day fetches them all; one added after a load is fetched at once. Then the index picker switches the charts between them at the same replay minute with no reload, and your paper trades stay - each punched, priced and exited in its own index. Nothing is fetched unless picked here. Replay only.`}>
                   <Select
-                    mode="multiple" value={alsoLoad} onChange={changeAlsoLoad} style={{ minWidth: 170 }} aria-label="Also load"
-                    placeholder="Also load…" maxTagCount="responsive"
+                    mode="multiple" value={alsoLoad} onChange={changeAlsoLoad} style={{ minWidth: 200 }} aria-label="Also load"
+                    prefix={<Text type="secondary" style={{ fontSize: 12 }}>Also load</Text>} placeholder="index…" maxTagCount="responsive"
                     options={TRADE_INDEXES.filter((u) => u !== underlying).map((u) => ({ value: u, label: u }))}
                   />
                 </Tooltip>
