@@ -203,7 +203,15 @@ When adding or changing a strategy:
   live at most every 5 s) and cut at the replay clock by the GEX card and the entry checklist. It feeds no strategy. The
   ENTRY CHECKLIST (`entryChecklist.js`, option buying) has one GEX check from it: gamma - dealers short gamma (net GEX
   negative) under both signs (disagreeing = unknown) - `tests/entry-checklist.test.mjs`. (A "room to the GEX wall"
-  check was removed on request.)
+  check was removed on request.) SMART DETECTION (`gexTrend.js` - `gexTrend` / `gexTrendDay`, the "Smart detection" line
+  under the card's controls, always shown): the trader's TRUTH TABLE of GEX behaviour x price behaviour (`GEX_TREND_TABLE`,
+  nine rows, their words kept - in the ⓘ tooltip, the row matched now lit, with "The trend today": the day's reads in
+  order) read over the last N minutes (5 / 10 / 15 / 30, default 15, `optionanalytics.oiReplay.gexTrendWindow`) of the net
+  GEX of the Sign shown: a change of sign (the start clearly on one side - outside the near-zero band - now past zero),
+  near zero (within 10% of the gross GEX, every strike's call and put counted positive), increasing / decreasing (10% of
+  its size further from / nearer zero), else steady; price rising / falling = spot moved 0.1%, else sideways. A pair the
+  table has no row for is NAMED, no read made up. Each minute from its own window only (`tests/gex-trend.test.mjs`); it
+  says since when the read holds and the one before it ("was"). A read, not a signal - it feeds no strategy or alert.
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
