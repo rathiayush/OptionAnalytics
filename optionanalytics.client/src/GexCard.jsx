@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Button, Col, Popover, Row, Segmented, Space, Tag, Tooltip, Typography } from 'antd'
+import { Button, Col, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -9,6 +10,7 @@ import { sanitizeLine } from './chartLine.js'
 import { LinesChart } from './StraddleCard.jsx'
 import { CardFitBox, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { gexAgreement, gexProfile, gexUpTo } from './gex.js'
+import { GEX_BEHAVIOURS, GEX_LEVEL_DEFAULTS, GEX_LEVEL_TABLE, GEX_LEVELS, GEX_TREND_DEFAULTS, GEX_TREND_TABLE, GEX_TREND_WINDOWS, PRICE_BEHAVIOURS, gexLevelsNear, gexTrend } from './gexTrend.js'
 import { FoldText } from './FoldText.jsx'
 
 const { Text } = Typography
@@ -219,6 +221,70 @@ function ProfileChart({ minute, height: givenHeight = 200 }) {
   return <div ref={ref} style={{ width: '100%', height }}>{chart}</div>
 }
 
+const TONE_COLOR = { bull: 'green', bear: 'red', neutral: 'gold' }
+const TONE_TEXT = { bull: UP_COLOR, bear: DOWN_COLOR, neutral: FLIP_COLOR }
+
+// The truth table the smart detection reads (gexTrend.js), the row matched now lit, and how each behaviour is told.
+function GexTrendTable({ trend, windowMin, levels }) {
+  const cell = { padding: '3px 6px', borderBottom: '1px solid rgba(255,255,255,0.15)', verticalAlign: 'top', textAlign: 'left' }
+  return (
+    <div style={{ fontSize: 11 }}>
+      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+        <thead>
+          <tr>{['GEX behaviour', 'Price behaviour', 'Interpretation'].map((h) => <th key={h} style={{ ...cell, fontWeight: 600 }}>{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {GEX_TREND_TABLE.map((r) => {
+            const on = trend?.row === r
+            return (
+              <tr key={r.read} style={{ background: on ? 'rgba(22,119,255,0.45)' : undefined, fontWeight: on ? 600 : 400 }}>
+                <td style={cell}>{GEX_BEHAVIOURS[r.gex]}</td>
+                <td style={cell}>{PRICE_BEHAVIOURS[r.price]}</td>
+                <td style={cell}>{on ? '▸ ' : ''}{r.read}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      <div style={{ marginTop: 8, fontWeight: 600 }}>At the levels - spot within {GEX_LEVEL_DEFAULTS.nearPct}% of a GEX level, read by the gamma now</div>
+      <table style={{ borderCollapse: 'collapse', width: '100%' }}>
+        <thead>
+          <tr>{['Price near', 'Net GEX', 'Read'].map((h) => <th key={h} style={{ ...cell, fontWeight: 600 }}>{h}</th>)}</tr>
+        </thead>
+        <tbody>
+          {GEX_LEVEL_TABLE.map((r) => {
+            const on = levels?.some((l) => l.row === r)
+            return (
+              <tr key={r.read} style={{ background: on ? 'rgba(22,119,255,0.45)' : undefined, fontWeight: on ? 600 : 400 }}>
+                <td style={cell}>{GEX_LEVELS[r.level]}</td>
+                <td style={cell}>{r.regime === 'positive' ? 'Positive' : 'Negative'}</td>
+                <td style={cell}>{on ? '▸ ' : ''}{r.read}</td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+      {trend?.path?.length > 0 && (
+        <div style={{ marginTop: 6 }}>
+          <b>The trend today</b>{trend.path.length > 8 ? ` (the last 8 of ${trend.path.length})` : ''}:
+          {trend.path.slice(-8).map((run) => (
+            <div key={run.since} style={{ color: TONE_TEXT[run.tone] }}>
+              {istHhmm(run.since)}{run.until > run.since ? `–${istHhmm(run.until)}` : ''} {run.read}
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 6, opacity: 0.85 }}>
+        Read over the last {windowMin} min, the net GEX of the Sign shown: <b>→</b> = it changed sign (from clearly one side);
+        <b> near zero</b> = within {GEX_TREND_DEFAULTS.zeroShare * 100}% of the gross GEX (every call and put counted positive);
+        <b> increasing</b> = {GEX_TREND_DEFAULTS.growShare * 100}% of its size further from zero. Price rising / falling = spot
+        moved {GEX_TREND_DEFAULTS.pricePct}% or more, else sideways. A mix with no row here is named as it is. A read of the day,
+        not a signal - it feeds no strategy or alert.
+      </div>
+    </div>
+  )
+}
+
 const HOW_TO_READ = (
   <div style={{ maxWidth: 440, fontSize: 12 }}>
     <p style={{ margin: '0 0 6px' }}><b>GEX</b> = how much index the option dealers must trade to stay hedged for a 1% move: gamma × the dealers&apos; OI × spot² × 1%, in ₹ crore. Gamma is Black-Scholes on the forward (spot plus the carry to expiry, read from the call and put premiums by put-call parity), with each strike&apos;s IV worked out from its own premium - so it follows the prices traded, not how Dhan works out its IV. The time to expiry runs to 15:30 on the expiry day (NIFTY Tuesday, SENSEX Thursday, BANKNIFTY the month&apos;s last Tuesday - Dhan&apos;s own date from today on, holidays checked before that).</p>
@@ -237,9 +303,15 @@ const HOW_TO_READ = (
  */
 export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260 }) {
   const [sign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
+  const [savedTrendWindow, setTrendWindow] = usePersistedState('optionanalytics.oiReplay.gexTrendWindow', GEX_TREND_DEFAULTS.window)
+  const trendWindow = GEX_TREND_WINDOWS.includes(savedTrendWindow) ? savedTrendWindow : GEX_TREND_DEFAULTS.window
   // Both signs, always: the card shows the one chosen; the line under the read says whether the other agrees.
   const minutes = useMemo(() => gexUpTo((sign === 'buildup' ? days?.buildup : days?.standard) ?? [], asOfMs), [days, sign, asOfMs])
   const now = minutes.at(-1)
+  // Smart detection: the truth table's row for how the net GEX and spot moved over the last `trendWindow` minutes.
+  const trend = useMemo(() => gexTrend(minutes, { window: trendWindow }), [minutes, trendWindow])
+  // ... and the GEX levels spot is at now: the put wall (support), the call wall (resistance), the max gamma (magnet).
+  const levelsNear = useMemo(() => gexLevelsNear(now), [now])
   const both = useMemo(() => {
     const standardNow = gexUpTo(days?.standard ?? [], asOfMs).at(-1)
     const buildupNow = gexUpTo(days?.buildup ?? [], asOfMs).at(-1)
@@ -289,9 +361,37 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   const aboveFlip = now.flip != null ? now.spot > now.flip : null
   // How far a level is from spot, signed.
   const away = (level) => (Number.isFinite(level) ? ` (${level - now.spot >= 0 ? '+' : '−'}${Math.abs(level - now.spot).toFixed(0)})` : '')
+  const trendRow = (
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 8px', marginBottom: 8, fontSize: 12 }}>
+      <Text strong style={{ fontSize: 12 }}>Smart detection</Text>
+      <Tooltip title={<GexTrendTable trend={trend} windowMin={trendWindow} levels={levelsNear} />} styles={{ root: { maxWidth: 'min(560px, calc(100vw - 24px))' } }}>
+        <InfoCircleOutlined aria-label="The GEX and price table" style={{ fontSize: 13, color: AXIS_COLOR, cursor: 'help' }} />
+      </Tooltip>
+      {trend?.warming && <Text type="secondary" style={{ fontSize: 12 }}>needs {trendWindow} min of GEX - from {istHhmm(trend.needFrom)}</Text>}
+      {trend && !trend.warming && (
+        <>
+          <Tag color={TONE_COLOR[trend.tone] ?? 'default'} style={{ margin: 0, whiteSpace: 'normal' }}>{trend.read ?? 'Not in the table'}</Tag>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            GEX {trend.gexLabel} ({crShort(trend.netFrom)} → {crShort(trend.netTo)}) · price {trend.priceLabel} ({num(trend.spotFrom)} → {num(trend.spotTo)}) · since {istHhmm(trend.since)}
+            {trend.previous && <> · was <span style={{ color: TONE_TEXT[trend.previous.tone] }}>{trend.previous.read}</span> {istHhmm(trend.previous.since)}–{istHhmm(trend.previous.until)}</>}
+          </Text>
+        </>
+      )}
+      <Select size="small" value={trendWindow} onChange={setTrendWindow} style={{ width: 84 }} options={GEX_TREND_WINDOWS.map((w) => ({ value: w, label: `${w} min` }))} />
+      {/* Spot at a GEX level: one line each, nearest first - what that level usually does in the gamma regime now. */}
+      {levelsNear.map((l) => (
+        <div key={l.level} style={{ flexBasis: '100%', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '2px 8px' }}>
+          <Tag color={TONE_COLOR[l.tone]} style={{ margin: 0 }}>Near {l.label} {l.price} ({l.distance >= 0 ? '+' : '−'}{Math.abs(l.distance).toFixed(0)})</Tag>
+          <Text style={{ fontSize: 12, color: TONE_TEXT[l.tone] }}>{l.read}</Text>
+          {l.weak && <Text type="secondary" style={{ fontSize: 11 }}>weak - the net GEX is near zero</Text>}
+        </div>
+      ))}
+    </div>
+  )
   return (
     <>
       {controls}
+      {trendRow}
       {/* The read, the two signs' verdict and the notes each fold to one line (FoldText - remembered, "Fold all" on the page). */}
       <FoldText id="gex.read" label="the read" style={{ marginBottom: 4 }}>
         <div style={{ borderLeft: `3px solid ${gexColor(now.net)}`, padding: '4px 10px', fontSize: 12 }}>
