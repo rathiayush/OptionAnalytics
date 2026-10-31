@@ -31,6 +31,7 @@ import { chainOiDay, chainOiTotalsAt } from './chainOiTotals.js'
 import { nearAtmOiChange, oiWalls } from './marketRead.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
+import { TRADE_INDEXES, effectiveTradeIndex, tradeAtmAt, tradeExpiryFlag, tradeRunKey } from './tradeIndex.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
@@ -274,6 +275,20 @@ export function pointMs(p) {
 // yet as of this point in the replay. Binary search: this runs for every strike (and, in the
 // per-bar loops, for every bar too) on every live batch, and a linear scan over a whole day's
 // series made the page slower and slower as the day went on.
+// A trade index's loaded day (tradeIndex.js) as the paper trades read it: its CE / PE by strike, step and 1-minute spot -
+// grouped once a run.
+const EMPTY_CHAIN = new Map()
+const tradeChainCache = new WeakMap()
+function tradeChainOf(run) {
+  if (!run) return null
+  let chain = tradeChainCache.get(run)
+  if (!chain) {
+    chain = { ce: groupByStrike(run.cePoints ?? []), pe: groupByStrike(run.pePoints ?? []), step: run.step || 50, spot: run.spotCandlesOneMinute ?? run.spotCandles ?? [] }
+    tradeChainCache.set(run, chain)
+  }
+  return chain
+}
+
 function latestAtOrBefore(sortedPoints, asOfMs) {
   let lo = 0
   let hi = sortedPoints.length - 1
@@ -2736,7 +2751,7 @@ function PaperTradePanel({
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
   liveOrderSummary = '', liveContent = null, liveBlockReason = null,
-  underlying = null, onUnderlyingChange = null, onReview = null,
+  underlying = null, onUnderlyingChange = null, onReview = null, indexHint = null, indexNote = null,
 }) {
   const isLiveMode = mode === 'live'
 
@@ -2782,13 +2797,14 @@ function PaperTradePanel({
     <div style={{ width: '100%' }}>
       <Space direction="vertical" size={10} style={{ width: '100%' }}>
         {onUnderlyingChange && (
-          <Tooltip title="Pick the index to trade - the panel then uses that index's ATM strike, expiry and premium. An open position in another index stays where it is.">
+          <Tooltip title={indexHint ?? "Pick the index to trade - the panel then uses that index's ATM strike, expiry and premium. An open position in another index stays where it is."}>
             <Segmented
               value={underlying} onChange={onUnderlyingChange} aria-label="Index to trade"
               options={['NIFTY', 'BANKNIFTY', 'SENSEX'].map((u) => ({ label: u, value: u }))}
             />
           </Tooltip>
         )}
+        {indexNote}
         {onModeChange && (
           <Space wrap size={8}>
             <Tooltip title={liveAvailable ? null : liveUnavailableReason}>
@@ -3334,7 +3350,7 @@ function PreTradeReview({
             {live && <Alert type="error" showIcon message="LIVE - this places a real order on your Dhan account" />}
             <div style={{ fontSize: 15 }}>
               <Tag color={order.direction === 'BUY' ? 'success' : 'error'} style={{ fontSize: 14 }}>{order.direction}</Tag>
-              <Text strong>{underlying} {order.strike} {order.side}</Text> × {order.qtyLots} lot{order.qtyLots === 1 ? '' : 's'}
+              <Text strong>{order.underlying ?? underlying} {order.strike} {order.side}</Text> × {order.qtyLots} lot{order.qtyLots === 1 ? '' : 's'}
             </div>
             <Text type="secondary" style={{ fontSize: 12 }}>{order.summary}</Text>
             <Text style={{ fontSize: 12 }}>
@@ -3351,7 +3367,7 @@ function PreTradeReview({
     <Modal
       open={open} onCancel={onCancel} destroyOnClose width={Math.min(980, typeof window === 'undefined' ? 980 : window.innerWidth - 24)}
       styles={{ body: { maxHeight: '72vh', overflowY: 'auto' } }}
-      title={`Before you ${order.direction === 'SELL' ? 'sell' : 'buy'} · ${underlying} ${order.strike} ${order.side}`}
+      title={`Before you ${order.direction === 'SELL' ? 'sell' : 'buy'} · ${order.underlying ?? underlying} ${order.strike} ${order.side}`}
       footer={(
         <Space>
           {current < last && <Button onClick={() => setCurrent(last)}>Skip</Button>}
@@ -3442,6 +3458,9 @@ export default function OiReplayPage() {
   // Only meaningful for a HISTORICAL (non-today) day - Dhan's rolling-option REST endpoint (what a
   // past day's CE/PE data ultimately comes from) only ever accepts these two literal flags.
   const [expiryFlag, setExpiryFlag] = usePersistedState('optionanalytics.oiReplay.expiryFlag', 'WEEK')
+  // Trade in ANOTHER index than the charts on a replayed day ('' = the charts' own) - tradeIndex.js: NIFTY on screen, the
+  // paper trades in SENSEX. Its day is loaded with the charts' (Load day) and priced at the replay clock.
+  const [tradeIndexChoice, setTradeIndexChoice] = usePersistedState('optionanalytics.oiReplay.tradeIndex', '')
   // "N1".."N6" - the Nth nearest currently-listed expiry for `underlying` overall, only meaningful
   // while isLive (see the expiry Select below, shown in place of the WEEK/MONTH one once live). The
   // user's own explicit "it's going to next expiry, add an expiry filter" ask for the live page this
@@ -3676,26 +3695,35 @@ export default function OiReplayPage() {
   // they persist in localStorage instead (see PAPER_POSITIONS_STORAGE_KEY's own doc comment) so a
   // page reload doesn't lose an open live session's positions - only Clear all, or loading a
   // different day/underlying, actually clears them.
+  // Today can be followed live (Go Live) or replayed like any other day (Load day) - replaying it
+  // fetches the day so far and gets the Start/Pause/slider scrubber instead of the live feed.
+  // isLive is "today, followed live": every live-only behaviour below keys off it.
+  const [todayMode, setTodayMode] = useState('live')
+  const isTodayDate = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
+  const isLive = isTodayDate && todayMode === 'live'
+  // The index the paper trades go to (tradeIndex.js): another than the charts' only on a replayed day - the panel's
+  // lots, SL / target and trailing below are that index's.
+  const paperUnderlying = effectiveTradeIndex(tradeIndexChoice, underlying, isLive)
   const [paperSide, setPaperSide] = useState('CE')
   const [paperDirection, setPaperDirection] = useState('BUY')
   const [paperStrikeOffset, setPaperStrikeOffset] = useState(0)
   // Lots and the live slippage are per index too (Trade settings - trade-settings.csv on the server).
-  const [paperQtyLots, setPaperQtyLotsState] = useState(() => loadTradeDefaults(underlying).lots)
-  const setPaperQtyLots = (v) => { setPaperQtyLotsState(v); if (v >= 1) saveTradeDefaults(underlying, { lots: v }) }
+  const [paperQtyLots, setPaperQtyLotsState] = useState(() => loadTradeDefaults(paperUnderlying).lots)
+  const setPaperQtyLots = (v) => { setPaperQtyLotsState(v); if (v >= 1) saveTradeDefaults(paperUnderlying, { lots: v }) }
   // Auto stop-loss/target, in premium points - on by default with each underlying's own levels
   // (tradeDefaults.js: NIFTY 20/30, BANKNIFTY 50/75, SENSEX 60/90), what the trader sets kept per
   // underlying in this browser. 0/blank disables either one (see the effect that reads these below).
-  const [paperSlPoints, setPaperSlPointsState] = useState(() => loadTradeLevels('oiReplay', underlying).sl)
-  const [paperTargetPoints, setPaperTargetPointsState] = useState(() => loadTradeLevels('oiReplay', underlying).target)
+  const [paperSlPoints, setPaperSlPointsState] = useState(() => loadTradeLevels('oiReplay', paperUnderlying).sl)
+  const [paperTargetPoints, setPaperTargetPointsState] = useState(() => loadTradeLevels('oiReplay', paperUnderlying).target)
   useEffect(() => {
-    const levels = loadTradeLevels('oiReplay', underlying)
+    const levels = loadTradeLevels('oiReplay', paperUnderlying)
     setPaperSlPointsState(levels.sl)
     setPaperTargetPointsState(levels.target)
-  }, [underlying])
+  }, [paperUnderlying])
   // Trailing stop on the premium: after `trailStart` pts of profit the stop follows the best premium
   // `trailGap` pts behind (0 = off) - paper here, and the live super order's stop-loss leg on the server.
-  const [paperTrailStart, setPaperTrailStartState] = useState(() => loadTradeLevels('oiReplay', underlying).trailStart)
-  const [paperTrailGap, setPaperTrailGapState] = useState(() => loadTradeLevels('oiReplay', underlying).trailGap)
+  const [paperTrailStart, setPaperTrailStartState] = useState(() => loadTradeLevels('oiReplay', paperUnderlying).trailStart)
+  const [paperTrailGap, setPaperTrailGapState] = useState(() => loadTradeLevels('oiReplay', paperUnderlying).trailGap)
   // "No SL": the next order has no stop-loss / target - it stays open for the day (paper squares it off at 15:15; a live
   // one is a plain order, Dhan squares intraday positions off near the close). Never remembered: off on every load.
   const [paperNoStop, setPaperNoStop] = useState(false)
@@ -3704,16 +3732,16 @@ export default function OiReplayPage() {
   // The trailing the next order would use: none with No SL or No trailing ticked.
   const paperTrailOff = paperNoStop || paperNoTrail
   useEffect(() => {
-    const levels = loadTradeLevels('oiReplay', underlying)
+    const levels = loadTradeLevels('oiReplay', paperUnderlying)
     setPaperTrailStartState(levels.trailStart)
     setPaperTrailGapState(levels.trailGap)
-  }, [underlying])
+  }, [paperUnderlying])
   const [paperPositions, setPaperPositions] = useState([])
   // A change of the SL / target / trail reaches THIS index's open paper positions from the moment it is made - never the
   // bars already passed (paperStops.js) - once it has stayed a moment: typing 25 passes through 2, which must not stop a
   // trade out. Otherwise each position keeps the levels it was punched with (the panel's, or the ticket's).
   const paperLevelsRef = useRef(null)
-  paperLevelsRef.current = { underlying, sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap }
+  paperLevelsRef.current = { underlying: paperUnderlying, sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap }
   const paperClockRef = useRef(null) // the page's clock (asOfMs) - set where it is worked out, below
   const paperSeriesRef = useRef(null) // each position's premium points (seriesOf) - set below
   const levelChangeRef = useRef(null)
@@ -3746,10 +3774,10 @@ export default function OiReplayPage() {
   useEffect(() => {
     let last = null
     const readAll = () => {
-      const d = loadTradeDefaults(underlying)
+      const d = loadTradeDefaults(paperUnderlying)
       if (last) {
         const patch = Object.fromEntries(['sl', 'target', 'trailStart', 'trailGap'].filter((key) => d[key] !== last[key]).map((key) => [key, d[key]]))
-        if (Object.keys(patch).length) queueLevelChangeRef.current(patch, underlying, last)
+        if (Object.keys(patch).length) queueLevelChangeRef.current(patch, paperUnderlying, last)
       }
       last = d
       setPaperSlPointsState(d.sl)
@@ -3761,11 +3789,11 @@ export default function OiReplayPage() {
     }
     readAll()
     return subscribeTradeLevels(readAll)
-  }, [underlying])
-  const setPaperTrailStart = (v) => { setPaperTrailStartState(v); queueLevelChange({ trailStart: v }); saveTradeLevels('oiReplay', underlying, { trailStart: v }) }
-  const setPaperTrailGap = (v) => { setPaperTrailGapState(v); queueLevelChange({ trailGap: v }); saveTradeLevels('oiReplay', underlying, { trailGap: v }) }
-  const setPaperSlPoints = (v) => { setPaperSlPointsState(v); queueLevelChange({ sl: v }); saveTradeLevels('oiReplay', underlying, { sl: v, target: paperTargetPoints }) }
-  const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); queueLevelChange({ target: v }); saveTradeLevels('oiReplay', underlying, { sl: paperSlPoints, target: v }) }
+  }, [paperUnderlying])
+  const setPaperTrailStart = (v) => { setPaperTrailStartState(v); queueLevelChange({ trailStart: v }); saveTradeLevels('oiReplay', paperUnderlying, { trailStart: v }) }
+  const setPaperTrailGap = (v) => { setPaperTrailGapState(v); queueLevelChange({ trailGap: v }); saveTradeLevels('oiReplay', paperUnderlying, { trailGap: v }) }
+  const setPaperSlPoints = (v) => { setPaperSlPointsState(v); queueLevelChange({ sl: v }); saveTradeLevels('oiReplay', paperUnderlying, { sl: v, target: paperTargetPoints }) }
+  const setPaperTargetPoints = (v) => { setPaperTargetPointsState(v); queueLevelChange({ target: v }); saveTradeLevels('oiReplay', paperUnderlying, { sl: paperSlPoints, target: v }) }
   // Toggled by the trigger button/tag and the panel's own close button only - never by clicking
   // elsewhere (it's a portal-rendered DraggableFloatingPanel, not an antd Popover, so there is no
   // click-outside-to-dismiss behavior to fight in the first place). Position lives here, not inside
@@ -3826,12 +3854,8 @@ export default function OiReplayPage() {
   }
 
   const canLoad = Boolean(underlying && date)
-  // Today can be followed live (Go Live) or replayed like any other day (Load day) - replaying it
-  // fetches the day so far and gets the Start/Pause/slider scrubber instead of the live feed.
-  // isLive is "today, followed live": every live-only behaviour below keys off it.
-  const [todayMode, setTodayMode] = useState('live')
-  const isTodayDate = Boolean(date && date.format('YYYY-MM-DD') === istDateKey(new Date()))
-  const isLive = isTodayDate && todayMode === 'live'
+  // The index to trade on a replayed day (tradeIndex.js) - the charts' own clears the choice.
+  const pickTradeIndex = (u) => setTradeIndexChoice(u === underlying ? '' : u)
   // Open paper positions on ANOTHER index (or another expiry) than the one on screen, live: their legs
   // ("NIFTY:N1:CE:23100") - the page also listens to their chains and keeps those legs' prices
   // (foreignPoints), so each position is marked to its own option whichever index is shown.
@@ -3960,6 +3984,58 @@ export default function OiReplayPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolvedExpiries.expiries])
 
+  // The trade index's day (tradeIndex.js - trading another index than the charts on a replayed day): the same /run the
+  // charts' index loads, fetched the moment Load day asks for a day (alongside the charts' own) or the trade index is
+  // picked, and kept per index, day and series - that day's only - so switching the trade index back costs nothing.
+  const [tradeLoadDate, setTradeLoadDate] = useState(null)
+  const [tradeRuns, setTradeRuns] = useState({})   // tradeRunKey -> { loading } | { run } | { error }
+  const [tradeRetry, setTradeRetry] = useState(0)
+  const tradeRunsRef = useRef(tradeRuns)
+  tradeRunsRef.current = tradeRuns
+  const tradeKey = !isLive && paperUnderlying !== underlying && tradeLoadDate
+    ? tradeRunKey(paperUnderlying, tradeLoadDate, tradeExpiryFlag(paperUnderlying, expiryFlag)) : null
+  useEffect(() => {
+    if (!tradeKey) return undefined
+    const have = tradeRunsRef.current[tradeKey]
+    if (have?.run || have?.loading) return undefined
+    const [u, day, flag] = tradeKey.split('|')
+    const controller = new AbortController()
+    const setEntry = (entry) => setTradeRuns((all) => {
+      const sameDay = Object.fromEntries(Object.entries(all).filter(([key]) => key.split('|')[1] === day && key !== tradeKey))
+      return entry ? { ...sameDay, [tradeKey]: entry } : sameDay
+    })
+    setEntry({ loading: true })
+    const params = new URLSearchParams({ date: day, timeframeMinutes: '1', expiryFlag: flag, ...(day === istDateKey(new Date()) ? { forceLive: 'true' } : {}) })
+    fetch(`/api/oi-replay/${u}/run?${params.toString()}`, { signal: controller.signal })
+      .then(async (r) => {
+        const body = await r.json().catch(() => null)
+        if (!r.ok || !body?.success) throw new Error(body?.error || `Request failed (HTTP ${r.status}).`)
+        return body
+      })
+      .then((run) => setEntry({ run }))
+      .catch((err) => { if (!controller.signal.aborted) setEntry({ error: err.message || `Failed to load ${u}.` }) })
+    // Left before it came: forgotten, so it is asked again when wanted.
+    return () => { controller.abort(); setTradeRuns((all) => (all[tradeKey]?.loading ? Object.fromEntries(Object.entries(all).filter(([key]) => key !== tradeKey)) : all)) }
+  }, [tradeKey, tradeRetry])
+  const tradeEntry = tradeKey ? tradeRuns[tradeKey] ?? { loading: true } : null
+  const retryTradeRun = () => { setTradeRuns((all) => Object.fromEntries(Object.entries(all).filter(([key]) => key !== tradeKey))); setTradeRetry((n) => n + 1) }
+  // Trading another index on a replayed day - what the controls and the paper panel say: the charts' and the traded
+  // index, and its day loading, loaded, failed (Retry) or not asked for yet (no day loaded).
+  const tradeIndexNote = !isLive && paperUnderlying !== underlying ? (
+    <Space size={6} wrap>
+      <Tag color="purple" style={{ margin: 0 }}>Charts {underlying} · trading {paperUnderlying}</Tag>
+      {!tradeLoadDate && <Text type="secondary" style={{ fontSize: 12 }}>Load day loads {paperUnderlying}&apos;s day too</Text>}
+      {tradeEntry?.loading && <Tag color="processing" style={{ margin: 0 }}>loading {paperUnderlying}…</Tag>}
+      {tradeEntry?.run && <Tag color="success" style={{ margin: 0 }}>{paperUnderlying} {tradeLoadDate} loaded</Tag>}
+      {tradeEntry?.error && (
+        <>
+          <Tag color="error" style={{ margin: 0, whiteSpace: 'normal' }}>{paperUnderlying}: {tradeEntry.error}</Tag>
+          <Button size="small" onClick={retryTradeRun}>Retry</Button>
+        </>
+      )}
+    </Space>
+  ) : null
+
   // Takes an optional explicit date rather than only ever reading the `date` state, so goLive below
   // can set today's date AND kick off the fetch in one click - setDate(today) followed immediately
   // by load() would still read the OLD `date` from this closure (React state updates aren't
@@ -3975,6 +4051,8 @@ export default function OiReplayPage() {
     // `live` is passed by the buttons that just switched todayMode (the state hasn't landed yet).
     const effectiveLive = effectiveIsToday && (live ?? todayMode === 'live')
     const dateKey = effectiveDate.format('YYYY-MM-DD')
+    // A replayed day: the trade index's day is fetched alongside this one (tradeRuns, below) - live, none.
+    setTradeLoadDate(effectiveLive ? null : dateKey)
 
     // Paints instantly from cache when one exists, but NEVER as a substitute for the real fetch
     // below - only as a head start on it. A page can sit closed/reloading for minutes; skipping the
@@ -4695,6 +4773,16 @@ export default function OiReplayPage() {
 
   const step = result?.step || 50
   const atmStrike = currentBar ? Math.round(currentBar.close / step) * step : null
+  // Trading another index (tradeIndex.js): each loaded trade day's chain (grouped once a run - tradeChainOf), the one
+  // traded now, and its step and ATM at the replay clock - the paper panel and the order ticket read these (paperCe /
+  // paperPe / paperAtm / paperStep); the charts keep the index on screen.
+  const tradeChainFor = (u) => (isLive || !tradeLoadDate ? null : tradeChainOf(tradeRuns[tradeRunKey(u, tradeLoadDate, tradeExpiryFlag(u, expiryFlag))]?.run))
+  const tradingOther = paperUnderlying !== underlying
+  const tradeChain = tradingOther ? tradeChainFor(paperUnderlying) : null
+  const paperCe = tradingOther ? tradeChain?.ce ?? EMPTY_CHAIN : ceByStrike
+  const paperPe = tradingOther ? tradeChain?.pe ?? EMPTY_CHAIN : peByStrike
+  const paperStep = tradingOther ? tradeChain?.step ?? null : step
+  const paperAtm = tradingOther ? (tradeChain ? tradeAtmAt(tradeChain.spot, tradeChain.step, asOfMs) : null) : atmStrike
 
   // The OI totals S/R breaks and 🎯 run here, not in the totals card, so they keep going with that card off-screen or
   // hidden (live, and on a replayed day's clock); its settings show there. Which ones pop up: alertTypes.
@@ -4763,12 +4851,12 @@ export default function OiReplayPage() {
     [pePremiumPoints, asOfMs],
   )
 
-  const paperStrike = atmStrike != null ? atmStrike + paperStrikeOffset * step : null
+  const paperStrike = paperAtm != null ? paperAtm + paperStrikeOffset * paperStep : null
   const paperEntryPreview = useMemo(() => {
     if (paperStrike == null || asOfMs == null) return null
-    const series = (paperSide === 'CE' ? ceByStrike : peByStrike).get(paperStrike)
+    const series = (paperSide === 'CE' ? paperCe : paperPe).get(paperStrike)
     return latestAtOrBefore(series ?? [], asOfMs)
-  }, [paperSide, paperStrike, ceByStrike, peByStrike, asOfMs])
+  }, [paperSide, paperStrike, paperCe, paperPe, asOfMs])
 
   // Paper trades are announced like real ones (Telegram only on today's live view, never a replay).
   const paperTradeText = (p, price) => `${p.direction} ${p.underlying ?? underlying} ${p.strike} ${p.side} x${p.qtyLots} lot${p.qtyLots === 1 ? '' : 's'} @ ${Number(price).toFixed(1)}`
@@ -4784,10 +4872,21 @@ export default function OiReplayPage() {
   // Each position is priced from ITS OWN option chain: the one on screen (ceByStrike / peByStrike, as of
   // the replay clock), else - an open position on another index / expiry, live - that leg's own ticks
   // (foreignPoints); with neither yet, the last price it had on screen (lastPrice), else its entry.
-  const ownChainOf = useCallback((p) => (p.underlying ?? underlying) === underlying && (!isLive || !p.expiryFlag || p.expiryFlag === liveExpiryFlag), [underlying, isLive, liveExpiryFlag])
-  const seriesOf = useCallback((p) => (ownChainOf(p)
-    ? (p.side === 'CE' ? ceByStrike : peByStrike).get(p.strike) ?? []
-    : (foreignPoints[`${p.underlying}:${p.expiryFlag}:${p.side}`] ?? []).filter((pt) => pt.strike === p.strike)), [ownChainOf, ceByStrike, peByStrike, foreignPoints])
+  // On a replayed day, a position in a trade index whose day is loaded (tradeIndex.js) is priced from that day's chain
+  // at the same replay clock - its own chain too.
+  const chainOfPosition = useCallback((p) => {
+    const u = p.underlying ?? underlying
+    if (u === underlying && (!isLive || !p.expiryFlag || p.expiryFlag === liveExpiryFlag)) return { ce: ceByStrike, pe: peByStrike }
+    return tradeChainFor(u)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [underlying, isLive, liveExpiryFlag, ceByStrike, peByStrike, tradeRuns, tradeLoadDate, expiryFlag])
+  const ownChainOf = useCallback((p) => chainOfPosition(p) != null, [chainOfPosition])
+  const seriesOf = useCallback((p) => {
+    const chain = chainOfPosition(p)
+    return chain
+      ? (p.side === 'CE' ? chain.ce : chain.pe).get(p.strike) ?? []
+      : (foreignPoints[`${p.underlying}:${p.expiryFlag}:${p.side}`] ?? []).filter((pt) => pt.strike === p.strike)
+  }, [chainOfPosition, foreignPoints])
   paperSeriesRef.current = seriesOf
   const markOf = useCallback((p) => {
     const at = ownChainOf(p) ? asOfMs : Number.MAX_SAFE_INTEGER
@@ -4796,21 +4895,22 @@ export default function OiReplayPage() {
   const exitPriceOf = (p) => markOf(p) ?? p.lastPrice ?? p.entryPrice
   // When a position closes (exitTime, ms - seconds shown live): its own chain's clock (the replay's, live now), another
   // index's position now.
-  const exitClockOf = (p) => (ownChainOf(p) ? asOfMs : Date.now())
-  const premiumOf = (side, strike) => (strike == null || asOfMs == null ? null : latestAtOrBefore((side === 'CE' ? ceByStrike : peByStrike).get(strike) ?? [], asOfMs)?.price ?? null)
+  const exitClockOf = (p) => (ownChainOf(p) || !isLive ? asOfMs : Date.now())
+  // The panel's and the order ticket's premium: the traded index's (paperCe / paperPe - the charts' own, or the trade index's).
+  const premiumOf = (side, strike) => (strike == null || asOfMs == null ? null : latestAtOrBefore((side === 'CE' ? paperCe : paperPe).get(strike) ?? [], asOfMs)?.price ?? null)
   const handlePaperPunch = (overrides) => {
     const t = tradeOf(overrides)
     const entryPrice = premiumOf(t.side, t.strike)
     if (t.strike == null || entryPrice == null) return
-    const text = paperTradeText({ direction: t.direction, strike: t.strike, side: t.side, qtyLots: t.lots }, entryPrice)
+    const text = paperTradeText({ direction: t.direction, underlying: paperUnderlying, strike: t.strike, side: t.side, qtyLots: t.lots }, entryPrice)
     // The position keeps these levels (the ticket's, else the panel's) - the panel's later changes reach it from their minute on.
     const levelLog = punchLevelLog({ sl: t.sl, target: t.target, trailStart: paperTrailStart, trailGap: paperTrailGap, noStop: t.noStop, noTrail: t.noTrail }, asOfMs)
     notifyTrade({ kind: 'entry', title: 'Paper order punched', text: `${text}${t.noStop ? ' · no SL / target - held until the 15:15 square-off' : ` · ${paperLevelsText(levelLog[0])}${t.noTrail ? ' · no trailing' : ''}`}`,
       telegramText: isLive ? `Paper ${text}${t.noStop ? ' (no SL)' : ''}` : null })
     setPaperPositions((prev) => [...prev, {
       id: `${Date.now()}-${Math.random()}`,
-      side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots, underlying, expiryFlag: isLive ? liveExpiryFlag : null,
-      lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1,
+      side: t.side, direction: t.direction, strike: t.strike, qtyLots: t.lots, underlying: paperUnderlying, expiryFlag: isLive ? liveExpiryFlag : null,
+      lotSize: PAPER_TRADE_LOT_SIZE[paperUnderlying] ?? 1,
       entryPrice, entryTime: asOfMs, status: 'OPEN', exitPrice: null, exitReason: null, ...(t.noStop ? { noStop: true } : t.noTrail ? { noTrail: true } : {}),
       ...(levelLog ? { levelLog } : {}),
     }])
@@ -5009,9 +5109,9 @@ export default function OiReplayPage() {
   const paperTotalPnl = enrichedPaperPositions.reduce((sum, p) => sum + p.pnl, 0)
 
   // A position's levels when it has none of its own (saved before positions kept them): its index's on the panel now.
-  const fallbackLevelsOf = useCallback((p) => ((p.underlying ?? underlying) === underlying
+  const fallbackLevelsOf = useCallback((p) => ((p.underlying ?? underlying) === paperUnderlying
     ? { sl: paperSlPoints, target: paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailGap }
-    : loadTradeLevels('oiReplay', p.underlying)), [underlying, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
+    : loadTradeLevels('oiReplay', p.underlying ?? underlying)), [underlying, paperUnderlying, paperSlPoints, paperTargetPoints, paperTrailStart, paperTrailGap])
   // Such a position takes them as its own, so a later change on the panel reaches it from its minute on, like any other.
   useEffect(() => {
     const unkept = (p) => p.status === 'OPEN' && !p.noStop && p.entryTime != null && !(p.levelLog?.length > 0)
@@ -5028,6 +5128,8 @@ export default function OiReplayPage() {
     for (const p of paperPositions) {
       if (p.status !== 'OPEN' || p.entryTime == null) continue
       const own = ownChainOf(p)
+      // A replayed day's position whose index's day is not loaded (now): it waits - never judged by the wall clock.
+      if (!own && !isLive) continue
       const clockMs = own ? asOfMs : Date.now()
       const hit = paperExitHit(seriesOf(p), p, { asOfMs: own ? asOfMs : null, clockMs, fallback: fallbackLevelsOf(p) })
       if (hit) hits.set(p.id, { ...hit, exitTime: paperExitTime(hit.at, clockMs) })
@@ -6073,6 +6175,15 @@ export default function OiReplayPage() {
               <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
                 <Button type="primary" onClick={loadDayAndAnnounce} loading={loading} disabled={!canLoad}>Load day</Button>
               </Tooltip>
+              {!isLive && (
+                <Tooltip title={`Trade another index than the charts: the paper panel and the order ticket (F1 / S) take its ATM strike, premiums, lot size and SL / target at the replay clock, while every chart stays on ${underlying}. Its day is loaded with the charts' (Load day). Replay only - live orders stay on the index on screen.`}>
+                  <Select
+                    value={paperUnderlying} onChange={pickTradeIndex} style={{ width: 150 }} aria-label="Trade in"
+                    options={TRADE_INDEXES.map((u) => ({ value: u, label: u === underlying ? `Trade in ${u}` : `Trade in ${u} ⇄` }))}
+                  />
+                </Tooltip>
+              )}
+              {!isLive && tradingOther && tradeIndexNote}
               {!controlsCollapsed && (
                 <Tooltip title="Skip the saved copy of this day (the server's Dhan cache and its stored database), ask Dhan for all of it again and update the cache with what comes back. Slower - use it when a day looks wrong or will not load from the cache. Unticks itself after the load.">
                   <Checkbox checked={forceFetch} onChange={(e) => setForceFetch(e.target.checked)} disabled={loading}>Force fetch from Dhan</Checkbox>
@@ -6739,7 +6850,7 @@ export default function OiReplayPage() {
       <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       {ticket && (
         <OrderTicket
-          ticket={ticket} onClose={() => setTicket(null)} onPlace={placeFromTicket} underlying={underlying} atmStrike={atmStrike} step={step}
+          ticket={ticket} onClose={() => setTicket(null)} onPlace={placeFromTicket} underlying={paperUnderlying} atmStrike={paperAtm} step={paperStep}
           live={liveTradeActive} premiumOf={premiumOf} slippage={liveSlippage}
           blockReason={liveExpiryDate == null ? 'Waiting for the listed expiries.' : null}
           initial={{ side: paperSide, offset: paperStrikeOffset, lots: paperQtyLots, sl: paperSlPoints, target: paperTargetPoints, noStop: paperNoStop, noTrail: paperNoTrail }}
@@ -6749,10 +6860,10 @@ export default function OiReplayPage() {
         <PreTradeReview
           open={reviewOpen} onCancel={() => setReviewOpen(false)} onPlace={handleReviewPlace}
           order={{
-            mode: liveTradeActive ? 'live' : 'paper', direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots,
+            mode: liveTradeActive ? 'live' : 'paper', direction: paperDirection, underlying: paperUnderlying, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots,
             sl: paperNoStop ? 0 : paperSlPoints, target: paperNoStop ? 0 : paperTargetPoints, trailStart: paperTrailStart, trailGap: paperTrailOff ? 0 : paperTrailGap, noStop: paperNoStop, noTrail: paperNoTrail,
             summary: liveTradeActive ? liveOrderSummary : paperEntryPreview?.price != null
-              ? paperTradeText({ direction: paperDirection, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price) : '',
+              ? paperTradeText({ direction: paperDirection, underlying: paperUnderlying, strike: paperStrike, side: paperSide, qtyLots: paperQtyLots }, paperEntryPreview.price) : '',
           }}
           underlying={underlying} dateKey={result?.date} asOfMs={asOfMs} isLive={isLive}
           totals={{ totalCeOi, totalPeOi, pcr, maxPain }} dayOi={dayOiSummary}
@@ -6793,8 +6904,10 @@ export default function OiReplayPage() {
           onClose={() => setPaperPanelOpen(false)}
         >
           <PaperTradePanel
-            atmStrike={atmStrike} step={step}
-            underlying={underlying} onUnderlyingChange={selectUnderlying}
+            atmStrike={paperAtm} step={paperStep}
+            underlying={paperUnderlying} onUnderlyingChange={isLive ? selectUnderlying : pickTradeIndex}
+            indexHint={isLive ? null : `Pick the index to TRADE - the charts stay on ${underlying}. Another index's day is loaded with the charts' (Load day) and its options are priced at the same replay clock.`}
+            indexNote={tradeIndexNote}
             side={paperSide} onSideChange={setPaperSide}
             direction={paperDirection} onDirectionChange={setPaperDirection}
             strikeOffset={paperStrikeOffset} onStrikeOffsetChange={setPaperStrikeOffset}
@@ -6803,7 +6916,7 @@ export default function OiReplayPage() {
             targetPoints={paperTargetPoints} onTargetPointsChange={setPaperTargetPoints}
             trailStart={paperTrailStart} onTrailStartChange={setPaperTrailStart} trailGap={paperTrailGap} onTrailGapChange={setPaperTrailGap}
             noStop={paperNoStop} onNoStopChange={setPaperNoStop} noTrail={paperNoTrail} onNoTrailChange={setPaperNoTrail}
-            onPunch={handlePaperPunch} canPunch={atmStrike != null && paperEntryPreview?.price != null}
+            onPunch={handlePaperPunch} canPunch={paperAtm != null && paperEntryPreview?.price != null}
             onReview={() => setReviewOpen(true)}
             positions={enrichedPaperPositions} onExit={handlePaperExit} onExitAll={handlePaperExitAll} onClearAll={handlePaperClearAll}
             mode={liveTradeActive ? 'live' : 'paper'} onModeChange={isAdmin ? handleTradeModeChange : null}

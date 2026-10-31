@@ -364,7 +364,16 @@ When adding or changing a strategy:
   change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
   position is squared off at 15:15 (`tests/paper-stops.test.mjs`). Each position keeps its entry and exit time (`entryTime` /
   `exitTime`, shown HH:MM:SS under its prices): the clock at a punch or a manual exit (live, to the second); an auto exit's
-  the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`).
+  the second it was seen live, else the minute it hit in (`paperExitTime`, `tests/paper-exit.test.mjs`). TRADE IN ANOTHER
+  INDEX than the charts on a REPLAYED day (`tradeIndex.js`; "Trade in" beside Load day, the panel's index picker - in
+  replay it picks the TRADE index, the charts stay; `optionanalytics.oiReplay.tradeIndex`): NIFTY on screen, the paper
+  trades in SENSEX. Load day asks for the trade index's day too, alongside the charts' (the same `/run`, 1-minute, its
+  series = the charts' Weekly / Monthly, BANKNIFTY Monthly - `tradeRuns`, kept per index and day, that day's only; picked
+  after a load it is fetched at once); the panel and the order ticket take ITS ATM (`tradeAtmAt` - its spot bar of the
+  minute shown, nothing after the clock), step, premiums, lot size and SL / target / lots / trail (`paperUnderlying` -
+  a change reaches that index's open positions); each position is priced and exited from its own index's loaded day at
+  the replay clock (`chainOfPosition`), one with none loaded waits (never the wall clock). Live it is always the index
+  on screen - a live order is never sent for another index from here (`tests/trade-index.test.mjs`).
 - Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
   page's chain chart): the band follows spot, so a strike that joins it after the open counts from its first reading -
   counted in full, its whole OI showed up as "added since the open" (`tests/chain-oi-totals.test.mjs`). Market Read
