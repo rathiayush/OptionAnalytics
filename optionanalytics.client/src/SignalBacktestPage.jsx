@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, INDICATORS, MAX_BACKTEST_DAYS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, backtestDays, istMinute, prepareDay, simulateRun, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, INDICATORS, MAX_BACKTEST_DAYS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, TIMEFRAMES, backtestDays, istMinute, prepareDay, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
@@ -34,6 +34,7 @@ const STORE = {
   charges: 'optionanalytics.signalBacktest.charges',
   strategies: 'optionanalytics.signalBacktest.strategies',
   voteThreshold: 'optionanalytics.signalBacktest.voteThreshold',
+  timeframe: 'optionanalytics.signalBacktest.timeframe',
   equity: 'optionanalytics.signalBacktest.equityView',
 }
 const COLORS = ['#4096ff', '#fa8c16', '#36cfc9', '#f759ab', '#9254de', '#fadb14', '#73d13d', '#ff7875', '#69c0ff']
@@ -130,6 +131,8 @@ export default function SignalBacktestPage() {
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
   const [chosen, setChosen] = usePersistedState(STORE.strategies, SIGNAL_STRATEGY_IDS)
   const [voteThreshold, setVoteThreshold] = usePersistedState(STORE.voteThreshold, BACKTEST_DEFAULTS.voteThreshold)
+  const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
+  const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
   const [equityView, setEquityView] = usePersistedState(STORE.equity, 'each')
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const strategies = (Array.isArray(chosen) ? chosen : SIGNAL_STRATEGY_IDS).filter((id) => SIGNAL_STRATEGY_IDS.includes(id))
@@ -165,9 +168,9 @@ export default function SignalBacktestPage() {
 
   // The report - worked out again, in an instant, whenever a setting changes.
   const settings = useMemo(() => ({
-    mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold,
+    mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, timeframe,
     lotSize: PAPER_TRADE_LOT_SIZE[run.underlying] ?? lotSize,
-  }), [mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, lotSize, run.underlying])
+  }), [mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, timeframe, lotSize, run.underlying])
   const report = useMemo(() => {
     const okDays = run.results.filter((r) => r.day?.ok)
     // Day by day in date order - the weighted vote learning each indicator's accuracy from the days before (simulateRun).
@@ -270,6 +273,12 @@ export default function SignalBacktestPage() {
                 : <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={start} disabled={!dates.length}>Run backtest</Button>}
             </Space>
             <Space wrap size={[16, 8]} align="center">
+              <Tooltip title="The candles the strategies read: a signal only at a completed candle's close (candles from 09:15; the OI totals' breaks on buckets of the same size). Longer = fewer, steadier signals. The trade is still managed on the option's 1-minute bars.">
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Timeframe</Text>
+                  <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((m) => ({ value: m, label: `${m}m` }))} />
+                </Space>
+              </Tooltip>
               <Tooltip title="BUY: a bullish signal buys the call, a bearish one the put. SELL: a bullish signal sells the put, a bearish one the call (premium collected).">
                 <Segmented size="small" value={mode} onChange={setMode} options={[{ value: 'buy', label: 'Option BUY' }, { value: 'sell', label: 'Option SELL' }]} />
               </Tooltip>
@@ -317,12 +326,14 @@ export default function SignalBacktestPage() {
             )}
             <FoldText id="signalBacktest.how" label="how it works" className="oa-note">
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Each day is replayed minute by minute: a strategy&apos;s signal at a minute uses only what was known at the end of that minute
-                (no look-ahead). Its trade enters at that minute&apos;s option close - BUY the call / put in the signal&apos;s direction, or SELL the put /
+                Each day is replayed minute by minute and the strategies read it on the Timeframe&apos;s candles (from 09:15): a signal on a
+                candle uses only what was known at its close - the end of its last minute (no look-ahead) - and the times shown are that
+                last minute (a 5m candle from 10:30 signals at 10:34, its close). Its trade enters at that minute&apos;s option close - BUY the call / put in the signal&apos;s direction, or SELL the put /
                 call against it - and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop
                 fills at its open, the stop before the target in the same bar, the time stop and the 15:10 square-off at the bar&apos;s close. No
                 entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. A condition that stays
-                true signals once, on the minute it becomes true. Hover a strategy for its rule.
+                true signals once, on the candle it becomes true. Windows given in minutes (the straddle&apos;s 15-minute move, a fresh break,
+                the indicators&apos; 15-minute outcome) stay minutes on every timeframe. Hover a strategy for its rule.
               </Text>
             </FoldText>
           </Space>
@@ -335,7 +346,7 @@ export default function SignalBacktestPage() {
             )}
             <Card
               size="small"
-              title={`${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · option ${mode === 'sell' ? 'SELL' : 'BUY'} · SL ${slPct}% · target ${targetPct}%`}
+              title={`${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · option ${mode === 'sell' ? 'SELL' : 'BUY'} · SL ${slPct}% · target ${targetPct}%`}
               extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
             >
               <Table size="small" pagination={false} scroll={{ x: 1300 }} columns={summaryColumns} dataSource={[report.all, ...report.rows]} />

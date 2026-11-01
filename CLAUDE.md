@@ -485,7 +485,13 @@ When adding or changing a strategy:
   wins; a signal when the weighted vote reaches "Weighted vote ≥" (30%) of all the weight one way. WALK-FORWARD: each day
   is traded with the weights learned from the days BEFORE it only (`simulateRun`; the first day all equal) - never its
   own outcome; the page's "Indicator accuracy" table shows each one's right / wrong / accuracy / weight. The OI since open
-  bias is 15%. A condition that stays true signals once, when it becomes true (`edges`). A trade: the option's close at the signal minute, then its own
+  bias is 15%. A condition that stays true signals once, when it becomes true (`edges`). TIMEFRAME (1 / 3 / 5 / 15 min,
+  `TIMEFRAMES`, `timeframeView`): the strategies read the day on candles from 09:15 - a candle's OHLC from its minutes,
+  every other feature as at the end of its LAST minute, the OI totals' breaks / 🎯 on that timeframe's own buckets
+  (`oiTf`, worked out in `prepareDay`), each in the candle it became known in - so a signal is known at the candle's
+  close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; windows given in
+  minutes (the straddle's 15-minute move, a fresh break, the indicators' 15-minute outcome) stay minutes (`span`); a
+  change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
   time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
   report (`summarize`): per strategy and all together - trades, win %, net / gross P&L, points, average win / loss, profit

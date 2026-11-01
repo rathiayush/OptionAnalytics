@@ -36,6 +36,8 @@ const STALE_MINUTES = 5
 const SESSION_FIRST = 9 * 60 + 15     // 09:15
 const SESSION_LAST = 15 * 60 + 29     // 15:29
 const IB_LAST = 10 * 60 + 14          // the Initial Balance: 09:15 - 10:14 (the first hour)
+/** The timeframes the strategies can be read on (minutes) - each divides the session from 09:15 and the IB's hour. */
+export const TIMEFRAMES = [1, 3, 5, 15]
 
 const msOf = (t) => (typeof t === 'number' ? t : Date.parse(t))
 const minuteOf = (ms) => Math.floor(ms / MIN) * MIN
@@ -107,6 +109,32 @@ function developingProfile(rowSize) {
       return { poc: (poc + 0.5) * rowSize, vah: (keys[hi] + 1) * rowSize, val: keys[lo] * rowSize }
     },
   }
+}
+
+/** The OI totals' cumulative Δ breaks and 🎯 signals on `bucketSeconds` buckets, minute by minute: at the end of each
+ *  minute only the buckets completed by then are read, so an event is listed at the minute it became known. Also the
+ *  net cumulative Δ at the last completed bucket, each minute. */
+function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
+  const n = t.length
+  const ceLevels = perStrikeLevels(ceLevelSeries, bucketSeconds)
+  const peLevels = perStrikeLevels(peLevelSeries, bucketSeconds)
+  const oiTotals = buildOiTotalsRows(changesFromLevels(ceLevels), changesFromLevels(peLevels))
+  const breakWatch = newBreakWatch()
+  const hpWatch = newHighProbabilityWatch()
+  const breaks = []
+  const hp = []
+  const netCum = new Float64Array(n).fill(NaN)
+  for (let i = 0; i < n; i++) {
+    const nowSec = Math.floor(t[i] / 1000) + IST_OFFSET_SECONDS + 60     // the end of minute i
+    const reads = completedLevelReads(oiTotals, bucketSeconds, nowSec)
+    if (!reads) continue
+    netCum[i] = oiTotals.rows.netCum.get(reads.last) ?? NaN
+    const fresh = watchBreaks(breakWatch, reads, bucketSeconds)
+    for (const b of fresh) breaks.push({ i, dir: breakMeaning(b.side.key, b.up), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
+    const signals = watchHighProbability(hpWatch, fresh, { totals: oiTotals, ceLevels, peLevels, last: reads.last, atmStrike: atm[i], bucketSeconds })
+    for (const x of signals) hp.push({ i, dir: x.hp.bullish ? 1 : -1, text: `🎯 ${x.hp.bullish ? 'bullish' : 'bearish'}: OI ${x.b.side.label} break + ${x.hp.side} OI at ATM ± 1 ${x.hp.pct >= 0 ? '+' : ''}${x.hp.pct.toFixed(0)}%` })
+  }
+  return { breaks, hp, netCum }
 }
 
 /**
@@ -183,26 +211,14 @@ export function prepareDay(run, { underlying = null } = {}) {
   const oi = totals.map((x) => ({ ce: x.ce - totals[0].ce, pe: x.pe - totals[0].pe }))
 
   // The OI totals' cumulative Δ breaks (CE / PE / Net) and the 🎯 high-probability signal, stepped minute by minute on
-  // the completed 1-minute buckets (the OI Replay page's own step, `oiLevelBreaks.js`).
+  // the completed buckets (the OI Replay page's own step, `oiLevelBreaks.js`) - 1-minute buckets, and each longer
+  // timeframe's own buckets (the OI totals chart at that timeframe) for the strategies read on its candles.
   const levelSeries = (series) => new Map([...series].map(([k, list]) => [k, list.map((p) => ({ t: p.ms, oi: p.openInterest }))]))
-  const ceLevels = perStrikeLevels(levelSeries(ceSeries), 60)
-  const peLevels = perStrikeLevels(levelSeries(peSeries), 60)
-  const oiTotals = buildOiTotalsRows(changesFromLevels(ceLevels), changesFromLevels(peLevels))
-  const breakWatch = newBreakWatch()
-  const hpWatch = newHighProbabilityWatch()
-  const breaks = []
-  const hp = []
-  const netCum = new Float64Array(n).fill(NaN)
-  for (let i = 0; i < n; i++) {
-    const nowSec = Math.floor(t[i] / 1000) + IST_OFFSET_SECONDS + 60     // the end of minute i
-    const reads = completedLevelReads(oiTotals, 60, nowSec)
-    if (!reads) continue
-    netCum[i] = oiTotals.rows.netCum.get(reads.last) ?? NaN
-    const fresh = watchBreaks(breakWatch, reads, 60)
-    for (const b of fresh) breaks.push({ i, dir: breakMeaning(b.side.key, b.up), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
-    const signals = watchHighProbability(hpWatch, fresh, { totals: oiTotals, ceLevels, peLevels, last: reads.last, atmStrike: atm[i], bucketSeconds: 60 })
-    for (const s of signals) hp.push({ i, dir: s.hp.bullish ? 1 : -1, text: `🎯 ${s.hp.bullish ? 'bullish' : 'bearish'}: OI ${s.b.side.label} break + ${s.hp.side} OI at ATM ± 1 ${s.hp.pct >= 0 ? '+' : ''}${s.hp.pct.toFixed(0)}%` })
-  }
+  const ceLevelSeries = levelSeries(ceSeries)
+  const peLevelSeries = levelSeries(peSeries)
+  const { breaks, hp, netCum } = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, 60)
+  const oiTf = {}
+  for (const tf of TIMEFRAMES) if (tf > 1) oiTf[tf] = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, tf * 60)
 
   // The OI walls (the spot chart's S-R): the most call OI at or above spot, the most put OI at or below it - the strikes'
   // latest OI at the end of each minute.
@@ -249,7 +265,7 @@ export function prepareDay(run, { underlying = null } = {}) {
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, profile, netCum,
+    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, profile, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap),
@@ -257,6 +273,57 @@ export function prepareDay(run, { underlying = null } = {}) {
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t),
   }
+}
+
+// ---- The timeframe ----------------------------------------------------------------------------------------------------
+// The strategies read a day on candles of the chosen timeframe, from 09:15: a candle's OHLC from its minutes, every other
+// feature (OI, walls, GEX, straddle, VWAP, profile) as at the END of its last minute, the OI totals' breaks / 🎯 from
+// that timeframe's own buckets, each at the candle it became known in. A signal on a candle is known at its close - its
+// last minute's end - so the trade enters at that minute's option close and is managed on the 1-minute bars from the next
+// minute (`at` maps a candle to its last minute). Timeframe 1 is the day itself.
+
+const fitTimeframe = (tf) => { const m = Math.round(Number(tf) || 1); return TIMEFRAMES.includes(m) ? m : 1 }
+/** A window given in minutes, in candles of the day's timeframe (at least one). */
+const span = (d, minutes) => Math.max(1, Math.round(minutes / (d.tf ?? 1)))
+
+/** The prepared day `d` read on `tf`-minute candles (kept on the day, worked out once a timeframe). */
+export function timeframeView(d, tf = 1) {
+  const m = fitTimeframe(tf)
+  if (!d?.ok || m === 1) return d
+  if (!d.views) Object.defineProperty(d, 'views', { value: new Map(), enumerable: false })
+  const kept = d.views.get(m)
+  if (kept) return kept
+  const first = []
+  const last = []
+  const candleOf = new Int32Array(d.n)
+  let bucket = null
+  for (let i = 0; i < d.n; i++) {
+    const b = Math.floor((istMinute(d.t[i]) - SESSION_FIRST) / m)
+    if (b !== bucket) { first.push(i); last.push(i); bucket = b } else last[last.length - 1] = i
+    candleOf[i] = first.length - 1
+  }
+  const pick = (list) => last.map((i) => list[i])
+  const candles = (ohlc) => {
+    const o = [], h = [], l = [], c = []
+    for (let k = 0; k < first.length; k++) {
+      let hi = -Infinity, lo = Infinity
+      for (let i = first[k]; i <= last[k]; i++) { hi = Math.max(hi, ohlc.h[i]); lo = Math.min(lo, ohlc.l[i]) }
+      o.push(ohlc.o[first[k]]); h.push(hi); l.push(lo); c.push(ohlc.c[last[k]])
+    }
+    return { o, h, l, c }
+  }
+  const reads = d.oiTf?.[m] ?? { breaks: d.breaks, hp: d.hp, netCum: d.netCum }
+  const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
+  const view = {
+    ...d, tf: m, n: first.length, at: Int32Array.from(last),
+    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
+    profile: pick(d.profile), vwap: pick(d.vwap), netCum: pick(reads.netCum),
+    spot: candles(d.spot), price: candles(d.price),
+    breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
+    ib: d.ib ? { ...d.ib, done: candleOf[d.ib.done] } : null,
+  }
+  d.views.set(m, view)
+  return view
 }
 
 // ---- The strategies -------------------------------------------------------------------------------------------------
@@ -292,18 +359,19 @@ const sideWord = (dir) => (dir > 0 ? 'bullish' : 'bearish')
 // over the next `horizon` minutes (a smaller move counts neither way). The weighted vote's weights come from the days
 // BEFORE the one traded (walk-forward - `simulateRun`), never from the day itself.
 
-const latestWithin = (events, i, span) => {
+const latestWithin = (d, events, i, minutes) => {
+  const candles = span(d, minutes)
   let dir = 0
-  for (const e of events) if (e.i <= i && e.i > i - span) dir = e.dir
+  for (const e of events) if (e.i <= i && e.i > i - candles) dir = e.dir
   return dir
 }
-const moveOver = (d, i, minutes) => d.spot.c[i] - d.spot.c[Math.max(0, i - minutes)]
+const moveOver = (d, i, minutes) => d.spot.c[i] - d.spot.c[Math.max(0, i - span(d, minutes))]
 
 export const INDICATORS = [
   { id: 'oi', name: 'OI since open', vote: (d, i) => { const b = oiBias(d, i); return Math.abs(b) >= 0.1 ? Math.sign(b) : 0 } },
   { id: 'netCum', name: 'Net cumulative Δ', vote: (d, i) => (Number.isFinite(d.netCum[i]) && d.netCum[i] !== 0 ? -Math.sign(d.netCum[i]) : 0) },
-  { id: 'break', name: 'Cumulative Δ break', vote: (d, i) => latestWithin(d.breaks, i, 15) },
-  { id: 'hp', name: '🎯 signal', vote: (d, i) => latestWithin(d.hp, i, 15) },
+  { id: 'break', name: 'Cumulative Δ break', vote: (d, i) => latestWithin(d, d.breaks, i, 15) },
+  { id: 'hp', name: '🎯 signal', vote: (d, i) => latestWithin(d, d.hp, i, 15) },
   {
     id: 'walls', name: 'OI walls (room)',
     vote: (d, i) => { const { support, resistance } = d.walls[i]; const c = d.spot.c[i]; return support != null && resistance != null ? Math.sign((resistance - c) - (c - support)) : 0 },
@@ -321,7 +389,7 @@ export const INDICATORS = [
   { id: 'vwap', name: 'VWAP', vote: (d, i) => above(d, i) },
   {
     id: 'straddle', name: 'Straddle',
-    vote: (d, i) => { const p = d.straddle[i], back = d.straddle[Math.max(0, i - 15)]; return p && back && p.value > p.vwap ? Math.sign(p.forward - back.forward) : 0 },
+    vote: (d, i) => { const p = d.straddle[i], back = d.straddle[Math.max(0, i - span(d, 15))]; return p && back && p.value > p.vwap ? Math.sign(p.forward - back.forward) : 0 },
   },
   {
     id: 'profile', name: 'IB / POC',
@@ -349,9 +417,10 @@ export function indicatorVotes(d) {
   return out
 }
 
-/** How each indicator's votes on a day came out: { [id]: { right, wrong } } - a vote at minute j judged by spot's move
- *  over the next `horizon` minutes (only votes from 09:30, and only where that move is known). */
-export function indicatorOutcomes(d, { horizon = 15, minMovePct = 0.05 } = {}) {
+/** How each indicator's votes on a day came out: { [id]: { right, wrong } } - a vote at minute (candle) j judged by spot's
+ *  move over the next `horizon` minutes (only votes from 09:30, and only where that move is known). */
+export function indicatorOutcomes(d, { horizon: minutes = 15, minMovePct = 0.05 } = {}) {
+  const horizon = span(d, minutes)
   const votes = indicatorVotes(d)
   const out = Object.fromEntries(INDICATOR_IDS.map((id) => [id, { right: 0, wrong: 0 }]))
   for (let j = 0; j + horizon < d.n; j++) {
@@ -406,7 +475,7 @@ export const SIGNAL_STRATEGIES = [
   },
   {
     id: 'oiWalls', name: 'OI S-R wall bounce',
-    rule: 'Spot touches the OI support (the most put OI at or below it) within a quarter strike and the minute closes up, back above it = bullish; touches the OI resistance (the most call OI at or above it) and closes down, under it = bearish.',
+    rule: 'Spot touches the OI support (the most put OI at or below it) within a quarter strike and the candle closes up, back above it = bullish; touches the OI resistance (the most call OI at or above it) and closes down, under it = bearish.',
     signals: (d) => edges(d, (i) => {
       if (i === 0) return 0
       const { support, resistance } = d.walls[i - 1]
@@ -442,8 +511,8 @@ export const SIGNAL_STRATEGIES = [
     signals: (d) => edges(d, (i) => {
       if (i < 2) return 0
       const s = [above(d, i - 2), above(d, i - 1), above(d, i)]
-      if (s[0] <= 0 && s[1] > 0 && s[2] > 0) return { dir: 1, why: `price held above VWAP ${d.vwap[i].toFixed(1)} for 2 min` }
-      if (s[0] >= 0 && s[1] < 0 && s[2] < 0) return { dir: -1, why: `price held below VWAP ${d.vwap[i].toFixed(1)} for 2 min` }
+      if (s[0] <= 0 && s[1] > 0 && s[2] > 0) return { dir: 1, why: `price held above VWAP ${d.vwap[i].toFixed(1)} for 2 closes` }
+      if (s[0] >= 0 && s[1] < 0 && s[2] < 0) return { dir: -1, why: `price held below VWAP ${d.vwap[i].toFixed(1)} for 2 closes` }
       return 0
     }),
   },
@@ -451,16 +520,19 @@ export const SIGNAL_STRATEGIES = [
     id: 'straddle', name: 'Straddle expansion',
     rule: 'The ATM straddle\'s card trade idea: the Auto ATM straddle over its VWAP 3 minutes (and over its decay-only line) - premium being bought - and the synthetic futures moved 25% of the day\'s priced half-range over 15 minutes and still going: up = bullish, down = bearish.',
     signals: (d) => edges(d, (i) => {
-      if (i < 15 || !(d.straddleWidth > 0)) return 0
-      const p = d.straddle[i], back = d.straddle[i - 15], start = d.straddle[i - 2]
+      // 3 minutes over its VWAP (one candle on 3 minutes and up), the move over 15 minutes, "still going" since the
+      // window's start (the candle before, on 3 minutes and up).
+      const hold = span(d, 3), read = span(d, 15), going0 = Math.max(1, hold - 1)
+      if (i < read || !(d.straddleWidth > 0)) return 0
+      const p = d.straddle[i], back = d.straddle[i - read], start = d.straddle[i - going0]
       if (!p || !back || !start) return 0
-      for (let k = i - 2; k <= i; k++) if (!d.straddle[k] || !(d.straddle[k].value > d.straddle[k].vwap)) return 0
+      for (let k = i - hold + 1; k <= i; k++) if (!d.straddle[k] || !(d.straddle[k].value > d.straddle[k].vwap)) return 0
       if (p.decay != null && !(p.value > p.decay)) return 0
       const move = p.forward - back.forward
       const going = p.forward - start.forward
       const need = 0.25 * d.straddleWidth
       const dir = move >= need && going > 0 ? 1 : move <= -need && going < 0 ? -1 : 0
-      return dir ? { dir, why: `straddle over its VWAP 3 min, futures ${move >= 0 ? '+' : '−'}${Math.abs(move).toFixed(0)} in 15 min` } : 0
+      return dir ? { dir, why: `straddle over its VWAP ${hold * (d.tf ?? 1)} min, futures ${move >= 0 ? '+' : '−'}${Math.abs(move).toFixed(0)} in ${read * (d.tf ?? 1)} min` } : 0
     }),
   },
   {
@@ -507,7 +579,7 @@ export const SIGNAL_STRATEGY_IDS = SIGNAL_STRATEGIES.map((s) => s.id)
 
 export const BACKTEST_DEFAULTS = {
   mode: 'buy', moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
-  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, voteThreshold: 0.3,
+  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, voteThreshold: 0.3, timeframe: 1,
 }
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
@@ -563,8 +635,9 @@ export function simulateTrade(d, i, option, { slPct, targetPct, timeStopMin = 0,
 
 /**
  * Every enabled strategy's signals and trades for one prepared day under the settings (BACKTEST_DEFAULTS + `settings`:
- * `strategies` the ids to run, `lotSize`, `chargesCfg`). One trade at a time per strategy, `cooldownMin` after an exit,
- * at most `maxTradesPerDay`, entries only from `entryFrom` to `lastEntry`. Returns `{ trades, signals }` - every trade
+ * `strategies` the ids to run, `lotSize`, `chargesCfg`, `timeframe` - the candles the strategies read, `timeframeView`).
+ * One trade at a time per strategy, `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom`
+ * to `lastEntry`. Returns `{ trades, signals }` - every trade
  * `{ date, strategy, dir, why, side, strike, action, entryTime, exitTime, entry, exit, exitReason, points, gross,
  * charges, net, holdMin }`; every signal `{ strategy, time, dir, why, taken, skipped }`.
  */
@@ -577,19 +650,23 @@ export function simulateDay(d, settings = {}) {
   const trades = []
   const signals = []
   if (!d?.ok) return { trades, signals }
+  // The strategies read the day on the timeframe's candles; a signal's candle -> its last minute, where the trade enters.
+  const view = timeframeView(d, s.timeframe)
+  const minuteOfSignal = (k) => (view.at ? view.at[k] : k)
   for (const strategy of SIGNAL_STRATEGIES) {
     if (!ids.includes(strategy.id)) continue
     let busyUntil = -1
     let count = 0
-    for (const sig of strategy.signals(d, s).sort((a, b) => a.i - b.i)) {
-      const minute = istMinute(d.t[sig.i])
-      const row = { strategy: strategy.id, time: d.t[sig.i], dir: sig.dir, why: sig.why, taken: false, skipped: null }
+    for (const sig of strategy.signals(view, s).sort((a, b) => a.i - b.i)) {
+      const i = minuteOfSignal(sig.i)
+      const minute = istMinute(d.t[i])
+      const row = { strategy: strategy.id, time: d.t[i], dir: sig.dir, why: sig.why, taken: false, skipped: null }
       signals.push(row)
       if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
-      if (sig.i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
+      if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
       if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
-      const option = optionFor(sig.dir, s.mode, d.atm[sig.i], d.step, s.moneyness)
-      const trade = simulateTrade(d, sig.i, option, s)
+      const option = optionFor(sig.dir, s.mode, d.atm[i], d.step, s.moneyness)
+      const trade = simulateTrade(d, i, option, s)
       if (!trade) { row.skipped = `no premium for ${option.strike} ${option.side}`; continue }
       row.taken = true
       count++
@@ -627,7 +704,7 @@ export function simulateRun(days, settings = {}) {
     const out = simulateDay(d, { ...settings, weights })
     trades.push(...out.trades)
     signals.push(...out.signals)
-    const outcome = indicatorOutcomes(d)
+    const outcome = indicatorOutcomes(timeframeView(d, settings.timeframe))
     for (const id of INDICATOR_IDS) { stats[id].right += outcome[id].right; stats[id].wrong += outcome[id].wrong }
   }
   return { trades, signals, accuracy: accuracyWeights(stats), daysWeights }

@@ -5,8 +5,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, INDICATOR_IDS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, accuracyWeights, equalWeights, indicatorOutcomes, indicatorVotes, istMinute, optionFor,
-  prepareDay, simulateDay, simulateRun, simulateTrade, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, INDICATOR_IDS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, TIMEFRAMES, accuracyWeights, equalWeights, indicatorOutcomes, indicatorVotes, istMinute,
+  optionFor, prepareDay, simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
 const MIN = 60_000
@@ -284,4 +284,85 @@ test('the days a backtest runs: weekdays in the range, before today, the latest 
   assert.equal(backtestDays('2026-01-01', '2026-10-30', '2026-10-31').length, 60)
   assert.equal(backtestDays('2026-01-01', '2026-10-30', '2026-10-31').at(-1), '2026-10-30')
   assert.deepEqual(backtestDays(null, '2026-10-30', '2026-10-31'), [])
+})
+
+// ---- The timeframe ---------------------------------------------------------------------------------------------------
+
+test('the timeframe: candles from 09:15 - OHLC from their minutes, every other feature as at their last minute', () => {
+  const d = fakeDay({
+    n: 70, spot: (i) => ({ o: 100 + i, h: 101 + i + (i === 7 ? 10 : 0), l: 99 + i, c: 100.5 + i }), vwap: (i) => i, oi: (i) => ({ ce: i, pe: 0 }),
+    breaks: [{ i: 7, dir: 1, text: 'x' }], ib: { high: 200, low: 50, done: 59 },
+  })
+  assert.deepEqual(TIMEFRAMES, [1, 3, 5, 15])
+  assert.equal(timeframeView(d, 1), d)          // 1 minute: the day itself
+  assert.equal(timeframeView(d, 7), d)          // not a timeframe offered: 1 minute
+  const v = timeframeView(d, 5)
+  assert.equal(v.tf, 5)
+  assert.equal(v.n, 14)
+  assert.deepEqual([...v.at].slice(0, 3), [4, 9, 14])        // each candle's last minute
+  assert.deepEqual(v.spot.o.slice(0, 2), [100, 105])
+  assert.deepEqual(v.spot.h.slice(0, 2), [105, 118])          // 09:22's spike is in the 09:20 candle
+  assert.deepEqual(v.spot.l.slice(0, 2), [99, 104])
+  assert.deepEqual(v.spot.c.slice(0, 2), [104.5, 109.5])
+  assert.deepEqual(v.vwap.slice(0, 2), [4, 9])
+  assert.deepEqual(v.oi[1], { ce: 9, pe: 0 })
+  assert.equal(v.t[1], d.t[9])                                 // known at the end of 09:24
+  assert.deepEqual(v.breaks, [{ i: 1, dir: 1, text: 'x' }])    // in the candle it happened in, known at its close
+  assert.equal(v.ib.done, 11)                                  // the 10:10 candle ends the IB
+  assert.equal(timeframeView(d, 5), v)                         // worked out once
+})
+
+test('the timeframe: a strategy reads completed candles - a 2-minute blip over VWAP is no 5-minute cross; the trade enters at the candle\'s last minute', () => {
+  // VWAP 100; price under it, over it at 09:56 - 09:57 only (a blip), under again, then over it for good from 10:25.
+  const px = (i) => (i === 41 || i === 42 || i >= 70 ? 101 : 99)
+  const d = fakeDay({ n: 120, spot: (i) => px(i), vwap: () => 100, legs: { ce: { 100: flat(50) }, pe: { 100: flat(50) } } })
+  const oneMin = strategy('vwap').signals(d).map((x) => [x.i, x.dir])
+  assert.deepEqual(oneMin, [[42, 1], [44, -1], [71, 1]])
+  const fiveMin = strategy('vwap').signals(timeframeView(d, 5)).map((x) => [x.i, x.dir])
+  assert.deepEqual(fiveMin, [[15, 1]])                         // the 10:25 and 10:30 candles both closed over it
+  const { trades, signals } = simulateDay(d, { strategies: ['vwap'], timeframe: 5, lotSize: 65 })
+  assert.equal(signals.length, 1)
+  assert.equal(trades.length, 1)
+  assert.equal(trades[0].entryTime, d.t[79])                   // 10:34 - the 10:30 candle's last minute, its close
+  assert.equal(istMinute(trades[0].entryTime), 10 * 60 + 34)
+  // 1 minute: as before.
+  assert.equal(simulateDay(d, { strategies: ['vwap'], lotSize: 65, maxTradesPerDay: 5, cooldownMin: 0 }).signals.length, 3)
+})
+
+test('the timeframe: windows given in minutes stay minutes - the indicators\' 15-minute outcome is one 15-minute candle', () => {
+  const d = fakeDay({ n: 60, spot: (i) => 25000 * (1 + 0.001 * i), vwap: () => 24000 })
+  assert.deepEqual(indicatorOutcomes(d).vwap, { right: 30, wrong: 0 })                    // 09:30 - 09:59, each judged 15 minutes on
+  assert.deepEqual(indicatorOutcomes(timeframeView(d, 15)).vwap, { right: 2, wrong: 0 })  // the 09:30 and 09:45 candles
+})
+
+test('the timeframe on a real day: the OI totals\' breaks on its own buckets, and nothing after a candle\'s close', () => {
+  const { run } = syntheticDay()
+  const full = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  for (const tf of [3, 5, 15]) {
+    // A bucket's break is known at the end of the bucket - the last minute of the timeframe's candle.
+    for (const b of full.oiTf[tf].breaks) assert.equal((istMinute(full.t[b.i]) - (9 * 60 + 15)) % tf, tf - 1, `${tf} min break at ${b.i}`)
+  }
+  assert.ok(full.oiTf[5].breaks.length > 0)
+  // The day cut at 11:44 (a candle's end on every timeframe): its candles are the full day's, and so are their signals.
+  const cut = Date.parse('2026-10-05T11:44:00+05:30')
+  const keep = (list) => list.filter((p) => Date.parse(p.time) <= cut)
+  const part = prepareDay({
+    ...run, optionExpiry: '2026-10-06', spotCandlesOneMinute: keep(run.spotCandlesOneMinute), futuresBars: keep(run.futuresBars), cePoints: keep(run.cePoints), pePoints: keep(run.pePoints),
+  }, { underlying: 'NIFTY' })
+  for (const tf of [3, 5, 15]) {
+    const pv = timeframeView(part, tf)
+    const fv = timeframeView(full, tf)
+    assert.equal(pv.n, 150 / tf)
+    for (let k = 0; k < pv.n; k++) {
+      for (const key of ['oi', 'walls', 'gex', 'straddle', 'profile', 'vwap', 'netCum', 'atm', 't', 'at']) assert.deepEqual(pv[key][k], fv[key][k], `${tf} min ${key} at ${k}`)
+      for (const key of ['spot', 'price']) for (const f of ['o', 'h', 'l', 'c']) assert.equal(pv[key][f][k], fv[key][f][k], `${tf} min ${key}.${f} at ${k}`)
+    }
+    assert.deepEqual(pv.breaks, fv.breaks.filter((b) => b.i < pv.n))
+    assert.deepEqual(pv.hp, fv.hp.filter((b) => b.i < pv.n))
+    const signalsOf = (d) => simulateDay(d, { lotSize: 65, timeframe: tf }).signals.map((x) => [x.strategy, x.time, x.dir])
+    assert.deepEqual(signalsOf(part), signalsOf(full).filter(([, time]) => time <= cut), `${tf} min signals`)
+  }
+  // Longer candles, fewer signals.
+  const count = (tf) => simulateDay(full, { lotSize: 65, timeframe: tf }).signals.length
+  assert.ok(count(15) < count(1), `${count(15)} < ${count(1)}`)
 })
