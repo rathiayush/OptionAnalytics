@@ -116,7 +116,9 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * The day's features at every session minute - each from what was known at the END of that minute. `run`: the OI
  * Replay run (`/api/oi-replay/{u}/run` - spotCandlesOneMinute, cePoints / pePoints, futuresBars, spotVwap, step,
  * optionExpiry); `prevProfile` the previous day's volume profile (`previousProfile`). Returns `{ ok: true, date, underlying, step, n, t, spot, price, priceSource, vwap, oi, breaks, hp,
- * walls, gex, straddle, ib, prevVp, atm, ce, pe, ceCum, peCum, netCum }` - or `{ ok: false, reason }`.
+ * walls, gex, straddle, ib, prevVp, atm, ce, pe, ceCum, peCum, netCum, expiry, isExpiry }` - or `{ ok: false, reason }`.
+ * `expiry` = the expiry of the options loaded (the run's `optionExpiry` - the weekly, BANKNIFTY's monthly), `isExpiry` =
+ * the day IS that expiry (known before the open - the expiry calendar).
  */
 export function prepareDay(run, { underlying = null, prevProfile = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
@@ -130,6 +132,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
   const n = spotBars.length
   const t = spotBars.map((b) => b.t)
   const date = new Date(t[0] + IST_MS).toISOString().slice(0, 10)
+  const expiry = /^\d{4}-\d{2}-\d{2}/.test(String(run?.optionExpiry ?? '')) ? String(run.optionExpiry).slice(0, 10) : null
 
   // The price the VWAP / Initial Balance are read on: the futures (they carry volume) when they cover the day,
   // else the index (its own VWAP from the server, when it had volume).
@@ -245,6 +248,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
     prevVp: previousProfile(prevProfile, date),
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t),
+    expiry, isExpiry: expiry === date,
   }
 }
 
@@ -954,10 +958,21 @@ export function ruleSignals(d, rule, { openAt = null } = {}) {
 export const BACKTEST_DEFAULTS = {
   moneyness: 0, slPct: 30, targetPct: 50, levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
   lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
+  // On the options' EXPIRY DAY: trade as the rule says ('rule'), or always BUY / always SELL ('buy' / 'sell') - the
+  // signal's direction kept (a bullish one buys the call or sells the put).
+  expiryDay: 'rule',
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
 }
+
+/** What to do on the options' expiry day (`expiryDay`) - overriding the rule's buy / sell there, the direction kept. */
+export const EXPIRY_DAY_CHOICES = [
+  { value: 'rule', label: 'As the rule' },
+  { value: 'buy', label: 'Buy options' },
+  { value: 'sell', label: 'Sell options' },
+]
+const EXPIRY_MODES = new Set(['buy', 'sell'])
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
  *  0 ATM, 1 one strike in the money, -1 one out of the money. */
@@ -1032,8 +1047,10 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * The rule's signals and trades for one prepared day under the settings (BACKTEST_DEFAULTS + `settings`: `rule`,
  * `lotSize`, `chargesCfg`, `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
  * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
- * `lastEntry`. Returns `{ trades, signals }` - every trade `{ date, strategy ('rule' | 'mirror'), dir, why, side, strike,
- * action, entryTime, exitTime, entry, exit, exitReason, points, gross, charges, net, holdMin }`; every signal
+ * `lastEntry`. On the options' expiry day (`d.isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
+ * signal's direction kept: bullish buys the call or sells the put). Returns `{ trades, signals }` - every trade `{ date,
+ * strategy ('rule' | 'mirror'), dir, why, side, strike, action, expiryDay, overridden, entryTime, exitTime, entry, exit,
+ * exitReason, points, gross, charges, net, holdMin }`; every signal
  * `{ strategy, time, dir, why, taken, skipped }`.
  */
 export function simulateDay(d, settings = {}) {
@@ -1052,11 +1069,16 @@ export function simulateDay(d, settings = {}) {
   // The first candle whose close is in the entry window: a rule already holding then signals on it.
   let openAt = 0
   while (openAt < view.n && istMinute(view.t[openAt]) < from) openAt++
+  // The expiry day's own choice overrides the rule's buy / sell (the signal's direction kept).
+  const expiryMode = d.isExpiry && EXPIRY_MODES.has(s.expiryDay) ? s.expiryDay : null
   for (const sig of ruleSignals(view, s.rule, { openAt })) {
     const i = minuteOfSignal(sig.i)
-    const { dir, mode } = ACTION[sig.action]
+    const { dir, mode: ruleMode } = ACTION[sig.action]
+    const mode = expiryMode ?? ruleMode
+    const overridden = mode !== ruleMode
+    const why = overridden ? `Expiry day - ${mode === 'sell' ? 'selling' : 'buying'} instead · ${sig.why}` : sig.why
     const minute = istMinute(d.t[i])
-    const row = { strategy: sig.side, time: d.t[i], dir, why: sig.why, taken: false, skipped: null }
+    const row = { strategy: sig.side, time: d.t[i], dir, why, taken: false, skipped: null }
     signals.push(row)
     if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
     if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
@@ -1071,7 +1093,7 @@ export function simulateDay(d, settings = {}) {
     const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg)
     const gross = trade.points * s.lots * lotSize
     trades.push({
-      date: d.date, strategy: sig.side, dir, why: sig.why, ...option,
+      date: d.date, strategy: sig.side, dir, why, ...option, expiryDay: Boolean(d.isExpiry), overridden,
       entryTime: d.t[trade.entryIndex], exitTime: d.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
       points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net: s.charges && money ? money.net : gross,
       holdMin: Math.round((d.t[trade.exitIndex] - d.t[trade.entryIndex]) / MIN),
@@ -1149,10 +1171,11 @@ export function tradesCsv(trades) {
     const safe = /^[=+\-@]/.test(text) && !/^-?\d/.test(text) ? `'${text}` : text
     return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
   }
-  const head = ['date', 'rule', 'signal', 'action', 'option', 'entry time', 'entry', 'exit time', 'exit', 'exit reason', 'points', 'gross', 'charges', 'net', 'why']
+  const head = ['date', 'rule', 'signal', 'action', 'option', 'entry time', 'entry', 'exit time', 'exit', 'exit reason', 'points', 'gross', 'charges', 'net', 'expiry day', 'why']
   const rows = trades.map((t) => [
     t.date, name[t.strategy] ?? t.strategy, t.dir > 0 ? 'bullish' : 'bearish', t.action, `${t.strike} ${t.side}`, time(t.entryTime), t.entry.toFixed(2),
-    time(t.exitTime), t.exit.toFixed(2), t.exitReason, t.points.toFixed(2), t.gross.toFixed(0), t.charges.toFixed(0), t.net.toFixed(0), t.why,
+    time(t.exitTime), t.exit.toFixed(2), t.exitReason, t.points.toFixed(2), t.gross.toFixed(0), t.charges.toFixed(0), t.net.toFixed(0),
+    t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', t.why,
   ])
   return [head, ...rows].map((r) => r.map(cell).join(',')).join('\n')
 }

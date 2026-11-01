@@ -61,6 +61,7 @@ test('a run is its days\' outcomes: the same trades, signals and numbers simulat
     }
     assert.equal(report.okDays, 4)
     assert.deepEqual(report.dayRows.map((r) => r.date), DATES)
+    assert.deepEqual(report.dayRows.map((r) => r.expiry), [true, true, false, true, true])   // each day the synthetic run's expiry; the holiday not run
     assert.deepEqual(report.failed, [{ date: HOLIDAY, reason: 'holiday' }])
     assert.deepEqual(report.noPrev, ['2026-10-23'])           // the rule reads the previous day's POC
     const last = report.lines.find((l) => l.id === 'all').points.at(-1)
@@ -92,6 +93,12 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
   assert.equal(reportHead(SETTINGS, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10%')
   assert.equal(reportHead(SETTINGS, 0), '')
+  // The expiry day's choice: kept when it is one, else "as the rule"; named in the heading when it overrides.
+  assert.equal(cleanBacktestSettings({ expiryDay: 'sell' }).expiryDay, 'sell')
+  assert.equal(cleanBacktestSettings({ expiryDay: 'hold' }).expiryDay, 'rule')
+  assert.equal(engineSettings(cleanBacktestSettings({ expiryDay: 'sell' })).expiryDay, 'sell')   // what the engine (and a background run) reads
+  assert.equal(SETTINGS.expiryDay, 'rule')
+  assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell')
   assert.equal(defaultRunName(SETTINGS), 'NIFTY 19 Oct – 23 Oct · Buy CE + mirror')
   // A profit factor with no losing trade survives JSON.
   assert.deepEqual(JSON.parse(JSON.stringify({ pf: Infinity, w: -Infinity, x: 1 }, reportReplacer), reportReviver), { pf: Infinity, w: -Infinity, x: 1 })

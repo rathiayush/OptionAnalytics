@@ -6,7 +6,7 @@
 // A run = its days' OUTCOMES put together: each day is replayed through the rule on its own (simulateDay - the days are
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
-  BACKTEST_DEFAULTS, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText,
+  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText,
   simulateDay, summarize,
 } from './signalBacktest.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
@@ -61,7 +61,7 @@ const held = (v, min, max, fallback) => {
 /**
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
- * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe }. The rule goes through its tree, as
+ * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -86,6 +86,7 @@ export function cleanBacktestSettings(s = {}) {
     lots: Math.round(held(s?.lots, 1, 100, d.lots)),
     charges: typeof s?.charges === 'boolean' ? s.charges : d.charges,
     timeframe: TIMEFRAMES.includes(Number(s?.timeframe)) ? Number(s.timeframe) : d.timeframe,
+    expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
   }
 }
 
@@ -101,7 +102,7 @@ export function dayOutcome(date, day, engine) {
   if (!day?.ok) return { date, ok: false, reason: day?.reason ?? 'not loaded', trades: [], signals: { rule: 0, mirror: 0 } }
   const { trades, signals } = simulateDay(day, engine)
   return {
-    date, ok: true, prev: Boolean(day.prevVp), trades,
+    date, ok: true, prev: Boolean(day.prevVp), expiry: Boolean(day.isExpiry), trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
 }
@@ -129,7 +130,7 @@ export function backtestReport(outcomes, settings) {
   }))
   const all = { key: 'all', id: 'all', name: SIDE_NAMES.all, what: 'the rule and its mirror together', signals: count('rule') + count('mirror'), ...summarize(trades) }
   const dayRows = days.map((o) => {
-    const row = { key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, trades: o.trades.length, net: netOf(o.trades) }
+    const row = { key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, expiry: Boolean(o.expiry), trades: o.trades.length, net: netOf(o.trades) }
     for (const id of sides) row[id] = netOf(o.trades.filter((t) => t.strategy === id))
     return row
   })
@@ -155,7 +156,8 @@ export function reportHead(s, okDays) {
   const unit = s.levelUnit === 'pts' ? ' pts' : '%'
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
-  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}`
+  const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
+  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}`
 }
 
 /** A run's name when none is given: the index, the days and the trade. */

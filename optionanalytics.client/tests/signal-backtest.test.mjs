@@ -623,6 +623,45 @@ test('a rule already true when entries open (09:30) signals then - a condition t
   assert.deepEqual(simulateDay(later, { rule: peAbove, lotSize: 65, timeStopMin: 5 }).trades.map((t) => istMinute(t.entryTime)), [9 * 60 + 15 + 100])
 })
 
+test('on the options\' expiry day the Expiry day setting overrides the rule\'s buy / sell - the direction kept; other days as the rule', () => {
+  // Spot under VWAP until 60 (bearish - the mirror), over it 60 - 119 (bullish - the rule), under it again from 120.
+  const legs = { ce: { 25000: flat(100) }, pe: { 25000: flat(100) } }
+  const day = (isExpiry) => ({ ...fakeDay({ legs, spot: (i) => (i >= 60 && i < 120 ? 25000 : 24980) }), isExpiry })
+  const base = { lotSize: 65, timeStopMin: 5, maxTradesPerDay: 5, cooldownMin: 0 }
+  const trades = (d, rule, expiryDay) => simulateDay(d, { ...base, rule, expiryDay }).trades
+  const what = (list) => list.map((t) => [t.strategy, t.action, t.side, t.overridden])
+  const buy = lines([{ id: 'vwap', value: 'above' }], 'buyCE', { mirror: true })
+  const asRule = trades(day(false), buy, 'rule')
+  assert.deepEqual(what(asRule), [['mirror', 'BUY', 'PE', false], ['rule', 'BUY', 'CE', false], ['mirror', 'BUY', 'PE', false]])
+  // Not an expiry day: the setting changes nothing.
+  assert.deepEqual(trades(day(false), buy, 'sell'), asRule)
+  // The expiry day, "As the rule": the same trades, marked as the expiry day's.
+  const onExpiry = trades(day(true), buy, 'rule')
+  assert.deepEqual(what(onExpiry), what(asRule))
+  assert.ok(onExpiry.every((t) => t.expiryDay))
+  // The expiry day, "Sell options": every signal SELLS - bullish sells the put, bearish the call - at the same minutes.
+  const sold = trades(day(true), buy, 'sell')
+  assert.deepEqual(what(sold), [['mirror', 'SELL', 'CE', true], ['rule', 'SELL', 'PE', true], ['mirror', 'SELL', 'CE', true]])
+  assert.deepEqual(sold.map((t) => t.entryTime), asRule.map((t) => t.entryTime))
+  assert.match(sold[1].why, /^Expiry day - selling instead · Buy CE: /)
+  assert.deepEqual(sold.map((t) => t.dir), asRule.map((t) => t.dir))
+  // A SELL rule with "Buy options" on the expiry day buys: bullish the call, bearish the put; "Sell options" leaves it.
+  const sell = lines([{ id: 'vwap', value: 'above' }], 'sellPE', { mirror: true })
+  assert.deepEqual(what(trades(day(true), sell, 'buy')), [['mirror', 'BUY', 'PE', true], ['rule', 'BUY', 'CE', true], ['mirror', 'BUY', 'PE', true]])
+  assert.deepEqual(what(trades(day(true), sell, 'sell')), [['mirror', 'SELL', 'CE', false], ['rule', 'SELL', 'PE', false], ['mirror', 'SELL', 'CE', false]])
+  // An unknown choice is "as the rule".
+  assert.deepEqual(what(trades(day(true), buy, 'maybe')), what(asRule))
+  // The CSV says which trades were the expiry day's and overridden.
+  const csv = tradesCsv(sold).split('\n')
+  assert.match(csv[0], /,net,expiry day,why$/)
+  assert.match(csv[1], /,yes - overridden,/)
+  // The prepared day knows its expiry: the run's optionExpiry (the options loaded) - before the open.
+  const { run } = syntheticDay()
+  assert.deepEqual([prepareDay({ ...run, optionExpiry: '2026-10-05' }).isExpiry, prepareDay({ ...run, optionExpiry: '2026-10-05' }).expiry], [true, '2026-10-05'])
+  assert.equal(prepareDay({ ...run, optionExpiry: '2026-10-06' }).isExpiry, false)
+  assert.deepEqual([prepareDay({ ...run, optionExpiry: null }).isExpiry, prepareDay({ ...run, optionExpiry: null }).expiry], [false, null])
+})
+
 test('the synthetic day end to end: buy and sell, the call and the put; every trade exits after it enters', () => {
   const { run } = syntheticDay()
   const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })

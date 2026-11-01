@@ -505,7 +505,14 @@ When adding or changing a strategy:
   developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now;
   a rule ALREADY TRUE when entries open (the first candle closing at / after 09:30 - `openAt`) signals there - else a
   condition true from the open (total PE OI above CE) never traded at all.
-  "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): every line's `opposite` value
+  "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). EXPIRY DAY (asked for - "that setting will override"):
+  on the options' expiry day (`prepareDay`'s `isExpiry` = the day is the run's `optionExpiry` - the weekly, BANKNIFTY's
+  monthly; known before the open) the "Expiry day" choice (`expiryDay`, `EXPIRY_DAY_CHOICES`: As the rule (default) / Buy
+  options / Sell options, `optionanalytics.signalBacktest.expiryDay`) OVERRIDES the rule's buy / sell - the signal's
+  direction kept (bullish buys the call or sells the put; the mirror's bearish one the put / the call), the same SL /
+  target / trail; other days as the rule. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
+  and day tables, the CSV's "expiry day" column, its `why` starting "Expiry day - selling instead"); the report heading
+  names it; a background run takes it with the rest of the settings. MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no
   side and stay; numbers, windows and AND / OR kept - `mirrorLines`) and the opposite trade - left out when no line has a
   side (`mirrorIsSame`). One trade at a time for the rule and its mirror together. The rule is saved whole

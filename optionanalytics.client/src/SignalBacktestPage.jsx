@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   mirrorIsSame, mirrorLines, normalizeRule, ruleText, tradesCsv,
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
@@ -45,6 +45,7 @@ const STORE = {
   timeframe: 'optionanalytics.signalBacktest.timeframe',
   rule: 'optionanalytics.signalBacktest.rule',
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
+  expiryDay: 'optionanalytics.signalBacktest.expiryDay',
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
@@ -235,6 +236,9 @@ export default function SignalBacktestPage() {
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
   const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
   const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
+  // On the options' expiry day: as the rule, or always buy / always sell (overriding the rule's buy / sell there).
+  const [storedExpiryDay, setExpiryDay] = usePersistedState(STORE.expiryDay, BACKTEST_DEFAULTS.expiryDay)
+  const expiryDay = EXPIRY_DAY_CHOICES.some((c) => c.value === storedExpiryDay) ? storedExpiryDay : BACKTEST_DEFAULTS.expiryDay
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
   // Always through its tree: a rule saved before the builder (lines + typed logic) opens as groups, numbered as shown.
   const rule = useMemo(() => {
@@ -286,8 +290,8 @@ export default function SignalBacktestPage() {
   // The settings as set - held to their ranges exactly as a background run holds them (cleanBacktestSettings).
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
-    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
-  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe])
+    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay,
+  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
   const engine = useMemo(() => engineSettings(runSettings), [runSettings])
@@ -314,6 +318,7 @@ export default function SignalBacktestPage() {
     setStoredRule(s.rule)
     setMoneyness(s.moneyness); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit); setTrailGap(s.trailGap); setTrailStart(s.trailStart)
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
+    setExpiryDay(s.expiryDay)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
   }
   // What the report cards show: the opened background run, else this page's run.
@@ -363,7 +368,7 @@ export default function SignalBacktestPage() {
     { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 90, align: 'right', render: (v) => rupees(v) },
   ]
   const dayColumns = [
-    { title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 110, render: (v) => dayjs(v).format('ddd D MMM') },
+    { title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 130, render: (v, r) => <Space size={4}>{dayjs(v).format('ddd D MMM')}{r.expiry && <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag>}</Space> },
     { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right', render: (v, r) => (r.ok ? v : <Tooltip title={r.reason}><Tag style={{ margin: 0 }}>no data</Tag></Tooltip>) },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v, r) => (r.ok ? <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> : '') },
     ...(sides.length > 1 ? sides.map((id) => ({
@@ -374,7 +379,14 @@ export default function SignalBacktestPage() {
     { title: 'Day', dataIndex: 'date', key: 'date', width: 100, render: (v) => dayjs(v).format('D MMM') },
     ...(sides.length > 1 ? [{ title: 'From', dataIndex: 'strategy', key: 'strategy', width: 90, render: (v) => sideTag(v) }] : []),
     { title: 'Signal', dataIndex: 'dir', key: 'dir', width: 80, render: (v) => <Tag color={v > 0 ? 'green' : 'red'} style={{ margin: 0 }}>{v > 0 ? 'bullish' : 'bearish'}</Tag> },
-    { title: 'Trade', key: 'trade', width: 130, render: (_, t) => <Text>{t.action} {t.strike} {t.side}</Text> },
+    {
+      title: 'Trade', key: 'trade', width: 150, render: (_, t) => (
+        <Space size={4}>
+          <Text>{t.action} {t.strike} {t.side}</Text>
+          {t.overridden && <Tooltip title="Expiry day: the Expiry day setting overrode the rule's buy / sell (the signal's direction kept)."><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag></Tooltip>}
+        </Space>
+      ),
+    },
     { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${clock(t.entryTime)} · ${num(t.entry, 2)}` },
     { title: 'Exit', key: 'exit', width: 110, render: (_, t) => `${clock(t.exitTime)} · ${num(t.exit, 2)}` },
     { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 150 },
@@ -451,6 +463,12 @@ export default function SignalBacktestPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Strike</Text>
                 <Select size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} options={[{ value: 0, label: 'ATM' }, { value: 1, label: '1 ITM' }, { value: -1, label: '1 OTM' }]} />
               </Space>
+              <Tooltip title="On the options' expiry day (the weekly's - BANKNIFTY's monthly): trade as the rule says, or always BUY or always SELL options - overriding the rule's Buy / Sell that day. The signal's direction is kept: a bullish signal buys the call or sells the put, a bearish one buys the put or sells the call. The SL, target and trail are the same.">
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Expiry day</Text>
+                  <Select size="small" value={expiryDay} onChange={setExpiryDay} style={{ width: 120 }} options={EXPIRY_DAY_CHOICES} />
+                </Space>
+              </Tooltip>
               <Tooltip title="Stop-loss, target and trailing stop in % of the entry premium, or in premium points.">
                 <Segmented size="small" value={levelUnit} onChange={setLevelUnit} options={[{ value: 'pct', label: '% premium' }, { value: 'pts', label: 'Points' }]} />
               </Tooltip>
@@ -573,7 +591,7 @@ export default function SignalBacktestPage() {
       {bgOpen && (
         <RunInBackgroundModal
           settings={pageSettings} days={dates.length} telegram={bgTelegram} setTelegram={setBgTelegram}
-          ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '')}
+          ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + (expiryDay !== 'rule' ? ` · on expiry day: ${expiryDay} options` : '')}
           onClose={() => setBgOpen(false)} onQueued={() => { setBgOpen(false); refreshJobs() }}
         />
       )}
