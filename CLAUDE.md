@@ -490,9 +490,10 @@ When adding or changing a strategy:
   tighter - `orGroups`), or a typed logic (the short-lived Logic box) - opens as its tree (`treeFromRule`; same-op chains
   one group) and the page always numbers from the tree; `ruleText` says the rule in words. The values: OI since open (PE / CE ahead, PE / CE crossed above the
   other), TOTAL OI (asked for - OI Replay's "Total OI" and its lookback table, the same chain-wide totals, `chainOiTotalsAt`,
-  kept as `tot`; OI since open is them less the open's): total CE / PE OI rising / falling / flat by a % over the window
-  (`totalCondition`), and the TOTAL OI PCR (PE ÷ CE) above / below a value, rising / falling by a %, and which side added
-  more OI in the window (`totalPcr`), the CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
+  kept as `tot`; OI since open is them less the open's): total CE / PE OI increased / decreased / flat by a % over the
+  window (`totalCondition`), and the Total OI chart's two lines CE vs PE (`totalOi`): PE above CE / CE above PE, PE crossed
+  above CE / CE crossed above PE in the window (still above now). No PCR - removed on request; a line saved with the
+  short-lived `totalPcr` is dropped (`cleanLine`), the rest of the rule kept. The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
   ATM straddle (vs its VWAP and the decay-only line, crossed), the Initial Balance (after 10:15), and VOLUME PROFILE
@@ -503,7 +504,7 @@ When adding or changing a strategy:
   resistance held, within %) and near it; inside / above / below the value area. A line saved while they were today's
   developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now;
   a rule ALREADY TRUE when entries open (the first candle closing at / after 09:30 - `openAt`) signals there - else a
-  condition true from the open (PCR above 0.9) never traded at all.
+  condition true from the open (total PE OI above CE) never traded at all.
   "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no
   side and stay; numbers, windows and AND / OR kept - `mirrorLines`) and the opposite trade - left out when no line has a

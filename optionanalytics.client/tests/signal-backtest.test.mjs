@@ -200,7 +200,7 @@ test('OI since open: PE / CE ahead, and a crossover within the window that still
   assert.ok(holds(d, 'oiOpen', 'ceCross', 81) && !holds(d, 'oiOpen', 'peCross', 81))
 })
 
-test('Total OI: total CE / PE OI rising / falling / flat by a % over the window; the PCR above / below, rising / falling; which side added more', () => {
+test('Total OI: total CE / PE OI increased / decreased / flat by a % over the window; CE vs PE - which is above, one crossing the other', () => {
   // Total CE OI 4 cr flat until 40, then +1% a minute for 10 minutes (to 4.4 cr), then flat. Total PE OI 4 cr all day.
   const ceAt = (i) => 4e7 * (i < 40 ? 1 : i < 50 ? 1 + (i - 40) * 0.01 : 1.1)
   const d = fakeDay({ tot: (i) => ({ ce: ceAt(i), pe: 4e7 }) })
@@ -210,18 +210,34 @@ test('Total OI: total CE / PE OI rising / falling / flat by a % over the window;
   assert.ok(holds(d, 'totalCe', 'flat', 60) && holds(d, 'totalCe', 'rising', 52, 15))             // 15-minute window still sees it
   assert.ok(holds(fakeDay({ tot: (i) => ({ ce: 4e7, pe: 4e7 * (1 - i * 0.002) }) }), 'totalPe', 'falling', 40))
   assert.ok(!holds(fakeDay({ tot: () => ({ ce: 0, pe: 0 }) }), 'totalCe', 'flat', 40))           // no OI read: nothing
-  // PCR: 1.0 until 40, CE building to 1.1x -> PCR 0.91.
-  assert.ok(holds(d, 'totalPcr', 'above', 30, 5, 0.95) && !holds(d, 'totalPcr', 'above', 30, 5, 1))
-  assert.ok(holds(d, 'totalPcr', 'below', 60, 5, 1) && !holds(d, 'totalPcr', 'below', 60, 5, 0.9))
-  assert.ok(holds(d, 'totalPcr', 'falling', 45) && !holds(d, 'totalPcr', 'rising', 45))
-  assert.ok(holds(d, 'totalPcr', 'falling', 45, 5, 3) && !holds(d, 'totalPcr', 'falling', 45, 5, 6))
-  assert.ok(holds(d, 'totalPcr', 'ceGaining', 45) && !holds(d, 'totalPcr', 'peGaining', 45))
-  assert.ok(!holds(d, 'totalPcr', 'ceGaining', 70))                                                // nothing added in the window
-  // In a rule, with its mirror: total PE OI rising -> buy the call; falling -> buy the put.
+  assert.match(cond('totalCe').options.find((o) => o.value === 'rising').label, /^Increased/)
+  assert.match(cond('totalPe').options.find((o) => o.value === 'falling').label, /^Decreased/)
+  // CE vs PE - the Total OI chart's two lines. PE 4.2 cr all day; CE 4 cr, 4.4 cr from 40 (CE crosses above PE), 4 cr from
+  // 70 (PE crosses back above CE).
+  const x = fakeDay({ tot: (i) => ({ ce: i >= 40 && i < 70 ? 4.4e7 : 4e7, pe: 4.2e7 }) })
+  assert.ok(holds(x, 'totalOi', 'peAbove', 30) && !holds(x, 'totalOi', 'ceAbove', 30))
+  assert.ok(holds(x, 'totalOi', 'ceAbove', 50) && !holds(x, 'totalOi', 'peAbove', 50))
+  assert.ok(holds(x, 'totalOi', 'ceCross', 42) && !holds(x, 'totalOi', 'peCross', 42))    // crossed at 40, 2 minutes ago
+  assert.ok(!holds(x, 'totalOi', 'ceCross', 46))                                            // 6 minutes ago: out of a 5-minute window
+  assert.ok(holds(x, 'totalOi', 'ceCross', 46, 10))                                         // in a 10-minute one
+  assert.ok(holds(x, 'totalOi', 'peCross', 72) && !holds(x, 'totalOi', 'ceCross', 72))
+  assert.ok(!holds(x, 'totalOi', 'peCross', 30))                                            // above all along: no cross
+  // A cross that did not hold is not one: CE above PE for 2 minutes only (40 - 41).
+  const poke = fakeDay({ tot: (i) => ({ ce: i === 40 || i === 41 ? 4.4e7 : 4e7, pe: 4.2e7 }) })
+  assert.ok(holds(poke, 'totalOi', 'ceCross', 41) && !holds(poke, 'totalOi', 'ceCross', 43) && holds(poke, 'totalOi', 'peCross', 43))
+  // No OI read: neither side.
+  const none = fakeDay({ tot: () => ({ ce: 0, pe: 0 }) })
+  assert.ok(!holds(none, 'totalOi', 'peAbove', 40) && !holds(none, 'totalOi', 'ceAbove', 40))
+  // In a rule, with its mirror: PE crossed above CE -> buy the call; CE crossed above PE -> buy the put.
+  assert.deepEqual(at(ruleSignals(x, lines([{ id: 'totalOi', value: 'peCross' }], 'buyCE', { mirror: true }))), [[40, 'mirror', 'buyPE'], [70, 'rule', 'buyCE']])
+  // And total PE OI increased -> buy the call; decreased -> buy the put.
   const pe = (i) => 4e7 * (i < 40 ? 1 : i < 50 ? 1 + (i - 40) * 0.01 : i < 80 ? 1.1 : 1.1 - (i - 80) * 0.01)
   const r = fakeDay({ tot: (i) => ({ ce: 4e7, pe: pe(i) }) })
   assert.deepEqual(at(ruleSignals(r, rule({ totalPe: 'rising' }, 'buyCE', { mirror: true }))), [[41, 'rule', 'buyCE'], [81, 'mirror', 'buyPE']])
-  assert.match(lineText({ id: 'totalPcr', value: 'above', param: 1.2 }), /^Total OI PCR \(PE ÷ CE\): PCR above > 1.2$/)
+  assert.match(lineText({ id: 'totalOi', value: 'peCross', windowMin: 10 }), /^Total OI: CE vs PE.*PE crossed above CE.*10 min/)
+  // The PCR condition was removed: a line saved with it is dropped, the rest of the rule kept.
+  assert.ok(!RULE_CONDITIONS.some((c) => c.id === 'totalPcr'))
+  assert.deepEqual(normalizeRule(lines([{ id: 'totalPcr', value: 'above', param: 0.9 }, { id: 'vwap', value: 'above' }])).lines.map((l) => l.id), ['vwap'])
 })
 
 test('Total OI on a prepared day: the chain-wide totals OI Replay shows - OI since open is them less the open\'s', () => {
@@ -588,22 +604,23 @@ test('a day\'s trades: entries 09:30 - 14:45, one at a time (rule and mirror tog
 })
 
 test('a rule already true when entries open (09:30) signals then - a condition true from the open is not lost', () => {
-  // Total OI PCR 1.0 all day: "PCR above 0.9" holds from 09:15. It used to signal only at 09:15 (outside the window) - never traded.
+  // Total PE OI above total CE OI all day: "PE above CE" holds from 09:15. It used to signal only at 09:15 (outside the
+  // window) - never traded.
   const legs = { ce: { 25000: () => ({ o: 100, h: 100, l: 100, c: 100 }) }, pe: { 25000: () => ({ o: 100, h: 100, l: 100, c: 100 }) } }
-  const d = fakeDay({ legs })
-  const pcr = lines([{ id: 'totalPcr', value: 'above', param: 0.9 }], 'buyCE')
-  assert.deepEqual(at(ruleSignals(d, pcr)), [[0, 'rule', 'buyCE']])                       // alone: once, when it became true
-  assert.deepEqual(at(ruleSignals(d, pcr, { openAt: 15 })), [[0, 'rule', 'buyCE'], [15, 'rule', 'buyCE']])
-  const { trades, signals } = simulateDay(d, { rule: pcr, lotSize: 65, timeStopMin: 5 })
+  const d = fakeDay({ legs, tot: () => ({ ce: 4e7, pe: 4.4e7 }) })
+  const peAbove = lines([{ id: 'totalOi', value: 'peAbove' }], 'buyCE')
+  assert.deepEqual(at(ruleSignals(d, peAbove)), [[0, 'rule', 'buyCE']])                       // alone: once, when it became true
+  assert.deepEqual(at(ruleSignals(d, peAbove, { openAt: 15 })), [[0, 'rule', 'buyCE'], [15, 'rule', 'buyCE']])
+  const { trades, signals } = simulateDay(d, { rule: peAbove, lotSize: 65, timeStopMin: 5 })
   assert.equal(trades.length, 1)
   assert.equal(istMinute(trades[0].entryTime), 9 * 60 + 30)
   assert.match(signals[0].skipped, /outside/)
   // On a 5-minute timeframe: the first candle closing in the window (09:30 - 09:34, known at 09:34).
-  const five = simulateDay(d, { rule: pcr, lotSize: 65, timeStopMin: 5, timeframe: 5 })
+  const five = simulateDay(d, { rule: peAbove, lotSize: 65, timeStopMin: 5, timeframe: 5 })
   assert.equal(istMinute(five.trades[0].entryTime), 9 * 60 + 34)
   // A rule that only becomes true later is unchanged: once, when it does.
-  const later = fakeDay({ legs, tot: (i) => ({ ce: 4e7, pe: i >= 100 ? 4e7 : 3e7 }) })
-  assert.deepEqual(simulateDay(later, { rule: pcr, lotSize: 65, timeStopMin: 5 }).trades.map((t) => istMinute(t.entryTime)), [9 * 60 + 15 + 100])
+  const later = fakeDay({ legs, tot: (i) => ({ ce: 4e7, pe: i >= 100 ? 4.4e7 : 3.6e7 }) })
+  assert.deepEqual(simulateDay(later, { rule: peAbove, lotSize: 65, timeStopMin: 5 }).trades.map((t) => istMinute(t.entryTime)), [9 * 60 + 15 + 100])
 })
 
 test('the synthetic day end to end: buy and sell, the call and the put; every trade exits after it enters', () => {

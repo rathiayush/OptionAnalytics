@@ -367,12 +367,12 @@ const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
 const fmtLakh = (v) => `${(v / 1e5).toFixed(1)}L`
 
 // Total CE / PE OI (chain-wide, OI Replay's "Total OI" and its lookback table): its move over the window as a % of where
-// it was - rising / falling by at least the number, flat when it moved less than that.
+// it was - increased / decreased by at least the number, flat when it moved less than that.
 function totalCondition(side, name, meaning) {
   return {
     id: side === 'ce' ? 'totalCe' : 'totalPe', group: 'OI', name,
     options: [
-      opt('rising', `Rising (${meaning.up})`, 'falling', TOTAL_MOVE), opt('falling', `Falling (${meaning.down})`, 'rising', TOTAL_MOVE),
+      opt('rising', `Increased (${meaning.up})`, 'falling', TOTAL_MOVE), opt('falling', `Decreased (${meaning.down})`, 'rising', TOTAL_MOVE),
       opt('flat', 'Flat (moved less than)', 'flat', TOTAL_MOVE),
     ],
     test: (d, i, v, w, p) => {
@@ -488,32 +488,23 @@ export const RULE_CONDITIONS = [
   totalCondition('ce', 'Total CE OI (chain-wide)', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
   totalCondition('pe', 'Total PE OI (chain-wide)', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
   {
-    id: 'totalPcr', group: 'OI', name: 'Total OI PCR (PE ÷ CE)',
+    // The Total OI chart's two lines - total CE OI and total PE OI: which is above, and one crossing the other.
+    id: 'totalOi', group: 'OI', name: 'Total OI: CE vs PE (the Total OI chart)',
     options: [
-      opt('above', 'PCR above', 'below', { param: { label: '>', unit: '', default: 1, min: 0, max: 5, step: 0.05 } }),
-      opt('below', 'PCR below', 'above', { param: { label: '<', unit: '', default: 1, min: 0, max: 5, step: 0.05 } }),
-      opt('rising', 'PCR rising (puts building faster - bullish)', 'falling', MOVE),
-      opt('falling', 'PCR falling (calls building faster - bearish)', 'rising', MOVE),
-      opt('peGaining', 'More PE OI added than CE (within the window)', 'ceGaining', W),
-      opt('ceGaining', 'More CE OI added than PE (within the window)', 'peGaining', W),
+      opt('peAbove', 'PE above CE (more put OI - bullish)', 'ceAbove'), opt('ceAbove', 'CE above PE (more call OI - bearish)', 'peAbove'),
+      opt('peCross', 'PE crossed above CE', 'ceCross', W), opt('ceCross', 'CE crossed above PE', 'peCross', W),
     ],
-    test: (d, i, v, w, p) => {
-      const tot = d.tot?.[i]
-      if (!tot || !(tot.ce > 0) || !(tot.pe > 0)) return false
-      const pcr = tot.pe / tot.ce
-      const back = d.tot[Math.max(0, i - w)]
-      const backPcr = back?.ce > 0 && back?.pe > 0 ? back.pe / back.ce : NaN
+    test: (d, i, v, w) => {
+      const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
       switch (v) {
-        case 'above': return pcr > p
-        case 'below': return pcr < p
-        case 'rising': return finite(backPcr) && pcr > backPcr && (pcr - backPcr) / backPcr >= p / 100
-        case 'falling': return finite(backPcr) && pcr < backPcr && (backPcr - pcr) / backPcr >= p / 100
-        case 'peGaining': return back != null && tot.pe - back.pe > tot.ce - back.ce
-        case 'ceGaining': return back != null && tot.ce - back.ce > tot.pe - back.pe
+        case 'peAbove': return gap(i) > 0
+        case 'ceAbove': return gap(i) < 0
+        case 'peCross': return crossed(gap, i, w, true)
+        case 'ceCross': return crossed(gap, i, w, false)
         default: return false
       }
     },
-    show: (d, i) => { const x = d.tot?.[i]; return x?.ce > 0 ? `PCR ${(x.pe / x.ce).toFixed(2)} (total CE ${fmtLakh(x.ce)} · PE ${fmtLakh(x.pe)})` : 'PCR —' },
+    show: (d, i) => { const x = d.tot?.[i]; return x ? `total CE OI ${fmtLakh(x.ce)} · PE ${fmtLakh(x.pe)}` : 'total OI —' },
   },
   cumCondition('ce', 'OI', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
   cumCondition('pe', 'OI', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
@@ -930,7 +921,7 @@ function ruleHolds(d, i, lines, groups, tree) {
  * its lines), and logic that does not read signals nothing. A signal on the candle where the rule BECOMES true (it then has to stop holding
  * before it signals again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror
  * that would be the rule itself is left out. `openAt`: the candle entries open on (09:30) - a rule that became true before it
- * and still holds there signals on it (else a condition true from the open, e.g. PCR above 0.9, never traded at all).
+ * and still holds there signals on it (else a condition true from the open, e.g. total PE OI above CE, never traded at all).
  * Returns [{ i, side: 'rule' | 'mirror', action, why }].
  */
 export function ruleSignals(d, rule, { openAt = null } = {}) {
