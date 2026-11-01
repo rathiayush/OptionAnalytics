@@ -237,7 +237,7 @@ body {
 .oa-rule-lines { display: flex; flex-direction: column; gap: 6px; }
 .oa-rule-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 6px 8px; border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; background: rgba(255, 255, 255, 0.02); }
 .oa-rule-line--or { margin-top: 8px; border-top: 1px dashed rgba(250, 140, 22, 0.6); }
-.oa-rule-join { flex: 0 0 96px; }
+.oa-rule-join { flex: 0 0 auto; min-width: 116px; }
 .oa-rule-line .oa-rule-ind { flex: 0 1 230px; width: 230px; min-width: 0; }
 .oa-rule-line .oa-rule-val { flex: 1 1 240px; width: 240px; min-width: 0; max-width: 360px; }
 .oa-rule-line .oa-rule-num { width: 170px; }
@@ -247,6 +247,14 @@ body {
   .oa-rule-join { flex-basis: auto; }
   .oa-rule-line .oa-rule-ind, .oa-rule-line .oa-rule-val { flex: 1 1 100%; width: 100%; max-width: none; }
 }
+/* Each line's number (what the Logic names it by); a line the Logic leaves out is dimmed. The Logic box under the lines. */
+.oa-rule-join { display: flex; align-items: center; gap: 6px; }
+.oa-rule-no { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px;
+  background: rgba(64, 150, 255, 0.2); color: #8fc1ff; font-size: 11px; font-weight: 600; }
+.oa-rule-line--unused { opacity: 0.55; }
+.oa-rule-logic { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; }
+.oa-rule-logic .oa-rule-logic-input { flex: 1 1 320px; max-width: 560px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
 /* Its dropdowns hold long labels: never wider than the screen (a phone's ran off its left), a long one wraps. */
 .oa-rule-popup { max-width: calc(100vw - 16px); }
 .oa-rule-popup .ant-select-item-option-content { white-space: normal; }

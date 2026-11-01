@@ -6,8 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, DEFAULT_WINDOW, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, istMinute, lineText, mirrorIsSame, mirrorLines, normalizeRule, optionFor,
-  prepareDay, ruleSignals, ruleText,
+  BACKTEST_DEFAULTS, DEFAULT_WINDOW, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, evalLogic, istMinute, lineText, logicText, logicWithoutLine,
+  mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleLogic, ruleSignals, ruleText,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -404,6 +404,70 @@ test('AND / OR: AND binds tighter - (A AND B) OR C; each line its own window; th
   assert.equal(r.lines.length, 2)
 })
 
+test('logic: the lines by number with AND / OR / NOT and brackets, any nesting - NOT, then AND, then OR', () => {
+  const truth = (t) => (no) => t[no - 1]
+  const holds = (text, t) => { const p = parseLogic(text, t.length); assert.ok(p.ok, p.error); return evalLogic(p.tree, truth(t)) }
+  // The example asked: (1 and 2) or (3 and (4 and 5)).
+  assert.equal(holds('(1 and 2) or ( 3 and (4 and 5))', [true, true, false, false, false]), true)
+  assert.equal(holds('(1 and 2) or ( 3 and (4 and 5))', [true, false, true, true, true]), true)
+  assert.equal(holds('(1 and 2) or ( 3 and (4 and 5))', [true, false, true, true, false]), false)
+  // What the lines' own AND / OR cannot say: (1 OR 2) AND (3 OR 4).
+  assert.equal(holds('(1 OR 2) AND (3 OR 4)', [false, true, true, false]), true)
+  assert.equal(holds('(1 OR 2) AND (3 OR 4)', [true, true, false, false]), false)
+  // Precedence without brackets, NOT, and the symbols.
+  assert.equal(holds('1 or 2 and 3', [true, false, false]), true)            // 1 OR (2 AND 3)
+  assert.equal(holds('(1 or 2) and 3', [true, false, false]), false)
+  assert.equal(holds('NOT 1 AND 2', [false, true]), true)
+  assert.equal(holds('not (1 or 2)', [false, false]), true)
+  assert.equal(holds('1 & (2 | !3)', [true, false, false]), true)
+  // In words: AND inside OR bracketed; the lines used.
+  const p = parseLogic('(1 and 2) or ( 3 and (4 and 5))', 5)
+  assert.equal(logicText(p.tree), '(1 AND 2) OR (3 AND 4 AND 5)')
+  assert.deepEqual([...p.used].sort(), [1, 2, 3, 4, 5])
+  assert.equal(logicText(parseLogic('(1 or 2) and not (3 or 4)', 4).tree), '(1 OR 2) AND NOT (3 OR 4)')
+  // What does not read, said in words.
+  assert.match(parseLogic('(1 and 2', 3).error, /"\)" is missing/)
+  assert.match(parseLogic('1 and 7', 3).error, /no line 7/)
+  assert.match(parseLogic('1 2', 3).error, /AND \/ OR is missing/)
+  assert.match(parseLogic('1 and', 3).error, /ends too early/)
+  assert.match(parseLogic('1 xor 2', 3).error, /cannot read/)
+  assert.match(parseLogic('1 and )', 3).error, /should be/)
+})
+
+test('logic in a rule: it combines the lines (the mirror by the same logic); bad logic signals nothing; removing a line renumbers it', () => {
+  // 1: price over VWAP from 60. 2: PE ahead from 80. 3: a bullish 🎯 at 30. 4: the straddle over its VWAP from 100.
+  const d = fakeDay({
+    price: (i) => flat(i >= 60 ? 25020 : 24980)(), vwap: () => 25000, oi: (i) => (i >= 80 ? { ce: 1e5, pe: 3e5 } : { ce: 3e5, pe: 1e5 }),
+    hp: [{ i: 30, dir: 1 }], straddle: (i) => ({ value: i >= 100 ? 120 : 100, vwap: 110, decay: 90, forward: 25000 }),
+  })
+  const four = [{ id: 'vwap', value: 'above' }, { id: 'oiOpen', value: 'peAhead' }, { id: 'hp', value: 'bullish', windowMin: 5 }, { id: 'straddle', value: 'aboveVwap' }]
+  // (1 OR 3) AND (2 OR 4): from 80 (1 and 2).
+  assert.deepEqual(at(ruleSignals(d, lines(four, 'buyCE', { logic: '(1 OR 3) AND (2 OR 4)' }))), [[80, 'rule', 'buyCE']])
+  // 3 OR (1 AND 4): the 🎯 at 30 (30 - 34), then 1 AND 4 from 100.
+  assert.deepEqual(at(ruleSignals(d, lines(four, 'buyCE', { logic: '3 OR (1 AND 4)' }))), [[30, 'rule', 'buyCE'], [100, 'rule', 'buyCE']])
+  // The logic overrides the lines' own AND / OR: the same lines all joined by OR, logic 1 AND 2.
+  const ors = four.map((l) => ({ ...l, join: 'or' }))
+  assert.deepEqual(at(ruleSignals(d, lines(ors, 'buyCE', { logic: '1 and 2' }))), [[80, 'rule', 'buyCE']])
+  // Logic that does not read: nothing (never a guess).
+  assert.deepEqual(ruleSignals(d, lines(four, 'buyCE', { logic: '(1 and 2' })), [])
+  assert.deepEqual(ruleSignals(d, lines(four, 'buyCE', { logic: '1 and 9' })), [])
+  assert.equal(ruleLogic({ lines: four, logic: '  ' }), null)
+  assert.ok(ruleLogic({ lines: four, logic: '(1' }).error)
+  // The mirror: the same logic on the flipped lines - price under VWAP AND CE ahead -> buy the put.
+  const flip = fakeDay({ price: (i) => flat(i >= 60 ? 24980 : 25020)(), vwap: () => 25000, oi: (i) => (i >= 80 ? { ce: 3e5, pe: 1e5 } : { ce: 1e5, pe: 3e5 }) })
+  assert.deepEqual(at(ruleSignals(flip, lines(four.slice(0, 2), 'buyCE', { logic: '1 and 2', mirror: true }))), [[0, 'rule', 'buyCE'], [80, 'mirror', 'buyPE']])
+  // Kept on the rule as typed; in words with each line by number.
+  assert.equal(normalizeRule(lines(four, 'buyCE', { logic: '(1 or 3) and 2' })).logic, '(1 or 3) and 2')
+  assert.equal(normalizeRule(lines(four, 'buyCE')).logic, '')
+  assert.match(ruleText(normalizeRule(lines(four, 'buyCE')).lines, 'buyCE', '(1 or 3) and 2'), /^Buy CE when \(1 OR 3\) AND 2 - 1 = Price vs VWAP: Price above VWAP · 2 = OI since open.* · 3 = 🎯/)
+  // Removing a line: it leaves the logic with its AND / OR, the lines after it renumbered.
+  assert.equal(logicWithoutLine('(1 and 2) or (3 and (4 and 5))', 5, 3), '(1 AND 2) OR (3 AND 4)')
+  assert.equal(logicWithoutLine('(1 and 2) or 3', 3, 1), '1 OR 2')
+  assert.equal(logicWithoutLine('not 2 and 1', 2, 2), '1')
+  assert.equal(logicWithoutLine('1', 1, 1), '')
+  assert.equal(logicWithoutLine('(1 and', 3, 1), '(1 and')   // does not read: left as typed
+})
+
 test('a line made whole: its number held to its range, the default when none, a window offered; the earlier { conditions } form read', () => {
   assert.deepEqual(cleanLine({ id: 'vwap', value: 'above', param: 99 }), { id: 'vwap', value: 'above', join: 'and', param: 5 })
   assert.deepEqual(cleanLine({ id: 'vwap', value: 'above' }), { id: 'vwap', value: 'above', join: 'and', param: 0 })
@@ -412,7 +476,7 @@ test('a line made whole: its number held to its range, the default when none, a 
   assert.equal(cleanLine({ id: 'vwap', value: 'sideways' }), null)
   assert.equal(cleanLine({ id: 'nope', value: 'above' }), null)
   const old = normalizeRule({ conditions: { vwap: 'crossedAbove', oiOpen: 'peAhead' }, windowMin: 10, action: 'sellPE', mirror: false })
-  assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', windowMin: 10 }], action: 'sellPE', mirror: false })
+  assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', windowMin: 10 }], action: 'sellPE', mirror: false, logic: '' })
   assert.deepEqual(normalizeRule(null), normalizeRule(BACKTEST_DEFAULTS.rule))
   assert.equal(normalizeRule({ lines: [], action: 'buyPE' }).lines.length, 0)       // all cleared: stays cleared
   assert.match(lineText({ id: 'gexLevel', value: 'nearCallWall', param: 0.2, windowMin: 15 }), /^GEX walls: Near the call wall \(resistance\) within 0.2% \(last 15 min\)$/)

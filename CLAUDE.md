@@ -481,7 +481,11 @@ When adding or changing a strategy:
   lead, "within %" of a wall, spot's move, the cumulative line's tolerance) and its own LOOK-BACK for what happened "in the
   last N min" (`windowed` - crossed, turned, broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default), joined to the
   line before by AND / OR - AND binds tighter: A AND B OR C = (A AND B) OR C (`orGroups`; the words show the brackets -
-  `ruleText`); the same indicator may be used twice. The values: OI since open (PE / CE ahead, PE / CE crossed above the
+  `ruleText`); the same indicator may be used twice. LOGIC (optional, `rule.logic`): the lines BY NUMBER with AND / OR / NOT
+  and brackets, any nesting - "(1 AND 2) OR (3 AND (4 OR 5))", "(1 OR 2) AND NOT 3" (`parseLogic` - NOT, then AND, then OR;
+  words in any case or & | !; `evalLogic`, `logicText`); written, it replaces the lines' own AND / OR (each line shows its
+  number, a line it leaves out is dimmed and named); logic that does not read signals NOTHING and says why; removing a line
+  takes it out of the logic and renumbers the rest (`logicWithoutLine`); the mirror uses the same logic on its lines. The values: OI since open (PE / CE ahead, PE / CE crossed above the
   other), the CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the

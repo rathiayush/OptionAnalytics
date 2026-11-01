@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
@@ -7,8 +7,8 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute, mirrorIsSame, mirrorLines,
-  normalizeRule, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, parseLogic, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
@@ -169,7 +169,15 @@ export default function SignalBacktestPage() {
     const unused = RULE_CONDITIONS.find((c) => !rule.lines.some((l) => l.id === c.id)) ?? RULE_CONDITIONS[0]
     setRule({ lines: [...rule.lines, freshLine(unused.id)] })
   }
-  const removeLine = (k) => setRule({ lines: rule.lines.filter((_, j) => j !== k) })
+  // The logic (the lines by number, AND / OR / NOT, brackets): empty = the lines' own AND / OR. A line removed leaves it.
+  const hasLogic = rule.logic.trim().length > 0
+  const logicRead = hasLogic ? parseLogic(rule.logic, rule.lines.length) : null
+  const logicOk = !hasLogic || Boolean(logicRead?.ok)
+  const unusedLines = logicRead?.ok ? rule.lines.map((_, k) => k + 1).filter((no) => !logicRead.used.has(no)) : []
+  const removeLine = (k) => setRule({
+    lines: rule.lines.filter((_, j) => j !== k),
+    logic: hasLogic ? logicWithoutLine(rule.logic, rule.lines.length, k + 1) : rule.logic,
+  })
   const hasLines = rule.lines.length > 0
   const mirrorSame = hasLines && mirrorIsSame(rule.lines)
   const mirrorOn = rule.mirror && !mirrorSame
@@ -214,7 +222,7 @@ export default function SignalBacktestPage() {
     const { trades, signals } = simulateRun(okDays.map((r) => r.day), settings)
     const sides = mirrorOn ? ['rule', 'mirror'] : ['rule']
     const rows = sides.map((id) => ({
-      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorLines(rule.lines) : rule.lines, id === 'mirror' ? OPPOSITE_ACTION[rule.action] : rule.action),
+      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorLines(rule.lines) : rule.lines, id === 'mirror' ? OPPOSITE_ACTION[rule.action] : rule.action, rule.logic),
       signals: signals.filter((x) => x.strategy === id).length, ...summarize(trades.filter((t) => t.strategy === id)),
     }))
     const all = { key: 'all', id: 'all', name: SIDE.all.name, what: 'the rule and its mirror together', signals: signals.length, ...summarize(trades) }
@@ -317,16 +325,17 @@ export default function SignalBacktestPage() {
             <div className="oa-rule">
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
                 <Text strong>The rule</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - AND binds tighter than OR: A AND B OR C = (A AND B) OR C</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - AND binds tighter than OR: A AND B OR C = (A AND B) OR C; for brackets, write the Logic below</Text>
               </Space>
               <div className="oa-rule-lines">
                 {rule.lines.map((line, k) => {
                   const c = CONDITION_OF[line.id]
                   const o = c.options.find((x) => x.value === line.value)
                   return (
-                    <div key={k} className={`oa-rule-line${k > 0 && line.join === 'or' ? ' oa-rule-line--or' : ''}`}>
+                    <div key={k} className={`oa-rule-line${!hasLogic && k > 0 && line.join === 'or' ? ' oa-rule-line--or' : ''}${unusedLines.includes(k + 1) ? ' oa-rule-line--unused' : ''}`}>
                       <div className="oa-rule-join">
-                        {k === 0
+                        <span className="oa-rule-no" title={`Line ${k + 1} - its number in the Logic`}>{k + 1}</span>
+                        {hasLogic ? null : k === 0
                           ? <Text strong style={{ fontSize: 12 }}>IF</Text>
                           : <Segmented size="small" value={line.join} onChange={(v) => setLine(k, { join: v })} options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]} />}
                       </div>
@@ -348,8 +357,20 @@ export default function SignalBacktestPage() {
               </div>
               <Space wrap size={[8, 8]} style={{ marginTop: 8, display: 'flex' }}>
                 <Button size="small" icon={<PlusOutlined />} onClick={addLine}>Add condition</Button>
-                <Button size="small" onClick={() => setRule({ lines: [] })} disabled={!hasLines}>Clear all</Button>
+                <Button size="small" onClick={() => setRule({ lines: [], logic: '' })} disabled={!hasLines}>Clear all</Button>
               </Space>
+              <div className="oa-rule-logic">
+                <Tooltip title="Optional: combine the lines by their numbers with AND, OR, NOT and brackets, as deep as you like - e.g. (1 AND 2) OR (3 AND (4 OR 5)), or (1 OR 2) AND NOT 3. NOT first, then AND, then OR. With logic written, the AND / OR on the lines are not used; empty, they are. Removing a line takes it out of the logic and renumbers the rest.">
+                  <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Logic</Text>
+                </Tooltip>
+                <Input
+                  size="small" allowClear value={rule.logic} maxLength={MAX_LOGIC_LENGTH} status={logicOk ? undefined : 'error'} className="oa-rule-logic-input"
+                  placeholder="optional - e.g. (1 AND 2) OR (3 AND (4 OR 5)); empty = the AND / OR on the lines"
+                  onChange={(e) => setRule({ logic: e.target.value })}
+                />
+                {hasLogic && !logicOk && <Text type="danger" style={{ fontSize: 12 }}>The logic does not read: {logicRead?.error}</Text>}
+                {unusedLines.length > 0 && <Text type="warning" style={{ fontSize: 12 }}>Line{unusedLines.length > 1 ? 's' : ''} {unusedLines.join(', ')} not in the logic - not used</Text>}
+              </div>
               <Space wrap size={[16, 8]} align="center" style={{ marginTop: 10 }}>
                 <Space size={4}>
                   <Text strong style={{ fontSize: 12 }}>Then</Text>
@@ -360,12 +381,14 @@ export default function SignalBacktestPage() {
                 </Tooltip>
               </Space>
               <div style={{ marginTop: 8 }}>
-                {hasLines
-                  ? <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.lines, rule.action)}</Text>
-                  : <Alert type="info" showIcon message="Add a condition - with none the rule never signals." style={{ padding: '4px 10px' }} />}
-                {hasLines && rule.mirror && (mirrorSame
+                {!hasLines
+                  ? <Alert type="info" showIcon message="Add a condition - with none the rule never signals." style={{ padding: '4px 10px' }} />
+                  : !logicOk
+                    ? <Alert type="error" showIcon message="Fix the Logic - until it reads, the rule signals nothing." style={{ padding: '4px 10px' }} />
+                    : <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.lines, rule.action, rule.logic)}</Text>}
+                {hasLines && logicOk && rule.mirror && (mirrorSame
                   ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these lines has a side (add one that does - e.g. VWAP, OI, a wall).</Text></div>
-                  : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorLines(rule.lines), OPPOSITE_ACTION[rule.action])}</Text></div>)}
+                  : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorLines(rule.lines), OPPOSITE_ACTION[rule.action], rule.logic)}</Text></div>)}
               </div>
             </div>
 
@@ -425,7 +448,8 @@ export default function SignalBacktestPage() {
                 number (a threshold %) and how far back it looks (crossed, turned, broke, near, a 🎯, spot&apos;s move - &quot;last N min&quot;; a
                 cross / turn / break must still hold now), joined by AND / OR - AND first: A AND B OR C = (A AND B) OR C. The rule signals
                 at a completed candle of the Timeframe (from 09:15) where it holds - once, when it becomes true (it has to stop holding
-                before it signals again). The Mirror adds the same rule the other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
+                before it signals again). For brackets, write the Logic: the lines by number with AND / OR / NOT, e.g. (1 AND 2) OR (3 AND (4
+                OR 5)). The Mirror adds the same rule the other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
                 and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
                 option close and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop fills
                 at its open, the stop before the target in the same bar, a trailing stop (if set) moving after each bar behind the best

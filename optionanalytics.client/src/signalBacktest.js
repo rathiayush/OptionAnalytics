@@ -634,8 +634,9 @@ export function cleanLine(line) {
   return out
 }
 
-/** A rule made whole: { lines, action, mirror } - also from the earlier form { conditions: { [id]: value }, windowMin }
- *  (every condition ANDed). */
+/** A rule made whole: { lines, action, mirror, logic } - also from the earlier form { conditions: { [id]: value },
+ *  windowMin } (every condition ANDed). `logic`: the lines by number with AND / OR / NOT and brackets (`parseLogic`) - kept as
+ *  typed ('' = the lines' own AND / OR). */
 export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
   if (!rule || typeof rule !== 'object') return normalizeRule(fallback, null)
   const raw = Array.isArray(rule.lines) ? rule.lines
@@ -648,7 +649,113 @@ export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
     lines: (raw ?? []).map(cleanLine).filter(Boolean),
     action: ACTION[rule.action] ? rule.action : (fallback ? fallback.action : null),
     mirror: typeof rule.mirror === 'boolean' ? rule.mirror : Boolean(fallback?.mirror),
+    logic: typeof rule.logic === 'string' ? rule.logic.slice(0, MAX_LOGIC_LENGTH) : '',
   }
+}
+
+// ---- Custom logic: the lines by number, AND / OR / NOT, brackets -----------------------------------------------------
+// "(1 AND 2) OR (3 AND (4 OR 5))" - any nesting. NOT binds tightest, then AND, then OR (as everywhere): "1 OR 2 AND 3" is
+// "1 OR (2 AND 3)". Words in any case, or & | !. With logic set the lines' own AND / OR are not used; empty, they are.
+
+export const MAX_LOGIC_LENGTH = 300
+const LOGIC_TOKEN = /\s*(?:(\d+)|(\()|(\))|(and(?![a-z])|&&|&)|(or(?![a-z])|\|\||\|)|(not(?![a-z])|!))/iy
+
+/** Reads `text` against `n` lines: { ok: true, tree, used: Set of line numbers } or { ok: false, error } (in words). A tree
+ *  node is { line } (1-based), { op: 'not', a } or { op: 'and' | 'or', a, b }. */
+export function parseLogic(text, n) {
+  const src = String(text ?? '')
+  const tokens = []
+  let pos = 0
+  while (pos < src.length && !/^\s*$/.test(src.slice(pos))) {
+    LOGIC_TOKEN.lastIndex = pos
+    const m = LOGIC_TOKEN.exec(src)
+    if (!m) return { ok: false, error: `cannot read "${src.slice(pos).trim().slice(0, 12)}" - use line numbers, AND, OR, NOT and brackets` }
+    pos = LOGIC_TOKEN.lastIndex
+    tokens.push(m[1] ? { t: 'num', v: Number(m[1]) } : m[2] ? { t: '(' } : m[3] ? { t: ')' } : m[4] ? { t: 'and' } : m[5] ? { t: 'or' } : { t: 'not' })
+  }
+  if (!tokens.length) return { ok: false, error: 'empty' }
+  const used = new Set()
+  let k = 0
+  const word = (tok) => (tok.t === 'num' ? String(tok.v) : tok.t.length > 1 ? tok.t.toUpperCase() : tok.t)
+  function factor() {
+    const tok = tokens[k++]
+    if (!tok) throw new Error('it ends too early - a line number or "(" is missing at the end')
+    if (tok.t === 'not') return { op: 'not', a: factor() }
+    if (tok.t === '(') {
+      const e = expr()
+      if (tokens[k]?.t !== ')') throw new Error('a ")" is missing')
+      k++
+      return e
+    }
+    if (tok.t === 'num') {
+      if (tok.v < 1 || tok.v > n) throw new Error(`there is no line ${tok.v} (the lines are 1${n > 1 ? ` - ${n}` : ''})`)
+      used.add(tok.v)
+      return { line: tok.v }
+    }
+    throw new Error(`"${word(tok)}" where a line number or "(" should be`)
+  }
+  function term() {
+    let left = factor()
+    while (tokens[k]?.t === 'and') { k++; left = { op: 'and', a: left, b: factor() } }
+    return left
+  }
+  function expr() {
+    let left = term()
+    while (tokens[k]?.t === 'or') { k++; left = { op: 'or', a: left, b: term() } }
+    return left
+  }
+  try {
+    const tree = expr()
+    if (k < tokens.length) {
+      const tok = tokens[k]
+      throw new Error(tok.t === ')' ? 'a ")" with no "(" before it' : `an AND / OR is missing before "${word(tok)}"`)
+    }
+    return { ok: true, tree, used }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+}
+
+/** A logic tree in words, with the brackets it needs (and an AND inside an OR bracketed - easier to read). */
+export function logicText(tree) {
+  const rank = { or: 1, and: 2, not: 3 }
+  const show = (node, parent) => {
+    if (node.line != null) return String(node.line)
+    if (node.op === 'not') return `NOT ${show(node.a, 3)}`
+    const inner = `${show(node.a, rank[node.op])} ${node.op.toUpperCase()} ${show(node.b, rank[node.op])}`
+    return rank[node.op] < parent || (node.op === 'and' && parent === 1) ? `(${inner})` : inner
+  }
+  return show(tree, 0)
+}
+
+/** Whether the tree holds, `line(no)` saying whether line no (1-based) holds. */
+export function evalLogic(tree, line) {
+  if (tree.line != null) return line(tree.line)
+  if (tree.op === 'not') return !evalLogic(tree.a, line)
+  return tree.op === 'and' ? evalLogic(tree.a, line) && evalLogic(tree.b, line) : evalLogic(tree.a, line) || evalLogic(tree.b, line)
+}
+
+/** The logic once line `k` (1-based) of `n` is removed: that line taken out (its AND / OR with it), the lines after it
+ *  renumbered. Logic that does not read is left as it is. */
+export function logicWithoutLine(text, n, k) {
+  const parsed = parseLogic(text, n)
+  if (!parsed.ok) return String(text ?? '')
+  const drop = (node) => {
+    if (node.line != null) return node.line === k ? null : { line: node.line > k ? node.line - 1 : node.line }
+    if (node.op === 'not') { const a = drop(node.a); return a ? { op: 'not', a } : null }
+    const a = drop(node.a), b = drop(node.b)
+    return a && b ? { op: node.op, a, b } : a ?? b
+  }
+  const tree = drop(parsed.tree)
+  return tree ? logicText(tree) : ''
+}
+
+/** The rule's logic tree, or null to use the lines' own AND / OR; { error } when the logic does not read. */
+export function ruleLogic(rule) {
+  const text = String(rule?.logic ?? '').trim()
+  if (!text) return null
+  const parsed = parseLogic(text, rule?.lines?.length ?? 0)
+  return parsed.ok ? parsed.tree : { error: parsed.error }
 }
 
 /** The mirror's lines - each line's opposite value (numbers, windows and joins kept). */
@@ -672,29 +779,39 @@ function orGroups(lines) {
   }
   return groups
 }
-/** The rule in words: "Buy CE when (A AND B) OR C". */
-export function ruleText(lines, action) {
+/** The rule in words: "Buy CE when (A AND B) OR C" - with `logic` (a valid one), its numbers and each line by number. */
+export function ruleText(lines, action, logic = '') {
   const groups = orGroups(lines)
   if (!groups.length) return `${ACTION[action]?.label ?? action} when (no condition picked)`
+  const parsed = String(logic ?? '').trim() ? parseLogic(logic, lines.length) : null
+  if (parsed?.ok) {
+    const where = lines.map((l, k) => (parsed.used.has(k + 1) ? `${k + 1} = ${lineText(l)}` : null)).filter(Boolean).join(' · ')
+    return `${ACTION[action]?.label ?? action} when ${logicText(parsed.tree)} - ${where}`
+  }
   const many = groups.length > 1
   const text = groups.map((g) => { const t = g.map(lineText).join(' AND '); return many && g.length > 1 ? `(${t})` : t }).join(' OR ')
   return `${ACTION[action]?.label ?? action} when ${text}`
 }
 
-// Does the rule hold at candle i: any OR group whose lines all hold.
-function ruleHolds(d, i, groups) {
-  return groups.some((g) => g.every((l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0)))
+const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0)
+// Does the rule hold at candle i: its logic tree (`tree`), else any OR group whose lines all hold.
+function ruleHolds(d, i, lines, groups, tree) {
+  if (tree) return evalLogic(tree, (no) => lineHolds(d, i, lines[no - 1]))
+  return groups.some((g) => g.every((l) => lineHolds(d, i, l)))
 }
 
 /**
- * The rule's signals on a day (read on its candles - `timeframeView`): `rule` = { lines, action, mirror } (or the earlier
- * { conditions } form - `normalizeRule`). A signal on the candle where the rule BECOMES true (it then has to stop holding
+ * The rule's signals on a day (read on its candles - `timeframeView`): `rule` = { lines, action, mirror, logic } (or the
+ * earlier { conditions } form - `normalizeRule`); with `logic` the lines are combined by it (the mirror by the same logic on
+ * its lines), and logic that does not read signals nothing. A signal on the candle where the rule BECOMES true (it then has to stop holding
  * before it signals again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror
  * that would be the rule itself is left out. Returns [{ i, side: 'rule' | 'mirror', action, why }].
  */
 export function ruleSignals(d, rule) {
   const r = normalizeRule(rule, null)
   if (!r.lines.length || !ACTION[r.action]) return []
+  const tree = ruleLogic(r)
+  if (tree?.error) return []
   const sides = [{ side: 'rule', lines: r.lines, action: r.action }]
   if (r.mirror && !mirrorIsSame(r.lines)) sides.push({ side: 'mirror', lines: mirrorLines(r.lines), action: ACTION[r.action].opposite })
   const out = []
@@ -702,7 +819,7 @@ export function ruleSignals(d, rule) {
     const groups = orGroups(s.lines)
     let was = false
     for (let i = 0; i < d.n; i++) {
-      const now = ruleHolds(d, i, groups)
+      const now = ruleHolds(d, i, s.lines, groups, tree)
       if (now && !was) {
         const shown = [...new Set(s.lines.map((l) => CONDITION[l.id].show(d, i)))].join(' · ')
         out.push({ i, side: s.side, action: s.action, why: `${ACTION[s.action].label}${s.side === 'mirror' ? ' (mirror)' : ''}: ${shown}` })
