@@ -1,7 +1,8 @@
 // The SIGNAL BACKTEST (the Signal backtest page): past days replayed through ONE strategy the trader builds - a rule of
 // conditions read from what the OI Replay page and the Volume & Market Profile page show (OI since the open, the OI
 // totals' CE / PE / Net cumulative Δ and their S/R breaks, the 🎯 signal, the OI support / resistance walls, GEX's
-// regime and walls, VWAP, spot's move, the ATM straddle, the developing POC / value area and the Initial Balance), each
+// regime and walls, VWAP, spot's move, the ATM straddle, the Initial Balance and the PREVIOUS day's volume profile -
+// POC / HVN / LVN / VAH / VAL and its value area), each
 // a dropdown of what it can say: a signal when ALL the conditions picked hold, then the trade picked (buy / sell the call
 // / put) - and, with the mirror, the opposite conditions' opposite trade.
 //
@@ -27,7 +28,6 @@ import {
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { gexDay } from './gex.js'
 import { straddleRead } from './straddle.js'
-import { PROFILE_ROWS, volumeZones } from './profileZones.js'
 import { tradeCharges } from './tradeCharges.js'
 
 const MIN = 60_000
@@ -81,40 +81,6 @@ function packBars(byStrike, times) {
   return out
 }
 
-// A developing volume profile, one minute at a time: each bar's volume spread over the rows of its range; POC / VAH / VAL
-// (70% value area grown from the POC, the bigger neighbour first) and its one HVN / LVN - the Volume & Market Profile
-// page's lines (`volumeZones`: the busiest row of the busy areas other than the POC's, the thinnest row of the thin areas
-// inside the range).
-function developingProfile(rowSize) {
-  const rows = new Map()
-  let total = 0
-  return {
-    add(bar) {
-      const v = bar.volume
-      if (!(v > 0) || !(bar.high >= bar.low) || !(bar.low > 0)) return
-      const bottom = Math.floor(bar.low / rowSize + 1e-9)
-      const top = Math.floor(bar.high / rowSize + 1e-9)
-      const share = v / (top - bottom + 1)
-      for (let r = bottom; r <= top; r++) rows.set(r, (rows.get(r) ?? 0) + share)
-      total += v
-    },
-    read() {
-      if (!(total > 0)) return null
-      const keys = [...rows.keys()].sort((a, b) => a - b)
-      let poc = keys[0]
-      for (const k of keys) if (rows.get(k) > rows.get(poc)) poc = k
-      let lo = keys.indexOf(poc), hi = lo, inside = rows.get(poc)
-      while (inside < total * 0.7 && (lo > 0 || hi < keys.length - 1)) {
-        const below = lo > 0 ? rows.get(keys[lo - 1]) : -1
-        const above = hi < keys.length - 1 ? rows.get(keys[hi + 1]) : -1
-        if (above >= below) inside += rows.get(keys[++hi]); else inside += rows.get(keys[--lo])
-      }
-      const zones = volumeZones({ rows: keys.map((k) => ({ price: k * rowSize, total: rows.get(k) })), poc: poc * rowSize }, rowSize)
-      return { poc: (poc + 0.5) * rowSize, vah: (keys[hi] + 1) * rowSize, val: keys[lo] * rowSize, hvn: zones.topHvn, lvn: zones.thinLvn }
-    },
-  }
-}
-
 /** The OI totals' cumulative Δ breaks and 🎯 signals on `bucketSeconds` buckets, minute by minute: at the end of each
  *  minute only the buckets completed by then are read, so an event is listed at the minute it became known. Also the
  *  CE / PE / Net cumulative Δ lines at the last completed bucket, each minute. */
@@ -149,7 +115,7 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * The day's features at every session minute - each from what was known at the END of that minute. `run`: the OI
  * Replay run (`/api/oi-replay/{u}/run` - spotCandlesOneMinute, cePoints / pePoints, futuresBars, spotVwap, step,
  * optionExpiry); `prevProfile` the previous day's volume profile (`previousProfile`). Returns `{ ok: true, date, underlying, step, n, t, spot, price, priceSource, vwap, oi, breaks, hp,
- * walls, gex, straddle, ib, profile, atm, ce, pe, ceCum, peCum, netCum }` - or `{ ok: false, reason }`.
+ * walls, gex, straddle, ib, prevVp, atm, ce, pe, ceCum, peCum, netCum }` - or `{ ok: false, reason }`.
  */
 export function prepareDay(run, { underlying = null, prevProfile = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
@@ -164,7 +130,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
   const t = spotBars.map((b) => b.t)
   const date = new Date(t[0] + IST_MS).toISOString().slice(0, 10)
 
-  // The price the VWAP / profile / Initial Balance are read on: the futures (they carry volume) when they cover the day,
+  // The price the VWAP / Initial Balance are read on: the futures (they carry volume) when they cover the day,
   // else the index (its own VWAP from the server, when it had volume).
   const fut = new Map()
   for (const b of run?.futuresBars ?? []) {
@@ -259,21 +225,16 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
     return p ? { value: p.value, vwap: p.vwap, decay: p.decay, forward: p.forward } : null
   })
 
-  // The Initial Balance (09:15 - 10:14) and the developing volume profile, on the price series.
+  // The Initial Balance (09:15 - 10:14), on the price series.
   let ibHigh = -Infinity, ibLow = Infinity, ibDone = null
-  const rowSize = PROFILE_ROWS[u] ?? Math.max(1, Math.round(step / 10))
-  const vp = developingProfile(rowSize)
-  const profile = []
   for (let i = 0; i < n; i++) {
     const b = priceBars[i]
     const m = istMinute(t[i])
     if (m <= IB_LAST) { ibHigh = Math.max(ibHigh, b.h); ibLow = Math.min(ibLow, b.l); if (m === IB_LAST) ibDone = i }
-    vp.add({ high: b.h, low: b.l, volume: b.v })
-    profile.push(vp.read())
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, profile, ceCum, peCum, netCum, oiTf,
+    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap),
@@ -297,7 +258,7 @@ function previousProfile(p, date) {
 
 // ---- The timeframe ----------------------------------------------------------------------------------------------------
 // The strategies read a day on candles of the chosen timeframe, from 09:15: a candle's OHLC from its minutes, every other
-// feature (OI, walls, GEX, straddle, VWAP, profile) as at the END of its last minute, the OI totals' breaks / 🎯 from
+// feature (OI, walls, GEX, straddle, VWAP) as at the END of its last minute, the OI totals' breaks / 🎯 from
 // that timeframe's own buckets, each at the candle it became known in. A signal on a candle is known at its close - its
 // last minute's end - so the trade enters at that minute's option close and is managed on the 1-minute bars from the next
 // minute (`at` maps a candle to its last minute). Timeframe 1 is the day itself.
@@ -337,7 +298,7 @@ export function timeframeView(d, tf = 1) {
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last),
     t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
-    profile: pick(d.profile), vwap: pick(d.vwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
+    vwap: pick(d.vwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
     ib: d.ib ? { ...d.ib, done: candleOf[d.ib.done] } : null,
@@ -434,10 +395,9 @@ function cumCondition(line, group, meaning) {
   }
 }
 
-// A price level: today's developing profile's (read on the price the profile is built on - the futures - at the level as
-// known at each candle; crossing / touching it is judged against the level of the candle BEFORE, so a candle's own volume
-// moving the level is not a cross) or the previous day's (fixed, read on spot - that profile is spot's).
-function levelCondition({ id, group, name, short, on, level }) {
+// A level of the PREVIOUS day's volume profile - fixed all day, known before the session opens, read on spot (that
+// profile is spot's).
+function levelCondition({ id, group, name, short, level }) {
   const L = (d, k) => { const x = k >= 0 ? level(d, k) : null; return Number.isFinite(x) ? x : null }
   return {
     id, group, name,
@@ -449,7 +409,7 @@ function levelCondition({ id, group, name, short, on, level }) {
       opt('near', 'Near it', 'near', NEAR(0.05)),
     ],
     test: (d, i, v, w, p) => {
-      const bars = d[on]
+      const bars = d.spot
       const c = bars.c
       const x = L(d, i)
       const by = (p / 100) * (x ?? 0)
@@ -472,12 +432,10 @@ function levelCondition({ id, group, name, short, on, level }) {
         default: return false
       }
     },
-    // The level as last known (a developing HVN / LVN can drop out the candle a touch of it is still being read).
-    show: (d, i) => { let k = i; while (k > 0 && L(d, k) == null) k--; return `${short} ${fmtP(L(d, k))}` },
+    show: (d, i) => `${short} ${fmtP(L(d, i))}`,
   }
 }
-const todayLevel = (id, name, short, key) => levelCondition({ id, group: 'Profile', name, short, on: 'price', level: (d, k) => d.profile[k]?.[key] })
-const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, on: 'spot', level: (d) => d.prevVp?.[key] })
+const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, level: (d) => d.prevVp?.[key] })
 
 /** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's; `windowed`,
  *  `param`: what the line takes). `test(d, i, value, windowCandles, param)`. */
@@ -617,19 +575,6 @@ export const RULE_CONDITIONS = [
     },
     show: (d, i) => `straddle ${fmtP(d.straddle[i]?.value)} · its VWAP ${fmtP(d.straddle[i]?.vwap)}`,
   },
-  todayLevel('poc', "Today's POC (developing)", 'POC', 'poc'),
-  todayLevel('vpHvn', "Today's HVN (developing)", 'HVN', 'hvn'),
-  todayLevel('vpLvn', "Today's LVN (developing)", 'LVN', 'lvn'),
-  {
-    id: 'valueArea', group: 'Profile', name: 'Value area (developing)',
-    options: [opt('aboveVah', 'Price above the VAH', 'belowVal'), opt('inside', 'Price inside the value area'), opt('belowVal', 'Price below the VAL', 'aboveVah')],
-    test: (d, i, v) => {
-      const x = d.profile[i], c = d.price.c[i]
-      if (!x) return false
-      return v === 'aboveVah' ? c > x.vah : v === 'belowVal' ? c < x.val : v === 'inside' ? c >= x.val && c <= x.vah : false
-    },
-    show: (d, i) => `VAL ${fmtP(d.profile[i]?.val)} · VAH ${fmtP(d.profile[i]?.vah)}`,
-  },
   {
     id: 'ib', group: 'Profile', name: 'Initial Balance (09:15 - 10:14)',
     options: [opt('aboveHigh', 'Price above the IB high (after 10:15)', 'belowLow'), opt('inside', 'Price inside the IB (after 10:15)'), opt('belowLow', 'Price below the IB low (after 10:15)', 'aboveHigh')],
@@ -641,11 +586,24 @@ export const RULE_CONDITIONS = [
     show: (d) => (d.ib ? `IB ${fmtP(d.ib.low)} - ${fmtP(d.ib.high)}` : 'IB —'),
   },
   prevLevel('prevPoc', "Previous day's POC", 'POC', 'poc'),
-  prevLevel('prevVah', "Previous day's VAH", 'VAH', 'vah'),
-  prevLevel('prevVal', "Previous day's VAL", 'VAL', 'val'),
   prevLevel('prevHvn', "Previous day's HVN", 'HVN', 'hvn'),
   prevLevel('prevLvn', "Previous day's LVN", 'LVN', 'lvn'),
+  prevLevel('prevVah', "Previous day's VAH", 'VAH', 'vah'),
+  prevLevel('prevVal', "Previous day's VAL", 'VAL', 'val'),
+  {
+    id: 'valueArea', group: 'PrevProfile', name: "Previous day's value area",
+    options: [opt('aboveVah', 'Price above its VAH', 'belowVal'), opt('inside', 'Price inside it'), opt('belowVal', 'Price below its VAL', 'aboveVah')],
+    test: (d, i, v) => {
+      const x = d.prevVp, c = d.spot.c[i]
+      if (!x || x.vah == null || x.val == null) return false
+      return v === 'aboveVah' ? c > x.vah : v === 'belowVal' ? c < x.val : v === 'inside' ? c >= x.val && c <= x.vah : false
+    },
+    show: (d) => `prev VAL ${fmtP(d.prevVp?.val)} · VAH ${fmtP(d.prevVp?.vah)}`,
+  },
 ]
+// Lines saved while the volume profile levels were today's developing ones (POC / HVN / LVN): read as the previous
+// day's same level - the levels are the previous day's now, on request.
+const RENAMED = { poc: 'prevPoc', vpHvn: 'prevHvn', vpLvn: 'prevLvn' }
 const CONDITION = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const optionOf = (id, value) => CONDITION[id]?.options.find((o) => o.value === value) ?? null
 
@@ -663,9 +621,10 @@ export const DEFAULT_WINDOW = 5
 /** A line made whole: a known condition and value, its number within its range (else the default), a window offered,
  *  AND / OR. Null when the condition / value is not known. */
 export function cleanLine(line) {
-  const o = optionOf(line?.id, line?.value)
+  const id = RENAMED[line?.id] ?? line?.id
+  const o = optionOf(id, line?.value)
   if (!o) return null
-  const out = { id: line.id, value: line.value, join: line.join === 'or' ? 'or' : 'and' }
+  const out = { id, value: line.value, join: line.join === 'or' ? 'or' : 'and' }
   if (o.param) {
     const v = Number(line.param)
     out.param = line.param != null && line.param !== '' && Number.isFinite(v) ? Math.min(o.param.max, Math.max(o.param.min, v)) : o.param.default
@@ -680,7 +639,8 @@ export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
   if (!rule || typeof rule !== 'object') return normalizeRule(fallback, null)
   const raw = Array.isArray(rule.lines) ? rule.lines
     : rule.conditions && typeof rule.conditions === 'object'
-      ? RULE_CONDITIONS.filter((c) => rule.conditions[c.id] != null).map((c) => ({ id: c.id, value: rule.conditions[c.id], join: 'and', windowMin: rule.windowMin }))
+      ? Object.entries(rule.conditions).map(([id, value]) => ({ id: RENAMED[id] ?? id, value, join: 'and', windowMin: rule.windowMin }))
+        .sort((a, b) => RULE_CONDITIONS.findIndex((c) => c.id === a.id) - RULE_CONDITIONS.findIndex((c) => c.id === b.id))
       : null
   if (!raw && fallback) return normalizeRule(fallback, null)
   return {

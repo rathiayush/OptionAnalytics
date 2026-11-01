@@ -38,7 +38,7 @@ const STORE = {
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
-const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: "Today's volume & market profile", PrevProfile: "Previous day's volume profile" }
+const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: "Today's market profile", PrevProfile: "Previous day's volume profile (yesterday's levels)" }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
 // The indicator dropdown: the conditions under their group's title.

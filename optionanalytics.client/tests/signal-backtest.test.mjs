@@ -24,7 +24,7 @@ const at = (list) => list.map((x) => [x.i, x.side, x.action])
 
 // A prepared day built by hand: `n` minutes from 09:15, everything flat unless given.
 function fakeDay({ n = 360, spot = () => 25000, price = null, vwap = () => 24990, oi = () => ({ ce: 0, pe: 0 }), walls = () => ({ support: null, resistance: null }),
-  gex = () => null, straddle = () => null, profile = () => null, ib = null, breaks = [], hp = [], ceCum = () => NaN, peCum = () => NaN, netCum = () => NaN,
+  gex = () => null, straddle = () => null, ib = null, breaks = [], hp = [], ceCum = () => NaN, peCum = () => NaN, netCum = () => NaN,
   straddleWidth = 100, legs = {}, prevVp = null } = {}) {
   const t = Array.from({ length: n }, (_, i) => T915 + i * MIN)
   const bar = (f) => Array.from({ length: n }, (_, i) => f(i))
@@ -40,7 +40,7 @@ function fakeDay({ n = 360, spot = () => 25000, price = null, vwap = () => 24990
     ok: true, date: '2026-10-05', underlying: 'NIFTY', step: 50, n, t, atm: bar((i) => Math.round(sp(i).c / 50) * 50),
     spot: { o: bar((i) => sp(i).o), h: bar((i) => sp(i).h), l: bar((i) => sp(i).l), c: bar((i) => sp(i).c) },
     price: { o: bar((i) => pr(i).o), h: bar((i) => pr(i).h), l: bar((i) => pr(i).l), c: bar((i) => pr(i).c) },
-    vwap: bar(vwap), oi: bar(oi), walls: bar(walls), gex: bar(gex), straddle: bar(straddle), profile: bar(profile),
+    vwap: bar(vwap), oi: bar(oi), walls: bar(walls), gex: bar(gex), straddle: bar(straddle),
     ceCum: bar(ceCum), peCum: bar(peCum), netCum: bar(netCum),
     ib, breaks, hp, straddleWidth, prevVp, priceSource: 'futures', ce: side('ce'), pe: side('pe'),
   }
@@ -65,7 +65,7 @@ test('a day prepared from the OI Replay run: every feature for each minute, noth
   }, { underlying: 'NIFTY' })
   assert.equal(part.n, 151)
   for (let i = 0; i < part.n; i++) {
-    for (const k of ['oi', 'walls', 'gex', 'straddle', 'profile']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
+    for (const k of ['oi', 'walls', 'gex', 'straddle']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
     for (const k of ['vwap', 'ceCum', 'peCum', 'netCum', 'atm']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
   }
   assert.deepEqual(part.breaks, full.breaks.filter((b) => b.i < part.n))
@@ -217,48 +217,45 @@ test('VWAP: above / below, a cross within the window that still holds; spot risi
   assert.ok(holds(fakeDay({ spot: (i) => 25000 - i * 10 }), 'spotMove', 'falling', 60))
 })
 
-test('the straddle against its VWAP and the decay line; the profile: POC, value area, the IB after 10:15', () => {
+test('the straddle against its VWAP and the decay line; the IB after 10:15', () => {
   const straddle = (i) => ({ value: i < 50 ? 100 : 120, vwap: 110, decay: 105, forward: 25000 })
   const d = fakeDay({ straddle })
   assert.ok(holds(d, 'straddle', 'belowVwap', 40) && holds(d, 'straddle', 'belowDecay', 40))
   assert.ok(holds(d, 'straddle', 'aboveVwap', 60) && holds(d, 'straddle', 'aboveDecay', 60))
   assert.ok(holds(d, 'straddle', 'crossedAbove', 52) && !holds(d, 'straddle', 'crossedAbove', 60))
-  const profile = () => ({ poc: 25000, vah: 25040, val: 24960 })
   const price = (i) => flat(i < 70 ? 25020 : 25080)()
-  const p = fakeDay({ profile, price, ib: { high: 25050, low: 24950, done: 59 } })
-  assert.ok(holds(p, 'poc', 'above', 40) && !holds(p, 'poc', 'below', 40))
-  assert.ok(holds(p, 'valueArea', 'inside', 40) && holds(p, 'valueArea', 'aboveVah', 80))
+  const p = fakeDay({ price, ib: { high: 25050, low: 24950, done: 59 } })
   assert.ok(!holds(p, 'ib', 'inside', 40))                    // the IB is not done before 10:15
   assert.ok(holds(p, 'ib', 'inside', 65) && holds(p, 'ib', 'aboveHigh', 80) && !holds(p, 'ib', 'belowLow', 80))
 })
 
-test('volume profile levels: price above / below, crossed, touched and held, near - today\'s developing ones on the futures, the previous day\'s on spot', () => {
-  // Today's HVN at 25000 (developing; it moves to 25050 at minute 90). The futures: under it, through it at 60, a dip back
-  // to it at 70 that closes above (held), then on up.
-  const price = (i) => (i < 60 ? flat(24980)() : i === 70 ? { o: 25020, h: 25025, l: 25004, c: 25018 } : flat(25030)())
-  const profile = (i) => ({ poc: 24900, vah: 25100, val: 24800, hvn: i < 90 ? 25000 : 25050, lvn: 24950 })
-  const d = fakeDay({ price, profile })
-  assert.ok(holds(d, 'vpHvn', 'below', 50) && holds(d, 'vpHvn', 'above', 65))
-  assert.ok(holds(d, 'vpHvn', 'crossedAbove', 62) && !holds(d, 'vpHvn', 'crossedAbove', 68))   // 8 minutes on: out of a 5-minute window
-  assert.ok(holds(d, 'vpHvn', 'heldAbove', 72))                                                // low 25004 within 0.05% of 25000, closed above
-  assert.ok(!holds(d, 'vpHvn', 'heldAbove', 66))                                               // nothing touched it yet
-  assert.ok(holds(d, 'vpHvn', 'near', 72) && !holds(d, 'vpHvn', 'near', 80))
-  assert.ok(holds(d, 'vpHvn', 'above', 65, 5, 0.1) && !holds(d, 'vpHvn', 'above', 65, 5, 0.2))  // 30 over 25000 = 0.12%
-  // The level moving over price is not a cross: at 90 the HVN steps up to 25050, above the price - "below", never "crossed below".
-  assert.ok(holds(d, 'vpHvn', 'below', 92) && !holds(d, 'vpHvn', 'crossedBelow', 92))
-  assert.ok(holds(d, 'vpLvn', 'above', 40) && holds(d, 'poc', 'above', 40))
-  // No HVN yet (a thin profile): nothing holds.
-  assert.ok(!holds(fakeDay({ price, profile: () => ({ poc: 24900, vah: 25000, val: 24800, hvn: null, lvn: null }) }), 'vpHvn', 'above', 65))
-  // The previous day's levels on SPOT, fixed all day.
-  const prevVp = { date: '2026-10-02', poc: 25000, vah: 25100, val: 24900, hvn: 25050, lvn: 24950 }
-  const spot = (i) => (i < 50 ? 24940 : 24960)
-  const p = fakeDay({ spot, prevVp })
-  assert.ok(holds(p, 'prevLvn', 'crossedAbove', 52) && holds(p, 'prevVal', 'above', 52) && holds(p, 'prevPoc', 'below', 52))
-  assert.ok(holds(p, 'prevLvn', 'near', 52) && !holds(p, 'prevHvn', 'near', 52))
-  assert.ok(!holds(fakeDay({ spot }), 'prevLvn', 'above', 52))                                 // no previous day's profile: nothing
+test('the previous day\'s volume profile levels, on spot: above / below, crossed, touched and held, near, its value area', () => {
+  const prevVp = { date: '2026-10-02', poc: 24900, vah: 25100, val: 24800, hvn: 25000, lvn: 24950 }
+  // Spot under the HVN, through it at 60, a dip back to it at 70 that closes above (held), then on up.
+  const spot = (i) => (i < 60 ? flat(24980)() : i === 70 ? { o: 25020, h: 25025, l: 25004, c: 25018 } : flat(25030)())
+  const d = fakeDay({ spot, prevVp })
+  assert.ok(holds(d, 'prevHvn', 'below', 50) && holds(d, 'prevHvn', 'above', 65))
+  assert.ok(holds(d, 'prevHvn', 'crossedAbove', 62) && !holds(d, 'prevHvn', 'crossedAbove', 68))   // 8 minutes on: out of a 5-minute window
+  assert.ok(holds(d, 'prevHvn', 'crossedAbove', 68, 10))                                             // in a 10-minute one
+  assert.ok(holds(d, 'prevHvn', 'heldAbove', 72))                                                    // low 25004 within 0.05% of 25000, closed above
+  assert.ok(!holds(d, 'prevHvn', 'heldAbove', 66))                                                   // nothing touched it yet
+  assert.ok(holds(d, 'prevHvn', 'near', 72) && !holds(d, 'prevHvn', 'near', 80))
+  assert.ok(holds(d, 'prevHvn', 'above', 65, 5, 0.1) && !holds(d, 'prevHvn', 'above', 65, 5, 0.2))  // 30 over 25000 = 0.12%
+  assert.ok(holds(d, 'prevLvn', 'above', 40) && holds(d, 'prevPoc', 'above', 40) && holds(d, 'prevVah', 'below', 40) && holds(d, 'prevVal', 'above', 40))
+  assert.ok(holds(d, 'valueArea', 'inside', 40) && !holds(d, 'valueArea', 'aboveVah', 40))
+  assert.ok(holds(fakeDay({ spot: () => 25150, prevVp }), 'valueArea', 'aboveVah', 40) && holds(fakeDay({ spot: () => 24700, prevVp }), 'valueArea', 'belowVal', 40))
+  // Resistance held: a poke up to the HVN that closes back under it.
+  const reject = fakeDay({ spot: (i) => (i === 40 ? { o: 24985, h: 25003, l: 24980, c: 24985 } : flat(24970)()), prevVp })
+  assert.ok(holds(reject, 'prevHvn', 'heldBelow', 42) && !holds(reject, 'prevHvn', 'heldAbove', 42))
+  // No previous day's profile (or no HVN in it): nothing holds.
+  assert.ok(!holds(fakeDay({ spot }), 'prevLvn', 'above', 52) && !holds(fakeDay({ spot }), 'valueArea', 'inside', 52))
+  assert.ok(!holds(fakeDay({ spot, prevVp: { ...prevVp, hvn: null } }), 'prevHvn', 'above', 65))
   // In a rule, with its mirror: crossed above the previous day's LVN -> buy the call; crossed below it -> buy the put.
   const both = fakeDay({ spot: (i) => (i < 50 ? 24940 : i < 100 ? 24960 : 24940), prevVp })
   assert.deepEqual(at(ruleSignals(both, rule({ prevLvn: 'crossedAbove' }, 'buyCE', { mirror: true }))), [[50, 'rule', 'buyCE'], [100, 'mirror', 'buyPE']])
+  // A line saved while the levels were today's developing ones reads as the previous day's same level.
+  assert.deepEqual(cleanLine({ id: 'vpHvn', value: 'crossedAbove', windowMin: 10 }), { id: 'prevHvn', value: 'crossedAbove', join: 'and', windowMin: 10 })
+  assert.deepEqual(normalizeRule(rule({ poc: 'above', vpLvn: 'near' })).lines.map((l) => [l.id, l.value]), [['prevPoc', 'above'], ['prevLvn', 'near']])
 })
 
 test('the previous day\'s profile on a prepared day: its first HVN / LVN, only a day before the one replayed', () => {
@@ -270,8 +267,11 @@ test('the previous day\'s profile on a prepared day: its first HVN / LVN, only a
   assert.equal(prepareDay(run, { underlying: 'NIFTY', prevProfile: { ...prev, success: false } }).prevVp, null)
   assert.equal(prepareDay(run, { underlying: 'NIFTY', prevProfile: { ...prev, profileDate: '2026-10-05' } }).prevVp, null)   // not before the day
   assert.deepEqual(prepareDay(run, { underlying: 'NIFTY', prevProfile: { ...prev, hvn: [], lvn: null } }).prevVp.hvn, null)
-  // Today's developing HVN / LVN are on the profile of each minute.
-  assert.ok(d.profile.some((x) => x?.hvn != null) && d.profile.some((x) => x?.lvn != null))
+  // Every timeframe reads the same fixed levels.
+  assert.deepEqual(timeframeView(d, 5).prevVp, d.prevVp)
+  // No developing profile any more: the levels are the previous day's only.
+  assert.equal(d.profile, undefined)
+  assert.ok(!RULE_CONDITIONS.some((c) => /developing/i.test(c.name)))
 })
 
 test('the rule: a signal only where ALL its conditions hold - each one missing, no signal; once until it stops holding', () => {
@@ -518,7 +518,7 @@ test('the timeframe on a real day: the OI totals\' breaks on its own buckets, an
     const fv = timeframeView(full, tf)
     assert.equal(pv.n, 150 / tf)
     for (let k = 0; k < pv.n; k++) {
-      for (const key of ['oi', 'walls', 'gex', 'straddle', 'profile', 'vwap', 'ceCum', 'peCum', 'netCum', 'atm', 't', 'at']) assert.deepEqual(pv[key][k], fv[key][k], `${tf} min ${key} at ${k}`)
+      for (const key of ['oi', 'walls', 'gex', 'straddle', 'vwap', 'ceCum', 'peCum', 'netCum', 'atm', 't', 'at']) assert.deepEqual(pv[key][k], fv[key][k], `${tf} min ${key} at ${k}`)
       for (const key of ['spot', 'price']) for (const f of ['o', 'h', 'l', 'c']) assert.equal(pv[key][f][k], fv[key][f][k], `${tf} min ${key}.${f} at ${k}`)
     }
     assert.deepEqual(pv.breaks, fv.breaks.filter((b) => b.i < pv.n))
