@@ -25,7 +25,7 @@ const at = (list) => list.map((x) => [x.i, x.side, x.action])
 // A prepared day built by hand: `n` minutes from 09:15, everything flat unless given.
 function fakeDay({ n = 360, spot = () => 25000, price = null, vwap = () => 24990, oi = () => ({ ce: 0, pe: 0 }), walls = () => ({ support: null, resistance: null }),
   gex = () => null, straddle = () => null, ib = null, breaks = [], hp = [], ceCum = () => NaN, peCum = () => NaN, netCum = () => NaN,
-  straddleWidth = 100, legs = {}, prevVp = null } = {}) {
+  straddleWidth = 100, legs = {}, prevVp = null, tot = () => ({ ce: 4e7, pe: 4e7 }) } = {}) {
   const t = Array.from({ length: n }, (_, i) => T915 + i * MIN)
   const bar = (f) => Array.from({ length: n }, (_, i) => f(i))
   const sp = (i) => (typeof spot(i) === 'number' ? { o: spot(i), h: spot(i), l: spot(i), c: spot(i) } : spot(i))
@@ -40,7 +40,7 @@ function fakeDay({ n = 360, spot = () => 25000, price = null, vwap = () => 24990
     ok: true, date: '2026-10-05', underlying: 'NIFTY', step: 50, n, t, atm: bar((i) => Math.round(sp(i).c / 50) * 50),
     spot: { o: bar((i) => sp(i).o), h: bar((i) => sp(i).h), l: bar((i) => sp(i).l), c: bar((i) => sp(i).c) },
     price: { o: bar((i) => pr(i).o), h: bar((i) => pr(i).h), l: bar((i) => pr(i).l), c: bar((i) => pr(i).c) },
-    vwap: bar(vwap), oi: bar(oi), walls: bar(walls), gex: bar(gex), straddle: bar(straddle),
+    vwap: bar(vwap), oi: bar(oi), tot: bar(tot), walls: bar(walls), gex: bar(gex), straddle: bar(straddle),
     ceCum: bar(ceCum), peCum: bar(peCum), netCum: bar(netCum),
     ib, breaks, hp, straddleWidth, prevVp, priceSource: 'futures', ce: side('ce'), pe: side('pe'),
   }
@@ -65,7 +65,7 @@ test('a day prepared from the OI Replay run: every feature for each minute, noth
   }, { underlying: 'NIFTY' })
   assert.equal(part.n, 151)
   for (let i = 0; i < part.n; i++) {
-    for (const k of ['oi', 'walls', 'gex', 'straddle']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
+    for (const k of ['oi', 'tot', 'walls', 'gex', 'straddle']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
     for (const k of ['vwap', 'ceCum', 'peCum', 'netCum', 'atm']) assert.deepEqual(part[k][i], full[k][i], `${k} at ${i}`)
   }
   assert.deepEqual(part.breaks, full.breaks.filter((b) => b.i < part.n))
@@ -198,6 +198,41 @@ test('OI since open: PE / CE ahead, and a crossover within the window that still
   assert.ok(!holds(d, 'oiOpen', 'peCross', 56))     // 6 minutes ago: out of a 5-minute window
   assert.ok(holds(d, 'oiOpen', 'peCross', 56, 10))  // in a 10-minute one
   assert.ok(holds(d, 'oiOpen', 'ceCross', 81) && !holds(d, 'oiOpen', 'peCross', 81))
+})
+
+test('Total OI: total CE / PE OI rising / falling / flat by a % over the window; the PCR above / below, rising / falling; which side added more', () => {
+  // Total CE OI 4 cr flat until 40, then +1% a minute for 10 minutes (to 4.4 cr), then flat. Total PE OI 4 cr all day.
+  const ceAt = (i) => 4e7 * (i < 40 ? 1 : i < 50 ? 1 + (i - 40) * 0.01 : 1.1)
+  const d = fakeDay({ tot: (i) => ({ ce: ceAt(i), pe: 4e7 }) })
+  assert.ok(holds(d, 'totalCe', 'flat', 30) && !holds(d, 'totalCe', 'rising', 30))
+  assert.ok(holds(d, 'totalCe', 'rising', 45) && !holds(d, 'totalCe', 'falling', 45))            // +5% over 5 minutes
+  assert.ok(holds(d, 'totalCe', 'rising', 45, 5, 4) && !holds(d, 'totalCe', 'rising', 45, 5, 6))  // by ≥ 4% yes, 6% no
+  assert.ok(holds(d, 'totalCe', 'flat', 60) && holds(d, 'totalCe', 'rising', 52, 15))             // 15-minute window still sees it
+  assert.ok(holds(fakeDay({ tot: (i) => ({ ce: 4e7, pe: 4e7 * (1 - i * 0.002) }) }), 'totalPe', 'falling', 40))
+  assert.ok(!holds(fakeDay({ tot: () => ({ ce: 0, pe: 0 }) }), 'totalCe', 'flat', 40))           // no OI read: nothing
+  // PCR: 1.0 until 40, CE building to 1.1x -> PCR 0.91.
+  assert.ok(holds(d, 'totalPcr', 'above', 30, 5, 0.95) && !holds(d, 'totalPcr', 'above', 30, 5, 1))
+  assert.ok(holds(d, 'totalPcr', 'below', 60, 5, 1) && !holds(d, 'totalPcr', 'below', 60, 5, 0.9))
+  assert.ok(holds(d, 'totalPcr', 'falling', 45) && !holds(d, 'totalPcr', 'rising', 45))
+  assert.ok(holds(d, 'totalPcr', 'falling', 45, 5, 3) && !holds(d, 'totalPcr', 'falling', 45, 5, 6))
+  assert.ok(holds(d, 'totalPcr', 'ceGaining', 45) && !holds(d, 'totalPcr', 'peGaining', 45))
+  assert.ok(!holds(d, 'totalPcr', 'ceGaining', 70))                                                // nothing added in the window
+  // In a rule, with its mirror: total PE OI rising -> buy the call; falling -> buy the put.
+  const pe = (i) => 4e7 * (i < 40 ? 1 : i < 50 ? 1 + (i - 40) * 0.01 : i < 80 ? 1.1 : 1.1 - (i - 80) * 0.01)
+  const r = fakeDay({ tot: (i) => ({ ce: 4e7, pe: pe(i) }) })
+  assert.deepEqual(at(ruleSignals(r, rule({ totalPe: 'rising' }, 'buyCE', { mirror: true }))), [[41, 'rule', 'buyCE'], [81, 'mirror', 'buyPE']])
+  assert.match(lineText({ id: 'totalPcr', value: 'above', param: 1.2 }), /^Total OI PCR \(PE ÷ CE\): PCR above > 1.2$/)
+})
+
+test('Total OI on a prepared day: the chain-wide totals OI Replay shows - OI since open is them less the open\'s', () => {
+  const { run } = syntheticDay()
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  for (const i of [0, 30, 120, 250]) {
+    assert.equal(d.tot[i].ce - d.tot[0].ce, d.oi[i].ce)
+    assert.equal(d.tot[i].pe - d.tot[0].pe, d.oi[i].pe)
+  }
+  assert.ok(d.tot[0].ce > 0 && d.tot[0].pe > 0)
+  assert.deepEqual(timeframeView(d, 5).tot[1], d.tot[9])         // a 5-minute candle: the totals at its last minute
 })
 
 test('cumulative Δ: positive / negative, −ve → +ve, rising / falling / stable against its range, its S/R breaks', () => {
@@ -537,7 +572,10 @@ test('a day\'s trades: entries 09:30 - 14:45, one at a time (rule and mirror tog
   const d = fakeDay({ price, vwap: () => 25000, legs })
   const { trades, signals } = simulateDay(d, { rule: rule({ vwap: 'above' }, 'buyCE', { mirror: true }), timeStopMin: 5, cooldownMin: 10, maxTradesPerDay: 3, lotSize: 65, charges: false })
   assert.equal(trades.length, 3)
-  assert.deepEqual(trades.map((t) => [t.strategy, t.side, t.action]), [['rule', 'CE', 'BUY'], ['mirror', 'PE', 'BUY'], ['rule', 'CE', 'BUY']])
+  // The mirror (price under VWAP since 09:15) already holds when entries open: its trade is at 09:30; the rule's 09:35 signal
+  // falls in the cooldown after it, then the mirror at 09:55 and the rule at 10:15.
+  assert.deepEqual(trades.map((t) => [t.strategy, t.side, t.action]), [['mirror', 'PE', 'BUY'], ['mirror', 'PE', 'BUY'], ['rule', 'CE', 'BUY']])
+  assert.equal(istMinute(trades[0].entryTime), 9 * 60 + 30)
   for (const tr of trades) {
     const m = istMinute(tr.entryTime)
     assert.ok(m >= 9 * 60 + 30 && m <= 14 * 60 + 45)
@@ -547,6 +585,25 @@ test('a day\'s trades: entries 09:30 - 14:45, one at a time (rule and mirror tog
   for (let k = 1; k < trades.length; k++) assert.ok(trades[k].entryTime >= trades[k - 1].exitTime + 10 * MIN)
   assert.ok(signals.some((s) => /outside/.test(s.skipped ?? '')))     // the 09:15 one
   assert.ok(signals.some((s) => /already today/.test(s.skipped ?? '')))
+})
+
+test('a rule already true when entries open (09:30) signals then - a condition true from the open is not lost', () => {
+  // Total OI PCR 1.0 all day: "PCR above 0.9" holds from 09:15. It used to signal only at 09:15 (outside the window) - never traded.
+  const legs = { ce: { 25000: () => ({ o: 100, h: 100, l: 100, c: 100 }) }, pe: { 25000: () => ({ o: 100, h: 100, l: 100, c: 100 }) } }
+  const d = fakeDay({ legs })
+  const pcr = lines([{ id: 'totalPcr', value: 'above', param: 0.9 }], 'buyCE')
+  assert.deepEqual(at(ruleSignals(d, pcr)), [[0, 'rule', 'buyCE']])                       // alone: once, when it became true
+  assert.deepEqual(at(ruleSignals(d, pcr, { openAt: 15 })), [[0, 'rule', 'buyCE'], [15, 'rule', 'buyCE']])
+  const { trades, signals } = simulateDay(d, { rule: pcr, lotSize: 65, timeStopMin: 5 })
+  assert.equal(trades.length, 1)
+  assert.equal(istMinute(trades[0].entryTime), 9 * 60 + 30)
+  assert.match(signals[0].skipped, /outside/)
+  // On a 5-minute timeframe: the first candle closing in the window (09:30 - 09:34, known at 09:34).
+  const five = simulateDay(d, { rule: pcr, lotSize: 65, timeStopMin: 5, timeframe: 5 })
+  assert.equal(istMinute(five.trades[0].entryTime), 9 * 60 + 34)
+  // A rule that only becomes true later is unchanged: once, when it does.
+  const later = fakeDay({ legs, tot: (i) => ({ ce: 4e7, pe: i >= 100 ? 4e7 : 3e7 }) })
+  assert.deepEqual(simulateDay(later, { rule: pcr, lotSize: 65, timeStopMin: 5 }).trades.map((t) => istMinute(t.entryTime)), [9 * 60 + 15 + 100])
 })
 
 test('the synthetic day end to end: buy and sell, the call and the put; every trade exits after it enters', () => {
@@ -670,7 +727,7 @@ test('the timeframe on a real day: the OI totals\' breaks on its own buckets, an
     const fv = timeframeView(full, tf)
     assert.equal(pv.n, 150 / tf)
     for (let k = 0; k < pv.n; k++) {
-      for (const key of ['oi', 'walls', 'gex', 'straddle', 'vwap', 'ceCum', 'peCum', 'netCum', 'atm', 't', 'at']) assert.deepEqual(pv[key][k], fv[key][k], `${tf} min ${key} at ${k}`)
+      for (const key of ['oi', 'tot', 'walls', 'gex', 'straddle', 'vwap', 'ceCum', 'peCum', 'netCum', 'atm', 't', 'at']) assert.deepEqual(pv[key][k], fv[key][k], `${tf} min ${key} at ${k}`)
       for (const key of ['spot', 'price']) for (const f of ['o', 'h', 'l', 'c']) assert.equal(pv[key][f][k], fv[key][f][k], `${tf} min ${key}.${f} at ${k}`)
     }
     assert.deepEqual(pv.breaks, fv.breaks.filter((b) => b.i < pv.n))

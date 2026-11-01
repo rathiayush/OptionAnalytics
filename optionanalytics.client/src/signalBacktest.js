@@ -184,6 +184,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
   const peSeries = byStrikeSeries(peLegs)
   const totals = chainOiTotalsAt(ceSeries, peSeries, t[0], t)
   const oi = totals.map((x) => ({ ce: x.ce - totals[0].ce, pe: x.pe - totals[0].pe }))
+  // Total OI: the chain-wide CE / PE open interest itself (OI Replay's "Total OI" and its lookback table - the same totals).
+  const tot = totals.map((x) => ({ ce: x.ce, pe: x.pe }))
 
   // The OI totals' cumulative Δ breaks (CE / PE / Net) and the 🎯 high-probability signal, stepped minute by minute on
   // the completed buckets (the OI Replay page's own step, `oiLevelBreaks.js`) - 1-minute buckets, and each longer
@@ -235,7 +237,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
+    ok: true, date, underlying: u, step, n, t, atm, oi, tot, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap),
@@ -298,7 +300,7 @@ export function timeframeView(d, tf = 1) {
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last),
-    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
+    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
     vwap: pick(d.vwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
@@ -360,6 +362,29 @@ const NEAR = (def) => ({ windowed: true, param: pctParam('within', def, 2, 0.01)
 const TOL = { windowed: true, param: pctParam('tolerance', 10) }
 const MOVE = { windowed: true, param: pctParam('by', 0.1, 5, 0.05) }
 const OVER = { param: pctParam('by ≥', 0, 5, 0.05) }
+const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
+
+const fmtLakh = (v) => `${(v / 1e5).toFixed(1)}L`
+
+// Total CE / PE OI (chain-wide, OI Replay's "Total OI" and its lookback table): its move over the window as a % of where
+// it was - rising / falling by at least the number, flat when it moved less than that.
+function totalCondition(side, name, meaning) {
+  return {
+    id: side === 'ce' ? 'totalCe' : 'totalPe', group: 'OI', name,
+    options: [
+      opt('rising', `Rising (${meaning.up})`, 'falling', TOTAL_MOVE), opt('falling', `Falling (${meaning.down})`, 'rising', TOTAL_MOVE),
+      opt('flat', 'Flat (moved less than)', 'flat', TOTAL_MOVE),
+    ],
+    test: (d, i, v, w, p) => {
+      const now = d.tot?.[i]?.[side], back = d.tot?.[Math.max(0, i - w)]?.[side]
+      if (!(now > 0) || !(back > 0)) return false
+      const move = (now - back) / back
+      const need = p / 100
+      return v === 'rising' ? move > 0 && move >= need : v === 'falling' ? move < 0 && -move >= need : v === 'flat' ? Math.abs(move) < need : false
+    },
+    show: (d, i) => `total ${side.toUpperCase()} OI ${finite(d.tot?.[i]?.[side]) ? fmtLakh(d.tot[i][side]) : '—'}`,
+  }
+}
 
 const CUM_LINES = { ce: { key: 'ceCum', name: 'CE' }, pe: { key: 'peCum', name: 'PE' }, net: { key: 'netCum', name: 'Net (CE − PE)' } }
 function cumCondition(line, group, meaning) {
@@ -459,6 +484,36 @@ export const RULE_CONDITIONS = [
       }
     },
     show: (d, i) => `OI since open CE ${fmtL(d.oi[i].ce)} · PE ${fmtL(d.oi[i].pe)}`,
+  },
+  totalCondition('ce', 'Total CE OI (chain-wide)', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
+  totalCondition('pe', 'Total PE OI (chain-wide)', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
+  {
+    id: 'totalPcr', group: 'OI', name: 'Total OI PCR (PE ÷ CE)',
+    options: [
+      opt('above', 'PCR above', 'below', { param: { label: '>', unit: '', default: 1, min: 0, max: 5, step: 0.05 } }),
+      opt('below', 'PCR below', 'above', { param: { label: '<', unit: '', default: 1, min: 0, max: 5, step: 0.05 } }),
+      opt('rising', 'PCR rising (puts building faster - bullish)', 'falling', MOVE),
+      opt('falling', 'PCR falling (calls building faster - bearish)', 'rising', MOVE),
+      opt('peGaining', 'More PE OI added than CE (within the window)', 'ceGaining', W),
+      opt('ceGaining', 'More CE OI added than PE (within the window)', 'peGaining', W),
+    ],
+    test: (d, i, v, w, p) => {
+      const tot = d.tot?.[i]
+      if (!tot || !(tot.ce > 0) || !(tot.pe > 0)) return false
+      const pcr = tot.pe / tot.ce
+      const back = d.tot[Math.max(0, i - w)]
+      const backPcr = back?.ce > 0 && back?.pe > 0 ? back.pe / back.ce : NaN
+      switch (v) {
+        case 'above': return pcr > p
+        case 'below': return pcr < p
+        case 'rising': return finite(backPcr) && pcr > backPcr && (pcr - backPcr) / backPcr >= p / 100
+        case 'falling': return finite(backPcr) && pcr < backPcr && (backPcr - pcr) / backPcr >= p / 100
+        case 'peGaining': return back != null && tot.pe - back.pe > tot.ce - back.ce
+        case 'ceGaining': return back != null && tot.ce - back.ce > tot.pe - back.pe
+        default: return false
+      }
+    },
+    show: (d, i) => { const x = d.tot?.[i]; return x?.ce > 0 ? `PCR ${(x.pe / x.ce).toFixed(2)} (total CE ${fmtLakh(x.ce)} · PE ${fmtLakh(x.pe)})` : 'PCR —' },
   },
   cumCondition('ce', 'OI', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
   cumCondition('pe', 'OI', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
@@ -874,9 +929,11 @@ function ruleHolds(d, i, lines, groups, tree) {
  * earlier { conditions } form - `normalizeRule`); with `logic` the lines are combined by it (the mirror by the same logic on
  * its lines), and logic that does not read signals nothing. A signal on the candle where the rule BECOMES true (it then has to stop holding
  * before it signals again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror
- * that would be the rule itself is left out. Returns [{ i, side: 'rule' | 'mirror', action, why }].
+ * that would be the rule itself is left out. `openAt`: the candle entries open on (09:30) - a rule that became true before it
+ * and still holds there signals on it (else a condition true from the open, e.g. PCR above 0.9, never traded at all).
+ * Returns [{ i, side: 'rule' | 'mirror', action, why }].
  */
-export function ruleSignals(d, rule) {
+export function ruleSignals(d, rule, { openAt = null } = {}) {
   const r = normalizeRule(rule, null)
   if (!r.lines.length || !ACTION[r.action]) return []
   const tree = ruleLogic(r)
@@ -889,6 +946,8 @@ export function ruleSignals(d, rule) {
     let was = false
     for (let i = 0; i < d.n; i++) {
       const now = ruleHolds(d, i, s.lines, groups, tree)
+      // Entries open at `openAt`: a rule already holding then signals there - it became true before entries were allowed.
+      if (i === openAt) was = false
       if (now && !was) {
         const shown = [...new Set(s.lines.map((l) => CONDITION[l.id].show(d, i)))].join(' · ')
         out.push({ i, side: s.side, action: s.action, why: `${ACTION[s.action].label}${s.side === 'mirror' ? ' (mirror)' : ''}: ${shown}` })
@@ -999,7 +1058,10 @@ export function simulateDay(d, settings = {}) {
   const minuteOfSignal = (k) => (view.at ? view.at[k] : k)
   let busyUntil = -1
   let count = 0
-  for (const sig of ruleSignals(view, s.rule)) {
+  // The first candle whose close is in the entry window: a rule already holding then signals on it.
+  let openAt = 0
+  while (openAt < view.n && istMinute(view.t[openAt]) < from) openAt++
+  for (const sig of ruleSignals(view, s.rule, { openAt })) {
     const i = minuteOfSignal(sig.i)
     const { dir, mode } = ACTION[sig.action]
     const minute = istMinute(d.t[i])
