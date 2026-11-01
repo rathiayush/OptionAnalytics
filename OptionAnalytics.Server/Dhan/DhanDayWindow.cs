@@ -74,6 +74,26 @@ internal static class DhanDayWindow
         return kept;
     }
 
+    /// <summary>Keeps every closed day of [from, to] that Dhan's (successful) answer has NO minutes for and that is not on
+    /// disk yet - empty. Only for a series whose empty day is final whatever comes after it: an expired futures contract
+    /// (Dhan keeps intraday history for live contracts only), so its past days stop being asked of Dhan on every load. An
+    /// answer whose timestamps are not in order, or that is not an object, keeps nothing. Returns the days written.</summary>
+    public static int KeepEmpty(DhanDataCache? cache, string endpoint, object key, DateOnly from, DateOnly to, JsonElement series,
+        Func<Action<Utf8JsonWriter>, Action<Utf8JsonWriter>> wrap)
+    {
+        if (cache is null || series.ValueKind != JsonValueKind.Object) return 0;
+        var ranges = DayRanges(series);
+        if (ranges is null) return 0;
+        var kept = 0;
+        foreach (var d in Days(from, to))
+        {
+            if (!cache.Cacheable(d) || ranges.ContainsKey(d) || cache.HasDay(endpoint, key, d)) continue;
+            cache.PutDay(endpoint, key, d, wrap(w => WriteSlice(w, series, 0, 0)));
+            kept++;
+        }
+        return kept;
+    }
+
     /// <summary>Each IST day's [Start, End) of the answer's arrays - empty when it has none; null when its timestamps are
     /// not in order (nothing is then kept per day).</summary>
     internal static Dictionary<DateOnly, (int Start, int End)>? DayRanges(JsonElement series)

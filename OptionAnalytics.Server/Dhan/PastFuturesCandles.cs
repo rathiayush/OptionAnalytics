@@ -7,11 +7,14 @@ namespace OptionAnalytics.Server.Dhan;
 ///
 /// Dhan's intraday history covers ACTIVE instruments only - its intraday request has no expiryCode and
 /// its expired-contract API (rolling option) serves options, not futures. So for an expired contract:
-///  1. Dhan, in case it still has it;
-///  2. NSE's own chart data for that exact contract (NseChartHistory) - the real prices and volume, but
-///     no open interest;
+///  1. NSE's own chart data for that exact contract (NseChartHistory) - the real prices and volume, but
+///     no open interest; KEPT ON DISK (NseDayStore), so a past day loaded once never asks again. It used to
+///     be second, after Dhan - whose answer for an expired contract is empty, and an empty answer is never
+///     kept (DhanDayWindow), so every load of such a day (most of a backtest's range) asked Dhan again;
+///  2. Dhan, in case it still has it (also when there is no NSE source);
 ///  3. another contract listed that day that is still live (NSE lists three monthly contracts at a time)
-///     - Dhan serves its history: the same index moves at a slightly higher price (cost of carry).
+///     - Dhan serves its history (kept on disk): the same index moves at a slightly higher price (cost of carry).
+/// A contract still live is Dhan's only (kept on disk like every past day).
 /// The result says which one it used, and when nothing worked, what each source answered.
 /// </summary>
 public static class PastFuturesCandles
@@ -23,12 +26,9 @@ public static class PastFuturesCandles
         DhanHistoricalDataService historical, DhanFuturesInstrument contract, IEnumerable<DhanFuturesInstrument> listedThatDay, DateOnly date,
         CancellationToken cancellationToken, NseChartHistory? nse = null)
     {
-        var (bars, oi, error) = await historical.GetIntradayFuturesCandlesAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken);
-        if (bars.Count > 0 || contract.Expiry >= IstClock.Today()) return new Result(contract, bars, oi, error, null);
-
-        var dhanSaid = error is null ? "Dhan: no candles (it keeps intraday history for live contracts only)" : $"Dhan: {error}";
+        var expired = contract.Expiry < IstClock.Today();
         string? nseSaid = null;
-        if (nse is not null)
+        if (expired && nse is not null)
         {
             var fromNse = await nse.DayAsync(contract, date, cancellationToken);
             if (fromNse.Bars.Count > 0)
@@ -36,6 +36,11 @@ public static class PastFuturesCandles
                     $"{contract.TradingSymbol} has expired and Dhan keeps no intraday history for it - loaded from NSE's chart data instead (prices and volume; NSE's chart has no open interest).");
             nseSaid = fromNse.Error is null ? $"NSE: no {NseChartHistory.Ticker(contract)} bars for that day" : $"NSE: {fromNse.Error}";
         }
+
+        // An expired contract's empty day is final at Dhan: kept empty on disk, not asked again on the next load.
+        var (bars, oi, error) = await historical.GetIntradayFuturesCandlesAsync(contract.SecurityId, contract.DhanSegment, date, date, 1, cancellationToken, keepEmpty: expired);
+        if (bars.Count > 0 || !expired) return new Result(contract, bars, oi, error, null);
+        var dhanSaid = error is null ? "Dhan: no candles (it keeps intraday history for live contracts only)" : $"Dhan: {error}";
 
         var tried = new HashSet<uint> { contract.SecurityId };
         foreach (var other in listedThatDay.Where(c => c.Expiry >= date && c.Expiry >= IstClock.Today() && c.Underlying.Equals(contract.Underlying, StringComparison.OrdinalIgnoreCase)).OrderBy(c => c.Expiry))

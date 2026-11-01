@@ -75,7 +75,14 @@ When adding or changing a strategy:
   when it is before today and Dhan sent a full session of it (its own timestamps - a thin option strike's untraded minutes
   come at a 0 price the parser drops, and still count, or BANKNIFTY's monthly strikes were never kept) or a later past day
   in the same answer (a holiday is then kept empty, a short session short); today, empty answers and a half LAST day go to
-  Dhan again. Older whole-window files are still read for their exact request and split into days. The folder is held to
+  Dhan again. So a HOLIDAY asked ALONE would go to Dhan on every load (the Signal backtest's days, the previous day's
+  profile walking back over one, the expiry check): an INDEX day goes through `GetIndexDayCandlesAsync` - a past day
+  that comes back empty is asked once more through the closed days after it (`HolidayProofDays`, 7) and, a later day's
+  minutes in that answer, is kept empty (holiday) with the days after it - every later load reads it from disk; a run of
+  a PAST day fetches its spot BEFORE its futures (`RunAsync`), so a holiday stops at the spot with no futures / option
+  call. An EXPIRED futures contract (most past days of a backtest - Dhan keeps intraday history for live contracts only):
+  NSE's chart first (kept on disk - `PastFuturesCandles`), then Dhan, whose empty answer for it is final and kept empty
+  (`keepEmpty` / `DhanDayWindow.KeepEmpty`); a live contract's empty day is never kept. Older whole-window files are still read for their exact request and split into days. The folder is held to
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
   and failed writes (`LoadProgress`), and at start the folder is checked writable and on a volume kept across a deploy
   (`DhanDataCache.CheckFolder`, `StorageVolume` from /proc/self/mountinfo) - logged, and an admin header tag when not

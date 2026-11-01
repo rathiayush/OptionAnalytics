@@ -90,7 +90,7 @@ public sealed class NseChartHistoryTests
     }
 
     [Fact]
-    public async Task AnExpiredContract_IsLoadedFromNse_BeforeSwappingToAnotherContract()
+    public async Task AnExpiredContract_IsLoadedFromNse_WithNoDhanCall()
     {
         var (dhan, dhanRequests) = Dhan();
         var history = new NseChartHistory(new HttpClient(new FakeNse(HttpStatusCode.OK, OneBar())), NullLogger<NseChartHistory>.Instance);
@@ -104,7 +104,8 @@ public sealed class NseChartHistoryTests
         Assert.Null(result.Bars[0].OpenInterest);
         Assert.False(result.OiFieldPresent);
         Assert.Contains("NSE", result.Note);
-        Assert.Equal(new[] { "68407" }, dhanRequests);
+        // NSE first (its answer is kept on disk): Dhan - which has no history for an expired contract - is not asked.
+        Assert.Empty(dhanRequests);
     }
 
     [Fact]

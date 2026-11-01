@@ -232,9 +232,19 @@ public sealed class OiReplayService
         LoadProgress.AddTotal(2 + 2 * (2 * StrikeBandSteps + 1));
         LoadProgress.Info($"Loading {underlying} {date:dd MMM yyyy} ({expiryFlag}): spot, futures and {2 * (2 * StrikeBandSteps + 1)} option series (ATM±{StrikeBandSteps}, CE and PE).");
         var futuresClock = System.Diagnostics.Stopwatch.StartNew();
-        var futuresTask = _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
-            ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
-        _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        Task<((IReadOnlyList<FuturesBar> Bars, DateOnly? Expiry, bool OiAvailable, string? Error), DateTimeOffset)>? futuresTask = null;
+        void StartFutures()
+        {
+            futuresClock.Restart();
+            futuresTask = _today.ReuseWithTimeAsync($"{underlying}|fut", date, IstClock.Today(),
+                ct => GetFuturesAsync(underlying, date, ct), r => r.Item1.Count > 0, cancellationToken, TodayWindow);
+            _ = futuresTask.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        }
+        // Today: the futures beside the spot. A PAST day: after its spot (a disk read once kept - no delay worth the name),
+        // so a day with no trading (a holiday) stops at the spot and asks nothing of Dhan / NSE for futures or options;
+        // the futures still run beside the 42 option series.
+        var pastDay = date < IstClock.Today();
+        if (!pastDay) StartFutures();
 
         var fromFeed = isAlwaysLive ? TodaySpotFromFeed(underlying, date, wholeDay: true) : null;
         var (spotBarsRaw, spotError) = fromFeed is not null ? (fromFeed, null) : await FetchSpotBarsWithVolumeAsync(underlying, date, isAlwaysLive, ResolveInstrumentAsync, cancellationToken);
@@ -258,6 +268,7 @@ public sealed class OiReplayService
         if (spotBarsRaw.Count == 0)
             return OiReplayResult.Failed(underlying, date, timeframe,
                 spotError ?? $"No stored spot data for {underlying} on {date:dd MMM yyyy} - has NiftyDataCollector backfilled this date yet?");
+        if (futuresTask is null) StartFutures();
 
         var spotBars1m = spotBarsRaw.Select(b => b.ToCandle()).ToList();
 
@@ -360,9 +371,10 @@ public sealed class OiReplayService
 
         LoadProgress.Stage("futures");
         var futuresLeft = FuturesBudget - futuresClock.Elapsed;
-        var futuresDone = futuresTask.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futuresTask, Task.Delay(futuresLeft, cancellationToken)) == futuresTask);
+        var futures = futuresTask!;
+        var futuresDone = futures.IsCompleted || (futuresLeft > TimeSpan.Zero && await Task.WhenAny(futures, Task.Delay(futuresLeft, cancellationToken)) == futures);
         var ((futuresBars, futuresExpiry, futuresOiAvailable, futuresError), futuresAt) = futuresDone
-            ? await futuresTask
+            ? await futures
             : ((Array.Empty<FuturesBar>(), (DateOnly?)null, false,
                 $"The futures for {date:dd MMM yyyy} were not ready within {FuturesBudget.TotalSeconds:0} s (an expired contract's day comes from NSE when Dhan has none, and NSE did not answer) - the page is shown without them."),
                DateTimeOffset.UtcNow);
@@ -546,13 +558,20 @@ public sealed class OiReplayService
             var liveInstrument = await resolveInstrument();
             if (liveInstrument is not null)
             {
-                var (liveSpotBars, liveSpotError) = await ReuseTodayAsync($"{underlying}|spot", date,
-                    ct => _historicalData.GetIntradayCandlesAsync(liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, ct),
-                    r => r.Candles.Count > 0, cancellationToken);
+                // A past day through the holiday proof (GetIndexDayCandlesAsync): a day with no trading is kept on disk
+                // once Dhan has answered past it, so the backtest's days, the previous day's profile walking back and the
+                // expiry check never ask Dhan for a holiday twice. Today is shared with the day's other loads as before.
+                var (liveSpotBars, liveSpotError, holiday) = date < IstClock.Today()
+                    ? await _historicalData.GetIndexDayCandlesAsync(liveInstrument.SecurityId, liveInstrument.DhanSegment, date, cancellationToken)
+                    : await ReuseTodayAsync($"{underlying}|spot", date,
+                        async ct => { var (c, e) = await _historicalData.GetIntradayCandlesAsync(liveInstrument.SecurityId, liveInstrument.DhanSegment, date, date, 1, ct); return (c, e, false); },
+                        r => r.Item1.Count > 0, cancellationToken);
                 // Only trust the live call over whatever's already stored if it actually found
                 // something - a live error (auth, market holiday) should never blank out a
                 // perfectly good, merely slightly-stale stored result.
                 if (liveSpotBars.Count > 0) spotBarsRaw = liveSpotBars;
+                else if (holiday && spotBarsRaw.Count == 0)
+                    spotError = $"No {underlying} trading on {date:ddd dd MMM yyyy} - a market holiday (Dhan has no candles for it and has for the days after).";
                 else spotError = liveSpotError is null ? null
                     : $"{underlying} spot 1-minute candles for {date:dd MMM yyyy} ({liveInstrument.DhanSegment}:{liveInstrument.SecurityId}) - Dhan said: {liveSpotError}";
             }

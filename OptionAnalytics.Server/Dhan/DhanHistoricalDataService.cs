@@ -90,7 +90,7 @@ public sealed class DhanHistoricalDataService
         var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
         // The request without its dates names the series on disk (one file per day); the payload is Dhan's request (and
         // the key of an older whole-window file).
-        var key = new { securityId = id, exchangeSegment = dhanSegment, instrument = Instrument, interval };
+        var key = IndexKey(securityId, dhanSegment, intervalMinutes);
         object PayloadFor(DateOnly from, DateOnly to) => new
         {
             securityId = id,
@@ -105,6 +105,45 @@ public sealed class DhanHistoricalDataService
         var candles = new List<CandleWithVolume>();
         foreach (var part in parts) using (part) candles.AddRange(ParseCandlesWithVolume(part.Root));
         return (candles.OrderBy(c => c.Time).ToList(), error);
+    }
+
+    /// <summary>An index series' name on disk (DhanDataCache) - the request without its dates.</summary>
+    private static object IndexKey(uint securityId, string dhanSegment, int intervalMinutes) => new
+    {
+        securityId = securityId.ToString(CultureInfo.InvariantCulture),
+        exchangeSegment = dhanSegment,
+        instrument = Instrument,
+        interval = intervalMinutes.ToString(CultureInfo.InvariantCulture),
+    };
+
+    /// <summary>How far past an index day with no candles GetIndexDayCandlesAsync asks to prove it a holiday - a week
+    /// holds the next session after any run of holidays NSE has had.</summary>
+    internal const int HolidayProofDays = 7;
+
+    /// <summary>
+    /// An INDEX's 1-minute candles of ONE day (GetIntradayCandlesAsync) that keeps a past day with NO trading on disk too.
+    /// Dhan's answer for a day alone with nothing in it is not kept - it may still be coming (DhanDayWindow.Keep) - so every
+    /// load of a holiday asked Dhan again (the backtest's days, the previous day's profile walking back over one, the expiry
+    /// check). Here such a day is asked once more THROUGH the closed days after it (up to HolidayProofDays): an index has
+    /// minutes in every session, so a later day's minutes in that answer make the empty day final - kept empty, with the
+    /// days after it - and every later load reads it from disk with no call. Holiday = true then (and Error null). A day
+    /// already kept empty answers from disk at once; one still empty with nothing after it (Dhan down, or no later day closed
+    /// yet) is asked again next time. Only for an INDEX: an expired contract has no minutes at Dhan on ANY day, so a wider
+    /// ask would only add calls.
+    /// </summary>
+    public async Task<(IReadOnlyList<CandleWithVolume> Candles, string? Error, bool Holiday)> GetIndexDayCandlesAsync(
+        uint securityId, string dhanSegment, DateOnly day, CancellationToken cancellationToken, bool interactive = true)
+    {
+        var (candles, error) = await GetIntradayCandlesAsync(securityId, dhanSegment, day, day, 1, cancellationToken, interactive);
+        if (candles.Count > 0 || _cache is null || !_cache.Cacheable(day)) return (candles, error, false);
+        if (error is null && _cache.HasDay(IntradayPath, IndexKey(securityId, dhanSegment, 1), day)) return (candles, null, true);
+        var to = day;
+        for (var d = day.AddDays(1); d <= day.AddDays(HolidayProofDays) && _cache.Cacheable(d); d = d.AddDays(1)) to = d;
+        if (to == day) return (candles, error, false);
+        var (wide, wideError) = await GetIntradayCandlesAsync(securityId, dhanSegment, day, to, 1, cancellationToken, interactive);
+        var own = wide.Where(c => IstClock.IstDate(c.Time) == day).ToList();
+        if (own.Count > 0) return (own, null, false);
+        return wide.Count > 0 ? (own, null, true) : (candles, error ?? wideError, false);
     }
 
     /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
@@ -129,8 +168,11 @@ public sealed class DhanHistoricalDataService
     /// genuine "this endpoint doesn't return OI for futures" can be told apart from "OI was 0/
     /// missing for these particular bars" - the first is a page-level "OI not available" message,
     /// the second is normal, unremarkable missing data.</summary>
+    /// <param name="keepEmpty">An EXPIRED contract: a closed day Dhan answers with nothing (it keeps intraday history for
+    /// live contracts only) is final - kept empty on disk, so the next load of that day does not ask Dhan again
+    /// (PastFuturesCandles). Never for a live contract, whose empty day may still be coming.</param>
     public async Task<(IReadOnlyList<(CandleWithVolume Bar, long? OpenInterest)> Bars, bool OiFieldPresent, string? Error)> GetIntradayFuturesCandlesAsync(
-        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true)
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int intervalMinutes, CancellationToken cancellationToken, bool interactive = true, bool keepEmpty = false)
     {
         var id = securityId.ToString(CultureInfo.InvariantCulture);
         var interval = intervalMinutes.ToString(CultureInfo.InvariantCulture);
@@ -146,7 +188,7 @@ public sealed class DhanHistoricalDataService
             oi = true,
         };
 
-        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"futures intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken);
+        var (parts, error) = await IntradayPartsAsync(key, PayloadFor, fromDay, toDay, intervalMinutes, $"futures intraday candles ({dhanSegment}:{securityId})", LogLevel.Warning, interactive, cancellationToken, keepEmpty);
         var bars = new List<(CandleWithVolume Bar, long? OpenInterest)>();
         var oiFieldPresent = false;
         foreach (var part in parts)
@@ -241,7 +283,7 @@ public sealed class DhanHistoricalDataService
     /// days read from disk and Dhan's reason (the caller disposes the parts).</summary>
     private async Task<(List<DhanApiResponse> Parts, string? Error)> IntradayPartsAsync(
         object key, Func<DateOnly, DateOnly, object> payloadFor, DateOnly fromDay, DateOnly toDay, int intervalMinutes, string what,
-        LogLevel failureLevel, bool interactive, CancellationToken cancellationToken)
+        LogLevel failureLevel, bool interactive, CancellationToken cancellationToken, bool keepEmpty = false)
     {
         var (parts, ask) = DhanDayWindow.Plan(_cache, IntradayPath, key, fromDay, toDay);
         if (ask is not { } span)
@@ -283,6 +325,7 @@ public sealed class DhanHistoricalDataService
             return (parts, error);
         }
         DhanDayWindow.Keep(_cache, IntradayPath, key, span.From, span.To, response.Root, AsIs, intervalMinutes);
+        if (keepEmpty) DhanDayWindow.KeepEmpty(_cache, IntradayPath, key, span.From, span.To, response.Root, AsIs);
         LoadProgress.Ok($"✓ Dhan: {what} in {clock.Elapsed.TotalSeconds:0.0} s");
         parts.Add(response);
         return (parts, null);

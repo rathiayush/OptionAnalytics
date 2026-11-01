@@ -297,6 +297,86 @@ public sealed class DhanDataCacheTests : IDisposable
         Assert.Equal(4, requests.Count);
     }
 
+    [Fact]
+    public async Task AnIndexHoliday_AskedAlone_IsProvedOnceThroughTheDaysAfter_ThenEveryLoadReadsItFromDisk()
+    {
+        // Wed 17-09 a holiday, asked on its own (the backtest's day, the previous day's profile walking back, the expiry
+        // check) - Dhan's empty answer for a day alone is not kept, so it used to be asked on every load.
+        var holiday = PastDay.AddDays(2);
+        int BarsOn(DateOnly d) => d == holiday || d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday ? 0 : 375;
+        var requests = new List<string>();
+        var service = Historical(requests, Cache(), session: true, barsOn: BarsOn);
+        var (none, error, isHoliday) = await service.GetIndexDayCandlesAsync(13, "IDX_I", holiday, CancellationToken.None);
+        Assert.Empty(none);
+        Assert.Null(error);
+        Assert.True(isHoliday);
+        Assert.Equal(2, requests.Count);                                              // the day, then through the days after it
+        Assert.Equal((holiday, holiday.AddDays(DhanHistoricalDataService.HolidayProofDays)), Asked(requests[1]));
+
+        // From now on, from disk - after a restart too, and the days after it came with the proof.
+        var restarted = Historical(requests, Cache(), session: true, barsOn: BarsOn);
+        var (again, againError, againHoliday) = await restarted.GetIndexDayCandlesAsync(13, "IDX_I", holiday, CancellationToken.None);
+        var (next, _) = await restarted.GetIntradayCandlesAsync(13, "IDX_I", holiday.AddDays(1), holiday.AddDays(1), 1, CancellationToken.None);
+        Assert.Empty(again);
+        Assert.Null(againError);
+        Assert.True(againHoliday);
+        Assert.Equal(375, next.Count);
+        Assert.Equal(2, requests.Count);
+
+        // A trading day is one call and no holiday; read from disk next time.
+        var (day, _, dayHoliday) = await restarted.GetIndexDayCandlesAsync(13, "IDX_I", PastDay.AddDays(-7), CancellationToken.None);
+        await restarted.GetIndexDayCandlesAsync(13, "IDX_I", PastDay.AddDays(-7), CancellationToken.None);
+        Assert.Equal(375, day.Count);
+        Assert.False(dayHoliday);
+        Assert.Equal(3, requests.Count);
+    }
+
+    [Fact]
+    public async Task AnIndexDayWithNothingAfterIt_IsNotCalledAHoliday_AndIsAskedAgain()
+    {
+        // The last closed day empty (nothing after it has closed yet), or Dhan sending nothing for the days after either:
+        // no proof - not kept, asked again next time.
+        var lastClosed = new DateOnly(2026, 10, 9);   // a Friday; the cache's today is Mon 12-10
+        var requests = new List<string>();
+        var service = Historical(requests, Cache(), session: true, barsOn: d => d == lastClosed || d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday ? 0 : 375);
+        var (_, _, holiday) = await service.GetIndexDayCandlesAsync(13, "IDX_I", lastClosed, CancellationToken.None);
+        Assert.False(holiday);
+        Assert.Equal(2, requests.Count);                                              // the day, then Sat - Sun: nothing traded
+        await service.GetIndexDayCandlesAsync(13, "IDX_I", lastClosed, CancellationToken.None);
+        Assert.Equal(4, requests.Count);
+
+        requests.Clear();
+        var down = Historical(requests, Cache(), session: true, barsOn: _ => 0);
+        var (_, _, downHoliday) = await down.GetIndexDayCandlesAsync(14, "IDX_I", PastDay, CancellationToken.None);
+        await down.GetIndexDayCandlesAsync(14, "IDX_I", PastDay, CancellationToken.None);
+        Assert.False(downHoliday);
+        Assert.Equal(4, requests.Count);
+    }
+
+    [Fact]
+    public async Task AnExpiredFuturesContractsEmptyDay_IsKept_OnlyWhenAskedTo()
+    {
+        // Dhan keeps intraday history for live contracts only: an expired one's day comes back empty - final for it.
+        var requests = new List<string>();
+        var service = Historical(requests, Cache(), session: true, barsOn: _ => 0);
+        var (bars, _, _) = await service.GetIntradayFuturesCandlesAsync(77, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None, keepEmpty: true);
+        var (again, _, _) = await service.GetIntradayFuturesCandlesAsync(77, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None, keepEmpty: true);
+        Assert.Empty(bars);
+        Assert.Empty(again);
+        Assert.Single(requests);
+        // A live contract's empty day may still be coming: asked again.
+        await service.GetIntradayFuturesCandlesAsync(78, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
+        await service.GetIntradayFuturesCandlesAsync(78, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None);
+        Assert.Equal(3, requests.Count);
+        // A day with minutes is kept as always, keepEmpty or not.
+        requests.Clear();
+        var traded = Historical(requests, Cache(), session: true);
+        await traded.GetIntradayFuturesCandlesAsync(79, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None, keepEmpty: true);
+        var (kept, _, _) = await traded.GetIntradayFuturesCandlesAsync(79, "NSE_FNO", PastDay, PastDay, 1, CancellationToken.None, keepEmpty: true);
+        Assert.Equal(375, kept.Count);
+        Assert.Single(requests);
+    }
+
     [Theory]
     [InlineData("NIFTY", "WEEK", "NSE_FNO")]
     [InlineData("BANKNIFTY", "MONTH", "NSE_FNO")]

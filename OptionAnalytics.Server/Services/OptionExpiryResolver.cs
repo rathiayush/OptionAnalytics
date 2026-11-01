@@ -37,7 +37,9 @@ public sealed class OptionExpiryResolver
                 await spotInstruments.EnsureLoadedAsync(ct);
                 var spot = spotInstruments.FindSpot(underlying);
                 if (spot is null) return null;
-                var (candles, error) = await historical.GetIntradayCandlesAsync(spot.SecurityId, spot.DhanSegment, day, day, 1, ct);
+                // Through the holiday proof: a holiday is kept on disk once Dhan has answered past it, so it is not asked
+                // of Dhan again after a restart (the answer is also remembered for the server's life - _past).
+                var (candles, error, _) = await historical.GetIndexDayCandlesAsync(spot.SecurityId, spot.DhanSegment, day, ct);
                 return candles.Count > 0 ? true : error is null ? false : null;
             },
             IstClock.Today)
