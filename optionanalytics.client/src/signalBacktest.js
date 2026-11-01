@@ -27,7 +27,7 @@ import {
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { gexDay } from './gex.js'
 import { straddleRead } from './straddle.js'
-import { PROFILE_ROWS } from './profileZones.js'
+import { PROFILE_ROWS, volumeZones } from './profileZones.js'
 import { tradeCharges } from './tradeCharges.js'
 
 const MIN = 60_000
@@ -82,7 +82,9 @@ function packBars(byStrike, times) {
 }
 
 // A developing volume profile, one minute at a time: each bar's volume spread over the rows of its range; POC / VAH / VAL
-// (70% value area grown from the POC, the bigger neighbour first).
+// (70% value area grown from the POC, the bigger neighbour first) and its one HVN / LVN - the Volume & Market Profile
+// page's lines (`volumeZones`: the busiest row of the busy areas other than the POC's, the thinnest row of the thin areas
+// inside the range).
 function developingProfile(rowSize) {
   const rows = new Map()
   let total = 0
@@ -107,7 +109,8 @@ function developingProfile(rowSize) {
         const above = hi < keys.length - 1 ? rows.get(keys[hi + 1]) : -1
         if (above >= below) inside += rows.get(keys[++hi]); else inside += rows.get(keys[--lo])
       }
-      return { poc: (poc + 0.5) * rowSize, vah: (keys[hi] + 1) * rowSize, val: keys[lo] * rowSize }
+      const zones = volumeZones({ rows: keys.map((k) => ({ price: k * rowSize, total: rows.get(k) })), poc: poc * rowSize }, rowSize)
+      return { poc: (poc + 0.5) * rowSize, vah: (keys[hi] + 1) * rowSize, val: keys[lo] * rowSize, hvn: zones.topHvn, lvn: zones.thinLvn }
     },
   }
 }
@@ -145,10 +148,10 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
 /**
  * The day's features at every session minute - each from what was known at the END of that minute. `run`: the OI
  * Replay run (`/api/oi-replay/{u}/run` - spotCandlesOneMinute, cePoints / pePoints, futuresBars, spotVwap, step,
- * optionExpiry). Returns `{ ok: true, date, underlying, step, n, t, spot, price, priceSource, vwap, oi, breaks, hp,
+ * optionExpiry); `prevProfile` the previous day's volume profile (`previousProfile`). Returns `{ ok: true, date, underlying, step, n, t, spot, price, priceSource, vwap, oi, breaks, hp,
  * walls, gex, straddle, ib, profile, atm, ce, pe, ceCum, peCum, netCum }` - or `{ ok: false, reason }`.
  */
-export function prepareDay(run, { underlying = null } = {}) {
+export function prepareDay(run, { underlying = null, prevProfile = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
   const session = (ms) => { const m = istMinute(ms); return m >= SESSION_FIRST && m <= SESSION_LAST }
   const spotBars = (run?.spotCandlesOneMinute ?? [])
@@ -276,8 +279,20 @@ export function prepareDay(run, { underlying = null } = {}) {
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap),
     straddleWidth: read?.day?.width ?? null,
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
+    prevVp: previousProfile(prevProfile, date),
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t),
   }
+}
+
+/** The previous trading day's volume profile (`/api/oi-replay/{u}/previous-day-volume-profile` - the levels OI Replay's
+ *  entry charts draw, of the index's spot): { date, poc, vah, val, hvn, lvn } (its first HVN / LVN), or null when there is
+ *  none or it is not a day BEFORE `date`. Fixed all day - known before the session opens. */
+function previousProfile(p, date) {
+  if (!p?.success) return null
+  const day = String(p.profileDate ?? '').slice(0, 10)
+  if (!day || !(day < date)) return null
+  const num = (v) => (Number.isFinite(Number(v)) && v != null ? Number(v) : null)
+  return { date: day, poc: num(p.poc), vah: num(p.vah), val: num(p.val), hvn: num(p.hvn?.[0]), lvn: num(p.lvn?.[0]) }
 }
 
 // ---- The timeframe ----------------------------------------------------------------------------------------------------
@@ -419,6 +434,51 @@ function cumCondition(line, group, meaning) {
   }
 }
 
+// A price level: today's developing profile's (read on the price the profile is built on - the futures - at the level as
+// known at each candle; crossing / touching it is judged against the level of the candle BEFORE, so a candle's own volume
+// moving the level is not a cross) or the previous day's (fixed, read on spot - that profile is spot's).
+function levelCondition({ id, group, name, short, on, level }) {
+  const L = (d, k) => { const x = k >= 0 ? level(d, k) : null; return Number.isFinite(x) ? x : null }
+  return {
+    id, group, name,
+    options: [
+      opt('above', 'Price above it', 'below', OVER), opt('below', 'Price below it', 'above', OVER),
+      opt('crossedAbove', 'Crossed above it', 'crossedBelow', W), opt('crossedBelow', 'Crossed below it', 'crossedAbove', W),
+      opt('heldAbove', 'Touched it, closed back above (support held)', 'heldBelow', NEAR(0.05)),
+      opt('heldBelow', 'Touched it, closed back below (resistance held)', 'heldAbove', NEAR(0.05)),
+      opt('near', 'Near it', 'near', NEAR(0.05)),
+    ],
+    test: (d, i, v, w, p) => {
+      const bars = d[on]
+      const c = bars.c
+      const x = L(d, i)
+      const by = (p / 100) * (x ?? 0)
+      switch (v) {
+        case 'above': return x != null && c[i] > x && c[i] - x >= by
+        case 'below': return x != null && c[i] < x && x - c[i] >= by
+        case 'crossedAbove': return brokeLevel(c, (k) => L(d, k), i, w, true)
+        case 'crossedBelow': return brokeLevel(c, (k) => L(d, k), i, w, false)
+        case 'heldAbove': case 'heldBelow': {
+          const up = v === 'heldAbove'
+          const k = inWindow(i, w, (k) => {
+            const lv = L(d, k - 1)
+            return lv != null && (up ? bars.l[k] <= lv * (1 + p / 100) && c[k] > lv : bars.h[k] >= lv * (1 - p / 100) && c[k] < lv)
+          })
+          if (k < 0) return false
+          const lv = L(d, k - 1)
+          return up ? c[i] > lv : c[i] < lv
+        }
+        case 'near': return inWindow(i, w, (k) => { const lv = L(d, k - 1) ?? L(d, k); return lv != null && bars.l[k] <= lv * (1 + p / 100) && bars.h[k] >= lv * (1 - p / 100) }) >= 0
+        default: return false
+      }
+    },
+    // The level as last known (a developing HVN / LVN can drop out the candle a touch of it is still being read).
+    show: (d, i) => { let k = i; while (k > 0 && L(d, k) == null) k--; return `${short} ${fmtP(L(d, k))}` },
+  }
+}
+const todayLevel = (id, name, short, key) => levelCondition({ id, group: 'Profile', name, short, on: 'price', level: (d, k) => d.profile[k]?.[key] })
+const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, on: 'spot', level: (d) => d.prevVp?.[key] })
+
 /** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's; `windowed`,
  *  `param`: what the line takes). `test(d, i, value, windowCandles, param)`. */
 export const RULE_CONDITIONS = [
@@ -557,18 +617,9 @@ export const RULE_CONDITIONS = [
     },
     show: (d, i) => `straddle ${fmtP(d.straddle[i]?.value)} · its VWAP ${fmtP(d.straddle[i]?.vwap)}`,
   },
-  {
-    id: 'poc', group: 'Profile', name: 'Volume profile POC (developing)',
-    options: [opt('above', 'Price above the POC', 'below', OVER), opt('below', 'Price below the POC', 'above', OVER)],
-    test: (d, i, v, w, p) => {
-      const x = d.profile[i]
-      if (!x) return false
-      const gap = d.price.c[i] - x.poc
-      const far = Math.abs(gap) >= (p / 100) * x.poc
-      return v === 'above' ? gap > 0 && far : v === 'below' ? gap < 0 && far : false
-    },
-    show: (d, i) => `POC ${fmtP(d.profile[i]?.poc)}`,
-  },
+  todayLevel('poc', "Today's POC (developing)", 'POC', 'poc'),
+  todayLevel('vpHvn', "Today's HVN (developing)", 'HVN', 'hvn'),
+  todayLevel('vpLvn', "Today's LVN (developing)", 'LVN', 'lvn'),
   {
     id: 'valueArea', group: 'Profile', name: 'Value area (developing)',
     options: [opt('aboveVah', 'Price above the VAH', 'belowVal'), opt('inside', 'Price inside the value area'), opt('belowVal', 'Price below the VAL', 'aboveVah')],
@@ -589,6 +640,11 @@ export const RULE_CONDITIONS = [
     },
     show: (d) => (d.ib ? `IB ${fmtP(d.ib.low)} - ${fmtP(d.ib.high)}` : 'IB —'),
   },
+  prevLevel('prevPoc', "Previous day's POC", 'POC', 'poc'),
+  prevLevel('prevVah', "Previous day's VAH", 'VAH', 'vah'),
+  prevLevel('prevVal', "Previous day's VAL", 'VAL', 'val'),
+  prevLevel('prevHvn', "Previous day's HVN", 'HVN', 'hvn'),
+  prevLevel('prevLvn', "Previous day's LVN", 'LVN', 'lvn'),
 ]
 const CONDITION = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const optionOf = (id, value) => CONDITION[id]?.options.find((o) => o.value === value) ?? null

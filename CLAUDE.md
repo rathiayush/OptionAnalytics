@@ -475,8 +475,14 @@ When adding or changing a strategy:
   other), the CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
-  ATM straddle (vs its VWAP and the decay-only line, crossed), the developing POC / value area and the Initial Balance
-  (after 10:15). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now.
+  ATM straddle (vs its VWAP and the decay-only line, crossed), the developing value area and the Initial Balance (after
+  10:15), and VOLUME PROFILE LEVELS (`levelCondition`) - today's developing POC / HVN / LVN (the Profiles page's one HVN /
+  LVN rule, `volumeZones` - `topHvn` / `thinLvn`, worked out each minute on the futures the profile is built on) and the
+  PREVIOUS DAY's POC / VAH / VAL / HVN / LVN (`/api/oi-replay/{u}/previous-day-volume-profile` - OI Replay's entry chart
+  lines, spot's, its first HVN / LVN; fixed all day, read on spot; loaded with each day, a day without one runs and says
+  so): price above / below (by ≥ %), crossed above / below, touched it and closed back above / below (support /
+  resistance held, within %) and near it - a cross or touch judged against the level of the candle BEFORE, so a
+  developing level moving over price is no cross. A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now.
   "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no
   side and stay; numbers, windows and AND / OR kept - `mirrorLines`) and the opposite trade - left out when no line has a
@@ -487,8 +493,8 @@ When adding or changing a strategy:
   and PREPARED once (`prepareDay` - every feature at each minute from data up to the END of that minute: OI since the open
   (`chainOiTotalsAt`), the OI totals' CE / PE / Net cumulative Δ and their breaks and the 🎯 signal (`completedLevelReads` /
   `watchBreaks` / `watchHighProbability` stepped minute by minute), the OI walls (`oiWalls`), GEX (`gexDay`, standard
-  sign), the straddle (`straddleRead`), VWAP (the futures', else the index's own), the Initial Balance and the developing
-  volume profile), kept for the tab's life, so a change of the rule / levels / timeframe re-runs at once (`simulateDay`).
+  sign), the straddle (`straddleRead`), VWAP (the futures', else the index's own), the Initial Balance, the developing
+  volume profile with its HVN / LVN and the previous day's profile - `prevVp`), kept for the tab's life, so a change of the rule / levels / timeframe re-runs at once (`simulateDay`).
   TIMEFRAME (1 / 3 / 5 / 15 min,
   `TIMEFRAMES`, `timeframeView`): the rule reads the day on candles from 09:15 - a candle's OHLC from its minutes,
   every other feature as at the end of its LAST minute, the OI totals' breaks / 🎯 on that timeframe's own buckets

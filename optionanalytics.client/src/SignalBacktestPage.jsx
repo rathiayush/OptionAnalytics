@@ -38,7 +38,7 @@ const STORE = {
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
-const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: 'Volume & Market Profile' }
+const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: "Today's volume & market profile", PrevProfile: "Previous day's volume profile" }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
 // The indicator dropdown: the conditions under their group's title.
@@ -53,6 +53,8 @@ const rupees = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.roun
 const num = (v, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '—')
 const pnlColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const runUrl = (u, date) => `/api/oi-replay/${u}/run?date=${date}&timeframeMinutes=1&expiryFlag=${u === 'BANKNIFTY' ? 'MONTH' : 'WEEK'}`
+// The previous trading day's volume profile (spot's POC / VAH / VAL / HVN / LVN - OI Replay's entry chart lines).
+const prevProfileUrl = (u, date) => `/api/oi-replay/${u}/previous-day-volume-profile?date=${date}`
 
 // The days prepared, for the tab's life (a past day never changes; a failed load is not kept - it is asked again next run).
 const PREPARED = new Map()
@@ -70,12 +72,14 @@ async function loadDay(underlying, date, signal) {
   const abort = () => timeout.abort('stopped')
   signal.addEventListener('abort', abort)
   try {
+    // The previous day's profile alongside the run - a day without one still runs (its previous-day lines never hold).
+    const prevPromise = fetch(prevProfileUrl(underlying, date), { signal: timeout.signal }).then((x) => (x.ok ? x.json() : null)).catch(() => null)
     const r = await fetch(runUrl(underlying, date), { signal: timeout.signal })
     const body = await r.json().catch(() => null)
     if (!r.ok || !body?.success) return { day: { ok: false, date, reason: body?.error ?? `HTTP ${r.status}` } }
     // Let the page draw the progress before the day's minutes are worked through.
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const day = prepareDay(body, { underlying })
+    const day = prepareDay(body, { underlying, prevProfile: await prevPromise })
     const kept = day.ok ? day : { ok: false, date, reason: day.reason }
     remember(key, kept)
     return { day: kept }
@@ -236,6 +240,8 @@ export default function SignalBacktestPage() {
 
   const running = run.status === 'running'
   const failed = run.results.filter((r) => !r.day?.ok)
+  // Days run without the previous day's volume profile, when the rule reads it.
+  const noPrev = rule.lines.some((l) => CONDITION_OF[l.id]?.group === 'PrevProfile') ? run.results.filter((r) => r.day?.ok && !r.day.prevVp) : []
   const sideTag = (id) => <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: SIDE[id].color, display: 'inline-block' }} />{SIDE[id].name}</Space>
   const summaryColumns = [
     { title: '', dataIndex: 'name', key: 'name', fixed: 'left', width: 100, render: (v, r) => (r.id === 'all' ? <Text strong>{v}</Text> : <Tooltip title={r.what}>{sideTag(r.id)}</Tooltip>) },
@@ -414,6 +420,12 @@ export default function SignalBacktestPage() {
           <>
             {failed.length > 0 && (
               <Alert type="warning" showIcon message={`${failed.length} day${failed.length === 1 ? '' : 's'} not run`} description={failed.map((r) => `${dayjs(r.date).format('D MMM')}: ${r.day?.reason}`).join(' · ')} />
+            )}
+            {noPrev.length > 0 && (
+              <Alert
+                type="info" showIcon message={`No previous day's volume profile for ${noPrev.length} day${noPrev.length === 1 ? '' : 's'} - the rule's previous-day lines never hold on ${noPrev.length === 1 ? 'it' : 'them'}`}
+                description={`${noPrev.map((r) => dayjs(r.date).format('D MMM')).join(' · ')} (the index has volume from January 2026 on).`}
+              />
             )}
             <Card
               size="small" title={head}
