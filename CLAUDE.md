@@ -82,7 +82,10 @@ When adding or changing a strategy:
   a PAST day fetches its spot BEFORE its futures (`RunAsync`), so a holiday stops at the spot with no futures / option
   call. An EXPIRED futures contract (most past days of a backtest - Dhan keeps intraday history for live contracts only):
   NSE's chart first (kept on disk - `PastFuturesCandles`), then Dhan, whose empty answer for it is final and kept empty
-  (`keepEmpty` / `DhanDayWindow.KeepEmpty`); a live contract's empty day is never kept. Older whole-window files are still read for their exact request and split into days. The folder is held to
+  (`keepEmpty` / `DhanDayWindow.KeepEmpty`); a live contract's empty day is never kept. `BacktestCachingTests.cs` holds it
+  end to end through the REAL `OiReplayService` on a fake Dhan, NIFTY / BANKNIFTY / SENSEX: a backtest day (the run - spot,
+  42 option series, futures - and its previous day's profile) asks Dhan once, then the same backtest and a restart ask it
+  NOTHING; a holiday is proved once with no futures / option call and never asked again. Older whole-window files are still read for their exact request and split into days. The folder is held to
   `Storage:DhanCacheMaxGb` (10 GB): over it, the files read least recently go first (`TrimNow`). Whether it works is shown: OI Replay's load panel counts the days "saved to disk"
   and failed writes (`LoadProgress`), and at start the folder is checked writable and on a volume kept across a deploy
   (`DhanDataCache.CheckFolder`, `StorageVolume` from /proc/self/mountinfo) - logged, and an admin header tag when not
