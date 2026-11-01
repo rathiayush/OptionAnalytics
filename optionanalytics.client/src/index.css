@@ -230,3 +230,19 @@ body {
   }
   body > .ant-notification .ant-notification-notice-close { top: 6px; inset-inline-end: 6px; }
 }
+
+/* The Signal backtest page's rule builder: each condition a row - its name and a dropdown (Any = not used) - grouped
+   (OI / GEX / Price / Straddle / Profile), the groups flowing into as many columns as fit. A condition picked is outlined. */
+.oa-rule-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr)); gap: 12px 24px; }
+.oa-rule-group { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oa-rule-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.oa-rule-name { flex: 1 1 auto; min-width: 0; }
+.oa-rule-row .ant-select { flex: 0 0 200px; width: 200px; min-width: 0; }
+.oa-rule-row .ant-select.oa-rule-set { border-color: #4096ff; background: rgba(64, 150, 255, 0.14); }
+.oa-rule-row .ant-select.oa-rule-any .ant-select-content { color: rgba(255, 255, 255, 0.45); }
+/* Its dropdowns hold long labels: never wider than the screen (a phone's ran off its left), a long one wraps. */
+.oa-rule-popup { max-width: calc(100vw - 16px); }
+.oa-rule-popup .ant-select-item-option-content { white-space: normal; }
+@media (max-width: 480px) {
+  .oa-rule-row .ant-select { flex-basis: 55%; width: 55%; }
+}

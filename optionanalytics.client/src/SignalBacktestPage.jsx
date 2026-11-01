@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { DownloadOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
@@ -7,15 +7,17 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, INDICATORS, MAX_BACKTEST_DAYS, SIGNAL_STRATEGIES, SIGNAL_STRATEGY_IDS, TIMEFRAMES, backtestDays, istMinute, prepareDay, simulateRun, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, istMinute, mirrorConditions, prepareDay,
+  ruleConditions, ruleText, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
-// The SIGNAL BACKTEST page: pick an index, a range of past days and option BUYING or SELLING; each day is loaded as OI
-// Replay loads it (the server keeps past days on disk - a day never loaded before comes from Dhan once), replayed minute
-// by minute through the strategies (signalBacktest.js - each signal from data up to its minute only) and every signal's
-// option trade simulated; the report sums them per strategy, per day and trade by trade. A day is prepared once and
-// kept for the tab's life, so changing the mode, the stop / target or the strategies re-runs at once with no new load.
+// The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE - every condition a dropdown of what
+// that indicator can say (Any = not used), the trade it makes and, optionally, its mirror; each day is loaded as OI
+// Replay loads it (the server keeps past days on disk - a day never loaded before comes from Dhan once), replayed through
+// the rule (signalBacktest.js - each signal from data up to its candle's close only) and every signal's option trade
+// simulated; the report sums them for the rule, its mirror and both, per day and trade by trade. A day is prepared once
+// and kept for the tab's life, so changing the rule, the timeframe or the stop / target re-runs at once with no new load.
 
 const { Text, Title } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -23,7 +25,6 @@ const LOAD_TIMEOUT_MS = 240_000
 const STORE = {
   underlying: 'optionanalytics.signalBacktest.underlying',
   range: 'optionanalytics.signalBacktest.range',
-  mode: 'optionanalytics.signalBacktest.mode',
   moneyness: 'optionanalytics.signalBacktest.moneyness',
   slPct: 'optionanalytics.signalBacktest.slPct',
   targetPct: 'optionanalytics.signalBacktest.targetPct',
@@ -32,14 +33,26 @@ const STORE = {
   cooldownMin: 'optionanalytics.signalBacktest.cooldownMin',
   lots: 'optionanalytics.signalBacktest.lots',
   charges: 'optionanalytics.signalBacktest.charges',
-  strategies: 'optionanalytics.signalBacktest.strategies',
-  voteThreshold: 'optionanalytics.signalBacktest.voteThreshold',
   timeframe: 'optionanalytics.signalBacktest.timeframe',
-  equity: 'optionanalytics.signalBacktest.equityView',
+  rule: 'optionanalytics.signalBacktest.rule',
 }
-const COLORS = ['#4096ff', '#fa8c16', '#36cfc9', '#f759ab', '#9254de', '#fadb14', '#73d13d', '#ff7875', '#69c0ff']
-const colorOf = (id) => COLORS[SIGNAL_STRATEGY_IDS.indexOf(id) % COLORS.length]
-const nameOf = Object.fromEntries(SIGNAL_STRATEGIES.map((s) => [s.id, s.name]))
+const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
+const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
+const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: 'Volume & Market Profile' }
+const ACTION_LABEL = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.label]))
+
+// A rule read back from storage, made whole: only known conditions / values, a known action, a window offered.
+function cleanRule(saved) {
+  const base = BACKTEST_DEFAULTS.rule
+  if (!saved || typeof saved !== 'object') return base
+  const conditions = Object.fromEntries(ruleConditions(saved.conditions))
+  return {
+    conditions: saved.conditions && typeof saved.conditions === 'object' ? conditions : base.conditions,
+    action: ACTION_LABEL[saved.action] ? saved.action : base.action,
+    mirror: typeof saved.mirror === 'boolean' ? saved.mirror : base.mirror,
+    windowMin: WINDOW_CHOICES.includes(saved.windowMin) ? saved.windowMin : base.windowMin,
+  }
+}
 
 const pad = (v) => String(v).padStart(2, '0')
 const clock = (ms) => { const m = istMinute(ms); return `${pad(Math.floor(m / 60))}:${pad(m % 60)}` }
@@ -82,7 +95,7 @@ async function loadDay(underlying, date, signal) {
   }
 }
 
-// The running net of each strategy (and all of them) at the end of each day.
+// The running net of the rule, its mirror and both at the end of each day.
 function EquityChart({ lines, height = 280 }) {
   const ref = useRef(null)
   const chartRef = useRef(null)
@@ -120,7 +133,6 @@ function EquityChart({ lines, height = 280 }) {
 export default function SignalBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORE.underlying, 'NIFTY')
   const [range, setRange] = usePersistedState(STORE.range, [dayjs().subtract(14, 'day').format('YYYY-MM-DD'), dayjs().subtract(1, 'day').format('YYYY-MM-DD')])
-  const [mode, setMode] = usePersistedState(STORE.mode, BACKTEST_DEFAULTS.mode)
   const [moneyness, setMoneyness] = usePersistedState(STORE.moneyness, BACKTEST_DEFAULTS.moneyness)
   const [slPct, setSlPct] = usePersistedState(STORE.slPct, BACKTEST_DEFAULTS.slPct)
   const [targetPct, setTargetPct] = usePersistedState(STORE.targetPct, BACKTEST_DEFAULTS.targetPct)
@@ -129,13 +141,21 @@ export default function SignalBacktestPage() {
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
   const [lots, setLots] = usePersistedState(STORE.lots, BACKTEST_DEFAULTS.lots)
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
-  const [chosen, setChosen] = usePersistedState(STORE.strategies, SIGNAL_STRATEGY_IDS)
-  const [voteThreshold, setVoteThreshold] = usePersistedState(STORE.voteThreshold, BACKTEST_DEFAULTS.voteThreshold)
   const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
   const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
-  const [equityView, setEquityView] = usePersistedState(STORE.equity, 'each')
+  const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
+  const rule = useMemo(() => cleanRule(storedRule), [storedRule])
+  const setRule = (change) => setStoredRule({ ...rule, ...change })
+  const setCondition = (id, value) => {
+    const conditions = { ...rule.conditions }
+    if (value && value !== 'any') conditions[id] = value; else delete conditions[id]
+    setRule({ conditions })
+  }
+  const picked = ruleConditions(rule.conditions)
+  const mirrored = ruleConditions(mirrorConditions(rule.conditions))
+  const mirrorSame = picked.length > 0 && mirrored.every(([id, v], k) => id === picked[k][0] && v === picked[k][1])
+  const mirrorOn = rule.mirror && !mirrorSame
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
-  const strategies = (Array.isArray(chosen) ? chosen : SIGNAL_STRATEGY_IDS).filter((id) => SIGNAL_STRATEGY_IDS.includes(id))
   const lotSize = PAPER_TRADE_LOT_SIZE[index] ?? 1
 
   // The run: the days asked for, each loaded and prepared in turn.
@@ -166,38 +186,37 @@ export default function SignalBacktestPage() {
   const stop = () => abortRef.current?.abort()
   useEffect(() => () => abortRef.current?.abort(), [])
 
-  // The report - worked out again, in an instant, whenever a setting changes.
+  // The report - worked out again, in an instant, whenever a setting or the rule changes.
   const settings = useMemo(() => ({
-    mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, timeframe,
+    rule, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
     lotSize: PAPER_TRADE_LOT_SIZE[run.underlying] ?? lotSize,
-  }), [mode, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, strategies, voteThreshold, timeframe, lotSize, run.underlying])
+  }), [rule, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, lotSize, run.underlying])
   const report = useMemo(() => {
     const okDays = run.results.filter((r) => r.day?.ok)
-    // Day by day in date order - the weighted vote learning each indicator's accuracy from the days before (simulateRun).
-    const { trades, signals, accuracy } = simulateRun(okDays.map((r) => r.day), settings)
-    const accuracyRows = INDICATORS.map((k) => ({ key: k.id, name: k.name, ...accuracy[k.id] }))
-      .sort((a, b) => b.weight - a.weight || (b.accuracy ?? 0) - (a.accuracy ?? 0))
-    const rows = SIGNAL_STRATEGIES.filter((s) => strategies.includes(s.id)).map((s) => ({
-      key: s.id, id: s.id, name: s.name, signals: signals.filter((x) => x.strategy === s.id).length, ...summarize(trades.filter((t) => t.strategy === s.id)),
-    })).sort((a, b) => (b.trades > 0) - (a.trades > 0) || b.net - a.net)   // the best first; those with no trade last
-    const all = { key: 'all', id: 'all', name: 'All strategies', signals: signals.length, ...summarize(trades) }
-    // Per day: each strategy's net.
+    const { trades, signals } = simulateRun(okDays.map((r) => r.day), settings)
+    const sides = mirrorOn ? ['rule', 'mirror'] : ['rule']
+    const rows = sides.map((id) => ({
+      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorConditions(rule.conditions) : rule.conditions, id === 'mirror' ? RULE_ACTIONS.find((a) => a.value === rule.action).opposite : rule.action),
+      signals: signals.filter((x) => x.strategy === id).length, ...summarize(trades.filter((t) => t.strategy === id)),
+    }))
+    const all = { key: 'all', id: 'all', name: SIDE.all.name, what: 'the rule and its mirror together', signals: signals.length, ...summarize(trades) }
     const dayRows = run.results.map((r) => {
       const dayTrades = trades.filter((t) => t.date === r.date)
-      const row = { key: r.date, date: r.date, ok: r.day?.ok, reason: r.day?.reason ?? null, source: r.day?.priceSource ?? null, trades: dayTrades.length, net: dayTrades.reduce((a, t) => a + t.net, 0) }
-      for (const s of SIGNAL_STRATEGY_IDS) row[s] = dayTrades.filter((t) => t.strategy === s).reduce((a, t) => a + t.net, 0)
+      const row = { key: r.date, date: r.date, ok: r.day?.ok, reason: r.day?.reason ?? null, trades: dayTrades.length, net: dayTrades.reduce((a, t) => a + t.net, 0) }
+      for (const id of sides) row[id] = dayTrades.filter((t) => t.strategy === id).reduce((a, t) => a + t.net, 0)
       return row
     })
     // The running net at the end of each day.
-    const lineOf = (id, name, color, pick) => {
+    const lineOf = (id, pick) => {
       let total = 0
-      return { id, name, color, points: okDays.map((r) => { total += pick(trades.filter((t) => t.date === r.date)); return { time: r.date, value: Math.round(total) } }) }
+      return { id, name: SIDE[id].name, color: SIDE[id].color, points: okDays.map((r) => { total += pick(trades.filter((t) => t.date === r.date)); return { time: r.date, value: Math.round(total) } }) }
     }
-    const lines = equityView === 'all'
-      ? [lineOf('all', 'All', '#e6e6e6', (ts) => ts.reduce((a, t) => a + t.net, 0))]
-      : rows.filter((s) => s.trades > 0).map((s) => lineOf(s.id, s.name, colorOf(s.id), (ts) => ts.filter((t) => t.strategy === s.id).reduce((a, t) => a + t.net, 0)))
-    return { trades, rows, all, dayRows, lines, okDays: okDays.length, accuracyRows }
-  }, [run.results, settings, strategies, equityView])
+    const lines = [
+      ...(mirrorOn ? sides.map((id) => lineOf(id, (ts) => ts.filter((t) => t.strategy === id).reduce((a, t) => a + t.net, 0))) : []),
+      lineOf('all', (ts) => ts.reduce((a, t) => a + t.net, 0)),
+    ]
+    return { trades, rows, all, dayRows, lines, okDays: okDays.length, sides }
+  }, [run.results, settings, mirrorOn, rule])
 
   const [tradeFilter, setTradeFilter] = useState('all')
   const shownTrades = useMemo(() => (tradeFilter === 'all' ? report.trades : report.trades.filter((t) => t.strategy === tradeFilter)), [report.trades, tradeFilter])
@@ -205,15 +224,16 @@ export default function SignalBacktestPage() {
     const blob = new Blob([tradesCsv(report.trades)], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `signal-backtest-${run.underlying ?? index}-${run.dates[0] ?? ''}-${run.dates.at(-1) ?? ''}-${mode}.csv`
+    a.download = `signal-backtest-${run.underlying ?? index}-${run.dates[0] ?? ''}-${run.dates.at(-1) ?? ''}-${rule.action}.csv`
     a.click()
     URL.revokeObjectURL(a.href)
   }
 
   const running = run.status === 'running'
   const failed = run.results.filter((r) => !r.day?.ok)
+  const sideTag = (id) => <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: SIDE[id].color, display: 'inline-block' }} />{SIDE[id].name}</Space>
   const summaryColumns = [
-    { title: 'Strategy', dataIndex: 'name', key: 'name', fixed: 'left', width: 200, render: (v, r) => (r.id === 'all' ? <Text strong>{v}</Text> : <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: colorOf(r.id), display: 'inline-block' }} />{v}</Space>) },
+    { title: '', dataIndex: 'name', key: 'name', fixed: 'left', width: 100, render: (v, r) => (r.id === 'all' ? <Text strong>{v}</Text> : <Tooltip title={r.what}>{sideTag(r.id)}</Tooltip>) },
     { title: 'Signals', dataIndex: 'signals', key: 'signals', width: 70, align: 'right' },
     { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right' },
     { title: 'Win %', dataIndex: 'winRate', key: 'winRate', width: 70, align: 'right', render: (v) => num(v, 0) },
@@ -232,13 +252,13 @@ export default function SignalBacktestPage() {
     { title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 110, render: (v) => dayjs(v).format('ddd D MMM') },
     { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right', render: (v, r) => (r.ok ? v : <Tooltip title={r.reason}><Tag style={{ margin: 0 }}>no data</Tag></Tooltip>) },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v, r) => (r.ok ? <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> : '') },
-    ...SIGNAL_STRATEGIES.filter((s) => strategies.includes(s.id)).map((s) => ({
-      title: s.name, dataIndex: s.id, key: s.id, width: 110, align: 'right', render: (v, r) => (r.ok && v ? <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> : ''),
-    })),
+    ...(report.sides.length > 1 ? report.sides.map((id) => ({
+      title: SIDE[id].name, dataIndex: id, key: id, width: 100, align: 'right', render: (v, r) => (r.ok && v ? <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> : ''),
+    })) : []),
   ]
   const tradeColumns = [
     { title: 'Day', dataIndex: 'date', key: 'date', width: 100, render: (v) => dayjs(v).format('D MMM') },
-    { title: 'Strategy', dataIndex: 'strategy', key: 'strategy', width: 150, render: (v) => <Space size={6}><span style={{ width: 8, height: 8, borderRadius: 2, background: colorOf(v), display: 'inline-block' }} />{nameOf[v]}</Space> },
+    ...(report.sides.length > 1 ? [{ title: 'From', dataIndex: 'strategy', key: 'strategy', width: 90, render: (v) => sideTag(v) }] : []),
     { title: 'Signal', dataIndex: 'dir', key: 'dir', width: 80, render: (v) => <Tag color={v > 0 ? 'green' : 'red'} style={{ margin: 0 }}>{v > 0 ? 'bullish' : 'bearish'}</Tag> },
     { title: 'Trade', key: 'trade', width: 130, render: (_, t) => <Text>{t.action} {t.strike} {t.side}</Text> },
     { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${clock(t.entryTime)} · ${num(t.entry, 2)}` },
@@ -246,8 +266,9 @@ export default function SignalBacktestPage() {
     { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 150 },
     { title: 'Points', dataIndex: 'points', key: 'points', width: 80, align: 'right', render: (v) => <span style={{ color: pnlColor(v) }}>{num(v, 2)}</span> },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
-    { title: 'Why in', dataIndex: 'why', key: 'why', width: 320, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
+    { title: 'At the signal', dataIndex: 'why', key: 'why', width: 360, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
   ]
+  const head = report.okDays ? `${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · SL ${slPct}% · target ${targetPct}%` : ''
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -257,7 +278,7 @@ export default function SignalBacktestPage() {
           <NavBar />
         </Space>
 
-        <Card size="small" title="Signal backtest - OI Replay and profile signals, past days">
+        <Card size="small" title="Signal backtest - your rule over past days">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]} align="center">
               <Segmented size="small" value={index} options={UNDERLYINGS} onChange={setUnderlying} disabled={running} />
@@ -272,30 +293,79 @@ export default function SignalBacktestPage() {
                 ? <Button size="small" danger icon={<StopOutlined />} onClick={stop}>Stop</Button>
                 : <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={start} disabled={!dates.length}>Run backtest</Button>}
             </Space>
+
+            <div className="oa-rule">
+              <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
+                <Text strong>Signal when ALL of these hold</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>(Any = not used) - read at each completed {timeframe}m candle</Text>
+                <Button size="small" onClick={() => setRule({ conditions: {} })} disabled={!picked.length}>Clear all</Button>
+              </Space>
+              <div className="oa-rule-grid">
+                {GROUPS.map((group) => (
+                  <div key={group} className="oa-rule-group">
+                    <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>{GROUP_TITLE[group] ?? group}</Text>
+                    {RULE_CONDITIONS.filter((c) => c.group === group).map((c) => {
+                      const value = rule.conditions[c.id] ?? 'any'
+                      return (
+                        <div key={c.id} className="oa-rule-row">
+                          <Text style={{ fontSize: 12 }} className="oa-rule-name">{c.name}</Text>
+                          <Select
+                            size="small" value={value} onChange={(v) => setCondition(c.id, v)} popupMatchSelectWidth={false} classNames={{ popup: { root: 'oa-rule-popup' } }}
+                            className={value === 'any' ? 'oa-rule-any' : 'oa-rule-set'}
+                            options={[{ value: 'any', label: 'Any' }, ...c.options.map((o) => ({ value: o.value, label: o.label }))]}
+                          />
+                        </div>
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+              <Space wrap size={[16, 8]} align="center" style={{ marginTop: 10 }}>
+                <Space size={4}>
+                  <Text strong style={{ fontSize: 12 }}>Then</Text>
+                  <Select size="small" value={rule.action} onChange={(v) => setRule({ action: v })} style={{ width: 100 }} options={RULE_ACTIONS.map((a) => ({ value: a.value, label: a.label }))} />
+                </Space>
+                <Tooltip title="Crossed, turned, broke, near, a 🎯 and spot's move look back this far (in minutes, whatever the timeframe). A cross / turn / break must still hold now.">
+                  <Space size={4}>
+                    <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Within the last</Text>
+                    <Select size="small" value={rule.windowMin} onChange={(v) => setRule({ windowMin: v })} style={{ width: 90 }} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `${m} min` }))} />
+                  </Space>
+                </Tooltip>
+                <Tooltip title="Also trade the mirror: every condition the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle and 'inside' stay as they are) and the opposite trade.">
+                  <Space size={4}><Switch size="small" checked={rule.mirror} onChange={(v) => setRule({ mirror: v })} /><Text style={{ fontSize: 12 }}>Mirror (other side)</Text></Space>
+                </Tooltip>
+              </Space>
+              <div style={{ marginTop: 8 }}>
+                {picked.length
+                  ? <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.conditions, rule.action)}</Text>
+                  : <Alert type="info" showIcon message="Pick at least one condition - with every one on Any the rule never signals." style={{ padding: '4px 10px' }} />}
+                {picked.length > 0 && rule.mirror && (mirrorSame
+                  ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these conditions has a side (pick one that does - e.g. VWAP, OI, a wall).</Text></div>
+                  : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorConditions(rule.conditions), RULE_ACTIONS.find((a) => a.value === rule.action).opposite)}</Text></div>)}
+              </div>
+            </div>
+
             <Space wrap size={[16, 8]} align="center">
-              <Tooltip title="The candles the strategies read: a signal only at a completed candle's close (candles from 09:15; the OI totals' breaks on buckets of the same size). Longer = fewer, steadier signals. The trade is still managed on the option's 1-minute bars.">
+              <Tooltip title="The candles the rule reads: a signal only at a completed candle's close (candles from 09:15; the OI totals' breaks on buckets of the same size). Longer = fewer, steadier signals. The trade is still managed on the option's 1-minute bars.">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Timeframe</Text>
                   <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((m) => ({ value: m, label: `${m}m` }))} />
                 </Space>
               </Tooltip>
-              <Tooltip title="BUY: a bullish signal buys the call, a bearish one the put. SELL: a bullish signal sells the put, a bearish one the call (premium collected).">
-                <Segmented size="small" value={mode} onChange={setMode} options={[{ value: 'buy', label: 'Option BUY' }, { value: 'sell', label: 'Option SELL' }]} />
-              </Tooltip>
               <Space size={4}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Strike</Text>
                 <Select size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} options={[{ value: 0, label: 'ATM' }, { value: 1, label: '1 ITM' }, { value: -1, label: '1 OTM' }]} />
               </Space>
-              <Tooltip title={mode === 'sell' ? 'Out when the premium RISES this much above the entry (sold).' : 'Out when the premium FALLS this much below the entry.'}>
+              <Tooltip title="Bought: out when the premium FALLS this much below the entry. Sold: out when it RISES this much above it.">
                 <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>SL</Text><InputNumber size="small" min={1} max={500} value={slPct} onChange={(v) => setSlPct(v ?? BACKTEST_DEFAULTS.slPct)} addonAfter="%" style={{ width: 100 }} /></Space>
               </Tooltip>
-              <Tooltip title={mode === 'sell' ? 'Out when the premium FALLS this much (the decay kept).' : 'Out when the premium RISES this much.'}>
+              <Tooltip title="Bought: out when the premium RISES this much. Sold: out when it FALLS this much (the decay kept).">
                 <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Target</Text><InputNumber size="small" min={1} max={1000} value={targetPct} onChange={(v) => setTargetPct(v ?? BACKTEST_DEFAULTS.targetPct)} addonAfter="%" style={{ width: 100 }} /></Space>
               </Tooltip>
               <Tooltip title="Out at the bar's close this many minutes after the entry (0 = off). Every trade is out by 15:10 anyway.">
                 <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Time stop</Text><InputNumber size="small" min={0} max={360} value={timeStopMin} onChange={(v) => setTimeStopMin(v ?? 0)} addonAfter="min" style={{ width: 110 }} /></Space>
               </Tooltip>
-              <Tooltip title="Per strategy and day: at most this many trades, one open at a time, and this long after an exit before the next.">
+              <Tooltip title="A day: at most this many trades (the rule and its mirror together), one open at a time, and this long after an exit before the next.">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Max</Text><InputNumber size="small" min={1} max={20} value={maxTradesPerDay} onChange={(v) => setMaxTradesPerDay(v ?? BACKTEST_DEFAULTS.maxTradesPerDay)} style={{ width: 60 }} />
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>a day · cooldown</Text><InputNumber size="small" min={0} max={120} value={cooldownMin} onChange={(v) => setCooldownMin(v ?? 0)} addonAfter="min" style={{ width: 100 }} />
@@ -306,16 +376,6 @@ export default function SignalBacktestPage() {
                 <Space size={4}><Switch size="small" checked={charges} onChange={setCharges} /><Text style={{ fontSize: 12 }}>Charges</Text></Space>
               </Tooltip>
             </Space>
-            <Space wrap size={[12, 6]} align="center">
-              <Tooltip title="The weighted vote: a signal when the votes, each weighted by its indicator's accuracy on the earlier days, add up to at least this share of all the weight one way. Lower = more signals.">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Weighted vote ≥</Text><InputNumber size="small" min={5} max={100} step={5} value={Math.round(voteThreshold * 100)} onChange={(v) => setVoteThreshold((v ?? 30) / 100)} addonAfter="%" style={{ width: 100 }} /></Space>
-              </Tooltip>
-            </Space>
-            <Checkbox.Group
-              value={strategies}
-              onChange={(v) => setChosen(v.length ? v : SIGNAL_STRATEGY_IDS)}
-              options={SIGNAL_STRATEGIES.map((s) => ({ value: s.id, label: <Tooltip title={s.rule}>{s.name}</Tooltip> }))}
-            />
             {(running || run.status === 'stopped') && (
               <Space direction="vertical" size={2} style={{ width: '100%' }}>
                 <Progress percent={run.dates.length ? Math.round((run.done / run.dates.length) * 100) : 0} size="small" status={run.status === 'stopped' ? 'exception' : 'active'} />
@@ -326,14 +386,15 @@ export default function SignalBacktestPage() {
             )}
             <FoldText id="signalBacktest.how" label="how it works" className="oa-note">
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Each day is replayed minute by minute and the strategies read it on the Timeframe&apos;s candles (from 09:15): a signal on a
-                candle uses only what was known at its close - the end of its last minute (no look-ahead) - and the times shown are that
-                last minute (a 5m candle from 10:30 signals at 10:34, its close). Its trade enters at that minute&apos;s option close - BUY the call / put in the signal&apos;s direction, or SELL the put /
-                call against it - and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop
-                fills at its open, the stop before the target in the same bar, the time stop and the 15:10 square-off at the bar&apos;s close. No
-                entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. A condition that stays
-                true signals once, on the candle it becomes true. Windows given in minutes (the straddle&apos;s 15-minute move, a fresh break,
-                the indicators&apos; 15-minute outcome) stay minutes on every timeframe. Hover a strategy for its rule.
+                Build ONE rule: each condition is what that indicator says on the OI Replay or Volume & Market Profile page (Any = not used),
+                and the rule signals at a completed candle of the Timeframe (from 09:15) where ALL the picked conditions hold - once, when
+                it becomes true (it has to stop holding before it signals again). The Mirror adds the same rule the other way round with
+                the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
+                and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
+                option close and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop fills
+                at its open, the stop before the target in the same bar, the time stop and the 15:10 square-off at the bar&apos;s close. No
+                entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. Change the rule after a
+                run and the report follows at once - nothing is loaded again.
               </Text>
             </FoldText>
           </Space>
@@ -345,46 +406,24 @@ export default function SignalBacktestPage() {
               <Alert type="warning" showIcon message={`${failed.length} day${failed.length === 1 ? '' : 's'} not run`} description={failed.map((r) => `${dayjs(r.date).format('D MMM')}: ${r.day?.reason}`).join(' · ')} />
             )}
             <Card
-              size="small"
-              title={`${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · option ${mode === 'sell' ? 'SELL' : 'BUY'} · SL ${slPct}% · target ${targetPct}%`}
+              size="small" title={head}
               extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
             >
-              <Table size="small" pagination={false} scroll={{ x: 1300 }} columns={summaryColumns} dataSource={[report.all, ...report.rows]} />
+              <Table size="small" pagination={false} scroll={{ x: 1200 }} columns={summaryColumns} dataSource={report.sides.length > 1 ? [report.all, ...report.rows] : report.rows} />
             </Card>
-            <Card size="small" title="Indicator accuracy - who has the say in the weighted vote">
-              <Table
-                size="small" pagination={false} scroll={{ x: 560 }} dataSource={report.accuracyRows}
-                columns={[
-                  { title: 'Indicator', dataIndex: 'name', key: 'name', width: 170 },
-                  { title: 'Right', dataIndex: 'right', key: 'right', width: 80, align: 'right' },
-                  { title: 'Wrong', dataIndex: 'wrong', key: 'wrong', width: 80, align: 'right' },
-                  { title: 'Accuracy', dataIndex: 'accuracy', key: 'accuracy', width: 90, align: 'right', render: (v) => (v == null ? '—' : <span style={{ color: v > 0.5 ? UP_COLOR : v < 0.5 ? DOWN_COLOR : undefined }}>{(v * 100).toFixed(1)}%</span>) },
-                  { title: 'Weight', dataIndex: 'weight', key: 'weight', width: 140, render: (v) => <Space size={6}><div style={{ width: Math.round(Math.min(1, v * 2) * 80), height: 8, background: '#4096ff', borderRadius: 2 }} /><Text style={{ fontSize: 12 }}>{v > 0 ? (v * 100).toFixed(1) : 'no say'}</Text></Space> },
-                ]}
-              />
-              <FoldText id="signalBacktest.accuracy" label="how it is measured" className="oa-note">
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Each indicator&apos;s direction every minute from 09:30, judged by where spot went over the next 15 minutes (a move under
-                  0.05% counts neither way). Weight = how far its accuracy is above 50% (smoothed toward 50% while it has few votes) - an
-                  indicator no better than a coin has no say. Shown over all the days run; each day itself was traded with the weights of
-                  only the days BEFORE it (the first day: all equal), so a day is never weighted by its own outcome.
-                </Text>
-              </FoldText>
-            </Card>
-            <Card
-              size="small" title="Running P&L, day by day"
-              extra={<Segmented size="small" value={equityView} onChange={setEquityView} options={[{ value: 'each', label: 'Each strategy' }, { value: 'all', label: 'All together' }]} />}
-            >
+            <Card size="small" title="Running P&L, day by day">
               <EquityChart lines={report.lines} />
             </Card>
             <Card size="small" title="Day by day">
-              <Table size="small" pagination={false} scroll={{ x: 400 + 110 * strategies.length }} columns={dayColumns} dataSource={report.dayRows} />
+              <Table size="small" pagination={false} scroll={{ x: 300 + 100 * report.sides.length }} columns={dayColumns} dataSource={report.dayRows} />
             </Card>
             <Card
               size="small" title={`Trades (${shownTrades.length})`}
               extra={(
                 <Space size={8}>
-                  <Select size="small" value={tradeFilter} onChange={setTradeFilter} style={{ width: 190 }} options={[{ value: 'all', label: 'All strategies' }, ...SIGNAL_STRATEGIES.filter((s) => strategies.includes(s.id)).map((s) => ({ value: s.id, label: s.name }))]} />
+                  {report.sides.length > 1 && (
+                    <Select size="small" value={tradeFilter} onChange={setTradeFilter} style={{ width: 120 }} options={[{ value: 'all', label: 'Both' }, { value: 'rule', label: 'Rule' }, { value: 'mirror', label: 'Mirror' }]} />
+                  )}
                   <Button size="small" icon={<DownloadOutlined />} onClick={downloadCsv} disabled={!report.trades.length}>CSV</Button>
                 </Space>
               )}

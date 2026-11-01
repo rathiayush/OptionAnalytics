@@ -1,21 +1,22 @@
-// The SIGNAL BACKTEST (the Signal backtest page): past days replayed minute by minute through buy / sell signals read
-// from what the OI Replay page and the Volume & Market Profile page show - OI since the open, the OI totals' cumulative
-// Δ breaks (and the 🎯 high-probability signal), the OI support / resistance walls, GEX, VWAP, the ATM straddle, the
-// Initial Balance and the developing volume profile - each strategy's signal turned into an option trade (BUY the call /
-// put in the signal's direction, or SELL the put / call against it) and the trades summed up per strategy.
+// The SIGNAL BACKTEST (the Signal backtest page): past days replayed through ONE strategy the trader builds - a rule of
+// conditions read from what the OI Replay page and the Volume & Market Profile page show (OI since the open, the OI
+// totals' CE / PE / Net cumulative Δ and their S/R breaks, the 🎯 signal, the OI support / resistance walls, GEX's
+// regime and walls, VWAP, spot's move, the ATM straddle, the developing POC / value area and the Initial Balance), each
+// a dropdown of what it can say: a signal when ALL the conditions picked hold, then the trade picked (buy / sell the call
+// / put) - and, with the mirror, the opposite conditions' opposite trade.
 //
 // Two steps, so a change of settings re-runs in an instant:
 //   prepareDay(run)       - the day's features at every minute, each from data up to the END of that minute only (a
 //                           point / bar stamped at a minute's start holds its close): nothing after a minute is known at
 //                           it. Kept per day (compact - the option bars as typed arrays, ~0.5 MB a day).
-//   simulateDay(day, s)   - each strategy's signals and their trades under the settings `s`.
+//   simulateDay(day, s)   - the rule's signals (on the timeframe's candles) and their trades under the settings `s`.
 //
 // NO LOOK-AHEAD: a signal at minute i is read from the features of minutes <= i; the trade enters at minute i's option
 // close (the last finished minute's premium) and is managed from minute i + 1 on the option's own 1-minute bars: a bar
 // opening through the stop fills at its open, the stop before the target in the same bar, the target at the target; a
 // time stop and the 15:10 square-off at the bar's close. No entry before 09:30 or after 14:45. `tests/signal-backtest.test.mjs`.
 //
-// It is a backtest of fixed rules, not a tuning: the rules below are what each strategy is.
+// It is a backtest of the rule as set, not a tuning.
 
 import { chainOiTotalsAt } from './chainOiTotals.js'
 import { oiWalls } from './marketRead.js'
@@ -113,7 +114,7 @@ function developingProfile(rowSize) {
 
 /** The OI totals' cumulative Δ breaks and 🎯 signals on `bucketSeconds` buckets, minute by minute: at the end of each
  *  minute only the buckets completed by then are read, so an event is listed at the minute it became known. Also the
- *  net cumulative Δ at the last completed bucket, each minute. */
+ *  CE / PE / Net cumulative Δ lines at the last completed bucket, each minute. */
 function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
   const n = t.length
   const ceLevels = perStrikeLevels(ceLevelSeries, bucketSeconds)
@@ -123,25 +124,29 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
   const hpWatch = newHighProbabilityWatch()
   const breaks = []
   const hp = []
+  const ceCum = new Float64Array(n).fill(NaN)
+  const peCum = new Float64Array(n).fill(NaN)
   const netCum = new Float64Array(n).fill(NaN)
   for (let i = 0; i < n; i++) {
     const nowSec = Math.floor(t[i] / 1000) + IST_OFFSET_SECONDS + 60     // the end of minute i
     const reads = completedLevelReads(oiTotals, bucketSeconds, nowSec)
     if (!reads) continue
+    ceCum[i] = oiTotals.rows.ceCum.get(reads.last) ?? NaN
+    peCum[i] = oiTotals.rows.peCum.get(reads.last) ?? NaN
     netCum[i] = oiTotals.rows.netCum.get(reads.last) ?? NaN
     const fresh = watchBreaks(breakWatch, reads, bucketSeconds)
-    for (const b of fresh) breaks.push({ i, dir: breakMeaning(b.side.key, b.up), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
+    for (const b of fresh) breaks.push({ i, line: b.side.key, up: b.up, dir: breakMeaning(b.side.key, b.up), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
     const signals = watchHighProbability(hpWatch, fresh, { totals: oiTotals, ceLevels, peLevels, last: reads.last, atmStrike: atm[i], bucketSeconds })
     for (const x of signals) hp.push({ i, dir: x.hp.bullish ? 1 : -1, text: `🎯 ${x.hp.bullish ? 'bullish' : 'bearish'}: OI ${x.b.side.label} break + ${x.hp.side} OI at ATM ± 1 ${x.hp.pct >= 0 ? '+' : ''}${x.hp.pct.toFixed(0)}%` })
   }
-  return { breaks, hp, netCum }
+  return { breaks, hp, ceCum, peCum, netCum }
 }
 
 /**
  * The day's features at every session minute - each from what was known at the END of that minute. `run`: the OI
  * Replay run (`/api/oi-replay/{u}/run` - spotCandlesOneMinute, cePoints / pePoints, futuresBars, spotVwap, step,
  * optionExpiry). Returns `{ ok: true, date, underlying, step, n, t, spot, price, priceSource, vwap, oi, breaks, hp,
- * walls, gex, straddle, ib, profile, atm, ce, pe, netCum }` - or `{ ok: false, reason }`.
+ * walls, gex, straddle, ib, profile, atm, ce, pe, ceCum, peCum, netCum }` - or `{ ok: false, reason }`.
  */
 export function prepareDay(run, { underlying = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
@@ -216,7 +221,7 @@ export function prepareDay(run, { underlying = null } = {}) {
   const levelSeries = (series) => new Map([...series].map(([k, list]) => [k, list.map((p) => ({ t: p.ms, oi: p.openInterest }))]))
   const ceLevelSeries = levelSeries(ceSeries)
   const peLevelSeries = levelSeries(peSeries)
-  const { breaks, hp, netCum } = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, 60)
+  const { breaks, hp, ceCum, peCum, netCum } = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, 60)
   const oiTf = {}
   for (const tf of TIMEFRAMES) if (tf > 1) oiTf[tf] = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, tf * 60)
 
@@ -265,7 +270,7 @@ export function prepareDay(run, { underlying = null } = {}) {
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, profile, netCum, oiTf,
+    ok: true, date, underlying: u, step, n, t, atm, oi, breaks, hp, walls, gex, straddle, profile, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap),
@@ -302,7 +307,7 @@ export function timeframeView(d, tf = 1) {
     if (b !== bucket) { first.push(i); last.push(i); bucket = b } else last[last.length - 1] = i
     candleOf[i] = first.length - 1
   }
-  const pick = (list) => last.map((i) => list[i])
+  const pick = (list) => last.map((i) => (list ? list[i] : NaN))
   const candles = (ohlc) => {
     const o = [], h = [], l = [], c = []
     for (let k = 0; k < first.length; k++) {
@@ -312,12 +317,12 @@ export function timeframeView(d, tf = 1) {
     }
     return { o, h, l, c }
   }
-  const reads = d.oiTf?.[m] ?? { breaks: d.breaks, hp: d.hp, netCum: d.netCum }
+  const reads = d.oiTf?.[m] ?? { breaks: d.breaks, hp: d.hp, ceCum: d.ceCum, peCum: d.peCum, netCum: d.netCum }
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last),
     t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
-    profile: pick(d.profile), vwap: pick(d.vwap), netCum: pick(reads.netCum),
+    profile: pick(d.profile), vwap: pick(d.vwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
     ib: d.ib ? { ...d.ib, done: candleOf[d.ib.done] } : null,
@@ -326,260 +331,314 @@ export function timeframeView(d, tf = 1) {
   return view
 }
 
-// ---- The strategies -------------------------------------------------------------------------------------------------
-// Each reads the day's features up to minute i and says +1 (bullish), -1 (bearish) or 0, with why. A condition that stays
-// true signals once - on the minute it BECOMES true (`edges`) - so a strategy does not fire every minute of a trend.
+// ---- The rule ---------------------------------------------------------------------------------------------------------
+// ONE strategy, built on the page: each condition a dropdown of what that indicator can say (or Any - not used), and a
+// signal when ALL the conditions picked are true at a candle's close - then the action (buy / sell the call / put). The
+// MIRROR (optional) is the same rule with every condition's opposite (above <-> below, support <-> resistance, rising <->
+// falling; a condition with no side - GEX regime, the straddle, "inside" - stays as it is) and the opposite trade.
+// "Within the last N min" conditions (crossed, turned, broke, near) look back over the rule's window; a cross / turn /
+// break must still hold now (a failed one does not count). Everything is read from the candles up to i (no look-ahead).
 
-const above = (d, i) => (Number.isFinite(d.vwap[i]) ? Math.sign(d.price.c[i] - d.vwap[i]) : 0)
-const oiBias = (d, i) => {
-  const { ce, pe } = d.oi[i]
-  const size = Math.abs(ce) + Math.abs(pe)
-  return size > 0 ? (pe - ce) / size : 0
-}
 const fmtL = (v) => `${v >= 0 ? '+' : '−'}${(Math.abs(v) / 1e5).toFixed(1)}L`
+const fmtP = (v) => (Number.isFinite(v) ? v.toFixed(1) : '—')
+const finite = (v) => Number.isFinite(v)
 
-/** The minutes where `cond(i)` (a direction, or { dir, why }) becomes non-zero or flips. */
-function edges(d, cond, from = 0) {
-  const out = []
-  let prev = 0
-  for (let i = from; i < d.n; i++) {
-    const r = cond(i)
-    const dir = typeof r === 'number' ? r : r?.dir ?? 0
-    if (dir !== 0 && dir !== prev) out.push({ i, dir, why: typeof r === 'object' ? r.why : '' })
-    prev = dir
+// Some k in the last `w` candles (i - w < k <= i, k >= 1) where f(k) holds.
+function inWindow(i, w, f) {
+  for (let k = i; k > i - w && k >= 1; k--) if (f(k)) return k
+  return -1
+}
+// `x` (a function of the candle) crossed from <= 0 to > 0 (up) / >= 0 to < 0 (down) in the window, and is still there.
+function crossed(x, i, w, up) {
+  const now = x(i)
+  if (!finite(now) || (up ? !(now > 0) : !(now < 0))) return false
+  return inWindow(i, w, (k) => { const a = x(k - 1), b = x(k); return finite(a) && finite(b) && (up ? a <= 0 && b > 0 : a >= 0 && b < 0) }) >= 0
+}
+// A level known at the candle before (`level(k - 1)`) closed through in the window - up or down - and still through.
+function brokeLevel(d, level, i, w, up) {
+  const c = d.price.c
+  const k = inWindow(i, w, (k) => { const v = level(k - 1); return v != null && finite(v) && (up ? c[k - 1] <= v && c[k] > v : c[k - 1] >= v && c[k] < v) })
+  if (k < 0) return false
+  const v = level(k - 1)
+  return up ? c[i] > v : c[i] < v
+}
+// A cumulative line's move over the window against 10% of its range so far: rising / falling / stable.
+function lineMove(series, i, w) {
+  const now = series[i], back = series[Math.max(0, i - w)]
+  if (!finite(now) || !finite(back)) return null
+  let lo = Infinity, hi = -Infinity
+  for (let k = 0; k <= i; k++) if (finite(series[k])) { lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k]) }
+  const tol = 0.1 * (hi - lo)
+  const move = now - back
+  return move > tol ? 1 : move < -tol ? -1 : 0
+}
+const opt = (value, label, opposite = value) => ({ value, label, opposite })
+
+const CUM_LINES = { ce: { key: 'ceCum', name: 'CE' }, pe: { key: 'peCum', name: 'PE' }, net: { key: 'netCum', name: 'Net (CE − PE)' } }
+function cumCondition(line, group, meaning) {
+  const { key, name } = CUM_LINES[line]
+  return {
+    id: `cum${line[0].toUpperCase()}${line.slice(1)}`, group, name: `${name} cumulative Δ`,
+    options: [
+      opt('positive', 'Positive (above 0)', 'negative'), opt('negative', 'Negative (below 0)', 'positive'),
+      opt('turnedPositive', '−ve → +ve (within the window)', 'turnedNegative'), opt('turnedNegative', '+ve → −ve (within the window)', 'turnedPositive'),
+      opt('rising', `Rising (${meaning.up})`, 'falling'), opt('falling', `Falling (${meaning.down})`, 'rising'), opt('stable', 'Stable (moved < 10% of its range)'),
+      opt('brokeResistance', 'Broke its resistance (within the window)', 'brokeSupport'), opt('brokeSupport', 'Broke its support (within the window)', 'brokeResistance'),
+    ],
+    test: (d, i, v, w) => {
+      const series = d[key]
+      if (!series) return false
+      const x = (k) => series[k]
+      switch (v) {
+        case 'positive': return series[i] > 0
+        case 'negative': return series[i] < 0
+        case 'turnedPositive': return crossed(x, i, w, true)
+        case 'turnedNegative': return crossed(x, i, w, false)
+        case 'rising': return lineMove(series, i, w) === 1
+        case 'falling': return lineMove(series, i, w) === -1
+        case 'stable': return lineMove(series, i, w) === 0
+        case 'brokeResistance': case 'brokeSupport': {
+          const up = v === 'brokeResistance'
+          return d.breaks.some((b) => b.line === line && b.up === up && b.i <= i && b.i > i - w)
+        }
+        default: return false
+      }
+    },
+    show: (d, i) => `${name} cum Δ ${finite(d[key]?.[i]) ? fmtL(d[key][i]) : '—'}`,
   }
-  return out
 }
 
-const sideWord = (dir) => (dir > 0 ? 'bullish' : 'bearish')
-
-// ---- The indicators' votes and how accurate each one is --------------------------------------------------------------
-// Each indicator's direction at every minute (+1 / -1 / 0), from the day's features up to that minute - what the weighted
-// vote adds up. An indicator's ACCURACY: of the minutes it voted, how often spot moved its way by at least `minMovePct` %
-// over the next `horizon` minutes (a smaller move counts neither way). The weighted vote's weights come from the days
-// BEFORE the one traded (walk-forward - `simulateRun`), never from the day itself.
-
-const latestWithin = (d, events, i, minutes) => {
-  const candles = span(d, minutes)
-  let dir = 0
-  for (const e of events) if (e.i <= i && e.i > i - candles) dir = e.dir
-  return dir
-}
-const moveOver = (d, i, minutes) => d.spot.c[i] - d.spot.c[Math.max(0, i - span(d, minutes))]
-
-export const INDICATORS = [
-  { id: 'oi', name: 'OI since open', vote: (d, i) => { const b = oiBias(d, i); return Math.abs(b) >= 0.1 ? Math.sign(b) : 0 } },
-  { id: 'netCum', name: 'Net cumulative Δ', vote: (d, i) => (Number.isFinite(d.netCum[i]) && d.netCum[i] !== 0 ? -Math.sign(d.netCum[i]) : 0) },
-  { id: 'break', name: 'Cumulative Δ break', vote: (d, i) => latestWithin(d, d.breaks, i, 15) },
-  { id: 'hp', name: '🎯 signal', vote: (d, i) => latestWithin(d, d.hp, i, 15) },
+/** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's). */
+export const RULE_CONDITIONS = [
   {
-    id: 'walls', name: 'OI walls (room)',
-    vote: (d, i) => { const { support, resistance } = d.walls[i]; const c = d.spot.c[i]; return support != null && resistance != null ? Math.sign((resistance - c) - (c - support)) : 0 },
-  },
-  {
-    // Short gamma: moves run - the last 15 minutes' way. Long gamma: pulled back between the walls - toward their middle.
-    id: 'gex', name: 'GEX',
-    vote: (d, i) => {
-      const g = d.gex[i]
-      if (!g) return 0
-      if (g.net < 0) return Math.sign(moveOver(d, i, 15))
-      return g.callWall != null && g.putWall != null ? Math.sign((g.callWall + g.putWall) / 2 - d.spot.c[i]) : 0
+    id: 'oiOpen', group: 'OI', name: 'OI since open (chain-wide)',
+    options: [
+      opt('peAhead', 'PE added > CE added (put writing ahead)', 'ceAhead'), opt('ceAhead', 'CE added > PE added (call writing ahead)', 'peAhead'),
+      opt('peCross', 'PE crossed above CE (within the window)', 'ceCross'), opt('ceCross', 'CE crossed above PE (within the window)', 'peCross'),
+    ],
+    test: (d, i, v, w) => {
+      const gap = (k) => d.oi[k].pe - d.oi[k].ce
+      switch (v) {
+        case 'peAhead': return gap(i) > 0
+        case 'ceAhead': return gap(i) < 0
+        case 'peCross': return crossed(gap, i, w, true)
+        case 'ceCross': return crossed(gap, i, w, false)
+        default: return false
+      }
     },
+    show: (d, i) => `OI since open CE ${fmtL(d.oi[i].ce)} · PE ${fmtL(d.oi[i].pe)}`,
   },
-  { id: 'vwap', name: 'VWAP', vote: (d, i) => above(d, i) },
+  cumCondition('ce', 'OI', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
+  cumCondition('pe', 'OI', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
+  cumCondition('net', 'OI', { up: 'call writers gaining - bearish', down: 'put writers gaining - bullish' }),
   {
-    id: 'straddle', name: 'Straddle',
-    vote: (d, i) => { const p = d.straddle[i], back = d.straddle[Math.max(0, i - span(d, 15))]; return p && back && p.value > p.vwap ? Math.sign(p.forward - back.forward) : 0 },
+    id: 'hp', group: 'OI', name: '🎯 High probability',
+    options: [opt('bullish', 'Bullish 🎯 (within the window)', 'bearish'), opt('bearish', 'Bearish 🎯 (within the window)', 'bullish')],
+    test: (d, i, v, w) => d.hp.some((h) => h.dir === (v === 'bullish' ? 1 : -1) && h.i <= i && h.i > i - w),
+    show: () => '🎯',
   },
   {
-    id: 'profile', name: 'IB / POC',
-    vote: (d, i) => {
+    id: 'oiWalls', group: 'OI', name: 'OI S-R walls (spot chart)',
+    options: [
+      opt('nearSupport', 'Near the OI support (within the window)', 'nearResistance'), opt('nearResistance', 'Near the OI resistance (within the window)', 'nearSupport'),
+      opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport'), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance'),
+    ],
+    test: (d, i, v, w) => {
+      const near = 0.25 * d.step
+      const wall = (k, side) => d.walls[k]?.[side] ?? null
+      switch (v) {
+        case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s + near }) >= 0
+        case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r - near }) >= 0
+        case 'brokeResistance': return brokeLevel({ price: d.spot }, (k) => wall(k, 'resistance'), i, w, true)
+        case 'brokeSupport': return brokeLevel({ price: d.spot }, (k) => wall(k, 'support'), i, w, false)
+        default: return false
+      }
+    },
+    show: (d, i) => `OI support ${d.walls[i]?.support ?? '—'} · resistance ${d.walls[i]?.resistance ?? '—'}`,
+  },
+  {
+    id: 'gexRegime', group: 'GEX', name: 'GEX regime',
+    options: [
+      opt('long', 'Positive - dealers long gamma (moves damped)'), opt('short', 'Negative - dealers short gamma (moves run)'),
+      opt('turnedShort', 'Turned negative (within the window)'), opt('turnedLong', 'Turned positive (within the window)'),
+    ],
+    test: (d, i, v, w) => {
+      const net = (k) => d.gex[k]?.net ?? NaN
+      switch (v) {
+        case 'long': return net(i) >= 0
+        case 'short': return net(i) < 0
+        case 'turnedShort': return crossed(net, i, w, false)
+        case 'turnedLong': return crossed(net, i, w, true)
+        default: return false
+      }
+    },
+    show: (d, i) => `net GEX ${finite(d.gex[i]?.net) ? (d.gex[i].net / 1e9).toFixed(2) + ' bn' : '—'}`,
+  },
+  {
+    id: 'gexLevel', group: 'GEX', name: 'GEX walls',
+    options: [
+      opt('nearPutWall', 'Near the put wall - support (within 0.15%, within the window)', 'nearCallWall'),
+      opt('nearCallWall', 'Near the call wall - resistance (within 0.15%, within the window)', 'nearPutWall'),
+      opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall'), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall'),
+    ],
+    test: (d, i, v, w) => {
+      const lvl = (k, side) => d.gex[k]?.[side] ?? null
+      switch (v) {
+        case 'nearPutWall': return inWindow(i, w, (k) => { const p = lvl(k - 1, 'putWall'); return p != null && d.spot.l[k] <= p * 1.0015 }) >= 0
+        case 'nearCallWall': return inWindow(i, w, (k) => { const c = lvl(k - 1, 'callWall'); return c != null && d.spot.h[k] >= c * 0.9985 }) >= 0
+        case 'brokeCallWall': return brokeLevel({ price: d.spot }, (k) => lvl(k, 'callWall'), i, w, true)
+        case 'brokePutWall': return brokeLevel({ price: d.spot }, (k) => lvl(k, 'putWall'), i, w, false)
+        default: return false
+      }
+    },
+    show: (d, i) => `GEX put wall ${d.gex[i]?.putWall ?? '—'} · call wall ${d.gex[i]?.callWall ?? '—'}`,
+  },
+  {
+    id: 'vwap', group: 'Price', name: 'Price vs VWAP',
+    options: [
+      opt('above', 'Price above VWAP', 'below'), opt('below', 'Price below VWAP', 'above'),
+      opt('crossedAbove', 'Crossed above VWAP (within the window)', 'crossedBelow'), opt('crossedBelow', 'Crossed below VWAP (within the window)', 'crossedAbove'),
+    ],
+    test: (d, i, v, w) => {
+      const gap = (k) => d.price.c[k] - d.vwap[k]
+      switch (v) {
+        case 'above': return gap(i) > 0
+        case 'below': return gap(i) < 0
+        case 'crossedAbove': return crossed(gap, i, w, true)
+        case 'crossedBelow': return crossed(gap, i, w, false)
+        default: return false
+      }
+    },
+    show: (d, i) => `price ${fmtP(d.price.c[i])} · VWAP ${fmtP(d.vwap[i])}`,
+  },
+  {
+    id: 'spotMove', group: 'Price', name: 'Spot over the window',
+    options: [opt('rising', 'Rising (up 0.1% or more)', 'falling'), opt('falling', 'Falling (down 0.1% or more)', 'rising'), opt('sideways', 'Sideways (moved under 0.1%)')],
+    test: (d, i, v, w) => {
+      const c = d.spot.c, back = c[Math.max(0, i - w)]
+      const move = (c[i] - back) / back
+      return v === 'rising' ? move >= 0.001 : v === 'falling' ? move <= -0.001 : v === 'sideways' ? Math.abs(move) < 0.001 : false
+    },
+    show: (d, i) => `spot ${fmtP(d.spot.c[i])}`,
+  },
+  {
+    id: 'straddle', group: 'Straddle', name: 'ATM straddle',
+    options: [
+      opt('aboveVwap', 'Above its VWAP (premium bought)'), opt('belowVwap', 'Below its VWAP (premium sold)'),
+      opt('aboveDecay', 'Above the decay-only line (IV up)'), opt('belowDecay', 'Below the decay-only line (IV down)'),
+      opt('crossedAbove', 'Crossed above its VWAP (within the window)'), opt('crossedBelow', 'Crossed below its VWAP (within the window)'),
+    ],
+    test: (d, i, v, w) => {
+      const p = d.straddle[i]
+      const gap = (k) => (d.straddle[k] ? d.straddle[k].value - d.straddle[k].vwap : NaN)
+      switch (v) {
+        case 'aboveVwap': return gap(i) > 0
+        case 'belowVwap': return gap(i) < 0
+        case 'aboveDecay': return p != null && finite(p.decay) && p.value > p.decay
+        case 'belowDecay': return p != null && finite(p.decay) && p.value < p.decay
+        case 'crossedAbove': return crossed(gap, i, w, true)
+        case 'crossedBelow': return crossed(gap, i, w, false)
+        default: return false
+      }
+    },
+    show: (d, i) => `straddle ${fmtP(d.straddle[i]?.value)} · its VWAP ${fmtP(d.straddle[i]?.vwap)}`,
+  },
+  {
+    id: 'poc', group: 'Profile', name: 'Volume profile POC (developing)',
+    options: [opt('above', 'Price above the POC', 'below'), opt('below', 'Price below the POC', 'above')],
+    test: (d, i, v) => { const p = d.profile[i]; return p ? (v === 'above' ? d.price.c[i] > p.poc : v === 'below' ? d.price.c[i] < p.poc : false) : false },
+    show: (d, i) => `POC ${fmtP(d.profile[i]?.poc)}`,
+  },
+  {
+    id: 'valueArea', group: 'Profile', name: 'Value area (developing)',
+    options: [opt('aboveVah', 'Price above the VAH', 'belowVal'), opt('inside', 'Price inside the value area'), opt('belowVal', 'Price below the VAL', 'aboveVah')],
+    test: (d, i, v) => {
+      const p = d.profile[i], c = d.price.c[i]
+      if (!p) return false
+      return v === 'aboveVah' ? c > p.vah : v === 'belowVal' ? c < p.val : v === 'inside' ? c >= p.val && c <= p.vah : false
+    },
+    show: (d, i) => `VAL ${fmtP(d.profile[i]?.val)} · VAH ${fmtP(d.profile[i]?.vah)}`,
+  },
+  {
+    id: 'ib', group: 'Profile', name: 'Initial Balance (09:15 - 10:14)',
+    options: [opt('aboveHigh', 'Price above the IB high (after 10:15)', 'belowLow'), opt('inside', 'Price inside the IB (after 10:15)'), opt('belowLow', 'Price below the IB low (after 10:15)', 'aboveHigh')],
+    test: (d, i, v) => {
+      if (!d.ib || i <= d.ib.done) return false
       const c = d.price.c[i]
-      if (d.ib && i > d.ib.done) { if (c > d.ib.high) return 1; if (c < d.ib.low) return -1 }
-      const p = d.profile[i]
-      return p ? Math.sign(c - p.poc) : 0
+      return v === 'aboveHigh' ? c > d.ib.high : v === 'belowLow' ? c < d.ib.low : v === 'inside' ? c >= d.ib.low && c <= d.ib.high : false
     },
+    show: (d) => (d.ib ? `IB ${fmtP(d.ib.low)} - ${fmtP(d.ib.high)}` : 'IB —'),
   },
 ]
-export const INDICATOR_IDS = INDICATORS.map((k) => k.id)
-export const equalWeights = () => Object.fromEntries(INDICATOR_IDS.map((id) => [id, 1]))
+const CONDITION = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 
-/** Every indicator's vote at each minute of a prepared day: { [id]: Int8Array(n) } (worked out once a day). */
-export function indicatorVotes(d) {
-  if (d.votes) return d.votes
-  const out = {}
-  for (const k of INDICATORS) {
-    const v = new Int8Array(d.n)
-    for (let i = 0; i < d.n; i++) v[i] = k.vote(d, i) || 0
-    out[k.id] = v
-  }
-  Object.defineProperty(d, 'votes', { value: out, enumerable: false })
-  return out
+/** The trades a rule can make, and the mirror's. */
+export const RULE_ACTIONS = [
+  { value: 'buyCE', label: 'Buy CE', dir: 1, mode: 'buy', opposite: 'buyPE' },
+  { value: 'buyPE', label: 'Buy PE', dir: -1, mode: 'buy', opposite: 'buyCE' },
+  { value: 'sellPE', label: 'Sell PE', dir: 1, mode: 'sell', opposite: 'sellCE' },
+  { value: 'sellCE', label: 'Sell CE', dir: -1, mode: 'sell', opposite: 'sellPE' },
+]
+const ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a]))
+export const WINDOW_CHOICES = [1, 3, 5, 10, 15, 30]
+
+/** The conditions picked (the ones known, not Any), as [id, value] in the catalogue's order. */
+export function ruleConditions(conditions) {
+  return RULE_CONDITIONS.filter((c) => c.options.some((o) => o.value === conditions?.[c.id])).map((c) => [c.id, conditions[c.id]])
+}
+/** The mirror of the conditions - each one's opposite. */
+export function mirrorConditions(conditions) {
+  return Object.fromEntries(ruleConditions(conditions).map(([id, v]) => [id, CONDITION[id].options.find((o) => o.value === v).opposite]))
+}
+/** The rule in words: "Buy CE when: … · …". */
+export function ruleText(conditions, action) {
+  const parts = ruleConditions(conditions).map(([id, v]) => `${CONDITION[id].name}: ${CONDITION[id].options.find((o) => o.value === v).label}`)
+  return `${ACTION[action]?.label ?? action} when ${parts.length ? parts.join(' AND ') : '(no condition picked)'}`
 }
 
-/** How each indicator's votes on a day came out: { [id]: { right, wrong } } - a vote at minute (candle) j judged by spot's
- *  move over the next `horizon` minutes (only votes from 09:30, and only where that move is known). */
-export function indicatorOutcomes(d, { horizon: minutes = 15, minMovePct = 0.05 } = {}) {
-  const horizon = span(d, minutes)
-  const votes = indicatorVotes(d)
-  const out = Object.fromEntries(INDICATOR_IDS.map((id) => [id, { right: 0, wrong: 0 }]))
-  for (let j = 0; j + horizon < d.n; j++) {
-    if (istMinute(d.t[j]) < 9 * 60 + 30) continue
-    const move = d.spot.c[j + horizon] - d.spot.c[j]
-    if (Math.abs(move) < (minMovePct / 100) * d.spot.c[j]) continue
-    for (const id of INDICATOR_IDS) {
-      const v = votes[id][j]
-      if (!v) continue
-      if (Math.sign(move) === v) out[id].right++; else out[id].wrong++
+/** Does the rule hold at candle i (all its conditions)? */
+function ruleHolds(d, i, picked, w) {
+  for (const [id, v] of picked) if (!CONDITION[id].test(d, i, v, w)) return false
+  return true
+}
+
+/**
+ * The rule's signals on a day (read on its candles - `timeframeView`): `rule` = { conditions: { [id]: value }, action,
+ * mirror, windowMin }. A signal on the candle where the rule BECOMES true (it then has to stop holding before it signals
+ * again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror with no condition
+ * that has a side would be the rule itself: it is left out. Returns [{ i, side: 'rule' | 'mirror', action, why }].
+ */
+export function ruleSignals(d, rule) {
+  const picked = ruleConditions(rule?.conditions)
+  if (!picked.length || !ACTION[rule?.action]) return []
+  const w = span(d, rule.windowMin ?? BACKTEST_DEFAULTS.rule.windowMin)
+  const mirrored = ruleConditions(mirrorConditions(rule.conditions))
+  const useMirror = Boolean(rule.mirror) && mirrored.some(([id, v], k) => v !== picked[k][1] || id !== picked[k][0])
+  const sides = [{ side: 'rule', picked, action: rule.action }]
+  if (useMirror) sides.push({ side: 'mirror', picked: mirrored, action: ACTION[rule.action].opposite })
+  const out = []
+  for (const s of sides) {
+    let was = false
+    for (let i = 0; i < d.n; i++) {
+      const now = ruleHolds(d, i, s.picked, w)
+      if (now && !was) {
+        const shown = [...new Set(s.picked.map(([id]) => CONDITION[id].show(d, i)))].join(' · ')
+        out.push({ i, side: s.side, action: s.action, why: `${ACTION[s.action].label}${s.side === 'mirror' ? ' (mirror)' : ''}: ${shown}` })
+      }
+      was = now
     }
   }
-  return out
+  return out.sort((a, b) => a.i - b.i)
 }
-
-/** The weights from the outcomes so far: accuracy (smoothed toward 50% by `prior` votes a side) and weight = how far it is
- *  above 50% (none at or below). No outcomes yet: every indicator weighs the same. */
-export function accuracyWeights(stats, prior = 10) {
-  const judged = INDICATOR_IDS.reduce((a, id) => a + (stats?.[id]?.right ?? 0) + (stats?.[id]?.wrong ?? 0), 0)
-  const table = {}
-  for (const id of INDICATOR_IDS) {
-    const right = stats?.[id]?.right ?? 0
-    const wrong = stats?.[id]?.wrong ?? 0
-    const accuracy = right + wrong > 0 ? right / (right + wrong) : null
-    const smoothed = (right + prior) / (right + wrong + 2 * prior)
-    table[id] = { right, wrong, accuracy, weight: judged ? Math.max(0, smoothed - 0.5) : 1 }
-  }
-  return table
-}
-
-export const SIGNAL_STRATEGIES = [
-  {
-    id: 'dayOi', name: 'OI since open + VWAP',
-    rule: 'Chain-wide OI added since 09:15: put writing ahead of call writing by 15% of the OI added (PE added − CE added ≥ 0.15 × both) with price above VWAP = bullish; call writing ahead and price below VWAP = bearish. From 09:45 (enough OI to read).',
-    signals: (d) => edges(d, (i) => {
-      if (istMinute(d.t[i]) < 9 * 60 + 45) return 0
-      const b = oiBias(d, i)
-      const side = above(d, i)
-      const dir = b >= 0.15 && side > 0 ? 1 : b <= -0.15 && side < 0 ? -1 : 0
-      return dir ? { dir, why: `OI since open CE ${fmtL(d.oi[i].ce)} · PE ${fmtL(d.oi[i].pe)} (bias ${(b * 100).toFixed(0)}%), price ${dir > 0 ? 'above' : 'below'} VWAP` } : 0
-    }),
-  },
-  {
-    id: 'cumDelta', name: 'Cumulative Δ S/R break',
-    rule: 'An OI totals cumulative Δ line (CE, PE or Net) breaks its own support / resistance (the "broke S / R" on the OI totals charts): calls unwinding / put writing = bullish, call writing / puts unwinding = bearish - with price on the same side of VWAP.',
-    signals: (d) => d.breaks.filter((b) => above(d, b.i) === b.dir).map((b) => ({ i: b.i, dir: b.dir, why: `${b.text}, price ${b.dir > 0 ? 'above' : 'below'} VWAP` })),
-  },
-  {
-    id: 'hp', name: '🎯 High probability',
-    rule: 'The OI Replay page\'s 🎯 signal: a cumulative Δ break AND the CE or PE OI at ATM ± 1 shifting 20% of its size the same way within 5 minutes.',
-    signals: (d) => d.hp.map((h) => ({ i: h.i, dir: h.dir, why: h.text })),
-  },
-  {
-    id: 'oiWalls', name: 'OI S-R wall bounce',
-    rule: 'Spot touches the OI support (the most put OI at or below it) within a quarter strike and the candle closes up, back above it = bullish; touches the OI resistance (the most call OI at or above it) and closes down, under it = bearish.',
-    signals: (d) => edges(d, (i) => {
-      if (i === 0) return 0
-      const { support, resistance } = d.walls[i - 1]
-      const near = 0.25 * d.step
-      const { o, h, l, c } = d.spot
-      if (support != null && l[i] <= support + near && c[i] > o[i] && c[i] > support) return { dir: 1, why: `bounced off the OI support ${support} (low ${l[i].toFixed(1)}, close ${c[i].toFixed(1)})` }
-      if (resistance != null && h[i] >= resistance - near && c[i] < o[i] && c[i] < resistance) return { dir: -1, why: `rejected at the OI resistance ${resistance} (high ${h[i].toFixed(1)}, close ${c[i].toFixed(1)})` }
-      return 0
-    }),
-  },
-  {
-    id: 'gex', name: 'GEX walls',
-    rule: 'Dealers SHORT gamma (net GEX < 0, moves run): spot closing through the call wall = bullish, through the put wall = bearish. Dealers LONG gamma (net GEX ≥ 0, moves damped): spot touching the call wall and closing down = bearish, touching the put wall and closing up = bullish.',
-    signals: (d) => edges(d, (i) => {
-      const g = d.gex[i - 1]
-      if (i === 0 || !g) return 0
-      const near = 0.25 * d.step
-      const { o, h, l, c } = d.spot
-      const prev = c[i - 1]
-      if (g.net < 0) {
-        if (g.callWall != null && prev <= g.callWall && c[i] > g.callWall) return { dir: 1, why: `short gamma, spot through the call wall ${g.callWall}` }
-        if (g.putWall != null && prev >= g.putWall && c[i] < g.putWall) return { dir: -1, why: `short gamma, spot through the put wall ${g.putWall}` }
-      } else {
-        if (g.callWall != null && h[i] >= g.callWall - near && c[i] < o[i] && c[i] < g.callWall) return { dir: -1, why: `long gamma, faded at the call wall ${g.callWall}` }
-        if (g.putWall != null && l[i] <= g.putWall + near && c[i] > o[i] && c[i] > g.putWall) return { dir: 1, why: `long gamma, held at the put wall ${g.putWall}` }
-      }
-      return 0
-    }),
-  },
-  {
-    id: 'vwap', name: 'VWAP cross',
-    rule: 'Price crosses VWAP and holds two closes on the new side: above = bullish, below = bearish.',
-    signals: (d) => edges(d, (i) => {
-      if (i < 2) return 0
-      const s = [above(d, i - 2), above(d, i - 1), above(d, i)]
-      if (s[0] <= 0 && s[1] > 0 && s[2] > 0) return { dir: 1, why: `price held above VWAP ${d.vwap[i].toFixed(1)} for 2 closes` }
-      if (s[0] >= 0 && s[1] < 0 && s[2] < 0) return { dir: -1, why: `price held below VWAP ${d.vwap[i].toFixed(1)} for 2 closes` }
-      return 0
-    }),
-  },
-  {
-    id: 'straddle', name: 'Straddle expansion',
-    rule: 'The ATM straddle\'s card trade idea: the Auto ATM straddle over its VWAP 3 minutes (and over its decay-only line) - premium being bought - and the synthetic futures moved 25% of the day\'s priced half-range over 15 minutes and still going: up = bullish, down = bearish.',
-    signals: (d) => edges(d, (i) => {
-      // 3 minutes over its VWAP (one candle on 3 minutes and up), the move over 15 minutes, "still going" since the
-      // window's start (the candle before, on 3 minutes and up).
-      const hold = span(d, 3), read = span(d, 15), going0 = Math.max(1, hold - 1)
-      if (i < read || !(d.straddleWidth > 0)) return 0
-      const p = d.straddle[i], back = d.straddle[i - read], start = d.straddle[i - going0]
-      if (!p || !back || !start) return 0
-      for (let k = i - hold + 1; k <= i; k++) if (!d.straddle[k] || !(d.straddle[k].value > d.straddle[k].vwap)) return 0
-      if (p.decay != null && !(p.value > p.decay)) return 0
-      const move = p.forward - back.forward
-      const going = p.forward - start.forward
-      const need = 0.25 * d.straddleWidth
-      const dir = move >= need && going > 0 ? 1 : move <= -need && going < 0 ? -1 : 0
-      return dir ? { dir, why: `straddle over its VWAP ${hold * (d.tf ?? 1)} min, futures ${move >= 0 ? '+' : '−'}${Math.abs(move).toFixed(0)} in ${read * (d.tf ?? 1)} min` } : 0
-    }),
-  },
-  {
-    id: 'profile', name: 'IB / value-area breakout',
-    rule: 'After the Initial Balance (09:15 - 10:14): two closes above the IB high and above the developing volume POC = bullish; two closes below the IB low and below the POC = bearish (the Volume & Market Profile page\'s levels).',
-    signals: (d) => (!d.ib ? [] : edges(d, (i) => {
-      if (i <= d.ib.done + 1) return 0
-      const p = d.profile[i]
-      const c = d.price.c
-      if (!p) return 0
-      if (c[i - 1] > d.ib.high && c[i] > d.ib.high && c[i] > p.poc) return { dir: 1, why: `2 closes over the IB high ${d.ib.high.toFixed(1)}, over the POC ${p.poc.toFixed(1)}` }
-      if (c[i - 1] < d.ib.low && c[i] < d.ib.low && c[i] < p.poc) return { dir: -1, why: `2 closes under the IB low ${d.ib.low.toFixed(1)}, under the POC ${p.poc.toFixed(1)}` }
-      return 0
-    }, d.ib.done + 1)),
-  },
-  {
-    id: 'weighted', name: 'Weighted vote (by accuracy)',
-    rule: 'Every indicator votes each minute - OI since open, the net cumulative Δ, a fresh cumulative Δ break, a fresh 🎯, room to the OI walls, GEX, VWAP, the straddle and the IB / POC - each weighted by how often its direction was RIGHT over the next 15 minutes on the earlier days of the run (the first day: all equal). Where they disagree, the more accurate ones win: a signal when the weighted vote reaches the "Vote" share of all the weight (30% by default) one way.',
-    signals: (d, s) => {
-      const weights = s?.weights ?? equalWeights()
-      const total = INDICATORS.reduce((a, k) => a + (weights[k.id] ?? 0), 0)
-      if (!(total > 0)) return []
-      const votes = indicatorVotes(d)
-      const bar = Math.max(0.05, Math.min(1, s?.voteThreshold ?? BACKTEST_DEFAULTS.voteThreshold))
-      return edges(d, (i) => {
-        if (istMinute(d.t[i]) < 9 * 60 + 30) return 0
-        let score = 0
-        for (const k of INDICATORS) score += (weights[k.id] ?? 0) * votes[k.id][i]
-        const share = score / total
-        const dir = share >= bar ? 1 : share <= -bar ? -1 : 0
-        if (!dir) return 0
-        // Why: the indicators on the winning side, the weightiest first.
-        const lead = INDICATORS.filter((k) => votes[k.id][i] === dir && weights[k.id] > 0)
-          .sort((a, b) => weights[b.id] - weights[a.id]).slice(0, 4).map((k) => k.name)
-        const against = INDICATORS.filter((k) => votes[k.id][i] === -dir && weights[k.id] > 0).map((k) => k.name)
-        return { dir, why: `weighted vote ${(share * 100).toFixed(0)}% ${sideWord(dir)}: ${lead.join(', ')}${against.length ? ` (against: ${against.join(', ')})` : ''}` }
-      })
-    },
-  },
-]
-export const SIGNAL_STRATEGY_IDS = SIGNAL_STRATEGIES.map((s) => s.id)
 
 // ---- Trades ---------------------------------------------------------------------------------------------------------
 
 export const BACKTEST_DEFAULTS = {
-  mode: 'buy', moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
-  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, voteThreshold: 0.3, timeframe: 1,
+  moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
+  lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
+  // The rule the page opens with: put writing ahead since the open and price over VWAP - buy the call; the mirror (call
+  // writing ahead, price under VWAP) buys the put.
+  rule: { conditions: { oiOpen: 'peAhead', vwap: 'above' }, action: 'buyCE', mirror: true, windowMin: 5 },
 }
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
@@ -634,80 +693,65 @@ export function simulateTrade(d, i, option, { slPct, targetPct, timeStopMin = 0,
 }
 
 /**
- * Every enabled strategy's signals and trades for one prepared day under the settings (BACKTEST_DEFAULTS + `settings`:
- * `strategies` the ids to run, `lotSize`, `chargesCfg`, `timeframe` - the candles the strategies read, `timeframeView`).
- * One trade at a time per strategy, `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom`
- * to `lastEntry`. Returns `{ trades, signals }` - every trade
- * `{ date, strategy, dir, why, side, strike, action, entryTime, exitTime, entry, exit, exitReason, points, gross,
- * charges, net, holdMin }`; every signal `{ strategy, time, dir, why, taken, skipped }`.
+ * The rule's signals and trades for one prepared day under the settings (BACKTEST_DEFAULTS + `settings`: `rule`,
+ * `lotSize`, `chargesCfg`, `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
+ * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
+ * `lastEntry`. Returns `{ trades, signals }` - every trade `{ date, strategy ('rule' | 'mirror'), dir, why, side, strike,
+ * action, entryTime, exitTime, entry, exit, exitReason, points, gross, charges, net, holdMin }`; every signal
+ * `{ strategy, time, dir, why, taken, skipped }`.
  */
 export function simulateDay(d, settings = {}) {
   const s = { ...BACKTEST_DEFAULTS, ...settings }
-  const ids = s.strategies ?? SIGNAL_STRATEGY_IDS
   const from = clockMinute(s.entryFrom) ?? 9 * 60 + 30
   const lastEntry = clockMinute(s.lastEntry) ?? 14 * 60 + 45
   const lotSize = s.lotSize ?? 1
   const trades = []
   const signals = []
   if (!d?.ok) return { trades, signals }
-  // The strategies read the day on the timeframe's candles; a signal's candle -> its last minute, where the trade enters.
+  // The rule reads the day on the timeframe's candles; a signal's candle -> its last minute, where the trade enters.
   const view = timeframeView(d, s.timeframe)
   const minuteOfSignal = (k) => (view.at ? view.at[k] : k)
-  for (const strategy of SIGNAL_STRATEGIES) {
-    if (!ids.includes(strategy.id)) continue
-    let busyUntil = -1
-    let count = 0
-    for (const sig of strategy.signals(view, s).sort((a, b) => a.i - b.i)) {
-      const i = minuteOfSignal(sig.i)
-      const minute = istMinute(d.t[i])
-      const row = { strategy: strategy.id, time: d.t[i], dir: sig.dir, why: sig.why, taken: false, skipped: null }
-      signals.push(row)
-      if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
-      if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
-      if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
-      const option = optionFor(sig.dir, s.mode, d.atm[i], d.step, s.moneyness)
-      const trade = simulateTrade(d, i, option, s)
-      if (!trade) { row.skipped = `no premium for ${option.strike} ${option.side}`; continue }
-      row.taken = true
-      count++
-      busyUntil = trade.exitIndex + Math.max(0, Math.round(s.cooldownMin))
-      const qty = { lots: s.lots, lotSize }
-      const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg)
-      const gross = trade.points * s.lots * lotSize
-      trades.push({
-        date: d.date, strategy: strategy.id, dir: sig.dir, why: sig.why, ...option,
-        entryTime: d.t[trade.entryIndex], exitTime: d.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
-        points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net: s.charges && money ? money.net : gross,
-        holdMin: Math.round((d.t[trade.exitIndex] - d.t[trade.entryIndex]) / MIN),
-      })
-    }
+  let busyUntil = -1
+  let count = 0
+  for (const sig of ruleSignals(view, s.rule)) {
+    const i = minuteOfSignal(sig.i)
+    const { dir, mode } = ACTION[sig.action]
+    const minute = istMinute(d.t[i])
+    const row = { strategy: sig.side, time: d.t[i], dir, why: sig.why, taken: false, skipped: null }
+    signals.push(row)
+    if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
+    if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
+    if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
+    const option = optionFor(dir, mode, d.atm[i], d.step, s.moneyness)
+    const trade = simulateTrade(d, i, option, s)
+    if (!trade) { row.skipped = `no premium for ${option.strike} ${option.side}`; continue }
+    row.taken = true
+    count++
+    busyUntil = trade.exitIndex + Math.max(0, Math.round(s.cooldownMin))
+    const qty = { lots: s.lots, lotSize }
+    const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg)
+    const gross = trade.points * s.lots * lotSize
+    trades.push({
+      date: d.date, strategy: sig.side, dir, why: sig.why, ...option,
+      entryTime: d.t[trade.entryIndex], exitTime: d.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
+      points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net: s.charges && money ? money.net : gross,
+      holdMin: Math.round((d.t[trade.exitIndex] - d.t[trade.entryIndex]) / MIN),
+    })
   }
-  trades.sort((a, b) => a.entryTime - b.entryTime)
   return { trades, signals }
 }
 
-/**
- * The whole run, day by day in date order: each day traded with the weighted vote's weights learned from the days BEFORE
- * it (walk-forward - the first day weighs every indicator the same), then its own outcomes added for the next day.
- * Returns { trades, signals, accuracy (the weights after the last day), daysWeights: { [date]: weights used } }.
- */
+/** The whole run, day by day in date order: { trades, signals }. */
 export function simulateRun(days, settings = {}) {
   const list = [...(days ?? [])].filter((d) => d?.ok).sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
-  const stats = Object.fromEntries(INDICATOR_IDS.map((id) => [id, { right: 0, wrong: 0 }]))
   const trades = []
   const signals = []
-  const daysWeights = {}
   for (const d of list) {
-    const table = accuracyWeights(stats)
-    const weights = Object.fromEntries(INDICATOR_IDS.map((id) => [id, table[id].weight]))
-    daysWeights[d.date] = weights
-    const out = simulateDay(d, { ...settings, weights })
+    const out = simulateDay(d, settings)
     trades.push(...out.trades)
     signals.push(...out.signals)
-    const outcome = indicatorOutcomes(timeframeView(d, settings.timeframe))
-    for (const id of INDICATOR_IDS) { stats[id].right += outcome[id].right; stats[id].wrong += outcome[id].wrong }
   }
-  return { trades, signals, accuracy: accuracyWeights(stats), daysWeights }
+  return { trades, signals }
 }
 
 // ---- The report -----------------------------------------------------------------------------------------------------
@@ -759,14 +803,14 @@ export function summarize(trades) {
 
 /** The trades as CSV text (one row a trade). */
 export function tradesCsv(trades) {
-  const name = Object.fromEntries(SIGNAL_STRATEGIES.map((s) => [s.id, s.name]))
+  const name = { rule: 'Rule', mirror: 'Mirror' }
   const time = (ms) => hhmm(istMinute(ms))
   const cell = (v) => {
     const text = v == null ? '' : String(v)
     const safe = /^[=+\-@]/.test(text) && !/^-?\d/.test(text) ? `'${text}` : text
     return /[",\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe
   }
-  const head = ['date', 'strategy', 'signal', 'action', 'option', 'entry time', 'entry', 'exit time', 'exit', 'exit reason', 'points', 'gross', 'charges', 'net', 'why']
+  const head = ['date', 'rule', 'signal', 'action', 'option', 'entry time', 'entry', 'exit time', 'exit', 'exit reason', 'points', 'gross', 'charges', 'net', 'why']
   const rows = trades.map((t) => [
     t.date, name[t.strategy] ?? t.strategy, t.dir > 0 ? 'bullish' : 'bearish', t.action, `${t.strike} ${t.side}`, time(t.entryTime), t.entry.toFixed(2),
     time(t.exitTime), t.exit.toFixed(2), t.exitReason, t.points.toFixed(2), t.gross.toFixed(0), t.charges.toFixed(0), t.net.toFixed(0), t.why,

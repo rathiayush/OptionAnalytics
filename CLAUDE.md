@@ -465,40 +465,40 @@ When adding or changing a strategy:
   auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
-  weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`), option BUY (a bullish signal buys the call, a bearish the put)
-  or SELL (sells the put / the call), the strike (ATM / 1 ITM / 1 OTM), SL / target % of the premium, a time stop, at most
-  N trades a day per strategy and a cooldown, lots and charges; each day is loaded as OI Replay loads it
+  weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
+  and the weighted vote were replaced by it on request). Every condition (`RULE_CONDITIONS`) is a dropdown of what that
+  indicator can say, "Any" = not used: OI since open (PE / CE ahead, PE / CE crossed above the other), the CE / PE / Net
+  cumulative Δ (positive / negative, −ve → +ve / +ve → −ve, rising / falling / stable - its move over the window against
+  10% of its range so far - and its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance - a quarter
+  strike - or broke through), GEX regime (long / short gamma, turned) and walls (near the put / call wall - 0.15% - or
+  broke through), price vs VWAP (above / below / crossed), spot over the window (0.1%), the ATM straddle (vs its VWAP and
+  the decay-only line, crossed), the developing POC / value area and the Initial Balance (after 10:15). A signal where ALL
+  the picked conditions hold, ONCE when the rule becomes true (`ruleSignals`); "within the last N min" (`windowMin`, 5 by
+  default) is how far crossed / turned / broke / near / 🎯 / spot's move look back - a cross, turn or break must still
+  hold now. "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): the same rule with every
+  condition's `opposite` (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle and
+  "inside" have no side and stay) and the opposite trade - left out when none of the conditions has a side. One trade at a
+  time for the rule and its mirror together. The rule is saved whole (`optionanalytics.signalBacktest.rule`, `cleanRule`
+  drops what is not known). Each day is loaded as OI Replay loads it
   (`/api/oi-replay/{u}/run`, one day at a time, a click - not polling; a day the server has not kept comes from Dhan once)
   and PREPARED once (`prepareDay` - every feature at each minute from data up to the END of that minute: OI since the open
-  (`chainOiTotalsAt`), the OI totals' cumulative Δ breaks and the 🎯 signal (`completedLevelReads` / `watchBreaks` /
-  `watchHighProbability` stepped minute by minute), the OI walls (`oiWalls`), GEX (`gexDay`, standard sign), the straddle
-  (`straddleRead`), VWAP (the futures', else the index's own), the Initial Balance and the developing volume profile),
-  kept for the tab's life, so a change of mode / levels / strategies re-runs at once (`simulateDay`). The STRATEGIES
-  (`SIGNAL_STRATEGIES`, each rule shown on the page): OI since open + VWAP, cumulative Δ S/R break (with VWAP), 🎯 high
-  probability, OI S-R wall bounce, GEX walls (short gamma: through a wall; long gamma: faded at it), VWAP cross (2 closes),
-  straddle expansion (the straddle card's trade-idea rule), IB / value-area breakout, and the WEIGHTED VOTE - not an
-  all-agree confluence (that was too tight, asked to be loosened): every indicator (`INDICATORS` - OI since open, the net
-  cumulative Δ, a fresh cumulative Δ break / 🎯, room to the OI walls, GEX - short gamma with the move, long gamma toward
-  the walls' middle - VWAP, the straddle, IB / POC) votes each minute (`indicatorVotes`), weighted by its ACCURACY (its
-  vote judged by spot's move over the next 15 minutes, a move under 0.05% counting neither way - `indicatorOutcomes`;
-  weight = smoothed accuracy above 50%, none at or below - `accuracyWeights`), so where they disagree the more accurate side
-  wins; a signal when the weighted vote reaches "Weighted vote ≥" (30%) of all the weight one way. WALK-FORWARD: each day
-  is traded with the weights learned from the days BEFORE it only (`simulateRun`; the first day all equal) - never its
-  own outcome; the page's "Indicator accuracy" table shows each one's right / wrong / accuracy / weight. The OI since open
-  bias is 15%. A condition that stays true signals once, when it becomes true (`edges`). TIMEFRAME (1 / 3 / 5 / 15 min,
-  `TIMEFRAMES`, `timeframeView`): the strategies read the day on candles from 09:15 - a candle's OHLC from its minutes,
+  (`chainOiTotalsAt`), the OI totals' CE / PE / Net cumulative Δ and their breaks and the 🎯 signal (`completedLevelReads` /
+  `watchBreaks` / `watchHighProbability` stepped minute by minute), the OI walls (`oiWalls`), GEX (`gexDay`, standard
+  sign), the straddle (`straddleRead`), VWAP (the futures', else the index's own), the Initial Balance and the developing
+  volume profile), kept for the tab's life, so a change of the rule / levels / timeframe re-runs at once (`simulateDay`).
+  TIMEFRAME (1 / 3 / 5 / 15 min,
+  `TIMEFRAMES`, `timeframeView`): the rule reads the day on candles from 09:15 - a candle's OHLC from its minutes,
   every other feature as at the end of its LAST minute, the OI totals' breaks / 🎯 on that timeframe's own buckets
   (`oiTf`, worked out in `prepareDay`), each in the candle it became known in - so a signal is known at the candle's
-  close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; windows given in
-  minutes (the straddle's 15-minute move, a fresh break, the indicators' 15-minute outcome) stay minutes (`span`); a
-  change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
+  close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; the window stays
+  minutes (`span`); a change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
   time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
-  report (`summarize`): per strategy and all together - trades, win %, net / gross P&L, points, average win / loss, profit
+  report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
   factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
-  trade with why it went in and out, and a CSV (`tradesCsv`). A backtest of fixed rules, not a tuning; it places nothing
-  and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - the features of a day cut part way equal the whole
-  day's up to the cut).
+  trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places
+  nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every condition's values on their case and
+  not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
