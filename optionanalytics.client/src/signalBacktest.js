@@ -29,6 +29,7 @@ import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { gexDay } from './gex.js'
 import { straddleRead } from './straddle.js'
 import { tradeCharges } from './tradeCharges.js'
+import { optionTrailLevel, tighterStop } from './optionTrail.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -715,7 +716,7 @@ export function ruleSignals(d, rule) {
 // ---- Trades ---------------------------------------------------------------------------------------------------------
 
 export const BACKTEST_DEFAULTS = {
-  moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
+  moneyness: 0, slPct: 30, targetPct: 50, levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
   lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
@@ -745,24 +746,42 @@ function premiumAt(packed, i) {
   return null
 }
 
-/** One trade, entered at minute `i`'s close of the option and managed from minute i + 1. */
-export function simulateTrade(d, i, option, { slPct, targetPct, timeStopMin = 0, squareOff = '15:10' }) {
+/** The level units: % of the entry premium, or premium points. */
+export const LEVEL_UNITS = ['pct', 'pts']
+
+/**
+ * One trade, entered at minute `i`'s close of the option and managed from minute i + 1 on its 1-minute bars. `slPct` /
+ * `targetPct` / `trailGap` / `trailStart` are in `levelUnit` - 'pct' (% of the entry premium) or 'pts' (premium points);
+ * 0 = none. The stop before the target in the same bar; a bar opening through the stop fills at its open. The TRAILING
+ * stop (the paper panel's - `optionTrailLevel`): `trailGap` behind the best premium reached (a bought option's highest
+ * high, a sold one's lowest low), once the trade is `trailStart` in profit; it moves after each completed bar - a bar is
+ * judged with the trail it had before it - and only tightens; the tighter of it and the fixed stop is the stop.
+ */
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10' }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
   const short = option.action === 'SELL'
-  const stop = short ? entry * (1 + slPct / 100) : entry * (1 - slPct / 100)
-  const target = short ? entry * (1 - targetPct / 100) : entry * (1 + targetPct / 100)
+  const size = (v) => (v > 0 ? (levelUnit === 'pts' ? v : (entry * v) / 100) : 0)
+  const slPts = size(slPct), targetPts = size(targetPct), gap = size(trailGap), start = size(trailStart)
+  const fixed = slPts > 0 ? (short ? entry + slPts : entry - slPts) : null
+  const target = targetPts > 0 ? (short ? entry - targetPts : entry + targetPts) : null
   const off = clockMinute(squareOff) ?? 15 * 60 + 10
-  let last = entry, exit = null
+  let last = entry, exit = null, best = entry, trail = null
   for (let j = i + 1; j < d.n; j++) {
     const b = barAt(packed, j)
     const minute = istMinute(d.t[j])
     if (b) {
-      if (short ? b.o >= stop : b.o <= stop) exit = { j, price: b.o, reason: 'Stop (opened through it)' }
-      else if (short ? b.h >= stop : b.l <= stop) exit = { j, price: stop, reason: 'Stop' }
-      else if (short ? b.l <= target : b.h >= target) exit = { j, price: target, reason: 'Target' }
+      const stop = tighterStop(option.action, fixed, trail)
+      const trailing = stop != null && trail != null && stop === trail && stop !== fixed
+      const name = trailing ? 'Trailing stop' : 'Stop'
+      if (stop != null && (short ? b.o >= stop : b.o <= stop)) exit = { j, price: b.o, reason: `${name} (opened through it)` }
+      else if (stop != null && (short ? b.h >= stop : b.l <= stop)) exit = { j, price: stop, reason: name }
+      else if (target != null && (short ? b.l <= target : b.h >= target)) exit = { j, price: target, reason: 'Target' }
       last = b.c
+      // After the bar: the best premium so far and the trail from it (never looser than the one it had).
+      best = short ? Math.min(best, b.l) : Math.max(best, b.h)
+      if (gap > 0) trail = tighterStop(option.action, trail, optionTrailLevel(option.action, entry, best, start, gap))
     }
     if (!exit && timeStopMin > 0 && d.t[j] - d.t[i] >= timeStopMin * MIN) exit = { j, price: last, reason: `Time stop ${timeStopMin} min` }
     if (!exit && minute >= off) exit = { j, price: last, reason: `${squareOff} square-off` }
@@ -770,7 +789,7 @@ export function simulateTrade(d, i, option, { slPct, targetPct, timeStopMin = 0,
   }
   if (!exit) exit = { j: d.n - 1, price: last, reason: 'Day end' }
   const points = short ? entry - exit.price : exit.price - entry
-  return { entryIndex: i, exitIndex: exit.j, entry, exit: exit.price, exitReason: exit.reason, points, stop, target }
+  return { entryIndex: i, exitIndex: exit.j, entry, exit: exit.price, exitReason: exit.reason, points, stop: fixed, target, trail }
 }
 
 /**

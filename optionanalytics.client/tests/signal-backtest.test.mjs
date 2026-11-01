@@ -117,6 +117,48 @@ test('the trade: entered at the signal minute\'s close, managed from the next mi
   assert.equal(simulateTrade(fakeDay({ n: 20 }), 0, buy, opts), null)
 })
 
+test('the trade: SL / target in points or %, 0 = none; the trailing stop - behind the best premium, after each bar, only tighter', () => {
+  const at = (bars) => fakeDay({ n: 30, legs: { ce: { 25000: (i) => bars[i] ?? null } } })
+  const buy = { side: 'CE', strike: 25000, action: 'BUY' }
+  const sell = { side: 'CE', strike: 25000, action: 'SELL' }
+  const bar = (o, h, l, c) => ({ o, h, l, c })
+  // Points: entry 100, SL 15 pts (85), target 25 pts (125).
+  let tr = simulateTrade(at({ 0: bar(100, 100, 100, 100), 2: bar(100, 110, 84, 90) }), 0, buy, { slPct: 15, targetPct: 25, levelUnit: 'pts' })
+  assert.deepEqual([tr.exit, tr.exitReason], [85, 'Stop'])
+  tr = simulateTrade(at({ 0: bar(100, 100, 100, 100), 2: bar(100, 126, 95, 120) }), 0, buy, { slPct: 15, targetPct: 25, levelUnit: 'pts' })
+  assert.deepEqual([tr.exit, tr.exitReason], [125, 'Target'])
+  // 0 = none: no stop, no target - out at the square-off.
+  tr = simulateTrade(at({ 0: bar(100, 100, 100, 100), 2: bar(100, 300, 1, 100) }), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts' })
+  assert.equal(tr.exitReason, 'Day end')
+  // The trail (gap 10 points, from the entry): 100 -> a high of 130 -> trail 120; the next bar's low 118 takes it at 120.
+  const run = { 0: bar(100, 100, 100, 100), 1: bar(100, 112, 99, 110), 2: bar(110, 130, 108, 128), 3: bar(127, 129, 118, 119) }
+  tr = simulateTrade(at(run), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitReason, tr.exitIndex, tr.points], [120, 'Trailing stop', 3, 20])
+  // The bar that makes the high is judged with the trail it had before it: bar 2's low 108 is over the 102 from bar 1.
+  // A wider SL never loosens it: the tighter of the two is the stop.
+  tr = simulateTrade(at(run), 0, buy, { slPct: 30, targetPct: 0, levelUnit: 'pts', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitReason], [120, 'Trailing stop'])
+  // Only tightens: a lower high later keeps the 120.
+  const fade = { ...run, 3: bar(127, 127, 121, 122), 4: bar(122, 125, 119, 120) }
+  tr = simulateTrade(at(fade), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitIndex], [120, 4])
+  // Start after +20 profit: bar 1's high (112) does not start it; bar 2's (130) does.
+  tr = simulateTrade(at({ ...run, 2: bar(110, 115, 101, 104), 3: bar(104, 106, 100, 101) }), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10, trailStart: 20 })
+  assert.equal(tr.exitReason, 'Day end')                                      // never 20 up: no trail (102 would have taken it)
+  tr = simulateTrade(at(run), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10, trailStart: 20 })
+  assert.deepEqual([tr.exit, tr.exitReason], [120, 'Trailing stop'])
+  // A gap through the trail fills at the open.
+  tr = simulateTrade(at({ ...run, 3: bar(115, 116, 110, 112) }), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitReason], [115, 'Trailing stop (opened through it)'])
+  // In %: a 10% gap on a 100 entry is 10 points - the same trade.
+  tr = simulateTrade(at(run), 0, buy, { slPct: 0, targetPct: 0, levelUnit: 'pct', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitReason], [120, 'Trailing stop'])
+  // SOLD: the trail above the lowest premium - 100 -> a low of 70 -> trail 80; a high of 82 takes it at 80.
+  const down = { 0: bar(100, 100, 100, 100), 1: bar(100, 101, 88, 90), 2: bar(90, 92, 70, 72), 3: bar(73, 82, 71, 81) }
+  tr = simulateTrade(at(down), 0, sell, { slPct: 0, targetPct: 0, levelUnit: 'pts', trailGap: 10 })
+  assert.deepEqual([tr.exit, tr.exitReason, tr.points], [80, 'Trailing stop', 20])
+})
+
 test('the trade: the time stop and the 15:10 square-off at the bar\'s close', () => {
   const d = fakeDay({ legs: { ce: { 25000: (i) => ({ o: 100 + i, h: 100 + i, l: 100 + i, c: 100 + i }) } } })
   const buy = { side: 'CE', strike: 25000, action: 'BUY' }

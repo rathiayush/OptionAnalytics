@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute, mirrorIsSame, mirrorLines,
+  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute, mirrorIsSame, mirrorLines,
   normalizeRule, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
@@ -28,6 +28,9 @@ const STORE = {
   moneyness: 'optionanalytics.signalBacktest.moneyness',
   slPct: 'optionanalytics.signalBacktest.slPct',
   targetPct: 'optionanalytics.signalBacktest.targetPct',
+  levelUnit: 'optionanalytics.signalBacktest.levelUnit',
+  trailGap: 'optionanalytics.signalBacktest.trailGap',
+  trailStart: 'optionanalytics.signalBacktest.trailStart',
   timeStopMin: 'optionanalytics.signalBacktest.timeStopMin',
   maxTradesPerDay: 'optionanalytics.signalBacktest.maxTradesPerDay',
   cooldownMin: 'optionanalytics.signalBacktest.cooldownMin',
@@ -133,6 +136,12 @@ export default function SignalBacktestPage() {
   const [moneyness, setMoneyness] = usePersistedState(STORE.moneyness, BACKTEST_DEFAULTS.moneyness)
   const [slPct, setSlPct] = usePersistedState(STORE.slPct, BACKTEST_DEFAULTS.slPct)
   const [targetPct, setTargetPct] = usePersistedState(STORE.targetPct, BACKTEST_DEFAULTS.targetPct)
+  const [storedUnit, setLevelUnit] = usePersistedState(STORE.levelUnit, BACKTEST_DEFAULTS.levelUnit)
+  const levelUnit = LEVEL_UNITS.includes(storedUnit) ? storedUnit : BACKTEST_DEFAULTS.levelUnit
+  const [trailGap, setTrailGap] = usePersistedState(STORE.trailGap, BACKTEST_DEFAULTS.trailGap)
+  const [trailStart, setTrailStart] = usePersistedState(STORE.trailStart, BACKTEST_DEFAULTS.trailStart)
+  const unitText = levelUnit === 'pts' ? ' pts' : '%'
+  const unitMax = levelUnit === 'pts' ? 5000 : 1000
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   const [maxTradesPerDay, setMaxTradesPerDay] = usePersistedState(STORE.maxTradesPerDay, BACKTEST_DEFAULTS.maxTradesPerDay)
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
@@ -197,9 +206,9 @@ export default function SignalBacktestPage() {
 
   // The report - worked out again, in an instant, whenever a setting or the rule changes.
   const settings = useMemo(() => ({
-    rule, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
+    rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
     lotSize: PAPER_TRADE_LOT_SIZE[run.underlying] ?? lotSize,
-  }), [rule, moneyness, slPct, targetPct, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, lotSize, run.underlying])
+  }), [rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, lotSize, run.underlying])
   const report = useMemo(() => {
     const okDays = run.results.filter((r) => r.day?.ok)
     const { trades, signals } = simulateRun(okDays.map((r) => r.day), settings)
@@ -279,7 +288,7 @@ export default function SignalBacktestPage() {
     { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
     { title: 'At the signal', dataIndex: 'why', key: 'why', width: 360, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
   ]
-  const head = report.okDays ? `${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · SL ${slPct}% · target ${targetPct}%` : ''
+  const head = report.okDays ? `${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · SL ${slPct > 0 ? `${slPct}${unitText}` : 'none'} · target ${targetPct > 0 ? `${targetPct}${unitText}` : 'none'}${trailGap > 0 ? ` · trail ${trailGap}${unitText}${trailStart > 0 ? ` after +${trailStart}${unitText}` : ''}` : ''}` : ''
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -371,11 +380,22 @@ export default function SignalBacktestPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Strike</Text>
                 <Select size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} options={[{ value: 0, label: 'ATM' }, { value: 1, label: '1 ITM' }, { value: -1, label: '1 OTM' }]} />
               </Space>
-              <Tooltip title="Bought: out when the premium FALLS this much below the entry. Sold: out when it RISES this much above it.">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>SL</Text><InputNumber size="small" min={1} max={500} value={slPct} onChange={(v) => setSlPct(v ?? BACKTEST_DEFAULTS.slPct)} addonAfter="%" style={{ width: 100 }} /></Space>
+              <Tooltip title="Stop-loss, target and trailing stop in % of the entry premium, or in premium points.">
+                <Segmented size="small" value={levelUnit} onChange={setLevelUnit} options={[{ value: 'pct', label: '% premium' }, { value: 'pts', label: 'Points' }]} />
               </Tooltip>
-              <Tooltip title="Bought: out when the premium RISES this much. Sold: out when it FALLS this much (the decay kept).">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Target</Text><InputNumber size="small" min={1} max={1000} value={targetPct} onChange={(v) => setTargetPct(v ?? BACKTEST_DEFAULTS.targetPct)} addonAfter="%" style={{ width: 100 }} /></Space>
+              <Tooltip title="Bought: out when the premium FALLS this much below the entry. Sold: out when it RISES this much above it. 0 = no stop-loss.">
+                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>SL</Text><InputNumber size="small" min={0} max={unitMax} value={slPct} onChange={(v) => setSlPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} /></Space>
+              </Tooltip>
+              <Tooltip title="Bought: out when the premium RISES this much. Sold: out when it FALLS this much (the decay kept). 0 = no target.">
+                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Target</Text><InputNumber size="small" min={0} max={unitMax} value={targetPct} onChange={(v) => setTargetPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} /></Space>
+              </Tooltip>
+              <Tooltip title="Trailing stop: this far behind the best premium reached (a bought option's highest, a sold one's lowest), once the trade is 'after +' in profit (0 = from the entry). It moves after each completed 1-minute bar and only tightens; the tighter of it and the SL is the stop. 0 = no trailing.">
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Trail</Text>
+                  <InputNumber size="small" min={0} max={unitMax} value={trailGap} onChange={(v) => setTrailGap(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} />
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>after +</Text>
+                  <InputNumber size="small" min={0} max={unitMax} value={trailStart} onChange={(v) => setTrailStart(v ?? 0)} addonAfter={unitText.trim()} disabled={!(trailGap > 0)} style={{ width: 110 }} />
+                </Space>
               </Tooltip>
               <Tooltip title="Out at the bar's close this many minutes after the entry (0 = off). Every trade is out by 15:10 anyway.">
                 <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Time stop</Text><InputNumber size="small" min={0} max={360} value={timeStopMin} onChange={(v) => setTimeStopMin(v ?? 0)} addonAfter="min" style={{ width: 110 }} /></Space>
@@ -408,7 +428,8 @@ export default function SignalBacktestPage() {
                 before it signals again). The Mirror adds the same rule the other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
                 and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
                 option close and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop fills
-                at its open, the stop before the target in the same bar, the time stop and the 15:10 square-off at the bar&apos;s close. No
+                at its open, the stop before the target in the same bar, a trailing stop (if set) moving after each bar behind the best
+                premium and only tightening, the time stop and the 15:10 square-off at the bar&apos;s close. No
                 entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. Change the rule after a
                 run and the report follows at once - nothing is loaded again.
               </Text>

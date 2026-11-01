@@ -501,7 +501,11 @@ When adding or changing a strategy:
   close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; a line's look-back stays
   minutes (`span`); a change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
-  time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
+  time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). SL,
+  target and TRAILING STOP in % of the entry premium or in premium POINTS (`levelUnit`, `LEVEL_UNITS`; 0 = none): the
+  trail is the paper panel's (`optionTrailLevel` / `tighterStop` from `optionTrail.js`) - `trailGap` behind the best
+  premium reached (a bought option's highest high, a sold one's lowest low) once `trailStart` in profit, moved after each
+  completed bar (a bar is judged with the trail it had before it), only tightening, the tighter of it and the SL the stop. The
   report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
   factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
   trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places
