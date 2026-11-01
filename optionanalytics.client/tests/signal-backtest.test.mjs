@@ -6,7 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, istMinute, mirrorConditions, optionFor, prepareDay, ruleConditions, ruleSignals, ruleText,
+  BACKTEST_DEFAULTS, DEFAULT_WINDOW, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, istMinute, lineText, mirrorIsSame, mirrorLines, normalizeRule, optionFor,
+  prepareDay, ruleSignals, ruleText,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -14,8 +15,11 @@ const MIN = 60_000
 const T915 = Date.parse('2026-10-05T09:15:00+05:30')
 const cond = (id) => RULE_CONDITIONS.find((c) => c.id === id)
 // Does condition `id` say `value` at minute i of `d` (window `w` candles)?
-const holds = (d, id, value, i, w = 5) => cond(id).test(d, i, value, w)
+// Does condition `id` say `value` at minute i of `d` (window `w` candles; `p` its number, else the option's default)?
+const holds = (d, id, value, i, w = 5, p = cond(id).options.find((o) => o.value === value).param?.default ?? 0) => cond(id).test(d, i, value, w, p)
+// A rule of AND-ed conditions { id: value } (the earlier form - read by normalizeRule) or of lines.
 const rule = (conditions, action = 'buyCE', more = {}) => ({ conditions, action, mirror: false, windowMin: 5, ...more })
+const lines = (list, action = 'buyCE', more = {}) => ({ lines: list, action, mirror: false, ...more })
 const at = (list) => list.map((x) => [x.i, x.side, x.action])
 
 // A prepared day built by hand: `n` minutes from 09:15, everything flat unless given.
@@ -252,8 +256,10 @@ test('the rule: a signal only where ALL its conditions hold - each one missing, 
 })
 
 test('the mirror: every condition\'s opposite trades the opposite side; a rule with no side has no mirror', () => {
-  assert.deepEqual(mirrorConditions({ oiOpen: 'peAhead', vwap: 'above', gexRegime: 'short', cumCe: 'falling' }),
-    { oiOpen: 'ceAhead', vwap: 'below', gexRegime: 'short', cumCe: 'rising' })
+  const four = normalizeRule(rule({ oiOpen: 'peAhead', vwap: 'above', gexRegime: 'short', cumCe: 'falling' })).lines
+  assert.deepEqual(mirrorLines(four).map((l) => [l.id, l.value]), [['oiOpen', 'ceAhead'], ['cumCe', 'rising'], ['gexRegime', 'short'], ['vwap', 'below']])
+  assert.equal(mirrorIsSame(four), false)
+  assert.equal(mirrorIsSame(normalizeRule(rule({ gexRegime: 'short', straddle: 'aboveVwap' })).lines), true)
   const price = (i) => flat(i < 60 ? 25020 : 24980)()
   const oi = (i) => (i < 60 ? { ce: 1e6, pe: 2e6 } : { ce: 3e6, pe: 2e6 })
   const d = fakeDay({ oi, price, vwap: () => 25000 })
@@ -264,8 +270,70 @@ test('the mirror: every condition\'s opposite trades the opposite side; a rule w
   // Only GEX short gamma: its mirror would be the same rule - left out.
   const g = fakeDay({ gex: () => ({ net: -1, putWall: null, callWall: null }) })
   assert.deepEqual(at(ruleSignals(g, rule({ gexRegime: 'short' }, 'buyCE', { mirror: true }))), [[0, 'rule', 'buyCE']])
-  assert.match(ruleText({ vwap: 'above', oiOpen: 'peAhead' }, 'buyCE'), /^Buy CE when OI since open.*PE added > CE added.* AND Price vs VWAP: Price above VWAP$/)
-  assert.deepEqual(ruleConditions({ vwap: 'above', bogus: 'x', oiOpen: 'any' }), [['vwap', 'above']])
+  assert.match(ruleText(normalizeRule(rule({ vwap: 'above', oiOpen: 'peAhead' })).lines, 'buyCE'), /^Buy CE when OI since open.*PE added > CE added.* AND Price vs VWAP: Price above VWAP$/)
+  assert.deepEqual(normalizeRule(rule({ vwap: 'above', bogus: 'x', oiOpen: 'any' })).lines.map((l) => [l.id, l.value]), [['vwap', 'above']])
+})
+
+test('the numbers: VWAP / POC / straddle "by ≥ %", the OI lead, near "within %", spot\'s move and the cumulative line\'s tolerance', () => {
+  // Price 0.08% over VWAP: above by ≥ 0 yes, by ≥ 0.05% yes, by ≥ 0.1% no.
+  const d = fakeDay({ price: () => flat(25020)(), vwap: () => 25000 })
+  assert.ok(holds(d, 'vwap', 'above', 40, 5, 0) && holds(d, 'vwap', 'above', 40, 5, 0.05) && !holds(d, 'vwap', 'above', 40, 5, 0.1))
+  // OI: PE 3L vs CE 2L added = a 20% lead.
+  const oi = fakeDay({ oi: () => ({ ce: 2e5, pe: 3e5 }) })
+  assert.ok(holds(oi, 'oiOpen', 'peAhead', 40, 5, 15) && !holds(oi, 'oiOpen', 'peAhead', 40, 5, 25))
+  // Near the OI support: 20 points over 24900 is 0.08% - within 0.1%, not within the default 0.05%.
+  const walls = () => ({ support: 24900, resistance: 25100 })
+  const dip = fakeDay({ walls, spot: (i) => (i === 50 ? { o: 24950, h: 24950, l: 24920, c: 24940 } : flat(25000)()) })
+  assert.ok(!holds(dip, 'oiWalls', 'nearSupport', 51) && holds(dip, 'oiWalls', 'nearSupport', 51, 5, 0.1))
+  // Spot up 0.2% over 5 minutes: rising by 0.1% yes, by 0.3% no; sideways under 0.3% yes.
+  const up = fakeDay({ spot: (i) => 25000 + (i >= 50 ? (i - 50) * 10 : 0) })
+  assert.ok(holds(up, 'spotMove', 'rising', 60, 5, 0.1) && !holds(up, 'spotMove', 'rising', 60, 5, 0.3) && holds(up, 'spotMove', 'sideways', 60, 5, 0.3))
+  // The net line up 50 over 5 minutes on a range of 400 (12.5%): rising at a 10% tolerance, stable at 20%.
+  const net = fakeDay({ netCum: (i) => (i < 40 ? -200 + i * 10 : i < 60 ? 200 : 200 + (i - 60) * 10) })
+  assert.ok(holds(net, 'cumNet', 'rising', 65, 5, 10) && holds(net, 'cumNet', 'stable', 65, 5, 20))
+  // The straddle 5% over its VWAP: by ≥ 3% yes, by ≥ 6% no.
+  const st = fakeDay({ straddle: () => ({ value: 105, vwap: 100, decay: 90, forward: 25000 }) })
+  assert.ok(holds(st, 'straddle', 'aboveVwap', 40, 5, 3) && !holds(st, 'straddle', 'aboveVwap', 40, 5, 6))
+})
+
+test('AND / OR: AND binds tighter - (A AND B) OR C; each line its own window; the words show the brackets', () => {
+  // A: price over VWAP from 60. B: PE ahead from 80. C: a bullish 🎯 at 30.
+  const d = fakeDay({ price: (i) => flat(i >= 60 ? 25020 : 24980)(), vwap: () => 25000, oi: (i) => (i >= 80 ? { ce: 1e5, pe: 3e5 } : { ce: 3e5, pe: 1e5 }), hp: [{ i: 30, dir: 1 }] })
+  const A = { id: 'vwap', value: 'above' }
+  const B = { id: 'oiOpen', value: 'peAhead' }
+  const C = { id: 'hp', value: 'bullish', windowMin: 5 }
+  assert.deepEqual(at(ruleSignals(d, lines([A, { ...B, join: 'and' }]))), [[80, 'rule', 'buyCE']])
+  assert.deepEqual(at(ruleSignals(d, lines([A, { ...B, join: 'or' }]))), [[60, 'rule', 'buyCE']])
+  // (A AND B) OR C: the 🎯 alone at 30 (true 30 - 34), then A AND B at 80.
+  assert.deepEqual(at(ruleSignals(d, lines([A, { ...B, join: 'and' }, { ...C, join: 'or' }]))), [[30, 'rule', 'buyCE'], [80, 'rule', 'buyCE']])
+  // (Read as A AND (B OR C) it would have signalled at 80 only.) A line's own window: C over 30 minutes holds 30 - 59,
+  // and C OR A runs on into A from 60 - one stretch, one signal.
+  const long = lines([{ ...C, windowMin: 30 }, { ...A, join: 'or' }])
+  assert.deepEqual(at(ruleSignals(d, long)), [[30, 'rule', 'buyCE']])   // C 30 - 59, A from 60: one unbroken stretch
+  assert.equal(ruleText(normalizeRule(lines([A, { ...B, join: 'and' }, { ...C, join: 'or' }])).lines, 'buyCE'),
+    'Buy CE when (Price vs VWAP: Price above VWAP AND OI since open (chain-wide): PE added > CE added (put writing ahead)) OR 🎯 High probability: Bullish 🎯 (last 5 min)')
+  // The mirror keeps the joins and numbers, flips the values.
+  const m = mirrorLines(normalizeRule(lines([{ ...A, param: 0.1 }, { ...C, join: 'or', windowMin: 10 }])).lines)
+  assert.deepEqual(m, [{ id: 'vwap', value: 'below', join: 'and', param: 0.1 }, { id: 'hp', value: 'bearish', join: 'or', windowMin: 10 }])
+  // The same indicator twice: near the OI support OR broke above the resistance.
+  const r = normalizeRule(lines([{ id: 'oiWalls', value: 'nearSupport' }, { id: 'oiWalls', value: 'brokeResistance', join: 'or' }]))
+  assert.equal(r.lines.length, 2)
+})
+
+test('a line made whole: its number held to its range, the default when none, a window offered; the earlier { conditions } form read', () => {
+  assert.deepEqual(cleanLine({ id: 'vwap', value: 'above', param: 99 }), { id: 'vwap', value: 'above', join: 'and', param: 5 })
+  assert.deepEqual(cleanLine({ id: 'vwap', value: 'above' }), { id: 'vwap', value: 'above', join: 'and', param: 0 })
+  assert.deepEqual(cleanLine({ id: 'gexLevel', value: 'nearPutWall', windowMin: 7, join: 'or' }), { id: 'gexLevel', value: 'nearPutWall', join: 'or', param: 0.15, windowMin: DEFAULT_WINDOW })
+  assert.deepEqual(cleanLine({ id: 'valueArea', value: 'inside', param: 3, windowMin: 10 }), { id: 'valueArea', value: 'inside', join: 'and' })
+  assert.equal(cleanLine({ id: 'vwap', value: 'sideways' }), null)
+  assert.equal(cleanLine({ id: 'nope', value: 'above' }), null)
+  const old = normalizeRule({ conditions: { vwap: 'crossedAbove', oiOpen: 'peAhead' }, windowMin: 10, action: 'sellPE', mirror: false })
+  assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', windowMin: 10 }], action: 'sellPE', mirror: false })
+  assert.deepEqual(normalizeRule(null), normalizeRule(BACKTEST_DEFAULTS.rule))
+  assert.equal(normalizeRule({ lines: [], action: 'buyPE' }).lines.length, 0)       // all cleared: stays cleared
+  assert.match(lineText({ id: 'gexLevel', value: 'nearCallWall', param: 0.2, windowMin: 15 }), /^GEX walls: Near the call wall \(resistance\) within 0.2% \(last 15 min\)$/)
+  // Every option with a number has a default inside its range.
+  for (const c of RULE_CONDITIONS) for (const o of c.options) if (o.param) assert.ok(o.param.default >= o.param.min && o.param.default <= o.param.max, `${c.id}.${o.value}`)
 })
 
 test('a day\'s trades: entries 09:30 - 14:45, one at a time (rule and mirror together), a cooldown, at most N a day', () => {
@@ -302,7 +370,7 @@ test('the synthetic day end to end: buy and sell, the call and the put; every tr
     }
   }
   // The default rule runs (the page opens with it).
-  assert.deepEqual(ruleConditions(BACKTEST_DEFAULTS.rule.conditions), [['oiOpen', 'peAhead'], ['vwap', 'above']])
+  assert.deepEqual(normalizeRule(BACKTEST_DEFAULTS.rule).lines.map((l) => [l.id, l.value, l.join]), [['oiOpen', 'peAhead', 'and'], ['vwap', 'above', 'and']])
   assert.ok(Array.isArray(simulateRun([d, { ok: false }], { lotSize: 65 }).trades))
 })
 

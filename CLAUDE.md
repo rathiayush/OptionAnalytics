@@ -466,20 +466,23 @@ When adding or changing a strategy:
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
-  and the weighted vote were replaced by it on request). Every condition (`RULE_CONDITIONS`) is a dropdown of what that
-  indicator can say, "Any" = not used: OI since open (PE / CE ahead, PE / CE crossed above the other), the CE / PE / Net
-  cumulative Δ (positive / negative, −ve → +ve / +ve → −ve, rising / falling / stable - its move over the window against
-  10% of its range so far - and its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance - a quarter
-  strike - or broke through), GEX regime (long / short gamma, turned) and walls (near the put / call wall - 0.15% - or
-  broke through), price vs VWAP (above / below / crossed), spot over the window (0.1%), the ATM straddle (vs its VWAP and
-  the decay-only line, crossed), the developing POC / value area and the Initial Balance (after 10:15). A signal where ALL
-  the picked conditions hold, ONCE when the rule becomes true (`ruleSignals`); "within the last N min" (`windowMin`, 5 by
-  default) is how far crossed / turned / broke / near / 🎯 / spot's move look back - a cross, turn or break must still
-  hold now. "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): the same rule with every
-  condition's `opposite` (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle and
-  "inside" have no side and stay) and the opposite trade - left out when none of the conditions has a side. One trade at a
-  time for the rule and its mirror together. The rule is saved whole (`optionanalytics.signalBacktest.rule`, `cleanRule`
-  drops what is not known). Each day is loaded as OI Replay loads it
+  and the weighted vote were replaced by it on request) - as LINES: each line an indicator (`RULE_CONDITIONS`), what it
+  says (its options), its NUMBER where one makes sense (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI
+  lead, "within %" of a wall, spot's move, the cumulative line's tolerance) and its own LOOK-BACK for what happened "in the
+  last N min" (`windowed` - crossed, turned, broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default), joined to the
+  line before by AND / OR - AND binds tighter: A AND B OR C = (A AND B) OR C (`orGroups`; the words show the brackets -
+  `ruleText`); the same indicator may be used twice. The values: OI since open (PE / CE ahead, PE / CE crossed above the
+  other), the CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
+  its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
+  turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
+  ATM straddle (vs its VWAP and the decay-only line, crossed), the developing POC / value area and the Initial Balance
+  (after 10:15). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now.
+  "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). MIRROR (on by default): every line's `opposite` value
+  (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no
+  side and stay; numbers, windows and AND / OR kept - `mirrorLines`) and the opposite trade - left out when no line has a
+  side (`mirrorIsSame`). One trade at a time for the rule and its mirror together. The rule is saved whole
+  (`optionanalytics.signalBacktest.rule`, `normalizeRule` / `cleanLine` - a number held to its range, an unknown line
+  dropped, the earlier `{ conditions }` form read as AND-ed lines). Each day is loaded as OI Replay loads it
   (`/api/oi-replay/{u}/run`, one day at a time, a click - not polling; a day the server has not kept comes from Dhan once)
   and PREPARED once (`prepareDay` - every feature at each minute from data up to the END of that minute: OI since the open
   (`chainOiTotalsAt`), the OI totals' CE / PE / Net cumulative Δ and their breaks and the 🎯 signal (`completedLevelReads` /
@@ -490,14 +493,14 @@ When adding or changing a strategy:
   `TIMEFRAMES`, `timeframeView`): the rule reads the day on candles from 09:15 - a candle's OHLC from its minutes,
   every other feature as at the end of its LAST minute, the OI totals' breaks / 🎯 on that timeframe's own buckets
   (`oiTf`, worked out in `prepareDay`), each in the candle it became known in - so a signal is known at the candle's
-  close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; the window stays
+  close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; a line's look-back stays
   minutes (`span`); a change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
   time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). The
   report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
   factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
   trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places
-  nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every condition's values on their case and
+  nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every value and number on its case and
   not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and

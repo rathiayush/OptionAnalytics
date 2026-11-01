@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
-import { DownloadOutlined, PlayCircleOutlined, StopOutlined } from '@ant-design/icons'
+import { CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, istMinute, mirrorConditions, prepareDay,
-  ruleConditions, ruleText, simulateRun, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, MAX_BACKTEST_DAYS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute, mirrorIsSame, mirrorLines,
+  normalizeRule, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
-// The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE - every condition a dropdown of what
-// that indicator can say (Any = not used), the trade it makes and, optionally, its mirror; each day is loaded as OI
+// The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE - lines of conditions (an indicator,
+// what it says, its number and look-back) joined by AND / OR, the trade it makes and, optionally, its mirror; each day is loaded as OI
 // Replay loads it (the server keeps past days on disk - a day never loaded before comes from Dhan once), replayed through
 // the rule (signalBacktest.js - each signal from data up to its candle's close only) and every signal's option trade
 // simulated; the report sums them for the rule, its mirror and both, per day and trade by trade. A day is prepared once
@@ -39,20 +39,13 @@ const STORE = {
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
 const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: 'Volume & Market Profile' }
-const ACTION_LABEL = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.label]))
-
-// A rule read back from storage, made whole: only known conditions / values, a known action, a window offered.
-function cleanRule(saved) {
-  const base = BACKTEST_DEFAULTS.rule
-  if (!saved || typeof saved !== 'object') return base
-  const conditions = Object.fromEntries(ruleConditions(saved.conditions))
-  return {
-    conditions: saved.conditions && typeof saved.conditions === 'object' ? conditions : base.conditions,
-    action: ACTION_LABEL[saved.action] ? saved.action : base.action,
-    mirror: typeof saved.mirror === 'boolean' ? saved.mirror : base.mirror,
-    windowMin: WINDOW_CHOICES.includes(saved.windowMin) ? saved.windowMin : base.windowMin,
-  }
-}
+const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
+const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
+// The indicator dropdown: the conditions under their group's title.
+const INDICATOR_OPTIONS = GROUPS.map((g) => ({ label: GROUP_TITLE[g] ?? g, options: RULE_CONDITIONS.filter((c) => c.group === g).map((c) => ({ value: c.id, label: c.name })) }))
+const POPUP = { popup: { root: 'oa-rule-popup' } }
+// A new line for condition `id`: its first value, that value's own number and window.
+const freshLine = (id, join = 'and') => cleanLine({ id, value: CONDITION_OF[id].options[0].value, join })
 
 const pad = (v) => String(v).padStart(2, '0')
 const clock = (ms) => { const m = istMinute(ms); return `${pad(Math.floor(m / 60))}:${pad(m % 60)}` }
@@ -144,16 +137,28 @@ export default function SignalBacktestPage() {
   const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
   const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
-  const rule = useMemo(() => cleanRule(storedRule), [storedRule])
+  const rule = useMemo(() => normalizeRule(storedRule), [storedRule])
   const setRule = (change) => setStoredRule({ ...rule, ...change })
-  const setCondition = (id, value) => {
-    const conditions = { ...rule.conditions }
-    if (value && value !== 'any') conditions[id] = value; else delete conditions[id]
-    setRule({ conditions })
+  const setLine = (k, change) => setRule({
+    lines: rule.lines.map((line, j) => {
+      if (j !== k) return line
+      const next = { ...line, ...change }
+      // A new value keeps the number only when it is the same kind of number.
+      if (change.value) {
+        const before = CONDITION_OF[line.id].options.find((o) => o.value === line.value)
+        const after = CONDITION_OF[line.id].options.find((o) => o.value === change.value)
+        if (before?.param?.label !== after?.param?.label) delete next.param
+      }
+      return cleanLine(next) ?? line
+    }),
+  })
+  const addLine = () => {
+    const unused = RULE_CONDITIONS.find((c) => !rule.lines.some((l) => l.id === c.id)) ?? RULE_CONDITIONS[0]
+    setRule({ lines: [...rule.lines, freshLine(unused.id)] })
   }
-  const picked = ruleConditions(rule.conditions)
-  const mirrored = ruleConditions(mirrorConditions(rule.conditions))
-  const mirrorSame = picked.length > 0 && mirrored.every(([id, v], k) => id === picked[k][0] && v === picked[k][1])
+  const removeLine = (k) => setRule({ lines: rule.lines.filter((_, j) => j !== k) })
+  const hasLines = rule.lines.length > 0
+  const mirrorSame = hasLines && mirrorIsSame(rule.lines)
   const mirrorOn = rule.mirror && !mirrorSame
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const lotSize = PAPER_TRADE_LOT_SIZE[index] ?? 1
@@ -196,7 +201,7 @@ export default function SignalBacktestPage() {
     const { trades, signals } = simulateRun(okDays.map((r) => r.day), settings)
     const sides = mirrorOn ? ['rule', 'mirror'] : ['rule']
     const rows = sides.map((id) => ({
-      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorConditions(rule.conditions) : rule.conditions, id === 'mirror' ? RULE_ACTIONS.find((a) => a.value === rule.action).opposite : rule.action),
+      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorLines(rule.lines) : rule.lines, id === 'mirror' ? OPPOSITE_ACTION[rule.action] : rule.action),
       signals: signals.filter((x) => x.strategy === id).length, ...summarize(trades.filter((t) => t.strategy === id)),
     }))
     const all = { key: 'all', id: 'all', name: SIDE.all.name, what: 'the rule and its mirror together', signals: signals.length, ...summarize(trades) }
@@ -296,52 +301,56 @@ export default function SignalBacktestPage() {
 
             <div className="oa-rule">
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
-                <Text strong>Signal when ALL of these hold</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>(Any = not used) - read at each completed {timeframe}m candle</Text>
-                <Button size="small" onClick={() => setRule({ conditions: {} })} disabled={!picked.length}>Clear all</Button>
+                <Text strong>The rule</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - AND binds tighter than OR: A AND B OR C = (A AND B) OR C</Text>
               </Space>
-              <div className="oa-rule-grid">
-                {GROUPS.map((group) => (
-                  <div key={group} className="oa-rule-group">
-                    <Text type="secondary" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>{GROUP_TITLE[group] ?? group}</Text>
-                    {RULE_CONDITIONS.filter((c) => c.group === group).map((c) => {
-                      const value = rule.conditions[c.id] ?? 'any'
-                      return (
-                        <div key={c.id} className="oa-rule-row">
-                          <Text style={{ fontSize: 12 }} className="oa-rule-name">{c.name}</Text>
-                          <Select
-                            size="small" value={value} onChange={(v) => setCondition(c.id, v)} popupMatchSelectWidth={false} classNames={{ popup: { root: 'oa-rule-popup' } }}
-                            className={value === 'any' ? 'oa-rule-any' : 'oa-rule-set'}
-                            options={[{ value: 'any', label: 'Any' }, ...c.options.map((o) => ({ value: o.value, label: o.label }))]}
-                          />
-                        </div>
-                      )
-                    })}
-                  </div>
-                ))}
+              <div className="oa-rule-lines">
+                {rule.lines.map((line, k) => {
+                  const c = CONDITION_OF[line.id]
+                  const o = c.options.find((x) => x.value === line.value)
+                  return (
+                    <div key={k} className={`oa-rule-line${k > 0 && line.join === 'or' ? ' oa-rule-line--or' : ''}`}>
+                      <div className="oa-rule-join">
+                        {k === 0
+                          ? <Text strong style={{ fontSize: 12 }}>IF</Text>
+                          : <Segmented size="small" value={line.join} onChange={(v) => setLine(k, { join: v })} options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]} />}
+                      </div>
+                      <Select size="small" className="oa-rule-ind" value={line.id} onChange={(id) => setRule({ lines: rule.lines.map((l, j) => (j === k ? freshLine(id, l.join) : l)) })} options={INDICATOR_OPTIONS} popupMatchSelectWidth={false} classNames={POPUP} />
+                      <Select size="small" className="oa-rule-val" value={line.value} onChange={(v) => setLine(k, { value: v })} options={c.options.map((x) => ({ value: x.value, label: x.label }))} popupMatchSelectWidth={false} classNames={POPUP} />
+                      {o.param && (
+                        <InputNumber
+                          size="small" className="oa-rule-num" min={o.param.min} max={o.param.max} step={o.param.step} value={line.param}
+                          onChange={(v) => setLine(k, { param: v ?? o.param.default })} addonBefore={o.param.label} addonAfter={o.param.unit}
+                        />
+                      )}
+                      {o.windowed && (
+                        <Select size="small" className="oa-rule-win" value={line.windowMin} onChange={(v) => setLine(k, { windowMin: v })} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `last ${m} min` }))} />
+                      )}
+                      <Button size="small" type="text" icon={<CloseOutlined />} onClick={() => removeLine(k)} aria-label="Remove this condition" title="Remove" />
+                    </div>
+                  )
+                })}
               </div>
+              <Space wrap size={[8, 8]} style={{ marginTop: 8, display: 'flex' }}>
+                <Button size="small" icon={<PlusOutlined />} onClick={addLine}>Add condition</Button>
+                <Button size="small" onClick={() => setRule({ lines: [] })} disabled={!hasLines}>Clear all</Button>
+              </Space>
               <Space wrap size={[16, 8]} align="center" style={{ marginTop: 10 }}>
                 <Space size={4}>
                   <Text strong style={{ fontSize: 12 }}>Then</Text>
                   <Select size="small" value={rule.action} onChange={(v) => setRule({ action: v })} style={{ width: 100 }} options={RULE_ACTIONS.map((a) => ({ value: a.value, label: a.label }))} />
                 </Space>
-                <Tooltip title="Crossed, turned, broke, near, a 🎯 and spot's move look back this far (in minutes, whatever the timeframe). A cross / turn / break must still hold now.">
-                  <Space size={4}>
-                    <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Within the last</Text>
-                    <Select size="small" value={rule.windowMin} onChange={(v) => setRule({ windowMin: v })} style={{ width: 90 }} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `${m} min` }))} />
-                  </Space>
-                </Tooltip>
-                <Tooltip title="Also trade the mirror: every condition the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle and 'inside' stay as they are) and the opposite trade.">
+                <Tooltip title="Also trade the mirror: every line the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle, 'inside' and 'stable' stay as they are) - numbers, windows and AND / OR kept - and the opposite trade.">
                   <Space size={4}><Switch size="small" checked={rule.mirror} onChange={(v) => setRule({ mirror: v })} /><Text style={{ fontSize: 12 }}>Mirror (other side)</Text></Space>
                 </Tooltip>
               </Space>
               <div style={{ marginTop: 8 }}>
-                {picked.length
-                  ? <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.conditions, rule.action)}</Text>
-                  : <Alert type="info" showIcon message="Pick at least one condition - with every one on Any the rule never signals." style={{ padding: '4px 10px' }} />}
-                {picked.length > 0 && rule.mirror && (mirrorSame
-                  ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these conditions has a side (pick one that does - e.g. VWAP, OI, a wall).</Text></div>
-                  : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorConditions(rule.conditions), RULE_ACTIONS.find((a) => a.value === rule.action).opposite)}</Text></div>)}
+                {hasLines
+                  ? <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.lines, rule.action)}</Text>
+                  : <Alert type="info" showIcon message="Add a condition - with none the rule never signals." style={{ padding: '4px 10px' }} />}
+                {hasLines && rule.mirror && (mirrorSame
+                  ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these lines has a side (add one that does - e.g. VWAP, OI, a wall).</Text></div>
+                  : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorLines(rule.lines), OPPOSITE_ACTION[rule.action])}</Text></div>)}
               </div>
             </div>
 
@@ -386,10 +395,11 @@ export default function SignalBacktestPage() {
             )}
             <FoldText id="signalBacktest.how" label="how it works" className="oa-note">
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Build ONE rule: each condition is what that indicator says on the OI Replay or Volume & Market Profile page (Any = not used),
-                and the rule signals at a completed candle of the Timeframe (from 09:15) where ALL the picked conditions hold - once, when
-                it becomes true (it has to stop holding before it signals again). The Mirror adds the same rule the other way round with
-                the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
+                Build ONE rule from lines: each line is what an indicator says on the OI Replay or Volume & Market Profile page, with its
+                number (a threshold %) and how far back it looks (crossed, turned, broke, near, a 🎯, spot&apos;s move - &quot;last N min&quot;; a
+                cross / turn / break must still hold now), joined by AND / OR - AND first: A AND B OR C = (A AND B) OR C. The rule signals
+                at a completed candle of the Timeframe (from 09:15) where it holds - once, when it becomes true (it has to stop holding
+                before it signals again). The Mirror adds the same rule the other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
                 and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
                 option close and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop fills
                 at its open, the stop before the target in the same bar, the time stop and the 15:10 square-off at the bar&apos;s close. No

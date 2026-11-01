@@ -332,12 +332,14 @@ export function timeframeView(d, tf = 1) {
 }
 
 // ---- The rule ---------------------------------------------------------------------------------------------------------
-// ONE strategy, built on the page: each condition a dropdown of what that indicator can say (or Any - not used), and a
-// signal when ALL the conditions picked are true at a candle's close - then the action (buy / sell the call / put). The
-// MIRROR (optional) is the same rule with every condition's opposite (above <-> below, support <-> resistance, rising <->
-// falling; a condition with no side - GEX regime, the straddle, "inside" - stays as it is) and the opposite trade.
-// "Within the last N min" conditions (crossed, turned, broke, near) look back over the rule's window; a cross / turn /
-// break must still hold now (a failed one does not count). Everything is read from the candles up to i (no look-ahead).
+// ONE strategy, built on the page as LINES: each line a condition (an indicator and what it says), with its own number
+// where one makes sense (a threshold %, `param`) and its own look-back for what happened "in the last N min" (crossed,
+// turned, broke, near, a 🎯, spot's move - `windowed`), joined to the line before by AND or OR. AND binds tighter than OR:
+// "A AND B OR C AND D" = (A AND B) OR (C AND D). A signal where the whole rule BECOMES true at a candle's close - then the
+// action (buy / sell the call / put). The MIRROR (optional) is the same rule with every line's opposite (above <-> below,
+// support <-> resistance, rising <-> falling; a value with no side - GEX regime, the straddle, "inside", "stable" - stays)
+// and the opposite trade. A cross / turn / break must still hold now (a failed one does not count). Everything is read
+// from the candles up to i (no look-ahead).
 
 const fmtL = (v) => `${v >= 0 ? '+' : '−'}${(Math.abs(v) / 1e5).toFixed(1)}L`
 const fmtP = (v) => (Number.isFinite(v) ? v.toFixed(1) : '—')
@@ -354,25 +356,33 @@ function crossed(x, i, w, up) {
   if (!finite(now) || (up ? !(now > 0) : !(now < 0))) return false
   return inWindow(i, w, (k) => { const a = x(k - 1), b = x(k); return finite(a) && finite(b) && (up ? a <= 0 && b > 0 : a >= 0 && b < 0) }) >= 0
 }
-// A level known at the candle before (`level(k - 1)`) closed through in the window - up or down - and still through.
-function brokeLevel(d, level, i, w, up) {
-  const c = d.price.c
+// A level known at the candle before (`level(k - 1)`) closed through by `c` in the window - up or down - and still through.
+function brokeLevel(c, level, i, w, up) {
   const k = inWindow(i, w, (k) => { const v = level(k - 1); return v != null && finite(v) && (up ? c[k - 1] <= v && c[k] > v : c[k - 1] >= v && c[k] < v) })
   if (k < 0) return false
   const v = level(k - 1)
   return up ? c[i] > v : c[i] < v
 }
-// A cumulative line's move over the window against 10% of its range so far: rising / falling / stable.
-function lineMove(series, i, w) {
+// A cumulative line's move over the window against `tolPct` % of its range so far: rising (1) / falling (-1) / stable (0).
+function lineMove(series, i, w, tolPct) {
   const now = series[i], back = series[Math.max(0, i - w)]
   if (!finite(now) || !finite(back)) return null
   let lo = Infinity, hi = -Infinity
   for (let k = 0; k <= i; k++) if (finite(series[k])) { lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k]) }
-  const tol = 0.1 * (hi - lo)
+  const tol = (tolPct / 100) * (hi - lo)
   const move = now - back
   return move > tol ? 1 : move < -tol ? -1 : 0
 }
-const opt = (value, label, opposite = value) => ({ value, label, opposite })
+// An option of a dropdown: its value, label, the mirror's value, and what it takes - `windowed` (looks back over the
+// line's minutes), `param` (a number: { label, unit, default, min, max, step }).
+const opt = (value, label, opposite = value, more = {}) => ({ value, label, opposite, ...more })
+const W = { windowed: true }
+const pctParam = (label, def, max = 100, step = 1) => ({ label, unit: '%', default: def, min: 0, max, step })
+const LEAD = { param: pctParam('by ≥', 0) }
+const NEAR = (def) => ({ windowed: true, param: pctParam('within', def, 2, 0.01) })
+const TOL = { windowed: true, param: pctParam('tolerance', 10) }
+const MOVE = { windowed: true, param: pctParam('by', 0.1, 5, 0.05) }
+const OVER = { param: pctParam('by ≥', 0, 5, 0.05) }
 
 const CUM_LINES = { ce: { key: 'ceCum', name: 'CE' }, pe: { key: 'peCum', name: 'PE' }, net: { key: 'netCum', name: 'Net (CE − PE)' } }
 function cumCondition(line, group, meaning) {
@@ -381,11 +391,12 @@ function cumCondition(line, group, meaning) {
     id: `cum${line[0].toUpperCase()}${line.slice(1)}`, group, name: `${name} cumulative Δ`,
     options: [
       opt('positive', 'Positive (above 0)', 'negative'), opt('negative', 'Negative (below 0)', 'positive'),
-      opt('turnedPositive', '−ve → +ve (within the window)', 'turnedNegative'), opt('turnedNegative', '+ve → −ve (within the window)', 'turnedPositive'),
-      opt('rising', `Rising (${meaning.up})`, 'falling'), opt('falling', `Falling (${meaning.down})`, 'rising'), opt('stable', 'Stable (moved < 10% of its range)'),
-      opt('brokeResistance', 'Broke its resistance (within the window)', 'brokeSupport'), opt('brokeSupport', 'Broke its support (within the window)', 'brokeResistance'),
+      opt('turnedPositive', 'Turned −ve → +ve', 'turnedNegative', W), opt('turnedNegative', 'Turned +ve → −ve', 'turnedPositive', W),
+      opt('rising', `Rising (${meaning.up})`, 'falling', TOL), opt('falling', `Falling (${meaning.down})`, 'rising', TOL),
+      opt('stable', 'Stable (moved under the tolerance of its range)', 'stable', TOL),
+      opt('brokeResistance', 'Broke its resistance', 'brokeSupport', W), opt('brokeSupport', 'Broke its support', 'brokeResistance', W),
     ],
-    test: (d, i, v, w) => {
+    test: (d, i, v, w, p) => {
       const series = d[key]
       if (!series) return false
       const x = (k) => series[k]
@@ -394,9 +405,9 @@ function cumCondition(line, group, meaning) {
         case 'negative': return series[i] < 0
         case 'turnedPositive': return crossed(x, i, w, true)
         case 'turnedNegative': return crossed(x, i, w, false)
-        case 'rising': return lineMove(series, i, w) === 1
-        case 'falling': return lineMove(series, i, w) === -1
-        case 'stable': return lineMove(series, i, w) === 0
+        case 'rising': return lineMove(series, i, w, p) === 1
+        case 'falling': return lineMove(series, i, w, p) === -1
+        case 'stable': return lineMove(series, i, w, p) === 0
         case 'brokeResistance': case 'brokeSupport': {
           const up = v === 'brokeResistance'
           return d.breaks.some((b) => b.line === line && b.up === up && b.i <= i && b.i > i - w)
@@ -408,19 +419,21 @@ function cumCondition(line, group, meaning) {
   }
 }
 
-/** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's). */
+/** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's; `windowed`,
+ *  `param`: what the line takes). `test(d, i, value, windowCandles, param)`. */
 export const RULE_CONDITIONS = [
   {
     id: 'oiOpen', group: 'OI', name: 'OI since open (chain-wide)',
     options: [
-      opt('peAhead', 'PE added > CE added (put writing ahead)', 'ceAhead'), opt('ceAhead', 'CE added > PE added (call writing ahead)', 'peAhead'),
-      opt('peCross', 'PE crossed above CE (within the window)', 'ceCross'), opt('ceCross', 'CE crossed above PE (within the window)', 'peCross'),
+      opt('peAhead', 'PE added > CE added (put writing ahead)', 'ceAhead', LEAD), opt('ceAhead', 'CE added > PE added (call writing ahead)', 'peAhead', LEAD),
+      opt('peCross', 'PE crossed above CE', 'ceCross', W), opt('ceCross', 'CE crossed above PE', 'peCross', W),
     ],
-    test: (d, i, v, w) => {
+    test: (d, i, v, w, p) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
+      const lead = () => { const { ce, pe } = d.oi[i]; const size = Math.abs(ce) + Math.abs(pe); return size > 0 ? Math.abs(pe - ce) / size >= p / 100 : false }
       switch (v) {
-        case 'peAhead': return gap(i) > 0
-        case 'ceAhead': return gap(i) < 0
+        case 'peAhead': return gap(i) > 0 && lead()
+        case 'ceAhead': return gap(i) < 0 && lead()
         case 'peCross': return crossed(gap, i, w, true)
         case 'ceCross': return crossed(gap, i, w, false)
         default: return false
@@ -433,24 +446,23 @@ export const RULE_CONDITIONS = [
   cumCondition('net', 'OI', { up: 'call writers gaining - bearish', down: 'put writers gaining - bullish' }),
   {
     id: 'hp', group: 'OI', name: '🎯 High probability',
-    options: [opt('bullish', 'Bullish 🎯 (within the window)', 'bearish'), opt('bearish', 'Bearish 🎯 (within the window)', 'bullish')],
+    options: [opt('bullish', 'Bullish 🎯', 'bearish', W), opt('bearish', 'Bearish 🎯', 'bullish', W)],
     test: (d, i, v, w) => d.hp.some((h) => h.dir === (v === 'bullish' ? 1 : -1) && h.i <= i && h.i > i - w),
     show: () => '🎯',
   },
   {
     id: 'oiWalls', group: 'OI', name: 'OI S-R walls (spot chart)',
     options: [
-      opt('nearSupport', 'Near the OI support (within the window)', 'nearResistance'), opt('nearResistance', 'Near the OI resistance (within the window)', 'nearSupport'),
-      opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport'), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance'),
+      opt('nearSupport', 'Near the OI support', 'nearResistance', NEAR(0.05)), opt('nearResistance', 'Near the OI resistance', 'nearSupport', NEAR(0.05)),
+      opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport', W), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance', W),
     ],
-    test: (d, i, v, w) => {
-      const near = 0.25 * d.step
+    test: (d, i, v, w, p) => {
       const wall = (k, side) => d.walls[k]?.[side] ?? null
       switch (v) {
-        case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s + near }) >= 0
-        case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r - near }) >= 0
-        case 'brokeResistance': return brokeLevel({ price: d.spot }, (k) => wall(k, 'resistance'), i, w, true)
-        case 'brokeSupport': return brokeLevel({ price: d.spot }, (k) => wall(k, 'support'), i, w, false)
+        case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s * (1 + p / 100) }) >= 0
+        case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r * (1 - p / 100) }) >= 0
+        case 'brokeResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'resistance'), i, w, true)
+        case 'brokeSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'support'), i, w, false)
         default: return false
       }
     },
@@ -460,7 +472,7 @@ export const RULE_CONDITIONS = [
     id: 'gexRegime', group: 'GEX', name: 'GEX regime',
     options: [
       opt('long', 'Positive - dealers long gamma (moves damped)'), opt('short', 'Negative - dealers short gamma (moves run)'),
-      opt('turnedShort', 'Turned negative (within the window)'), opt('turnedLong', 'Turned positive (within the window)'),
+      opt('turnedShort', 'Turned negative', 'turnedShort', W), opt('turnedLong', 'Turned positive', 'turnedLong', W),
     ],
     test: (d, i, v, w) => {
       const net = (k) => d.gex[k]?.net ?? NaN
@@ -477,17 +489,16 @@ export const RULE_CONDITIONS = [
   {
     id: 'gexLevel', group: 'GEX', name: 'GEX walls',
     options: [
-      opt('nearPutWall', 'Near the put wall - support (within 0.15%, within the window)', 'nearCallWall'),
-      opt('nearCallWall', 'Near the call wall - resistance (within 0.15%, within the window)', 'nearPutWall'),
-      opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall'), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall'),
+      opt('nearPutWall', 'Near the put wall (support)', 'nearCallWall', NEAR(0.15)), opt('nearCallWall', 'Near the call wall (resistance)', 'nearPutWall', NEAR(0.15)),
+      opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall', W), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall', W),
     ],
-    test: (d, i, v, w) => {
+    test: (d, i, v, w, p) => {
       const lvl = (k, side) => d.gex[k]?.[side] ?? null
       switch (v) {
-        case 'nearPutWall': return inWindow(i, w, (k) => { const p = lvl(k - 1, 'putWall'); return p != null && d.spot.l[k] <= p * 1.0015 }) >= 0
-        case 'nearCallWall': return inWindow(i, w, (k) => { const c = lvl(k - 1, 'callWall'); return c != null && d.spot.h[k] >= c * 0.9985 }) >= 0
-        case 'brokeCallWall': return brokeLevel({ price: d.spot }, (k) => lvl(k, 'callWall'), i, w, true)
-        case 'brokePutWall': return brokeLevel({ price: d.spot }, (k) => lvl(k, 'putWall'), i, w, false)
+        case 'nearPutWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'putWall'); return x != null && d.spot.l[k] <= x * (1 + p / 100) }) >= 0
+        case 'nearCallWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'callWall'); return x != null && d.spot.h[k] >= x * (1 - p / 100) }) >= 0
+        case 'brokeCallWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'callWall'), i, w, true)
+        case 'brokePutWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'putWall'), i, w, false)
         default: return false
       }
     },
@@ -496,14 +507,15 @@ export const RULE_CONDITIONS = [
   {
     id: 'vwap', group: 'Price', name: 'Price vs VWAP',
     options: [
-      opt('above', 'Price above VWAP', 'below'), opt('below', 'Price below VWAP', 'above'),
-      opt('crossedAbove', 'Crossed above VWAP (within the window)', 'crossedBelow'), opt('crossedBelow', 'Crossed below VWAP (within the window)', 'crossedAbove'),
+      opt('above', 'Price above VWAP', 'below', OVER), opt('below', 'Price below VWAP', 'above', OVER),
+      opt('crossedAbove', 'Crossed above VWAP', 'crossedBelow', W), opt('crossedBelow', 'Crossed below VWAP', 'crossedAbove', W),
     ],
-    test: (d, i, v, w) => {
+    test: (d, i, v, w, p) => {
       const gap = (k) => d.price.c[k] - d.vwap[k]
+      const far = () => Math.abs(gap(i)) >= (p / 100) * d.vwap[i]
       switch (v) {
-        case 'above': return gap(i) > 0
-        case 'below': return gap(i) < 0
+        case 'above': return gap(i) > 0 && far()
+        case 'below': return gap(i) < 0 && far()
         case 'crossedAbove': return crossed(gap, i, w, true)
         case 'crossedBelow': return crossed(gap, i, w, false)
         default: return false
@@ -512,30 +524,32 @@ export const RULE_CONDITIONS = [
     show: (d, i) => `price ${fmtP(d.price.c[i])} · VWAP ${fmtP(d.vwap[i])}`,
   },
   {
-    id: 'spotMove', group: 'Price', name: 'Spot over the window',
-    options: [opt('rising', 'Rising (up 0.1% or more)', 'falling'), opt('falling', 'Falling (down 0.1% or more)', 'rising'), opt('sideways', 'Sideways (moved under 0.1%)')],
-    test: (d, i, v, w) => {
+    id: 'spotMove', group: 'Price', name: 'Spot move',
+    options: [opt('rising', 'Rising', 'falling', MOVE), opt('falling', 'Falling', 'rising', MOVE), opt('sideways', 'Sideways (moved less than)', 'sideways', MOVE)],
+    test: (d, i, v, w, p) => {
       const c = d.spot.c, back = c[Math.max(0, i - w)]
       const move = (c[i] - back) / back
-      return v === 'rising' ? move >= 0.001 : v === 'falling' ? move <= -0.001 : v === 'sideways' ? Math.abs(move) < 0.001 : false
+      const need = p / 100
+      return v === 'rising' ? move > 0 && move >= need : v === 'falling' ? move < 0 && -move >= need : v === 'sideways' ? Math.abs(move) < need : false
     },
     show: (d, i) => `spot ${fmtP(d.spot.c[i])}`,
   },
   {
     id: 'straddle', group: 'Straddle', name: 'ATM straddle',
     options: [
-      opt('aboveVwap', 'Above its VWAP (premium bought)'), opt('belowVwap', 'Below its VWAP (premium sold)'),
+      opt('aboveVwap', 'Above its VWAP (premium bought)', 'aboveVwap', OVER), opt('belowVwap', 'Below its VWAP (premium sold)', 'belowVwap', OVER),
       opt('aboveDecay', 'Above the decay-only line (IV up)'), opt('belowDecay', 'Below the decay-only line (IV down)'),
-      opt('crossedAbove', 'Crossed above its VWAP (within the window)'), opt('crossedBelow', 'Crossed below its VWAP (within the window)'),
+      opt('crossedAbove', 'Crossed above its VWAP', 'crossedAbove', W), opt('crossedBelow', 'Crossed below its VWAP', 'crossedBelow', W),
     ],
-    test: (d, i, v, w) => {
-      const p = d.straddle[i]
+    test: (d, i, v, w, p) => {
+      const s = d.straddle[i]
       const gap = (k) => (d.straddle[k] ? d.straddle[k].value - d.straddle[k].vwap : NaN)
+      const far = () => s != null && Math.abs(gap(i)) >= (p / 100) * s.vwap
       switch (v) {
-        case 'aboveVwap': return gap(i) > 0
-        case 'belowVwap': return gap(i) < 0
-        case 'aboveDecay': return p != null && finite(p.decay) && p.value > p.decay
-        case 'belowDecay': return p != null && finite(p.decay) && p.value < p.decay
+        case 'aboveVwap': return gap(i) > 0 && far()
+        case 'belowVwap': return gap(i) < 0 && far()
+        case 'aboveDecay': return s != null && finite(s.decay) && s.value > s.decay
+        case 'belowDecay': return s != null && finite(s.decay) && s.value < s.decay
         case 'crossedAbove': return crossed(gap, i, w, true)
         case 'crossedBelow': return crossed(gap, i, w, false)
         default: return false
@@ -545,17 +559,23 @@ export const RULE_CONDITIONS = [
   },
   {
     id: 'poc', group: 'Profile', name: 'Volume profile POC (developing)',
-    options: [opt('above', 'Price above the POC', 'below'), opt('below', 'Price below the POC', 'above')],
-    test: (d, i, v) => { const p = d.profile[i]; return p ? (v === 'above' ? d.price.c[i] > p.poc : v === 'below' ? d.price.c[i] < p.poc : false) : false },
+    options: [opt('above', 'Price above the POC', 'below', OVER), opt('below', 'Price below the POC', 'above', OVER)],
+    test: (d, i, v, w, p) => {
+      const x = d.profile[i]
+      if (!x) return false
+      const gap = d.price.c[i] - x.poc
+      const far = Math.abs(gap) >= (p / 100) * x.poc
+      return v === 'above' ? gap > 0 && far : v === 'below' ? gap < 0 && far : false
+    },
     show: (d, i) => `POC ${fmtP(d.profile[i]?.poc)}`,
   },
   {
     id: 'valueArea', group: 'Profile', name: 'Value area (developing)',
     options: [opt('aboveVah', 'Price above the VAH', 'belowVal'), opt('inside', 'Price inside the value area'), opt('belowVal', 'Price below the VAL', 'aboveVah')],
     test: (d, i, v) => {
-      const p = d.profile[i], c = d.price.c[i]
-      if (!p) return false
-      return v === 'aboveVah' ? c > p.vah : v === 'belowVal' ? c < p.val : v === 'inside' ? c >= p.val && c <= p.vah : false
+      const x = d.profile[i], c = d.price.c[i]
+      if (!x) return false
+      return v === 'aboveVah' ? c > x.vah : v === 'belowVal' ? c < x.val : v === 'inside' ? c >= x.val && c <= x.vah : false
     },
     show: (d, i) => `VAL ${fmtP(d.profile[i]?.val)} · VAH ${fmtP(d.profile[i]?.vah)}`,
   },
@@ -571,6 +591,7 @@ export const RULE_CONDITIONS = [
   },
 ]
 const CONDITION = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
+const optionOf = (id, value) => CONDITION[id]?.options.find((o) => o.value === value) ?? null
 
 /** The trades a rule can make, and the mirror's. */
 export const RULE_ACTIONS = [
@@ -581,48 +602,92 @@ export const RULE_ACTIONS = [
 ]
 const ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a]))
 export const WINDOW_CHOICES = [1, 3, 5, 10, 15, 30]
+export const DEFAULT_WINDOW = 5
 
-/** The conditions picked (the ones known, not Any), as [id, value] in the catalogue's order. */
-export function ruleConditions(conditions) {
-  return RULE_CONDITIONS.filter((c) => c.options.some((o) => o.value === conditions?.[c.id])).map((c) => [c.id, conditions[c.id]])
-}
-/** The mirror of the conditions - each one's opposite. */
-export function mirrorConditions(conditions) {
-  return Object.fromEntries(ruleConditions(conditions).map(([id, v]) => [id, CONDITION[id].options.find((o) => o.value === v).opposite]))
-}
-/** The rule in words: "Buy CE when: … · …". */
-export function ruleText(conditions, action) {
-  const parts = ruleConditions(conditions).map(([id, v]) => `${CONDITION[id].name}: ${CONDITION[id].options.find((o) => o.value === v).label}`)
-  return `${ACTION[action]?.label ?? action} when ${parts.length ? parts.join(' AND ') : '(no condition picked)'}`
+/** A line made whole: a known condition and value, its number within its range (else the default), a window offered,
+ *  AND / OR. Null when the condition / value is not known. */
+export function cleanLine(line) {
+  const o = optionOf(line?.id, line?.value)
+  if (!o) return null
+  const out = { id: line.id, value: line.value, join: line.join === 'or' ? 'or' : 'and' }
+  if (o.param) {
+    const v = Number(line.param)
+    out.param = line.param != null && line.param !== '' && Number.isFinite(v) ? Math.min(o.param.max, Math.max(o.param.min, v)) : o.param.default
+  }
+  if (o.windowed) out.windowMin = WINDOW_CHOICES.includes(line.windowMin) ? line.windowMin : DEFAULT_WINDOW
+  return out
 }
 
-/** Does the rule hold at candle i (all its conditions)? */
-function ruleHolds(d, i, picked, w) {
-  for (const [id, v] of picked) if (!CONDITION[id].test(d, i, v, w)) return false
-  return true
+/** A rule made whole: { lines, action, mirror } - also from the earlier form { conditions: { [id]: value }, windowMin }
+ *  (every condition ANDed). */
+export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
+  if (!rule || typeof rule !== 'object') return normalizeRule(fallback, null)
+  const raw = Array.isArray(rule.lines) ? rule.lines
+    : rule.conditions && typeof rule.conditions === 'object'
+      ? RULE_CONDITIONS.filter((c) => rule.conditions[c.id] != null).map((c) => ({ id: c.id, value: rule.conditions[c.id], join: 'and', windowMin: rule.windowMin }))
+      : null
+  if (!raw && fallback) return normalizeRule(fallback, null)
+  return {
+    lines: (raw ?? []).map(cleanLine).filter(Boolean),
+    action: ACTION[rule.action] ? rule.action : (fallback ? fallback.action : null),
+    mirror: typeof rule.mirror === 'boolean' ? rule.mirror : Boolean(fallback?.mirror),
+  }
+}
+
+/** The mirror's lines - each line's opposite value (numbers, windows and joins kept). */
+export const mirrorLines = (lines) => lines.map((l) => ({ ...l, value: optionOf(l.id, l.value)?.opposite ?? l.value }))
+/** Whether the mirror would be the rule itself (no line has a side). */
+export const mirrorIsSame = (lines) => lines.every((l) => optionOf(l.id, l.value)?.opposite === l.value)
+
+/** One line in words: "Price vs VWAP: Price above VWAP by ≥ 0.1% (last 5 min)". */
+export function lineText(line) {
+  const c = CONDITION[line.id], o = optionOf(line.id, line.value)
+  if (!c || !o) return ''
+  const num = o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : ''
+  const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
+  return `${c.name}: ${o.label}${num}${win}`
+}
+// The lines as OR groups of AND-ed lines: a line joined by OR starts a new group.
+function orGroups(lines) {
+  const groups = []
+  for (const l of lines) {
+    if (!groups.length || l.join === 'or') groups.push([l]); else groups.at(-1).push(l)
+  }
+  return groups
+}
+/** The rule in words: "Buy CE when (A AND B) OR C". */
+export function ruleText(lines, action) {
+  const groups = orGroups(lines)
+  if (!groups.length) return `${ACTION[action]?.label ?? action} when (no condition picked)`
+  const many = groups.length > 1
+  const text = groups.map((g) => { const t = g.map(lineText).join(' AND '); return many && g.length > 1 ? `(${t})` : t }).join(' OR ')
+  return `${ACTION[action]?.label ?? action} when ${text}`
+}
+
+// Does the rule hold at candle i: any OR group whose lines all hold.
+function ruleHolds(d, i, groups) {
+  return groups.some((g) => g.every((l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0)))
 }
 
 /**
- * The rule's signals on a day (read on its candles - `timeframeView`): `rule` = { conditions: { [id]: value }, action,
- * mirror, windowMin }. A signal on the candle where the rule BECOMES true (it then has to stop holding before it signals
- * again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror with no condition
- * that has a side would be the rule itself: it is left out. Returns [{ i, side: 'rule' | 'mirror', action, why }].
+ * The rule's signals on a day (read on its candles - `timeframeView`): `rule` = { lines, action, mirror } (or the earlier
+ * { conditions } form - `normalizeRule`). A signal on the candle where the rule BECOMES true (it then has to stop holding
+ * before it signals again) - and, with the mirror on, where the mirrored rule becomes true (its opposite trade). A mirror
+ * that would be the rule itself is left out. Returns [{ i, side: 'rule' | 'mirror', action, why }].
  */
 export function ruleSignals(d, rule) {
-  const picked = ruleConditions(rule?.conditions)
-  if (!picked.length || !ACTION[rule?.action]) return []
-  const w = span(d, rule.windowMin ?? BACKTEST_DEFAULTS.rule.windowMin)
-  const mirrored = ruleConditions(mirrorConditions(rule.conditions))
-  const useMirror = Boolean(rule.mirror) && mirrored.some(([id, v], k) => v !== picked[k][1] || id !== picked[k][0])
-  const sides = [{ side: 'rule', picked, action: rule.action }]
-  if (useMirror) sides.push({ side: 'mirror', picked: mirrored, action: ACTION[rule.action].opposite })
+  const r = normalizeRule(rule, null)
+  if (!r.lines.length || !ACTION[r.action]) return []
+  const sides = [{ side: 'rule', lines: r.lines, action: r.action }]
+  if (r.mirror && !mirrorIsSame(r.lines)) sides.push({ side: 'mirror', lines: mirrorLines(r.lines), action: ACTION[r.action].opposite })
   const out = []
   for (const s of sides) {
+    const groups = orGroups(s.lines)
     let was = false
     for (let i = 0; i < d.n; i++) {
-      const now = ruleHolds(d, i, s.picked, w)
+      const now = ruleHolds(d, i, groups)
       if (now && !was) {
-        const shown = [...new Set(s.picked.map(([id]) => CONDITION[id].show(d, i)))].join(' · ')
+        const shown = [...new Set(s.lines.map((l) => CONDITION[l.id].show(d, i)))].join(' · ')
         out.push({ i, side: s.side, action: s.action, why: `${ACTION[s.action].label}${s.side === 'mirror' ? ' (mirror)' : ''}: ${shown}` })
       }
       was = now
@@ -636,9 +701,9 @@ export function ruleSignals(d, rule) {
 export const BACKTEST_DEFAULTS = {
   moneyness: 0, slPct: 30, targetPct: 50, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
   lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
-  // The rule the page opens with: put writing ahead since the open and price over VWAP - buy the call; the mirror (call
-  // writing ahead, price under VWAP) buys the put.
-  rule: { conditions: { oiOpen: 'peAhead', vwap: 'above' }, action: 'buyCE', mirror: true, windowMin: 5 },
+  // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
+  // writing ahead AND price under VWAP) buys the put.
+  rule: { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'above', join: 'and', param: 0 }], action: 'buyCE', mirror: true },
 }
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
