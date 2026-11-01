@@ -634,23 +634,94 @@ export function cleanLine(line) {
   return out
 }
 
-/** A rule made whole: { lines, action, mirror, logic } - also from the earlier form { conditions: { [id]: value },
- *  windowMin } (every condition ANDed). `logic`: the lines by number with AND / OR / NOT and brackets (`parseLogic`) - kept as
- *  typed ('' = the lines' own AND / OR). */
+/** A rule made whole: { lines, action, mirror, logic, tree }. The page builds it as a TREE of groups (`tree` - Match ALL /
+ *  ANY, NOT, conditions and groups inside, `cleanTree`): when there is one, the lines (in the tree's order) and the logic
+ *  over their numbers are worked out from it (`ruleFromTree`). Without one - a rule saved before - from `lines` with their
+ *  AND / OR or the typed `logic` (the lines by number with AND / OR / NOT and brackets, `parseLogic`), or the earlier form
+ *  { conditions: { [id]: value }, windowMin } (every condition ANDed); its tree is worked out from them (`treeFromRule`). */
 export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
   if (!rule || typeof rule !== 'object') return normalizeRule(fallback, null)
+  const action = ACTION[rule.action] ? rule.action : (fallback ? fallback.action : null)
+  const mirror = typeof rule.mirror === 'boolean' ? rule.mirror : Boolean(fallback?.mirror)
+  if (rule.tree && typeof rule.tree === 'object') {
+    const tree = cleanTree(rule.tree)
+    return { ...ruleFromTree(tree), action, mirror, tree }
+  }
   const raw = Array.isArray(rule.lines) ? rule.lines
     : rule.conditions && typeof rule.conditions === 'object'
       ? Object.entries(rule.conditions).map(([id, value]) => ({ id: RENAMED[id] ?? id, value, join: 'and', windowMin: rule.windowMin }))
         .sort((a, b) => RULE_CONDITIONS.findIndex((c) => c.id === a.id) - RULE_CONDITIONS.findIndex((c) => c.id === b.id))
       : null
   if (!raw && fallback) return normalizeRule(fallback, null)
-  return {
-    lines: (raw ?? []).map(cleanLine).filter(Boolean),
-    action: ACTION[rule.action] ? rule.action : (fallback ? fallback.action : null),
-    mirror: typeof rule.mirror === 'boolean' ? rule.mirror : Boolean(fallback?.mirror),
-    logic: typeof rule.logic === 'string' ? rule.logic.slice(0, MAX_LOGIC_LENGTH) : '',
+  const lines = (raw ?? []).map(cleanLine).filter(Boolean)
+  const logic = typeof rule.logic === 'string' ? rule.logic.slice(0, MAX_LOGIC_LENGTH) : ''
+  return { lines, action, mirror, logic, tree: treeFromRule({ lines, logic }) }
+}
+
+// ---- The rule as a TREE of groups (the page's builder - dropdowns, no typing) -----------------------------------------
+// A group: { op: 'and' | 'or' (Match ALL / ANY), not: true / false, items: [{ line } | { group }] } - groups inside groups
+// are the brackets: (1 AND 2) OR (3 AND (4 AND 5)) is ANY of [ALL of [1, 2], ALL of [3, ALL of [4, 5]]]. The engine still
+// reads lines + logic: the tree gives them (`ruleFromTree`), and a rule without a tree gives its tree (`treeFromRule`).
+
+export const MAX_GROUP_DEPTH = 5
+const emptyGroup = (op = 'and') => ({ op, not: false, items: [] })
+
+/** A tree made whole: ops 'and' / 'or', each condition a known line (`cleanLine`), groups at most MAX_GROUP_DEPTH deep. */
+export function cleanTree(tree, depth = 0) {
+  const items = []
+  for (const it of Array.isArray(tree?.items) ? tree.items : []) {
+    if (it?.line) {
+      const line = cleanLine({ ...it.line, join: 'and' })
+      if (line) items.push({ line })
+    } else if (it?.group && depth < MAX_GROUP_DEPTH) items.push({ group: cleanTree(it.group, depth + 1) })
   }
+  return { op: tree?.op === 'or' ? 'or' : 'and', not: Boolean(tree?.not), items }
+}
+
+/** The tree as the engine reads it: { lines } in the tree's order (numbered 1, 2, … as the page shows them) and the logic
+ *  over those numbers - a group of more than one part in brackets, NOT before it; an empty group is left out. */
+export function ruleFromTree(tree) {
+  const lines = []
+  const text = (g, top) => {
+    const parts = []
+    for (const it of g.items) {
+      if (it.line) { lines.push(it.line); parts.push(String(lines.length)) } else {
+        const t = text(it.group, false)
+        if (t) parts.push(t)
+      }
+    }
+    if (!parts.length) return ''
+    const body = parts.join(` ${g.op.toUpperCase()} `)
+    if (g.not) return parts.length > 1 ? `NOT (${body})` : `NOT ${body}`
+    return parts.length > 1 && !top ? `(${body})` : body
+  }
+  return { lines, logic: text(cleanTree(tree), true) }
+}
+
+/** A rule's tree from its lines and logic: the typed logic's own structure (same-op chains as one group), else the lines'
+ *  AND / OR (AND first: each run of AND-ed lines a group, ANY of them). Lines the logic leaves out are not in it. */
+export function treeFromRule({ lines = [], logic = '' } = {}) {
+  const parsed = String(logic ?? '').trim() ? parseLogic(logic, lines.length) : null
+  const leaf = (l) => ({ line: { ...l, join: 'and' } })
+  if (parsed?.ok) {
+    const toItem = (node) => {
+      if (node.line != null) return leaf(lines[node.line - 1])
+      if (node.op === 'not') {
+        const inner = toItem(node.a)
+        const g = inner.group && !inner.group.not ? inner.group : { op: 'and', items: [inner] }
+        return { group: { ...g, not: true } }
+      }
+      const items = []
+      const collect = (n) => { if (n.op === node.op) { collect(n.a); collect(n.b) } else items.push(toItem(n)) }
+      collect(node)
+      return { group: { op: node.op, not: false, items } }
+    }
+    const root = toItem(parsed.tree)
+    return root.group ?? { ...emptyGroup(), items: [root] }
+  }
+  const groups = orGroups(lines)
+  if (groups.length <= 1) return { ...emptyGroup(), items: lines.map(leaf) }
+  return { ...emptyGroup('or'), items: groups.map((g) => (g.length === 1 ? leaf(g[0]) : { group: { ...emptyGroup(), items: g.map(leaf) } })) }
 }
 
 // ---- Custom logic: the lines by number, AND / OR / NOT, brackets -----------------------------------------------------
@@ -716,11 +787,12 @@ export function parseLogic(text, n) {
   }
 }
 
-/** A logic tree in words, with the brackets it needs (and an AND inside an OR bracketed - easier to read). */
-export function logicText(tree) {
+/** A logic tree in words, with the brackets it needs (and an AND inside an OR bracketed - easier to read); `leaf(no)` says
+ *  a line (its number by default). */
+export function logicText(tree, leaf = String) {
   const rank = { or: 1, and: 2, not: 3 }
   const show = (node, parent) => {
-    if (node.line != null) return String(node.line)
+    if (node.line != null) return leaf(node.line)
     if (node.op === 'not') return `NOT ${show(node.a, 3)}`
     const inner = `${show(node.a, rank[node.op])} ${node.op.toUpperCase()} ${show(node.b, rank[node.op])}`
     return rank[node.op] < parent || (node.op === 'and' && parent === 1) ? `(${inner})` : inner
@@ -784,10 +856,7 @@ export function ruleText(lines, action, logic = '') {
   const groups = orGroups(lines)
   if (!groups.length) return `${ACTION[action]?.label ?? action} when (no condition picked)`
   const parsed = String(logic ?? '').trim() ? parseLogic(logic, lines.length) : null
-  if (parsed?.ok) {
-    const where = lines.map((l, k) => (parsed.used.has(k + 1) ? `${k + 1} = ${lineText(l)}` : null)).filter(Boolean).join(' · ')
-    return `${ACTION[action]?.label ?? action} when ${logicText(parsed.tree)} - ${where}`
-  }
+  if (parsed?.ok) return `${ACTION[action]?.label ?? action} when ${logicText(parsed.tree, (no) => lineText(lines[no - 1]))}`
   const many = groups.length > 1
   const text = groups.map((g) => { const t = g.map(lineText).join(' AND '); return many && g.length > 1 ? `(${t})` : t }).join(' OR ')
   return `${ACTION[action]?.label ?? action} when ${text}`
@@ -837,7 +906,7 @@ export const BACKTEST_DEFAULTS = {
   lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
-  rule: { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'above', join: 'and', param: 0 }], action: 'buyCE', mirror: true },
+  rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
 }
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
@@ -7,13 +7,14 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, parseLogic, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
+  BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
 } from './signalBacktest.js'
 import { FoldText } from './FoldText.jsx'
 
-// The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE - lines of conditions (an indicator,
-// what it says, its number and look-back) joined by AND / OR, the trade it makes and, optionally, its mirror; each day is loaded as OI
+// The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
+// ANY, NOT) of conditions (an indicator, what it says, its number and look-back) and of groups (the brackets), the trade it
+// makes and, optionally, its mirror; each day is loaded as OI
 // Replay loads it (the server keeps past days on disk - a day never loaded before comes from Dhan once), replayed through
 // the rule (signalBacktest.js - each signal from data up to its candle's close only) and every signal's option trade
 // simulated; the report sums them for the rule, its mirror and both, per day and trade by trade. A day is prepared once
@@ -49,6 +50,107 @@ const INDICATOR_OPTIONS = GROUPS.map((g) => ({ label: GROUP_TITLE[g] ?? g, optio
 const POPUP = { popup: { root: 'oa-rule-popup' } }
 // A new line for condition `id`: its first value, that value's own number and window.
 const freshLine = (id, join = 'and') => cleanLine({ id, value: CONDITION_OF[id].options[0].value, join })
+
+// ---- The rule builder: groups of conditions and groups, all dropdowns -------------------------------------------------
+
+/** The tree with the group at `path` (each step a group's place in its parent's items) replaced by fn(group). */
+function editGroup(tree, path, fn) {
+  if (!path.length) return fn(tree)
+  const [k, ...rest] = path
+  return { ...tree, items: tree.items.map((it, j) => (j === k && it.group ? { group: editGroup(it.group, rest, fn) } : it)) }
+}
+/** A condition changed: a new value keeps the number only when it is the same kind of number. */
+function editLine(line, change) {
+  const next = { ...line, ...change }
+  if (change.value) {
+    const before = CONDITION_OF[line.id].options.find((o) => o.value === line.value)
+    const after = CONDITION_OF[line.id].options.find((o) => o.value === change.value)
+    if (before?.param?.label !== after?.param?.label) delete next.param
+  }
+  return cleanLine(next) ?? line
+}
+/** Every condition id in the tree (a new condition starts on one not used yet). */
+function idsIn(tree, out = new Set()) {
+  for (const it of tree.items) if (it.line) out.add(it.line.id); else idsIn(it.group, out)
+  return out
+}
+const nextId = (tree) => (RULE_CONDITIONS.find((c) => !idsIn(tree).has(c.id)) ?? RULE_CONDITIONS[0]).id
+/** Each condition's number (as the logic names it - the tree's order), by its path "0.2.1". */
+function lineNumbers(tree) {
+  const out = new Map()
+  let n = 0
+  const walk = (g, path) => g.items.forEach((it, k) => (it.line ? out.set([...path, k].join('.'), ++n) : walk(it.group, [...path, k])))
+  walk(tree, [])
+  return out
+}
+
+function ConditionRow({ line, no, onChange, onRemove }) {
+  const c = CONDITION_OF[line.id]
+  const o = c.options.find((x) => x.value === line.value)
+  return (
+    <div className="oa-rule-line">
+      <span className="oa-rule-no" title={`Condition ${no} - its number in the logic shown under the rule`}>{no}</span>
+      <Select size="small" className="oa-rule-ind" value={line.id} onChange={(id) => onChange(freshLine(id))} options={INDICATOR_OPTIONS} popupMatchSelectWidth={false} classNames={POPUP} />
+      <Select size="small" className="oa-rule-val" value={line.value} onChange={(v) => onChange(editLine(line, { value: v }))} options={c.options.map((x) => ({ value: x.value, label: x.label }))} popupMatchSelectWidth={false} classNames={POPUP} />
+      {o.param && (
+        <InputNumber
+          size="small" className="oa-rule-num" min={o.param.min} max={o.param.max} step={o.param.step} value={line.param}
+          onChange={(v) => onChange(editLine(line, { param: v ?? o.param.default }))} addonBefore={o.param.label} addonAfter={o.param.unit}
+        />
+      )}
+      {o.windowed && (
+        <Select size="small" className="oa-rule-win" value={line.windowMin} onChange={(v) => onChange(editLine(line, { windowMin: v }))} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `last ${m} min` }))} />
+      )}
+      <Button size="small" type="text" icon={<CloseOutlined />} onClick={onRemove} aria-label="Remove this condition" title="Remove this condition" />
+    </div>
+  )
+}
+
+/** A group: NOT, Match ALL / ANY, its conditions and groups (the brackets) - each group inside a box of its own. */
+function RuleGroup({ group, path, tree, numbers, onEdit, onRemove }) {
+  const depth = path.length
+  const edit = (fn) => onEdit(path, fn)
+  const items = (fn) => edit((g) => ({ ...g, items: fn(g.items) }))
+  return (
+    <div className={`oa-rule-group oa-rule-group--d${depth % 4}`}>
+      <div className="oa-rule-group-head">
+        {depth === 0 && <Text strong style={{ fontSize: 12 }}>Signal when</Text>}
+        <Tooltip title="NOT: the group holds when what is inside it does NOT.">
+          <Checkbox checked={group.not} onChange={(e) => edit((g) => ({ ...g, not: e.target.checked }))}><Text style={{ fontSize: 12 }}>NOT</Text></Checkbox>
+        </Tooltip>
+        <Select
+          size="small" value={group.op} onChange={(op) => edit((g) => ({ ...g, op }))} style={{ width: 170 }}
+          options={[{ value: 'and', label: 'ALL of these (AND)' }, { value: 'or', label: 'ANY of these (OR)' }]}
+        />
+        <Space size={6} wrap className="oa-rule-group-add">
+          <Button size="small" icon={<PlusOutlined />} onClick={() => items((list) => [...list, { line: freshLine(nextId(tree)) }])}>Condition</Button>
+          {depth < MAX_GROUP_DEPTH && (
+            <Tooltip title="A group inside this one - its own ALL / ANY: that is a pair of brackets.">
+              <Button size="small" icon={<PlusOutlined />} onClick={() => items((list) => [...list, { group: { op: group.op === 'and' ? 'or' : 'and', not: false, items: [{ line: freshLine(nextId(tree)) }] } }])}>Group ( )</Button>
+            </Tooltip>
+          )}
+          {onRemove && <Button size="small" type="text" icon={<CloseOutlined />} onClick={onRemove} aria-label="Remove this group" title="Remove this group (and what is in it)" />}
+        </Space>
+      </div>
+      {group.items.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Empty - add a condition or a group (an empty group is left out).</Text>}
+      {group.items.map((it, k) => (
+        <Fragment key={k}>
+          {k > 0 && <div className="oa-rule-connector">{group.op === 'and' ? 'AND' : 'OR'}</div>}
+          {it.line
+            ? <ConditionRow
+                line={it.line} no={numbers.get([...path, k].join('.'))}
+                onChange={(line) => items((list) => list.map((x, j) => (j === k ? { line } : x)))}
+                onRemove={() => items((list) => list.filter((_, j) => j !== k))}
+              />
+            : <RuleGroup
+                group={it.group} path={[...path, k]} tree={tree} numbers={numbers} onEdit={onEdit}
+                onRemove={() => items((list) => list.filter((_, j) => j !== k))}
+              />}
+        </Fragment>
+      ))}
+    </div>
+  )
+}
 
 const pad = (v) => String(v).padStart(2, '0')
 const clock = (ms) => { const m = istMinute(ms); return `${pad(Math.floor(m / 60))}:${pad(m % 60)}` }
@@ -150,34 +252,15 @@ export default function SignalBacktestPage() {
   const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
   const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
-  const rule = useMemo(() => normalizeRule(storedRule), [storedRule])
-  const setRule = (change) => setStoredRule({ ...rule, ...change })
-  const setLine = (k, change) => setRule({
-    lines: rule.lines.map((line, j) => {
-      if (j !== k) return line
-      const next = { ...line, ...change }
-      // A new value keeps the number only when it is the same kind of number.
-      if (change.value) {
-        const before = CONDITION_OF[line.id].options.find((o) => o.value === line.value)
-        const after = CONDITION_OF[line.id].options.find((o) => o.value === change.value)
-        if (before?.param?.label !== after?.param?.label) delete next.param
-      }
-      return cleanLine(next) ?? line
-    }),
-  })
-  const addLine = () => {
-    const unused = RULE_CONDITIONS.find((c) => !rule.lines.some((l) => l.id === c.id)) ?? RULE_CONDITIONS[0]
-    setRule({ lines: [...rule.lines, freshLine(unused.id)] })
-  }
-  // The logic (the lines by number, AND / OR / NOT, brackets): empty = the lines' own AND / OR. A line removed leaves it.
-  const hasLogic = rule.logic.trim().length > 0
-  const logicRead = hasLogic ? parseLogic(rule.logic, rule.lines.length) : null
-  const logicOk = !hasLogic || Boolean(logicRead?.ok)
-  const unusedLines = logicRead?.ok ? rule.lines.map((_, k) => k + 1).filter((no) => !logicRead.used.has(no)) : []
-  const removeLine = (k) => setRule({
-    lines: rule.lines.filter((_, j) => j !== k),
-    logic: hasLogic ? logicWithoutLine(rule.logic, rule.lines.length, k + 1) : rule.logic,
-  })
+  // Always through its tree: a rule saved before the builder (lines + typed logic) opens as groups, numbered as shown.
+  const rule = useMemo(() => {
+    const saved = normalizeRule(storedRule)
+    return normalizeRule({ tree: saved.tree, action: saved.action, mirror: saved.mirror })
+  }, [storedRule])
+  // The rule is kept as its tree (the builder's); the lines and the logic the engine reads come from it (normalizeRule).
+  const setRule = (change) => setStoredRule({ tree: rule.tree, action: rule.action, mirror: rule.mirror, ...change })
+  const editTree = (path, fn) => setRule({ tree: editGroup(rule.tree, path, fn) })
+  const numbers = useMemo(() => lineNumbers(rule.tree), [rule.tree])
   const hasLines = rule.lines.length > 0
   const mirrorSame = hasLines && mirrorIsSame(rule.lines)
   const mirrorOn = rule.mirror && !mirrorSame
@@ -325,69 +408,28 @@ export default function SignalBacktestPage() {
             <div className="oa-rule">
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
                 <Text strong>The rule</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - AND binds tighter than OR: A AND B OR C = (A AND B) OR C; for brackets, write the Logic below</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND) or ANY (OR) for each group; a group inside a group is a pair of brackets</Text>
               </Space>
-              <div className="oa-rule-lines">
-                {rule.lines.map((line, k) => {
-                  const c = CONDITION_OF[line.id]
-                  const o = c.options.find((x) => x.value === line.value)
-                  return (
-                    <div key={k} className={`oa-rule-line${!hasLogic && k > 0 && line.join === 'or' ? ' oa-rule-line--or' : ''}${unusedLines.includes(k + 1) ? ' oa-rule-line--unused' : ''}`}>
-                      <div className="oa-rule-join">
-                        <span className="oa-rule-no" title={`Line ${k + 1} - its number in the Logic`}>{k + 1}</span>
-                        {hasLogic ? null : k === 0
-                          ? <Text strong style={{ fontSize: 12 }}>IF</Text>
-                          : <Segmented size="small" value={line.join} onChange={(v) => setLine(k, { join: v })} options={[{ value: 'and', label: 'AND' }, { value: 'or', label: 'OR' }]} />}
-                      </div>
-                      <Select size="small" className="oa-rule-ind" value={line.id} onChange={(id) => setRule({ lines: rule.lines.map((l, j) => (j === k ? freshLine(id, l.join) : l)) })} options={INDICATOR_OPTIONS} popupMatchSelectWidth={false} classNames={POPUP} />
-                      <Select size="small" className="oa-rule-val" value={line.value} onChange={(v) => setLine(k, { value: v })} options={c.options.map((x) => ({ value: x.value, label: x.label }))} popupMatchSelectWidth={false} classNames={POPUP} />
-                      {o.param && (
-                        <InputNumber
-                          size="small" className="oa-rule-num" min={o.param.min} max={o.param.max} step={o.param.step} value={line.param}
-                          onChange={(v) => setLine(k, { param: v ?? o.param.default })} addonBefore={o.param.label} addonAfter={o.param.unit}
-                        />
-                      )}
-                      {o.windowed && (
-                        <Select size="small" className="oa-rule-win" value={line.windowMin} onChange={(v) => setLine(k, { windowMin: v })} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `last ${m} min` }))} />
-                      )}
-                      <Button size="small" type="text" icon={<CloseOutlined />} onClick={() => removeLine(k)} aria-label="Remove this condition" title="Remove" />
-                    </div>
-                  )
-                })}
-              </div>
+              <RuleGroup group={rule.tree} path={[]} tree={rule.tree} numbers={numbers} onEdit={editTree} />
               <Space wrap size={[8, 8]} style={{ marginTop: 8, display: 'flex' }}>
-                <Button size="small" icon={<PlusOutlined />} onClick={addLine}>Add condition</Button>
-                <Button size="small" onClick={() => setRule({ lines: [], logic: '' })} disabled={!hasLines}>Clear all</Button>
+                <Button size="small" onClick={() => setRule({ tree: { op: 'and', not: false, items: [] } })} disabled={!hasLines}>Clear all</Button>
+                {hasLines && <Text type="secondary" style={{ fontSize: 12 }}>Logic: <Text code style={{ fontSize: 12 }}>{rule.logic}</Text></Text>}
               </Space>
-              <div className="oa-rule-logic">
-                <Tooltip title="Optional: combine the lines by their numbers with AND, OR, NOT and brackets, as deep as you like - e.g. (1 AND 2) OR (3 AND (4 OR 5)), or (1 OR 2) AND NOT 3. NOT first, then AND, then OR. With logic written, the AND / OR on the lines are not used; empty, they are. Removing a line takes it out of the logic and renumbers the rest.">
-                  <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Logic</Text>
-                </Tooltip>
-                <Input
-                  size="small" allowClear value={rule.logic} maxLength={MAX_LOGIC_LENGTH} status={logicOk ? undefined : 'error'} className="oa-rule-logic-input"
-                  placeholder="optional - e.g. (1 AND 2) OR (3 AND (4 OR 5)); empty = the AND / OR on the lines"
-                  onChange={(e) => setRule({ logic: e.target.value })}
-                />
-                {hasLogic && !logicOk && <Text type="danger" style={{ fontSize: 12 }}>The logic does not read: {logicRead?.error}</Text>}
-                {unusedLines.length > 0 && <Text type="warning" style={{ fontSize: 12 }}>Line{unusedLines.length > 1 ? 's' : ''} {unusedLines.join(', ')} not in the logic - not used</Text>}
-              </div>
               <Space wrap size={[16, 8]} align="center" style={{ marginTop: 10 }}>
                 <Space size={4}>
                   <Text strong style={{ fontSize: 12 }}>Then</Text>
                   <Select size="small" value={rule.action} onChange={(v) => setRule({ action: v })} style={{ width: 100 }} options={RULE_ACTIONS.map((a) => ({ value: a.value, label: a.label }))} />
                 </Space>
-                <Tooltip title="Also trade the mirror: every line the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle, 'inside' and 'stable' stay as they are) - numbers, windows and AND / OR kept - and the opposite trade.">
+                <Tooltip title="Also trade the mirror: every condition the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle, 'inside' and 'stable' stay as they are) - numbers, windows and the groups kept - and the opposite trade.">
                   <Space size={4}><Switch size="small" checked={rule.mirror} onChange={(v) => setRule({ mirror: v })} /><Text style={{ fontSize: 12 }}>Mirror (other side)</Text></Space>
                 </Tooltip>
               </Space>
               <div style={{ marginTop: 8 }}>
-                {!hasLines
-                  ? <Alert type="info" showIcon message="Add a condition - with none the rule never signals." style={{ padding: '4px 10px' }} />
-                  : !logicOk
-                    ? <Alert type="error" showIcon message="Fix the Logic - until it reads, the rule signals nothing." style={{ padding: '4px 10px' }} />
-                    : <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.lines, rule.action, rule.logic)}</Text>}
-                {hasLines && logicOk && rule.mirror && (mirrorSame
-                  ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these lines has a side (add one that does - e.g. VWAP, OI, a wall).</Text></div>
+                {hasLines
+                  ? <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(rule.lines, rule.action, rule.logic)}</Text>
+                  : <Alert type="info" showIcon message="Add a condition - with none the rule never signals." style={{ padding: '4px 10px' }} />}
+                {hasLines && rule.mirror && (mirrorSame
+                  ? <div><Text type="secondary" style={{ fontSize: 12 }}>No mirror: none of these conditions has a side (add one that does - e.g. VWAP, OI, a wall).</Text></div>
                   : <div><Text style={{ fontSize: 12 }}><span style={{ color: SIDE.mirror.color }}>■</span> {ruleText(mirrorLines(rule.lines), OPPOSITE_ACTION[rule.action], rule.logic)}</Text></div>)}
               </div>
             </div>
@@ -414,7 +456,7 @@ export default function SignalBacktestPage() {
               </Tooltip>
               <Tooltip title="Trailing stop: this far behind the best premium reached (a bought option's highest, a sold one's lowest), once the trade is 'after +' in profit (0 = from the entry). It moves after each completed 1-minute bar and only tightens; the tighter of it and the SL is the stop. 0 = no trailing.">
                 <Space size={4}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>Trail</Text>
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Trail</Text>
                   <InputNumber size="small" min={0} max={unitMax} value={trailGap} onChange={(v) => setTrailGap(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} />
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>after +</Text>
                   <InputNumber size="small" min={0} max={unitMax} value={trailStart} onChange={(v) => setTrailStart(v ?? 0)} addonAfter={unitText.trim()} disabled={!(trailGap > 0)} style={{ width: 110 }} />
@@ -444,12 +486,13 @@ export default function SignalBacktestPage() {
             )}
             <FoldText id="signalBacktest.how" label="how it works" className="oa-note">
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Build ONE rule from lines: each line is what an indicator says on the OI Replay or Volume & Market Profile page, with its
-                number (a threshold %) and how far back it looks (crossed, turned, broke, near, a 🎯, spot&apos;s move - &quot;last N min&quot;; a
-                cross / turn / break must still hold now), joined by AND / OR - AND first: A AND B OR C = (A AND B) OR C. The rule signals
-                at a completed candle of the Timeframe (from 09:15) where it holds - once, when it becomes true (it has to stop holding
-                before it signals again). For brackets, write the Logic: the lines by number with AND / OR / NOT, e.g. (1 AND 2) OR (3 AND (4
-                OR 5)). The Mirror adds the same rule the other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
+                Build ONE rule with the dropdowns: each condition is what an indicator says on the OI Replay or Volume &amp; Market Profile
+                page, with its number (a threshold %) and how far back it looks (crossed, turned, broke, near, a 🎯, spot&apos;s move -
+                &quot;last N min&quot;; a cross / turn / break must still hold now). A group holds when ALL (AND) or ANY (OR) of what is in it
+                holds - NOT turns it round - and a group inside a group is a pair of brackets: (1 AND 2) OR (3 AND (4 AND 5)) is ANY of two
+                ALL groups, the second with a group inside it. The rule signals at a completed candle of the Timeframe (from 09:15) where it
+                holds - once, when it becomes true (it has to stop holding before it signals again). The Mirror adds the same rule the
+                other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
                 and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
                 option close and is managed from the next minute on the option&apos;s own 1-minute bars: a bar opening through the stop fills
                 at its open, the stop before the target in the same bar, a trailing stop (if set) moving after each bar behind the best

@@ -476,16 +476,19 @@ When adding or changing a strategy:
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
-  and the weighted vote were replaced by it on request) - as LINES: each line an indicator (`RULE_CONDITIONS`), what it
-  says (its options), its NUMBER where one makes sense (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI
-  lead, "within %" of a wall, spot's move, the cumulative line's tolerance) and its own LOOK-BACK for what happened "in the
-  last N min" (`windowed` - crossed, turned, broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default), joined to the
-  line before by AND / OR - AND binds tighter: A AND B OR C = (A AND B) OR C (`orGroups`; the words show the brackets -
-  `ruleText`); the same indicator may be used twice. LOGIC (optional, `rule.logic`): the lines BY NUMBER with AND / OR / NOT
-  and brackets, any nesting - "(1 AND 2) OR (3 AND (4 OR 5))", "(1 OR 2) AND NOT 3" (`parseLogic` - NOT, then AND, then OR;
-  words in any case or & | !; `evalLogic`, `logicText`); written, it replaces the lines' own AND / OR (each line shows its
-  number, a line it leaves out is dimmed and named); logic that does not read signals NOTHING and says why; removing a line
-  takes it out of the logic and renumbers the rest (`logicWithoutLine`); the mirror uses the same logic on its lines. The values: OI since open (PE / CE ahead, PE / CE crossed above the
+  and the weighted vote were replaced by it on request) - with DROPDOWNS, no typing (asked for): a TREE of GROUPS
+  (`rule.tree` - `cleanTree`, `RuleGroup` / `ConditionRow` on the page): each group "Match ALL of these (AND)" or "ANY of
+  these (OR)", a NOT tick, its CONDITIONS and its own GROUPS (+ Condition / + Group ( ) - a group inside a group is a pair
+  of brackets, at most `MAX_GROUP_DEPTH` 5 deep): (1 AND 2) OR (3 AND (4 AND 5)) = ANY of [ALL of 1, 2 - ALL of 3, ALL of
+  4, 5]. Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
+  (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI lead, "within %" of a wall, spot's move, the
+  cumulative line's tolerance) and its own LOOK-BACK for what happened "in the last N min" (`windowed` - crossed, turned,
+  broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default); the same indicator may be used twice. The engine still
+  reads LINES + LOGIC: `ruleFromTree` numbers the conditions in the tree's order (the number shown on each) and writes the
+  logic over them ("Logic: (1 AND 2) OR (3 AND (4 AND 5))" under the builder; an empty group left out); `parseLogic` /
+  `evalLogic` evaluate it (NOT, then AND, then OR). A rule saved before the builder - lines with their AND / OR (AND binds
+  tighter - `orGroups`), or a typed logic (the short-lived Logic box) - opens as its tree (`treeFromRule`; same-op chains
+  one group) and the page always numbers from the tree; `ruleText` says the rule in words. The values: OI since open (PE / CE ahead, PE / CE crossed above the
   other), the CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the

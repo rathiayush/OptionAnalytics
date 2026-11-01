@@ -6,8 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, DEFAULT_WINDOW, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, evalLogic, istMinute, lineText, logicText, logicWithoutLine,
-  mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleLogic, ruleSignals, ruleText,
+  BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
+  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, treeFromRule,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -459,13 +459,58 @@ test('logic in a rule: it combines the lines (the mirror by the same logic); bad
   // Kept on the rule as typed; in words with each line by number.
   assert.equal(normalizeRule(lines(four, 'buyCE', { logic: '(1 or 3) and 2' })).logic, '(1 or 3) and 2')
   assert.equal(normalizeRule(lines(four, 'buyCE')).logic, '')
-  assert.match(ruleText(normalizeRule(lines(four, 'buyCE')).lines, 'buyCE', '(1 or 3) and 2'), /^Buy CE when \(1 OR 3\) AND 2 - 1 = Price vs VWAP: Price above VWAP · 2 = OI since open.* · 3 = 🎯/)
+  assert.match(ruleText(normalizeRule(lines(four, 'buyCE')).lines, 'buyCE', '(1 or 3) and 2'), /^Buy CE when \(Price vs VWAP: Price above VWAP OR 🎯 High probability: Bullish 🎯 \(last 5 min\)\) AND OI since open/)
   // Removing a line: it leaves the logic with its AND / OR, the lines after it renumbered.
   assert.equal(logicWithoutLine('(1 and 2) or (3 and (4 and 5))', 5, 3), '(1 AND 2) OR (3 AND 4)')
   assert.equal(logicWithoutLine('(1 and 2) or 3', 3, 1), '1 OR 2')
   assert.equal(logicWithoutLine('not 2 and 1', 2, 2), '1')
   assert.equal(logicWithoutLine('1', 1, 1), '')
   assert.equal(logicWithoutLine('(1 and', 3, 1), '(1 and')   // does not read: left as typed
+})
+
+test('the builder\'s tree: groups (Match ALL / ANY, NOT) of conditions and groups - the lines and the logic worked out from it', () => {
+  const c = (id, value, more = {}) => ({ line: { id, value, ...more } })
+  const all = (...items) => ({ group: { op: 'and', not: false, items } })
+  const any = (...items) => ({ group: { op: 'or', not: false, items } })
+  // (1 AND 2) OR (3 AND (4 AND 5)): ANY of [ALL of 1, 2 - ALL of 3, ALL of 4, 5].
+  const tree = any(all(c('oiOpen', 'peAhead'), c('vwap', 'above')), all(c('prevLvn', 'crossedAbove'), all(c('gexRegime', 'short'), c('straddle', 'aboveVwap')))).group
+  const r = ruleFromTree(tree)
+  assert.equal(r.logic, '(1 AND 2) OR (3 AND (4 AND 5))')
+  assert.deepEqual(r.lines.map((l) => l.id), ['oiOpen', 'vwap', 'prevLvn', 'gexRegime', 'straddle'])   // numbered in the tree's order
+  // NOT on a group, a group of one (no brackets), empty groups left out.
+  const t2 = all(any(c('vwap', 'above'), c('oiOpen', 'peAhead')), { group: { op: 'or', not: true, items: [c('gexRegime', 'short'), c('straddle', 'aboveVwap')] } },
+    { group: { op: 'and', not: false, items: [] } }, any(c('ib', 'aboveHigh'))).group
+  assert.equal(ruleFromTree(t2).logic, '(1 OR 2) AND NOT (3 OR 4) AND 5')
+  assert.equal(ruleFromTree({ op: 'and', not: true, items: [c('vwap', 'above')] }).logic, 'NOT 1')
+  assert.deepEqual(ruleFromTree({ op: 'or', items: [] }), { lines: [], logic: '' })
+  // Made whole: unknown conditions dropped, ops held to and / or, no deeper than MAX_GROUP_DEPTH.
+  const messy = cleanTree({ op: 'xor', items: [c('nope', 'x'), c('vwap', 'above', { param: 99 }), { group: { op: 'or', items: [c('vwap', 'sideways')] } }, 'junk'] })
+  assert.deepEqual(messy, { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 5 } }, { group: { op: 'or', not: false, items: [] } }] })
+  let deep = { op: 'and', items: [c('vwap', 'above')] }
+  for (let k = 0; k < MAX_GROUP_DEPTH + 3; k++) deep = { op: 'and', items: [{ group: deep }] }
+  let depth = 0
+  for (let g = cleanTree(deep); g.items[0]?.group; g = g.items[0].group) depth++
+  assert.equal(depth, MAX_GROUP_DEPTH)
+  // A rule with a tree: the engine reads the lines + logic it gives - (1 OR 2) AND (3 OR 4), the lines' own AND / OR ignored.
+  const d = fakeDay({
+    price: (i) => flat(i >= 60 ? 25020 : 24980)(), vwap: () => 25000, oi: (i) => (i >= 80 ? { ce: 1e5, pe: 3e5 } : { ce: 3e5, pe: 1e5 }),
+    hp: [{ i: 30, dir: 1 }], straddle: (i) => ({ value: i >= 100 ? 120 : 100, vwap: 110, decay: 90, forward: 25000 }),
+  })
+  const built = { tree: all(any(c('vwap', 'above'), c('hp', 'bullish', { windowMin: 5 })), any(c('oiOpen', 'peAhead'), c('straddle', 'aboveVwap'))).group, action: 'buyCE', mirror: false }
+  assert.deepEqual(at(ruleSignals(d, built)), [[80, 'rule', 'buyCE']])
+  assert.equal(normalizeRule(built).logic, '(1 OR 2) AND (3 OR 4)')
+  // A rule saved before the builder: its tree from the lines' AND / OR, or from the typed logic.
+  const L = (id, value, join = 'and') => ({ id, value, join })
+  const fromJoins = treeFromRule({ lines: [L('vwap', 'above'), L('oiOpen', 'peAhead'), L('hp', 'bullish', 'or'), L('straddle', 'aboveVwap')] })
+  assert.equal(ruleFromTree(fromJoins).logic, '(1 AND 2) OR (3 AND 4)')
+  const fromLogic = treeFromRule({ lines: [L('vwap', 'above'), L('oiOpen', 'peAhead'), L('hp', 'bullish'), L('straddle', 'aboveVwap')], logic: 'not (1 or 3) and 2' })
+  assert.equal(ruleFromTree(fromLogic).logic, 'NOT (1 OR 2) AND 3')
+  assert.deepEqual(ruleFromTree(fromLogic).lines.map((l) => l.id), ['vwap', 'hp', 'oiOpen'])
+  // The same rule either way: the saved lines + logic, and its tree, signal alike.
+  const saved = lines([L('vwap', 'above'), L('hp', 'bullish'), L('oiOpen', 'peAhead'), L('straddle', 'aboveVwap')], 'buyCE', { logic: '(1 or 2) and (3 or 4)' })
+  assert.deepEqual(at(ruleSignals(d, saved)), at(ruleSignals(d, { tree: normalizeRule(saved).tree, action: 'buyCE' })))
+  // The default rule (a tree): PE ahead AND price over VWAP.
+  assert.equal(normalizeRule(BACKTEST_DEFAULTS.rule).logic, '1 AND 2')
 })
 
 test('a line made whole: its number held to its range, the default when none, a window offered; the earlier { conditions } form read', () => {
@@ -475,8 +520,9 @@ test('a line made whole: its number held to its range, the default when none, a 
   assert.deepEqual(cleanLine({ id: 'valueArea', value: 'inside', param: 3, windowMin: 10 }), { id: 'valueArea', value: 'inside', join: 'and' })
   assert.equal(cleanLine({ id: 'vwap', value: 'sideways' }), null)
   assert.equal(cleanLine({ id: 'nope', value: 'above' }), null)
-  const old = normalizeRule({ conditions: { vwap: 'crossedAbove', oiOpen: 'peAhead' }, windowMin: 10, action: 'sellPE', mirror: false })
+  const { tree: oldTree, ...old } = normalizeRule({ conditions: { vwap: 'crossedAbove', oiOpen: 'peAhead' }, windowMin: 10, action: 'sellPE', mirror: false })
   assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', windowMin: 10 }], action: 'sellPE', mirror: false, logic: '' })
+  assert.deepEqual(oldTree.items.map((it) => it.line.id), ['oiOpen', 'vwap'])   // its tree: ALL of the two
   assert.deepEqual(normalizeRule(null), normalizeRule(BACKTEST_DEFAULTS.rule))
   assert.equal(normalizeRule({ lines: [], action: 'buyPE' }).lines.length, 0)       // all cleared: stays cleared
   assert.match(lineText({ id: 'gexLevel', value: 'nearCallWall', param: 0.2, windowMin: 15 }), /^GEX walls: Near the call wall \(resistance\) within 0.2% \(last 15 min\)$/)
