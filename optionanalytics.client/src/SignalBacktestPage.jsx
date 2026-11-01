@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
-import { CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, usePersistedState } from './shared.jsx'
@@ -8,8 +8,11 @@ import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
   BACKTEST_DEFAULTS, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText, simulateRun, summarize, tradesCsv,
+  mirrorIsSame, mirrorLines, normalizeRule, ruleText, tradesCsv,
 } from './signalBacktest.js'
+import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
+import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
+import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { FoldText } from './FoldText.jsx'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
@@ -17,8 +20,10 @@ import { FoldText } from './FoldText.jsx'
 // makes and, optionally, its mirror; each day is loaded as OI
 // Replay loads it (the server keeps past days on disk - a day never loaded before comes from Dhan once), replayed through
 // the rule (signalBacktest.js - each signal from data up to its candle's close only) and every signal's option trade
-// simulated; the report sums them for the rule, its mirror and both, per day and trade by trade. A day is prepared once
-// and kept for the tab's life, so changing the rule, the timeframe or the stop / target re-runs at once with no new load.
+// simulated; the report sums them for the rule, its mirror and both, per day and trade by trade (signalBacktestJob.js). A
+// day is prepared once and kept for the tab's life, so changing the rule, the timeframe or the stop / target re-runs at
+// once with no new load. Or the run goes to the server's BACKGROUND queue (now or at a time - SignalBacktestJobService
+// runs the same code), the browser can be closed, and its report is opened here from "Background runs".
 
 const { Text, Title } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
@@ -39,6 +44,7 @@ const STORE = {
   charges: 'optionanalytics.signalBacktest.charges',
   timeframe: 'optionanalytics.signalBacktest.timeframe',
   rule: 'optionanalytics.signalBacktest.rule',
+  bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
@@ -157,9 +163,6 @@ const clock = (ms) => { const m = istMinute(ms); return `${pad(Math.floor(m / 60
 const rupees = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}` : '—')
 const num = (v, digits = 1) => (Number.isFinite(v) ? v.toFixed(digits) : '—')
 const pnlColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
-const runUrl = (u, date) => `/api/oi-replay/${u}/run?date=${date}&timeframeMinutes=1&expiryFlag=${u === 'BANKNIFTY' ? 'MONTH' : 'WEEK'}`
-// The previous trading day's volume profile (spot's POC / VAH / VAL / HVN / LVN - OI Replay's entry chart lines).
-const prevProfileUrl = (u, date) => `/api/oi-replay/${u}/previous-day-volume-profile?date=${date}`
 
 // The days prepared, for the tab's life (a past day never changes; a failed load is not kept - it is asked again next run).
 const PREPARED = new Map()
@@ -172,29 +175,10 @@ function remember(key, day) {
 async function loadDay(underlying, date, signal) {
   const key = `${underlying}|${date}`
   if (PREPARED.has(key)) return { day: PREPARED.get(key), cached: true }
-  const timeout = new AbortController()
-  const timer = setTimeout(() => timeout.abort('timeout'), LOAD_TIMEOUT_MS)
-  const abort = () => timeout.abort('stopped')
-  signal.addEventListener('abort', abort)
-  try {
-    // The previous day's profile alongside the run - a day without one still runs (its previous-day lines never hold).
-    const prevPromise = fetch(prevProfileUrl(underlying, date), { signal: timeout.signal }).then((x) => (x.ok ? x.json() : null)).catch(() => null)
-    const r = await fetch(runUrl(underlying, date), { signal: timeout.signal })
-    const body = await r.json().catch(() => null)
-    if (!r.ok || !body?.success) return { day: { ok: false, date, reason: body?.error ?? `HTTP ${r.status}` } }
-    // Let the page draw the progress before the day's minutes are worked through.
-    await new Promise((resolve) => setTimeout(resolve, 0))
-    const day = prepareDay(body, { underlying, prevProfile: await prevPromise })
-    const kept = day.ok ? day : { ok: false, date, reason: day.reason }
-    remember(key, kept)
-    return { day: kept }
-  } catch (err) {
-    if (signal.aborted) throw err
-    return { day: { ok: false, date, reason: timeout.signal.aborted ? 'took too long to load' : String(err?.message ?? err) } }
-  } finally {
-    clearTimeout(timer)
-    signal.removeEventListener('abort', abort)
-  }
+  const day = await loadBacktestDay(underlying, date, { signal, timeoutMs: LOAD_TIMEOUT_MS })
+  // A day whose own data cannot be read is kept as such; one that failed on the way is asked again next run.
+  if (day.ok || day.final) remember(key, day.ok ? day : { ok: false, date, reason: day.reason })
+  return { day }
 }
 
 // The running net of the rule, its mirror and both at the end of each day.
@@ -270,6 +254,9 @@ export default function SignalBacktestPage() {
   // The run: the days asked for, each loaded and prepared in turn.
   const [run, setRun] = useState({ status: 'idle', underlying: null, dates: [], done: 0, current: null, results: [] })
   const abortRef = useRef(null)
+  // A background run opened on the page (its report shown instead of the page's run) and the trades table's filter.
+  const [viewing, setViewing] = useState(null)
+  const [tradeFilter, setTradeFilter] = useState('all')
   const dates = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD')), [range])
   const start = async () => {
     abortRef.current?.abort()
@@ -277,6 +264,7 @@ export default function SignalBacktestPage() {
     abortRef.current = controller
     const u = index
     const list = dates
+    setViewing(null)
     setRun({ status: 'running', underlying: u, dates: list, done: 0, current: list[0] ?? null, results: [] })
     const results = []
     for (let k = 0; k < list.length; k++) {
@@ -295,53 +283,68 @@ export default function SignalBacktestPage() {
   const stop = () => abortRef.current?.abort()
   useEffect(() => () => abortRef.current?.abort(), [])
 
-  // The report - worked out again, in an instant, whenever a setting or the rule changes.
-  const settings = useMemo(() => ({
-    rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
-    lotSize: PAPER_TRADE_LOT_SIZE[run.underlying] ?? lotSize,
-  }), [rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, lotSize, run.underlying])
-  const report = useMemo(() => {
-    const okDays = run.results.filter((r) => r.day?.ok)
-    const { trades, signals } = simulateRun(okDays.map((r) => r.day), settings)
-    const sides = mirrorOn ? ['rule', 'mirror'] : ['rule']
-    const rows = sides.map((id) => ({
-      key: id, id, name: SIDE[id].name, what: ruleText(id === 'mirror' ? mirrorLines(rule.lines) : rule.lines, id === 'mirror' ? OPPOSITE_ACTION[rule.action] : rule.action, rule.logic),
-      signals: signals.filter((x) => x.strategy === id).length, ...summarize(trades.filter((t) => t.strategy === id)),
-    }))
-    const all = { key: 'all', id: 'all', name: SIDE.all.name, what: 'the rule and its mirror together', signals: signals.length, ...summarize(trades) }
-    const dayRows = run.results.map((r) => {
-      const dayTrades = trades.filter((t) => t.date === r.date)
-      const row = { key: r.date, date: r.date, ok: r.day?.ok, reason: r.day?.reason ?? null, trades: dayTrades.length, net: dayTrades.reduce((a, t) => a + t.net, 0) }
-      for (const id of sides) row[id] = dayTrades.filter((t) => t.strategy === id).reduce((a, t) => a + t.net, 0)
-      return row
-    })
-    // The running net at the end of each day.
-    const lineOf = (id, pick) => {
-      let total = 0
-      return { id, name: SIDE[id].name, color: SIDE[id].color, points: okDays.map((r) => { total += pick(trades.filter((t) => t.date === r.date)); return { time: r.date, value: Math.round(total) } }) }
-    }
-    const lines = [
-      ...(mirrorOn ? sides.map((id) => lineOf(id, (ts) => ts.filter((t) => t.strategy === id).reduce((a, t) => a + t.net, 0))) : []),
-      lineOf('all', (ts) => ts.reduce((a, t) => a + t.net, 0)),
-    ]
-    return { trades, rows, all, dayRows, lines, okDays: okDays.length, sides }
-  }, [run.results, settings, mirrorOn, rule])
+  // The settings as set - held to their ranges exactly as a background run holds them (cleanBacktestSettings).
+  const pageSettings = useMemo(() => cleanBacktestSettings({
+    underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
+    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe,
+  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe])
+  // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
+  const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
+  const engine = useMemo(() => engineSettings(runSettings), [runSettings])
+  const outcomes = useMemo(() => run.results.map((r) => dayOutcome(r.date, r.day, engine)), [run.results, engine])
+  const localReport = useMemo(() => backtestReport(outcomes, engine), [outcomes, engine])
 
-  const [tradeFilter, setTradeFilter] = useState('all')
-  const shownTrades = useMemo(() => (tradeFilter === 'all' ? report.trades : report.trades.filter((t) => t.strategy === tradeFilter)), [report.trades, tradeFilter])
+  // The background runs (the server's queue) and the one opened here, if any - its report is shown instead of the page's.
+  const { jobs, refresh: refreshJobs } = useBackgroundRuns()
+  const [bgTelegram, setBgTelegram] = usePersistedState(STORE.bgTelegram, true)
+  const [bgOpen, setBgOpen] = useState(false)
+  const openRun = async (job) => {
+    try {
+      const result = await runResult(job.id)
+      setViewing({ job, result })
+      setTradeFilter('all')
+    } catch (err) {
+      message.error(`The report could not be opened: ${err.message}`)
+    }
+  }
+  const applyRunSettings = (job) => {
+    const s = cleanBacktestSettings(job.settings)
+    setUnderlying(s.underlying)
+    if (s.from && s.to) setRange([s.from, s.to])
+    setStoredRule(s.rule)
+    setMoneyness(s.moneyness); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit); setTrailGap(s.trailGap); setTrailStart(s.trailStart)
+    setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
+    message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
+  }
+  // What the report cards show: the opened background run, else this page's run.
+  const shown = useMemo(() => {
+    if (viewing) {
+      const s = cleanBacktestSettings(viewing.result.settings)
+      return { report: viewing.result.report, settings: s, dates: viewing.result.dates ?? [], job: viewing.job }
+    }
+    return run.results.length ? { report: localReport, settings: runSettings, dates: run.dates, job: null } : null
+  }, [viewing, run.results.length, run.dates, localReport, runSettings])
+  const report = shown?.report
+  const chartLines = useMemo(() => (report?.lines ?? []).map((l) => ({ ...l, color: SIDE[l.id]?.color ?? '#e6e6e6' })), [report])
+
+  const shownTrades = useMemo(() => {
+    const all = report?.trades ?? []
+    return tradeFilter === 'all' ? all : all.filter((t) => t.strategy === tradeFilter)
+  }, [report, tradeFilter])
   const downloadCsv = () => {
     const blob = new Blob([tradesCsv(report.trades)], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `signal-backtest-${run.underlying ?? index}-${run.dates[0] ?? ''}-${run.dates.at(-1) ?? ''}-${rule.action}.csv`
+    a.download = `signal-backtest-${shown.settings.underlying}-${shown.dates[0] ?? ''}-${shown.dates.at(-1) ?? ''}-${shown.settings.rule.action}.csv`
     a.click()
     URL.revokeObjectURL(a.href)
   }
 
   const running = run.status === 'running'
-  const failed = run.results.filter((r) => !r.day?.ok)
+  const failed = report?.failed ?? []
   // Days run without the previous day's volume profile, when the rule reads it.
-  const noPrev = rule.lines.some((l) => CONDITION_OF[l.id]?.group === 'PrevProfile') ? run.results.filter((r) => r.day?.ok && !r.day.prevVp) : []
+  const noPrev = report?.noPrev ?? []
+  const sides = report?.sides ?? ['rule']
   const sideTag = (id) => <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: SIDE[id].color, display: 'inline-block' }} />{SIDE[id].name}</Space>
   const summaryColumns = [
     { title: '', dataIndex: 'name', key: 'name', fixed: 'left', width: 100, render: (v, r) => (r.id === 'all' ? <Text strong>{v}</Text> : <Tooltip title={r.what}>{sideTag(r.id)}</Tooltip>) },
@@ -363,13 +366,13 @@ export default function SignalBacktestPage() {
     { title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 110, render: (v) => dayjs(v).format('ddd D MMM') },
     { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right', render: (v, r) => (r.ok ? v : <Tooltip title={r.reason}><Tag style={{ margin: 0 }}>no data</Tag></Tooltip>) },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v, r) => (r.ok ? <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> : '') },
-    ...(report.sides.length > 1 ? report.sides.map((id) => ({
+    ...(sides.length > 1 ? sides.map((id) => ({
       title: SIDE[id].name, dataIndex: id, key: id, width: 100, align: 'right', render: (v, r) => (r.ok && v ? <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> : ''),
     })) : []),
   ]
   const tradeColumns = [
     { title: 'Day', dataIndex: 'date', key: 'date', width: 100, render: (v) => dayjs(v).format('D MMM') },
-    ...(report.sides.length > 1 ? [{ title: 'From', dataIndex: 'strategy', key: 'strategy', width: 90, render: (v) => sideTag(v) }] : []),
+    ...(sides.length > 1 ? [{ title: 'From', dataIndex: 'strategy', key: 'strategy', width: 90, render: (v) => sideTag(v) }] : []),
     { title: 'Signal', dataIndex: 'dir', key: 'dir', width: 80, render: (v) => <Tag color={v > 0 ? 'green' : 'red'} style={{ margin: 0 }}>{v > 0 ? 'bullish' : 'bearish'}</Tag> },
     { title: 'Trade', key: 'trade', width: 130, render: (_, t) => <Text>{t.action} {t.strike} {t.side}</Text> },
     { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${clock(t.entryTime)} · ${num(t.entry, 2)}` },
@@ -379,7 +382,7 @@ export default function SignalBacktestPage() {
     { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
     { title: 'At the signal', dataIndex: 'why', key: 'why', width: 360, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
   ]
-  const head = report.okDays ? `${run.underlying} · ${report.okDays} day${report.okDays === 1 ? '' : 's'} · ${timeframe}m candles · SL ${slPct > 0 ? `${slPct}${unitText}` : 'none'} · target ${targetPct > 0 ? `${targetPct}${unitText}` : 'none'}${trailGap > 0 ? ` · trail ${trailGap}${unitText}${trailStart > 0 ? ` after +${trailStart}${unitText}` : ''}` : ''}` : ''
+  const head = shown ? reportHead(shown.settings, report.okDays) : ''
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -403,6 +406,9 @@ export default function SignalBacktestPage() {
               {running
                 ? <Button size="small" danger icon={<StopOutlined />} onClick={stop}>Stop</Button>
                 : <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={start} disabled={!dates.length}>Run backtest</Button>}
+              <Tooltip title="Run it on the server instead - now, after the close or at a time. Close the browser; the report waits under Background runs.">
+                <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(true)} disabled={!dates.length || !hasLines}>Run in background</Button>
+              </Tooltip>
             </Space>
 
             <div className="oa-rule">
@@ -498,40 +504,61 @@ export default function SignalBacktestPage() {
                 at its open, the stop before the target in the same bar, a trailing stop (if set) moving after each bar behind the best
                 premium and only tightening, the time stop and the 15:10 square-off at the bar&apos;s close. No
                 entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. Change the rule after a
-                run and the report follows at once - nothing is loaded again.
+                run and the report follows at once - nothing is loaded again. Run in background hands the same run to the server - now,
+                after the close or at a time - so the browser can be closed; its report waits under Background runs (Open).
               </Text>
             </FoldText>
           </Space>
         </Card>
 
-        {run.results.length > 0 && (
+        <BackgroundRunsCard jobs={jobs} refresh={refreshJobs} viewingId={viewing?.job.id ?? null} onOpen={openRun} onUse={applyRunSettings} />
+
+        {shown && (
           <>
+            {shown.job && (
+              <Alert
+                type="info" showIcon
+                message={`Background run "${shown.job.name}" - finished ${dayjs(shown.job.finishedUtc).format('ddd D MMM HH:mm')}`}
+                description={(
+                  <Space direction="vertical" size={2}>
+                    <Text style={{ fontSize: 12 }}><span style={{ color: SIDE.rule.color }}>■</span> {ruleText(normalizeRule(shown.settings.rule).lines, shown.settings.rule.action, normalizeRule(shown.settings.rule).logic)}</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>Its own rule and settings - changing the page&apos;s does not change it (Use settings puts them on the page).</Text>
+                  </Space>
+                )}
+                action={(
+                  <Space direction="vertical" size={4}>
+                    <Button size="small" onClick={() => applyRunSettings(shown.job)}>Use settings</Button>
+                    <Button size="small" onClick={() => setViewing(null)}>{run.results.length ? 'Back to this page\'s run' : 'Close'}</Button>
+                  </Space>
+                )}
+              />
+            )}
             {failed.length > 0 && (
-              <Alert type="warning" showIcon message={`${failed.length} day${failed.length === 1 ? '' : 's'} not run`} description={failed.map((r) => `${dayjs(r.date).format('D MMM')}: ${r.day?.reason}`).join(' · ')} />
+              <Alert type="warning" showIcon message={`${failed.length} day${failed.length === 1 ? '' : 's'} not run`} description={failed.map((r) => `${dayjs(r.date).format('D MMM')}: ${r.reason}`).join(' · ')} />
             )}
             {noPrev.length > 0 && (
               <Alert
                 type="info" showIcon message={`No previous day's volume profile for ${noPrev.length} day${noPrev.length === 1 ? '' : 's'} - the rule's previous-day lines never hold on ${noPrev.length === 1 ? 'it' : 'them'}`}
-                description={`${noPrev.map((r) => dayjs(r.date).format('D MMM')).join(' · ')} (the index has volume from January 2026 on).`}
+                description={`${noPrev.map((date) => dayjs(date).format('D MMM')).join(' · ')} (the index has volume from January 2026 on).`}
               />
             )}
             <Card
               size="small" title={head}
               extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
             >
-              <Table size="small" pagination={false} scroll={{ x: 1200 }} columns={summaryColumns} dataSource={report.sides.length > 1 ? [report.all, ...report.rows] : report.rows} />
+              <Table size="small" pagination={false} scroll={{ x: 1200 }} columns={summaryColumns} dataSource={sides.length > 1 ? [report.all, ...report.rows] : report.rows} />
             </Card>
             <Card size="small" title="Running P&L, day by day">
-              <EquityChart lines={report.lines} />
+              <EquityChart lines={chartLines} />
             </Card>
             <Card size="small" title="Day by day">
-              <Table size="small" pagination={false} scroll={{ x: 300 + 100 * report.sides.length }} columns={dayColumns} dataSource={report.dayRows} />
+              <Table size="small" pagination={false} scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows} />
             </Card>
             <Card
               size="small" title={`Trades (${shownTrades.length})`}
               extra={(
                 <Space size={8}>
-                  {report.sides.length > 1 && (
+                  {sides.length > 1 && (
                     <Select size="small" value={tradeFilter} onChange={setTradeFilter} style={{ width: 120 }} options={[{ value: 'all', label: 'Both' }, { value: 'rule', label: 'Rule' }, { value: 'mirror', label: 'Mirror' }]} />
                   )}
                   <Button size="small" icon={<DownloadOutlined />} onClick={downloadCsv} disabled={!report.trades.length}>CSV</Button>
@@ -543,6 +570,13 @@ export default function SignalBacktestPage() {
           </>
         )}
       </Space>
+      {bgOpen && (
+        <RunInBackgroundModal
+          settings={pageSettings} days={dates.length} telegram={bgTelegram} setTelegram={setBgTelegram}
+          ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '')}
+          onClose={() => setBgOpen(false)} onQueued={() => { setBgOpen(false); refreshJobs() }}
+        />
+      )}
     </div>
   )
 }

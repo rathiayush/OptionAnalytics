@@ -534,6 +534,27 @@ When adding or changing a strategy:
   trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places
   nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every value and number on its case and
   not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).
+  A RUN is its days' OUTCOMES put together (`signalBacktestJob.js` - `loadBacktestDay`, `cleanBacktestSettings` (the
+  page's ranges), `dayOutcome` = simulateDay of one day, `backtestReport`; the days are independent) - the page and the
+  BACKGROUND run share it. RUN IN BACKGROUND (asked for - "schedule in background"): the page's "Run in background" queues
+  the run as set (index, days, rule, levels, timeframe) on the server - NOW, AFTER THE CLOSE (15:45 IST today) or AT A TIME
+  (at most 14 days ahead) - and the browser can be closed (`SignalBacktestJobService` / `SignalBacktestController`,
+  `/api/signal-backtest/jobs`, Admin and User only - each account its own runs, an admin every account's; never the
+  Runner key or External). Runs go ONE AT A TIME, each in its own Node process (`scanner-runner/signal-backtest.mjs`,
+  bundled by `npm run build:runner` - `vite.backtest.config.js`, published as `scanner-runner/signal-backtest.mjs`) with
+  the runner's key: each day through `/api/oi-replay/{u}/run` as the page loads it (the disk cache - a day not kept comes
+  from Dhan once), replayed and dropped (only its outcome kept), a day that failed on the way (timeout, network, 5xx)
+  tried ONCE more at the end - never a loop - and the report written as JSON (`reportReplacer` keeps an Infinity profit
+  factor). Each run is a file under `{Storage:ScannerRunnerPath}/signal-backtests/` (`{id}.json` - settings, state,
+  progress; `{id}.result.json` - the report): the queue and the reports survive a restart / deploy, a run the restart cut
+  off is queued again (failed after `MaxAttempts` 3 starts); `MaxJobs` 60 kept (the oldest finished go first), 20 waiting
+  an account. Telegram when a run ends (on by default in the dialog - `optionanalytics.signalBacktest.bgTelegram`). The
+  page's "Background runs" card lists them (state, day k of n, the result so far / its numbers; a page TIMER with
+  `POLL_HEADERS` - 5 s while one runs or waits to run now, 30 s while one only waits for its time - `signalBacktestQueue.js`;
+  a block a run on a phone, no sideways scroll): Open shows a finished run's report on the page (its own rule and settings
+  - the page's do not change it), Use settings puts its settings on the page, Cancel / Stop, Remove. The background run's
+  report is the page's for the same days (`tests/signal-backtest-job.test.mjs` - the job script against a fake server;
+  `SignalBacktestJobServiceTests.cs` - the queue, the time, one at a time, restart, owners, limits, Telegram).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

@@ -356,6 +356,10 @@ builder.Services.AddHostedService<OptionAnalytics.Server.Services.Visitors.GeoDb
 builder.Services.AddSingleton<RiskSettingsStore>();
 // The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
 builder.Services.AddSingleton<StrategyTuningService>();
+// The Signal backtest's background runs (scanner-runner/signal-backtest.mjs) - a queue worked one at a time, now or at a
+// time picked on the page; the browser can be closed (SignalBacktestJobService / SignalBacktestController).
+builder.Services.AddSingleton<SignalBacktestJobService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<SignalBacktestJobService>());
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());

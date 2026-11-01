@@ -265,3 +265,6 @@ body {
 /* Its dropdowns hold long labels: never wider than the screen (a phone's ran off its left), a long one wraps. */
 .oa-rule-popup { max-width: calc(100vw - 16px); }
 .oa-rule-popup .ant-select-item-option-content { white-space: normal; }
+/* The Signal backtest's background runs on a phone: one block a run (SignalBacktestRuns.jsx). */
+.oa-bg-run { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+.oa-bg-run:last-of-type { border-bottom: none; }

@@ -68,6 +68,11 @@
         <RelativePath>scanner-runner/tune.mjs</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
+      <!-- The Signal backtest's background job (SignalBacktestJobService). -->
+      <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/signal-backtest.mjs">
+        <RelativePath>scanner-runner/signal-backtest.mjs</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
       <ResolvedFileToPublish Include="../optionanalytics.client/scanner-runner/package.json">
         <RelativePath>scanner-runner/package.json</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
