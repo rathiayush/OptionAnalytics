@@ -358,7 +358,7 @@ test('the previous day\'s volume profile levels, on spot: above / below, crossed
   const both = fakeDay({ spot: (i) => (i < 50 ? 24940 : i < 100 ? 24960 : 24940), prevVp })
   assert.deepEqual(at(ruleSignals(both, rule({ prevLvn: 'crossedAbove' }, 'buyCE', { mirror: true }))), [[50, 'rule', 'buyCE'], [100, 'mirror', 'buyPE']])
   // A line saved while the levels were today's developing ones reads as the previous day's same level.
-  assert.deepEqual(cleanLine({ id: 'vpHvn', value: 'crossedAbove', windowMin: 10 }), { id: 'prevHvn', value: 'crossedAbove', join: 'and', windowMin: 10 })
+  assert.deepEqual(cleanLine({ id: 'vpHvn', value: 'crossedAbove', windowMin: 10 }), { id: 'prevHvn', value: 'crossedAbove', join: 'and', param: 0, windowMin: 10 })
   assert.deepEqual(normalizeRule(rule({ poc: 'above', vpLvn: 'near' })).lines.map((l) => [l.id, l.value]), [['prevPoc', 'above'], ['prevLvn', 'near']])
 })
 
@@ -530,6 +530,48 @@ test('logic in a rule: it combines the lines (the mirror by the same logic); bad
   assert.equal(logicWithoutLine('(1 and', 3, 1), '(1 and')   // does not read: left as typed
 })
 
+test('every comparison takes a "by ≥ %" - the crossings and turns too; 0 (the default) changes nothing', () => {
+  // Only what has nothing to measure is without one: a 🎯 (an event) and "inside".
+  const without = RULE_CONDITIONS.flatMap((c) => c.options.filter((o) => !o.param).map((o) => `${c.id}:${o.value}`))
+  assert.deepEqual(without, ['hp:bullish', 'hp:bearish', 'ib:inside', 'valueArea:inside'])
+  const step = (i) => (i < 50 ? 24980 : 25100)                     // spot / price: under 25000 until 50, then 0.4% over it
+  // OI since open crossed - with the lead now (PE 130 v CE 100 = 30 / 230 = 13%).
+  const oi = fakeDay({ oi: (i) => (i < 50 ? { ce: 100, pe: 90 } : { ce: 100, pe: 130 }) })
+  assert.ok(holds(oi, 'oiOpen', 'peCross', 52, 5, 0) && holds(oi, 'oiOpen', 'peCross', 52, 5, 12) && !holds(oi, 'oiOpen', 'peCross', 52, 5, 14))
+  // A cumulative line: -100 until 50, then +20, +60 from 60 - past 0 by % of its range so far.
+  const net = fakeDay({ netCum: (i) => (i < 50 ? -100 : i < 60 ? 20 : 60), breaks: [{ i: 50, line: 'net', up: true, level: 10 }] })
+  assert.ok(holds(net, 'cumNet', 'turnedPositive', 52, 5, 0) && holds(net, 'cumNet', 'turnedPositive', 52, 5, 15) && !holds(net, 'cumNet', 'turnedPositive', 52, 5, 20))   // 20 / 120 = 16.7%
+  assert.ok(holds(net, 'cumNet', 'positive', 62, 5, 35) && !holds(net, 'cumNet', 'positive', 62, 5, 40))                                                                 // 60 / 160 = 37.5%
+  assert.ok(holds(net, 'cumNet', 'negative', 30, 5, 0) && !holds(net, 'cumNet', 'negative', 30, 5, 1))                                                                   // no range yet: 0%
+  // ... and past the level it broke (10): 10 / 120 = 8.3% at 52.
+  assert.ok(holds(net, 'cumNet', 'brokeResistance', 52, 5, 0) && holds(net, 'cumNet', 'brokeResistance', 52, 5, 8) && !holds(net, 'cumNet', 'brokeResistance', 52, 5, 9))
+  // The OI walls and GEX walls broken - by % of the wall, now.
+  const walls = fakeDay({ spot: step, walls: () => ({ support: 24800, resistance: 25000 }), gex: (i) => ({ net: i < 50 ? -100 : 50, callWall: 25000, putWall: 24800 }) })
+  assert.ok(holds(walls, 'oiWalls', 'brokeResistance', 52, 5, 0.35) && !holds(walls, 'oiWalls', 'brokeResistance', 52, 5, 0.45))
+  assert.ok(holds(walls, 'gexLevel', 'brokeCallWall', 52, 5, 0.35) && !holds(walls, 'gexLevel', 'brokeCallWall', 52, 5, 0.45))
+  // The GEX regime: net -100 then +50 - past 0 by 50 / 150 = 33%.
+  assert.ok(holds(walls, 'gexRegime', 'turnedLong', 52, 5, 30) && !holds(walls, 'gexRegime', 'turnedLong', 52, 5, 35))
+  assert.ok(holds(walls, 'gexRegime', 'long', 52, 5, 30) && !holds(walls, 'gexRegime', 'long', 52, 5, 35) && holds(walls, 'gexRegime', 'short', 30, 5, 0))
+  // VWAP crossed - and over it by the % now.
+  const vw = fakeDay({ spot: step, vwap: () => 25000 })
+  assert.ok(holds(vw, 'vwap', 'crossedAbove', 52, 5, 0.35) && !holds(vw, 'vwap', 'crossedAbove', 52, 5, 0.45))
+  // The straddle: crossed its VWAP (104 v 100 = 4%), over the decay-only line (110 v 100 = 10%).
+  const st = fakeDay({ straddle: (i) => ({ value: i < 50 ? 95 : 104, vwap: 100, decay: i < 50 ? 100 : 94.5 }) })
+  assert.ok(holds(st, 'straddle', 'crossedAbove', 52, 5, 3.5) && !holds(st, 'straddle', 'crossedAbove', 52, 5, 4.5))
+  assert.ok(holds(st, 'straddle', 'aboveDecay', 52, 5, 10) && !holds(st, 'straddle', 'aboveDecay', 52, 5, 10.5))     // 104 v 94.5 = 10.05%
+  // The Initial Balance, the previous day's levels and value area - by % of the level.
+  const lv = fakeDay({ spot: step, ib: { high: 25000, low: 24900, done: 40 }, prevVp: { date: '2026-10-02', poc: 25000, vah: 25000, val: 24900, hvn: null, lvn: null } })
+  assert.ok(holds(lv, 'ib', 'aboveHigh', 52, 5, 0.35) && !holds(lv, 'ib', 'aboveHigh', 52, 5, 0.45))
+  assert.ok(holds(lv, 'prevPoc', 'crossedAbove', 52, 5, 0.35) && !holds(lv, 'prevPoc', 'crossedAbove', 52, 5, 0.45))
+  assert.ok(holds(lv, 'valueArea', 'aboveVah', 52, 5, 0.35) && !holds(lv, 'valueArea', 'aboveVah', 52, 5, 0.45))
+  // Every new one starts at 0 - a rule saved before reads as it did - and the mirror keeps the number.
+  for (const [id, value] of [['oiOpen', 'peCross'], ['cumNet', 'turnedPositive'], ['cumNet', 'brokeSupport'], ['oiWalls', 'brokeResistance'], ['gexRegime', 'long'], ['vwap', 'crossedAbove'], ['straddle', 'belowDecay'], ['ib', 'belowLow'], ['prevLvn', 'crossedBelow'], ['valueArea', 'belowVal']]) {
+    assert.equal(cleanLine({ id, value }).param, 0, `${id} ${value}`)
+  }
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'oiOpen', value: 'peCross', param: 10 })]).map((l) => [l.value, l.param]), [['ceCross', 10]])
+  assert.match(lineText({ id: 'cumNet', value: 'turnedNegative', param: 20, windowMin: 10 }), /Turned \+ve → −ve by ≥ 20% \(last 10 min\)$/)
+})
+
 test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
   const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
   const five = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow'), L('nearAbove')].map((x, k) => (k === 4 ? { line: { id: 'prevPoc', value: 'above', join: 'and', param: 0 } } : x)) }
@@ -667,7 +709,7 @@ test('a line made whole: its number held to its range, the default when none, a 
   assert.equal(cleanLine({ id: 'vwap', value: 'sideways' }), null)
   assert.equal(cleanLine({ id: 'nope', value: 'above' }), null)
   const { tree: oldTree, ...old } = normalizeRule({ conditions: { vwap: 'crossedAbove', oiOpen: 'peAhead' }, windowMin: 10, action: 'sellPE', mirror: false })
-  assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', windowMin: 10 }], action: 'sellPE', mirror: false, logic: '' })
+  assert.deepEqual(old, { lines: [{ id: 'oiOpen', value: 'peAhead', join: 'and', param: 0 }, { id: 'vwap', value: 'crossedAbove', join: 'and', param: 0, windowMin: 10 }], action: 'sellPE', mirror: false, logic: '' })
   assert.deepEqual(oldTree.items.map((it) => it.line.id), ['oiOpen', 'vwap'])   // its tree: ALL of the two
   assert.deepEqual(normalizeRule(null), normalizeRule(BACKTEST_DEFAULTS.rule))
   assert.equal(normalizeRule({ lines: [], action: 'buyPE' }).lines.length, 0)       // all cleared: stays cleared

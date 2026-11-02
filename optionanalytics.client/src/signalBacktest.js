@@ -105,7 +105,7 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
     peCum[i] = oiTotals.rows.peCum.get(reads.last) ?? NaN
     netCum[i] = oiTotals.rows.netCum.get(reads.last) ?? NaN
     const fresh = watchBreaks(breakWatch, reads, bucketSeconds)
-    for (const b of fresh) breaks.push({ i, line: b.side.key, up: b.up, dir: breakMeaning(b.side.key, b.up), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
+    for (const b of fresh) breaks.push({ i, line: b.side.key, up: b.up, dir: breakMeaning(b.side.key, b.up), level: brokenLevel(b), text: `OI ${b.side.label} cumulative Δ broke ${b.up ? 'above resistance' : 'below support'} (${b.up ? b.side.up : b.side.down})` })
     const signals = watchHighProbability(hpWatch, fresh, { totals: oiTotals, ceLevels, peLevels, last: reads.last, atmStrike: atm[i], bucketSeconds })
     for (const x of signals) hp.push({ i, dir: x.hp.bullish ? 1 : -1, text: `🎯 ${x.hp.bullish ? 'bullish' : 'bearish'}: OI ${x.b.side.label} break + ${x.hp.side} OI at ATM ± 1 ${x.hp.pct >= 0 ? '+' : ''}${x.hp.pct.toFixed(0)}%` })
   }
@@ -333,18 +333,38 @@ function inWindow(i, w, f) {
   for (let k = i; k > i - w && k >= 1; k--) if (f(k)) return k
   return -1
 }
+// The level a cumulative line broke (the outermost of those broken together): the highest broken up, the lowest down.
+function brokenLevel(b) {
+  const values = (b.levels ?? []).map((l) => l.value).filter(finite)
+  return values.length ? (b.up ? Math.max(...values) : Math.min(...values)) : null
+}
+// How far a line (`x`, a function of the candle) is from `ref` (0, or a level it broke) NOW, in % of its range so far -
+// the scale a cumulative line's tolerance uses (a line in lakhs has no price to be a % of). NaN when it has no reading.
+function pastPct(x, i, ref = 0) {
+  const now = x(i)
+  if (!finite(now) || !finite(ref)) return NaN
+  let lo = Infinity, hi = -Infinity
+  for (let k = 0; k <= i; k++) { const v = x(k); if (finite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v) } }
+  return hi > lo ? (Math.abs(now - ref) / (hi - lo)) * 100 : 0
+}
+// A "by ≥ %" met: 0 (the default) = any distance, as before the number was there.
+const atLeast = (pct, p) => !(p > 0) || pct >= p - 1e-9
+// A "by ≥ %" as a fraction - none given reads as 0.
+const frac = (p) => (p > 0 ? p : 0) / 100
 // `x` (a function of the candle) crossed from <= 0 to > 0 (up) / >= 0 to < 0 (down) in the window, and is still there.
 function crossed(x, i, w, up) {
   const now = x(i)
   if (!finite(now) || (up ? !(now > 0) : !(now < 0))) return false
   return inWindow(i, w, (k) => { const a = x(k - 1), b = x(k); return finite(a) && finite(b) && (up ? a <= 0 && b > 0 : a >= 0 && b < 0) }) >= 0
 }
-// A level known at the candle before (`level(k - 1)`) closed through by `c` in the window - up or down - and still through.
-function brokeLevel(c, level, i, w, up) {
+// A level known at the candle before (`level(k - 1)`) closed through by `c` in the window - up or down - and still
+// through, by at least `p` % of the level now (0 = any).
+function brokeLevel(c, level, i, w, up, p = 0) {
   const k = inWindow(i, w, (k) => { const v = level(k - 1); return v != null && finite(v) && (up ? c[k - 1] <= v && c[k] > v : c[k - 1] >= v && c[k] < v) })
   if (k < 0) return false
   const v = level(k - 1)
-  return up ? c[i] > v : c[i] < v
+  const by = frac(p) * Math.abs(v)
+  return up ? c[i] > v && c[i] - v >= by : c[i] < v && v - c[i] >= by
 }
 // A cumulative line's move over the window against `tolPct` % of its range so far: rising (1) / falling (-1) / stable (0).
 function lineMove(series, i, w, tolPct) {
@@ -366,6 +386,10 @@ const NEAR = (def) => ({ windowed: true, param: pctParam('within', def, 2, 0.01)
 const TOL = { windowed: true, param: pctParam('tolerance', 10) }
 const MOVE = { windowed: true, param: pctParam('by', 0.1, 5, 0.05) }
 const OVER = { param: pctParam('by ≥', 0, 5, 0.05) }
+// "by ≥ %" of a line's own range so far (`pastPct`) - for the lines with no price: the cumulative Δ, the net GEX.
+const PAST = { param: pctParam('by ≥', 0, 100, 1) }
+// "by ≥ %" of the decay-only line - a straddle runs further from it than from its VWAP.
+const OVER_WIDE = { param: pctParam('by ≥', 0, 50, 0.5) }
 const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
 // How far one Total OI line is over the other, in % of the lower one (PE 4.4 cr over CE 4 cr = 10%); 0 = any lead.
 const TOTAL_LEAD = { param: pctParam('by ≥', 0, 100, 0.5) }
@@ -399,27 +423,31 @@ function cumCondition(line, group, meaning) {
   return {
     id: `cum${line[0].toUpperCase()}${line.slice(1)}`, group, name: `${name} cumulative Δ`,
     options: [
-      opt('positive', 'Positive (above 0)', 'negative'), opt('negative', 'Negative (below 0)', 'positive'),
-      opt('turnedPositive', 'Turned −ve → +ve', 'turnedNegative', W), opt('turnedNegative', 'Turned +ve → −ve', 'turnedPositive', W),
+      opt('positive', 'Positive (above 0)', 'negative', PAST), opt('negative', 'Negative (below 0)', 'positive', PAST),
+      opt('turnedPositive', 'Turned −ve → +ve', 'turnedNegative', { ...W, ...PAST }), opt('turnedNegative', 'Turned +ve → −ve', 'turnedPositive', { ...W, ...PAST }),
       opt('rising', `Rising (${meaning.up})`, 'falling', TOL), opt('falling', `Falling (${meaning.down})`, 'rising', TOL),
       opt('stable', 'Stable (moved under the tolerance of its range)', 'stable', TOL),
-      opt('brokeResistance', 'Broke its resistance', 'brokeSupport', W), opt('brokeSupport', 'Broke its support', 'brokeResistance', W),
+      opt('brokeResistance', 'Broke its resistance', 'brokeSupport', { ...W, ...PAST }), opt('brokeSupport', 'Broke its support', 'brokeResistance', { ...W, ...PAST }),
     ],
+    // "by ≥ %" = how far past 0 (or past the level broken) the line is now, in % of its range so far.
     test: (d, i, v, w, p) => {
       const series = d[key]
       if (!series) return false
       const x = (k) => series[k]
       switch (v) {
-        case 'positive': return series[i] > 0
-        case 'negative': return series[i] < 0
-        case 'turnedPositive': return crossed(x, i, w, true)
-        case 'turnedNegative': return crossed(x, i, w, false)
+        case 'positive': return series[i] > 0 && atLeast(pastPct(x, i), p)
+        case 'negative': return series[i] < 0 && atLeast(pastPct(x, i), p)
+        case 'turnedPositive': return crossed(x, i, w, true) && atLeast(pastPct(x, i), p)
+        case 'turnedNegative': return crossed(x, i, w, false) && atLeast(pastPct(x, i), p)
         case 'rising': return lineMove(series, i, w, p) === 1
         case 'falling': return lineMove(series, i, w, p) === -1
         case 'stable': return lineMove(series, i, w, p) === 0
         case 'brokeResistance': case 'brokeSupport': {
           const up = v === 'brokeResistance'
-          return d.breaks.some((b) => b.line === line && b.up === up && b.i <= i && b.i > i - w)
+          const hits = d.breaks.filter((b) => b.line === line && b.up === up && b.i <= i && b.i > i - w)
+          if (!(p > 0)) return hits.length > 0
+          // With a %: still through the level broken, by that much of its range so far.
+          return hits.some((b) => finite(b.level) && (up ? series[i] > b.level : series[i] < b.level) && atLeast(pastPct(x, i, b.level), p))
         }
         default: return false
       }
@@ -436,7 +464,7 @@ function levelCondition({ id, group, name, short, level }) {
     id, group, name,
     options: [
       opt('above', 'Price above it', 'below', OVER), opt('below', 'Price below it', 'above', OVER),
-      opt('crossedAbove', 'Crossed above it', 'crossedBelow', W), opt('crossedBelow', 'Crossed below it', 'crossedAbove', W),
+      opt('crossedAbove', 'Crossed above it', 'crossedBelow', { ...W, ...OVER }), opt('crossedBelow', 'Crossed below it', 'crossedAbove', { ...W, ...OVER }),
       opt('heldAbove', 'Touched it, closed back above (support held)', 'heldBelow', NEAR(0.05)),
       opt('heldBelow', 'Touched it, closed back below (resistance held)', 'heldAbove', NEAR(0.05)),
       opt('near', 'Near it', 'near', NEAR(0.05)),
@@ -445,12 +473,12 @@ function levelCondition({ id, group, name, short, level }) {
       const bars = d.spot
       const c = bars.c
       const x = L(d, i)
-      const by = (p / 100) * (x ?? 0)
+      const by = frac(p) * (x ?? 0)
       switch (v) {
         case 'above': return x != null && c[i] > x && c[i] - x >= by
         case 'below': return x != null && c[i] < x && x - c[i] >= by
-        case 'crossedAbove': return brokeLevel(c, (k) => L(d, k), i, w, true)
-        case 'crossedBelow': return brokeLevel(c, (k) => L(d, k), i, w, false)
+        case 'crossedAbove': return brokeLevel(c, (k) => L(d, k), i, w, true, p)
+        case 'crossedBelow': return brokeLevel(c, (k) => L(d, k), i, w, false, p)
         case 'heldAbove': case 'heldBelow': {
           const up = v === 'heldAbove'
           const k = inWindow(i, w, (k) => {
@@ -477,16 +505,16 @@ export const RULE_CONDITIONS = [
     id: 'oiOpen', group: 'OI', name: 'OI since open (chain-wide)',
     options: [
       opt('peAhead', 'PE added > CE added (put writing ahead)', 'ceAhead', LEAD), opt('ceAhead', 'CE added > PE added (call writing ahead)', 'peAhead', LEAD),
-      opt('peCross', 'PE crossed above CE', 'ceCross', W), opt('ceCross', 'CE crossed above PE', 'peCross', W),
+      opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...LEAD }),
     ],
     test: (d, i, v, w, p) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
-      const lead = () => { const { ce, pe } = d.oi[i]; const size = Math.abs(ce) + Math.abs(pe); return size > 0 ? Math.abs(pe - ce) / size >= p / 100 : false }
+      const lead = () => { const { ce, pe } = d.oi[i]; const size = Math.abs(ce) + Math.abs(pe); return size > 0 ? Math.abs(pe - ce) / size >= frac(p) : false }
       switch (v) {
         case 'peAhead': return gap(i) > 0 && lead()
         case 'ceAhead': return gap(i) < 0 && lead()
-        case 'peCross': return crossed(gap, i, w, true)
-        case 'ceCross': return crossed(gap, i, w, false)
+        case 'peCross': return crossed(gap, i, w, true) && lead()
+        case 'ceCross': return crossed(gap, i, w, false) && lead()
         default: return false
       }
     },
@@ -533,15 +561,15 @@ export const RULE_CONDITIONS = [
     id: 'oiWalls', group: 'OI', name: 'OI S-R walls (spot chart)',
     options: [
       opt('nearSupport', 'Near the OI support', 'nearResistance', NEAR(0.05)), opt('nearResistance', 'Near the OI resistance', 'nearSupport', NEAR(0.05)),
-      opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport', W), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance', W),
+      opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport', { ...W, ...OVER }), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const wall = (k, side) => d.walls[k]?.[side] ?? null
       switch (v) {
         case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s * (1 + p / 100) }) >= 0
         case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r * (1 - p / 100) }) >= 0
-        case 'brokeResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'resistance'), i, w, true)
-        case 'brokeSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'support'), i, w, false)
+        case 'brokeResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'resistance'), i, w, true, p)
+        case 'brokeSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'support'), i, w, false, p)
         default: return false
       }
     },
@@ -550,16 +578,18 @@ export const RULE_CONDITIONS = [
   {
     id: 'gexRegime', group: 'GEX', name: 'GEX regime',
     options: [
-      opt('long', 'Positive - dealers long gamma (moves damped)'), opt('short', 'Negative - dealers short gamma (moves run)'),
-      opt('turnedShort', 'Turned negative', 'turnedShort', W), opt('turnedLong', 'Turned positive', 'turnedLong', W),
+      opt('long', 'Positive - dealers long gamma (moves damped)', 'long', PAST), opt('short', 'Negative - dealers short gamma (moves run)', 'short', PAST),
+      opt('turnedShort', 'Turned negative', 'turnedShort', { ...W, ...PAST }), opt('turnedLong', 'Turned positive', 'turnedLong', { ...W, ...PAST }),
     ],
-    test: (d, i, v, w) => {
+    // "by ≥ %" = how far past 0 the net GEX is now, in % of its range so far.
+    test: (d, i, v, w, p) => {
       const net = (k) => d.gex[k]?.net ?? NaN
+      const far = () => atLeast(pastPct(net, i), p)
       switch (v) {
-        case 'long': return net(i) >= 0
-        case 'short': return net(i) < 0
-        case 'turnedShort': return crossed(net, i, w, false)
-        case 'turnedLong': return crossed(net, i, w, true)
+        case 'long': return net(i) >= 0 && far()
+        case 'short': return net(i) < 0 && far()
+        case 'turnedShort': return crossed(net, i, w, false) && far()
+        case 'turnedLong': return crossed(net, i, w, true) && far()
         default: return false
       }
     },
@@ -569,15 +599,15 @@ export const RULE_CONDITIONS = [
     id: 'gexLevel', group: 'GEX', name: 'GEX walls',
     options: [
       opt('nearPutWall', 'Near the put wall (support)', 'nearCallWall', NEAR(0.15)), opt('nearCallWall', 'Near the call wall (resistance)', 'nearPutWall', NEAR(0.15)),
-      opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall', W), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall', W),
+      opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall', { ...W, ...OVER }), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const lvl = (k, side) => d.gex[k]?.[side] ?? null
       switch (v) {
         case 'nearPutWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'putWall'); return x != null && d.spot.l[k] <= x * (1 + p / 100) }) >= 0
         case 'nearCallWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'callWall'); return x != null && d.spot.h[k] >= x * (1 - p / 100) }) >= 0
-        case 'brokeCallWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'callWall'), i, w, true)
-        case 'brokePutWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'putWall'), i, w, false)
+        case 'brokeCallWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'callWall'), i, w, true, p)
+        case 'brokePutWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'putWall'), i, w, false, p)
         default: return false
       }
     },
@@ -587,16 +617,16 @@ export const RULE_CONDITIONS = [
     id: 'vwap', group: 'Price', name: 'Price vs VWAP',
     options: [
       opt('above', 'Price above VWAP', 'below', OVER), opt('below', 'Price below VWAP', 'above', OVER),
-      opt('crossedAbove', 'Crossed above VWAP', 'crossedBelow', W), opt('crossedBelow', 'Crossed below VWAP', 'crossedAbove', W),
+      opt('crossedAbove', 'Crossed above VWAP', 'crossedBelow', { ...W, ...OVER }), opt('crossedBelow', 'Crossed below VWAP', 'crossedAbove', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const gap = (k) => d.price.c[k] - d.vwap[k]
-      const far = () => Math.abs(gap(i)) >= (p / 100) * d.vwap[i]
+      const far = () => Math.abs(gap(i)) >= frac(p) * d.vwap[i]
       switch (v) {
         case 'above': return gap(i) > 0 && far()
         case 'below': return gap(i) < 0 && far()
-        case 'crossedAbove': return crossed(gap, i, w, true)
-        case 'crossedBelow': return crossed(gap, i, w, false)
+        case 'crossedAbove': return crossed(gap, i, w, true) && far()
+        case 'crossedBelow': return crossed(gap, i, w, false) && far()
         default: return false
       }
     },
@@ -617,20 +647,20 @@ export const RULE_CONDITIONS = [
     id: 'straddle', group: 'Straddle', name: 'ATM straddle',
     options: [
       opt('aboveVwap', 'Above its VWAP (premium bought)', 'aboveVwap', OVER), opt('belowVwap', 'Below its VWAP (premium sold)', 'belowVwap', OVER),
-      opt('aboveDecay', 'Above the decay-only line (IV up)'), opt('belowDecay', 'Below the decay-only line (IV down)'),
-      opt('crossedAbove', 'Crossed above its VWAP', 'crossedAbove', W), opt('crossedBelow', 'Crossed below its VWAP', 'crossedBelow', W),
+      opt('aboveDecay', 'Above the decay-only line (IV up)', 'aboveDecay', OVER_WIDE), opt('belowDecay', 'Below the decay-only line (IV down)', 'belowDecay', OVER_WIDE),
+      opt('crossedAbove', 'Crossed above its VWAP', 'crossedAbove', { ...W, ...OVER }), opt('crossedBelow', 'Crossed below its VWAP', 'crossedBelow', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const s = d.straddle[i]
       const gap = (k) => (d.straddle[k] ? d.straddle[k].value - d.straddle[k].vwap : NaN)
-      const far = () => s != null && Math.abs(gap(i)) >= (p / 100) * s.vwap
+      const far = () => s != null && Math.abs(gap(i)) >= frac(p) * s.vwap
       switch (v) {
         case 'aboveVwap': return gap(i) > 0 && far()
         case 'belowVwap': return gap(i) < 0 && far()
-        case 'aboveDecay': return s != null && finite(s.decay) && s.value > s.decay
-        case 'belowDecay': return s != null && finite(s.decay) && s.value < s.decay
-        case 'crossedAbove': return crossed(gap, i, w, true)
-        case 'crossedBelow': return crossed(gap, i, w, false)
+        case 'aboveDecay': return s != null && finite(s.decay) && s.value > s.decay && s.value - s.decay >= frac(p) * s.decay
+        case 'belowDecay': return s != null && finite(s.decay) && s.value < s.decay && s.decay - s.value >= frac(p) * s.decay
+        case 'crossedAbove': return crossed(gap, i, w, true) && far()
+        case 'crossedBelow': return crossed(gap, i, w, false) && far()
         default: return false
       }
     },
@@ -638,11 +668,12 @@ export const RULE_CONDITIONS = [
   },
   {
     id: 'ib', group: 'Profile', name: 'Initial Balance (09:15 - 10:14)',
-    options: [opt('aboveHigh', 'Price above the IB high (after 10:15)', 'belowLow'), opt('inside', 'Price inside the IB (after 10:15)'), opt('belowLow', 'Price below the IB low (after 10:15)', 'aboveHigh')],
-    test: (d, i, v) => {
+    options: [opt('aboveHigh', 'Price above the IB high (after 10:15)', 'belowLow', OVER), opt('inside', 'Price inside the IB (after 10:15)'), opt('belowLow', 'Price below the IB low (after 10:15)', 'aboveHigh', OVER)],
+    test: (d, i, v, w, p) => {
       if (!d.ib || i <= d.ib.done) return false
       const c = d.price.c[i]
-      return v === 'aboveHigh' ? c > d.ib.high : v === 'belowLow' ? c < d.ib.low : v === 'inside' ? c >= d.ib.low && c <= d.ib.high : false
+      const by = (lv) => frac(p) * lv
+      return v === 'aboveHigh' ? c > d.ib.high && c - d.ib.high >= by(d.ib.high) : v === 'belowLow' ? c < d.ib.low && d.ib.low - c >= by(d.ib.low) : v === 'inside' ? c >= d.ib.low && c <= d.ib.high : false
     },
     show: (d) => (d.ib ? `IB ${fmtP(d.ib.low)} - ${fmtP(d.ib.high)}` : 'IB —'),
   },
@@ -653,11 +684,12 @@ export const RULE_CONDITIONS = [
   prevLevel('prevVal', "Previous day's VAL", 'VAL', 'val'),
   {
     id: 'valueArea', group: 'PrevProfile', name: "Previous day's value area",
-    options: [opt('aboveVah', 'Price above its VAH', 'belowVal'), opt('inside', 'Price inside it'), opt('belowVal', 'Price below its VAL', 'aboveVah')],
-    test: (d, i, v) => {
+    options: [opt('aboveVah', 'Price above its VAH', 'belowVal', OVER), opt('inside', 'Price inside it'), opt('belowVal', 'Price below its VAL', 'aboveVah', OVER)],
+    test: (d, i, v, w, p) => {
       const x = d.prevVp, c = d.spot.c[i]
       if (!x || x.vah == null || x.val == null) return false
-      return v === 'aboveVah' ? c > x.vah : v === 'belowVal' ? c < x.val : v === 'inside' ? c >= x.val && c <= x.vah : false
+      const by = (lv) => frac(p) * lv
+      return v === 'aboveVah' ? c > x.vah && c - x.vah >= by(x.vah) : v === 'belowVal' ? c < x.val && x.val - c >= by(x.val) : v === 'inside' ? c >= x.val && c <= x.vah : false
     },
     show: (d) => `prev VAL ${fmtP(d.prevVp?.val)} · VAH ${fmtP(d.prevVp?.vah)}`,
   },

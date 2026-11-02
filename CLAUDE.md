@@ -516,7 +516,15 @@ When adding or changing a strategy:
   its first HVN / LVN; fixed all day, known before the open, read on spot; loaded with each day, a day without one runs
   and says so): price above / below (by ≥ %), crossed above / below, touched it and closed back above / below (support /
   resistance held, within %) and near it; inside / above / below the value area. A line saved while they were today's
-  developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now;
+  developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). EVERY comparison takes a "by ≥ %"
+  (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
+  reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the two
+  "inside" have none (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
+  GEX walls broken - `brokeLevel(..., p)`, the IB, yesterday's levels and value area) the level; OI since open CE + PE
+  added (`LEAD`, its crosses too); Total OI CE vs PE the lower line; a CUMULATIVE Δ line (positive / negative, turned,
+  broke - the break keeps the `level` broken, `brokenLevel`) and the NET GEX (regime, turned) - no price - their own range
+  so far (`pastPct`: how far past 0, or past the level broken, NOW - the scale the lines' tolerance uses; `PAST`); a straddle
+  its VWAP, or the decay-only line (`OVER_WIDE`, up to 50%). A signal ONCE when the rule becomes true (`ruleSignals`); a cross, turn or break must still hold now;
   a rule ALREADY TRUE when entries open (the first candle closing at / after 09:30 - `openAt`) signals there - else a
   condition true from the open (total PE OI above CE) never traded at all.
   "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). EXPIRY DAY (asked for - "that setting will override"):

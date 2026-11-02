@@ -592,7 +592,11 @@ export default function SignalBacktestPage() {
                 at its open, the stop before the target in the same bar, a trailing stop (if set) moving after each bar behind the best
                 premium and only tightening, the time stop and the 15:10 square-off at the bar&apos;s close. No
                 entries before 09:30 or after 14:45. Only the strikes OI Replay loads (ATM ± 10) and the near expiry. Change the rule after a
-                run and the report follows at once - nothing is loaded again. Run in background hands the same run to the server - now,
+                run and the report follows at once - nothing is loaded again. Every comparison - crossings and turns too - takes a
+                &quot;by ≥ %&quot; (0 = any, the default): price against a level (VWAP, a wall, the IB, yesterday&apos;s levels) in % of that level;
+                OI since open in % of CE + PE added; Total OI CE vs PE in % of the lower line; a cumulative Δ line and the net GEX - which
+                have no price - in % of their own range so far (how far past 0, or past the level broken, they are now); a straddle in % of
+                its VWAP or of the decay-only line. Run in background hands the same run to the server - now,
                 after the close or at a time - so the browser can be closed; its report waits under Background runs (Open).
               </Text>
             </FoldText>
