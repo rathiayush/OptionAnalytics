@@ -492,7 +492,9 @@ When adding or changing a strategy:
   other), TOTAL OI (asked for - OI Replay's "Total OI" and its lookback table, the same chain-wide totals, `chainOiTotalsAt`,
   kept as `tot`; OI since open is them less the open's): total CE / PE OI increased / decreased / flat by a % over the
   window (`totalCondition`), and the Total OI chart's two lines CE vs PE (`totalOi`): PE above CE / CE above PE, PE crossed
-  above CE / CE crossed above PE in the window (still above now). No PCR - removed on request; a line saved with the
+  above CE / CE crossed above PE in the window (still above now), each "by ≥ %" (asked for, like OI since open's lead -
+  `TOTAL_LEAD` / `totalLeadPct`: the line ahead NOW by at least that % of the other, PE 4.4 cr over CE 4 cr = 10%; a cross
+  only with that lead now too; 0 = any lead, the default, so a line saved before reads as it did). No PCR - removed on request; a line saved with the
   short-lived `totalPcr` is dropped (`cleanLine`), the rest of the rule kept. The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the

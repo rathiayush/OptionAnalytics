@@ -222,6 +222,17 @@ test('Total OI: total CE / PE OI increased / decreased / flat by a % over the wi
   assert.ok(holds(x, 'totalOi', 'ceCross', 46, 10))                                         // in a 10-minute one
   assert.ok(holds(x, 'totalOi', 'peCross', 72) && !holds(x, 'totalOi', 'ceCross', 72))
   assert.ok(!holds(x, 'totalOi', 'peCross', 30))                                            // above all along: no cross
+  // "by ≥ %" - the line ahead by at least that % of the other (like OI since open's lead). Until 40 PE 4.2 cr over CE 4 cr
+  // = 5%; from 40 CE 4.4 cr over PE 4.2 cr = 4.76%; a cross counts only with that lead now too.
+  assert.ok(holds(x, 'totalOi', 'peAbove', 30, 5, 5) && !holds(x, 'totalOi', 'peAbove', 30, 5, 5.5))
+  assert.ok(holds(x, 'totalOi', 'ceAbove', 50, 5, 4.5) && !holds(x, 'totalOi', 'ceAbove', 50, 5, 5))
+  assert.ok(holds(x, 'totalOi', 'ceCross', 42, 5, 4.5) && !holds(x, 'totalOi', 'ceCross', 42, 5, 5))
+  assert.ok(holds(x, 'totalOi', 'peCross', 72, 5, 5) && !holds(x, 'totalOi', 'peCross', 72, 5, 6))
+  assert.equal(cond('totalOi').options.find((o) => o.value === 'peAbove').param.default, 0)        // 0 = any lead, as before
+  assert.match(cond('totalOi').show(x, 50), /CE \+4\.8%/)
+  assert.match(lineText({ id: 'totalOi', value: 'peAbove', param: 5 }), /PE above CE .*by ≥ 5%$/)
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'totalOi', value: 'peCross', param: 3, windowMin: 10 })]).map((l) => [l.value, l.param, l.windowMin]), [['ceCross', 3, 10]])
+  assert.equal(cleanLine({ id: 'totalOi', value: 'peAbove' }).param, 0)                             // a line saved before: any lead
   // A cross that did not hold is not one: CE above PE for 2 minutes only (40 - 41).
   const poke = fakeDay({ tot: (i) => ({ ce: i === 40 || i === 41 ? 4.4e7 : 4e7, pe: 4.2e7 }) })
   assert.ok(holds(poke, 'totalOi', 'ceCross', 41) && !holds(poke, 'totalOi', 'ceCross', 43) && holds(poke, 'totalOi', 'peCross', 43))

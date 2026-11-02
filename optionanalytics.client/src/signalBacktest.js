@@ -367,6 +367,9 @@ const TOL = { windowed: true, param: pctParam('tolerance', 10) }
 const MOVE = { windowed: true, param: pctParam('by', 0.1, 5, 0.05) }
 const OVER = { param: pctParam('by ≥', 0, 5, 0.05) }
 const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
+// How far one Total OI line is over the other, in % of the lower one (PE 4.4 cr over CE 4 cr = 10%); 0 = any lead.
+const TOTAL_LEAD = { param: pctParam('by ≥', 0, 100, 0.5) }
+const totalLeadPct = (x) => { const lo = x ? Math.min(x.ce, x.pe) : 0; return lo > 0 ? (Math.abs(x.pe - x.ce) / lo) * 100 : NaN }
 
 const fmtLakh = (v) => `${(v / 1e5).toFixed(1)}L`
 
@@ -494,21 +497,28 @@ export const RULE_CONDITIONS = [
   {
     // The Total OI chart's two lines - total CE OI and total PE OI: which is above, and one crossing the other.
     id: 'totalOi', group: 'OI', name: 'Total OI: CE vs PE (the Total OI chart)',
+    // Each with "by ≥ %" (like OI since open's lead): the line ahead now, by at least that % of the other - a cross too.
     options: [
-      opt('peAbove', 'PE above CE (more put OI - bullish)', 'ceAbove'), opt('ceAbove', 'CE above PE (more call OI - bearish)', 'peAbove'),
-      opt('peCross', 'PE crossed above CE', 'ceCross', W), opt('ceCross', 'CE crossed above PE', 'peCross', W),
+      opt('peAbove', 'PE above CE (more put OI - bullish)', 'ceAbove', TOTAL_LEAD), opt('ceAbove', 'CE above PE (more call OI - bearish)', 'peAbove', TOTAL_LEAD),
+      opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...TOTAL_LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...TOTAL_LEAD }),
     ],
-    test: (d, i, v, w) => {
+    test: (d, i, v, w, p) => {
       const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
+      const lead = () => totalLeadPct(d.tot?.[i]) >= (p ?? 0) - 1e-9
       switch (v) {
-        case 'peAbove': return gap(i) > 0
-        case 'ceAbove': return gap(i) < 0
-        case 'peCross': return crossed(gap, i, w, true)
-        case 'ceCross': return crossed(gap, i, w, false)
+        case 'peAbove': return gap(i) > 0 && lead()
+        case 'ceAbove': return gap(i) < 0 && lead()
+        case 'peCross': return crossed(gap, i, w, true) && lead()
+        case 'ceCross': return crossed(gap, i, w, false) && lead()
         default: return false
       }
     },
-    show: (d, i) => { const x = d.tot?.[i]; return x ? `total CE OI ${fmtLakh(x.ce)} · PE ${fmtLakh(x.pe)}` : 'total OI —' },
+    show: (d, i) => {
+      const x = d.tot?.[i]
+      if (!x) return 'total OI —'
+      const ahead = totalLeadPct(x)
+      return `total CE OI ${fmtLakh(x.ce)} · PE ${fmtLakh(x.pe)}${Number.isFinite(ahead) && ahead > 0 ? ` (${x.pe > x.ce ? 'PE' : 'CE'} +${ahead.toFixed(1)}%)` : ''}`
+    },
   },
   cumCondition('ce', 'OI', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
   cumCondition('pe', 'OI', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
