@@ -264,6 +264,7 @@ body {
 .oa-rule-logic { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-width: 720px; }
 .oa-rule-logic-row { display: flex; align-items: center; gap: 6px; }
 .oa-rule-logic-row .ant-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; flex: 1; min-width: 0; }
+.oa-rule-logic .oa-rule-logic-choice { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 @media (max-width: 600px) {
   .oa-rule-group .oa-rule-group { margin-left: 4px; }
   .oa-rule-group-head .oa-rule-group-add { margin-left: 0; }

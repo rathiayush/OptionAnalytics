@@ -144,15 +144,19 @@ function Connector({ op, tree, path, k, onConnector, touch }) {
 function LogicInput({ tree, logic, onApply }) {
   const [draft, setDraft] = useState(null)
   const [error, setError] = useState(null)
+  const [choices, setChoices] = useState([])
   const changed = draft != null && draft.trim() !== logic
-  const apply = (quiet = false) => {
-    if (!changed) { setDraft(null); setError(null); return }
-    const r = treeFromLogic(tree, draft)
-    if (!r.ok) { if (!quiet || draft.trim()) setError(r.error); return }
+  const clear = () => { setDraft(null); setError(null); setChoices([]) }
+  const applyText = (text, quiet = false) => {
+    if (text == null || text.trim() === logic) { clear(); return }
+    const r = treeFromLogic(tree, text)
+    if (!r.ok) {
+      if (!quiet || text.trim()) { setError(r.error); setChoices(r.choices ?? []) }
+      return
+    }
     onApply(r.tree)
     // The same rule written another way ("1 or 2") leaves the logic as it was: show the rule's own again.
-    setDraft(null)
-    setError(null)
+    clear()
   }
   return (
     <div className="oa-rule-logic">
@@ -160,15 +164,27 @@ function LogicInput({ tree, logic, onApply }) {
         <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Logic</Text>
         <Input
           size="small" value={draft ?? logic} status={error ? 'error' : undefined} placeholder="(1 AND 2) OR 3" spellCheck={false} autoComplete="off"
-          autoCorrect="off" autoCapitalize="characters" onChange={(e) => { setDraft(e.target.value); setError(null) }} onPressEnter={() => apply()} onBlur={() => apply(true)}
+          autoCorrect="off" autoCapitalize="characters" onChange={(e) => { setDraft(e.target.value); setError(null); setChoices([]) }}
+          onPressEnter={() => applyText(draft)} onBlur={() => changed && applyText(draft, true)}
           aria-label="The rule's logic - condition numbers with AND, OR, NOT and brackets"
         />
-        <Button size="small" type="primary" disabled={!changed} onMouseDown={(e) => e.preventDefault()} onClick={() => apply()}>Apply</Button>
-        {changed && <Button size="small" onMouseDown={(e) => e.preventDefault()} onClick={() => { setDraft(null); setError(null) }}>Undo</Button>}
+        <Button size="small" type="primary" disabled={!changed} onMouseDown={(e) => e.preventDefault()} onClick={() => applyText(draft)}>Apply</Button>
+        {changed && <Button size="small" onMouseDown={(e) => e.preventDefault()} onClick={clear}>Undo</Button>}
       </div>
       {error
-        ? <Text type="danger" style={{ fontSize: 12 }}>{error} - nothing changed.</Text>
-        : <Text type="secondary" style={{ fontSize: 12 }}>Type the condition numbers with AND, OR, NOT and brackets - e.g. (1 AND 2) OR (3 AND 4) - and Apply: the conditions above follow, numbered in the order written. Changing them above changes this too.</Text>}
+        ? (
+            <>
+              <Text type="danger" style={{ fontSize: 12 }}>{error}{choices.length ? ':' : ' - nothing changed.'}</Text>
+              {choices.length > 0 && (
+                <Space size={6} wrap>
+                  {choices.map((c) => (
+                    <Button key={c} size="small" className="oa-rule-logic-choice" onMouseDown={(e) => e.preventDefault()} onClick={() => applyText(c)}>{c}</Button>
+                  ))}
+                </Space>
+              )}
+            </>
+          )
+        : <Text type="secondary" style={{ fontSize: 12 }}>Type the condition numbers with AND, OR, NOT and brackets - e.g. (1 AND 2) OR (3 AND 4) - and Apply: the conditions above follow, numbered in the order written. AND and OR side by side need brackets to say which goes first. Changing the conditions above changes this too.</Text>}
     </div>
   )
 }

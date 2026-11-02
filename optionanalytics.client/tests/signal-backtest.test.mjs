@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
   BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
-  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromLogic, treeFromRule,
+  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromLogic, treeFromRule, mixedLogicReadings,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -583,9 +583,22 @@ test('logic typed in the box redraws the builder: every condition once, AND befo
   assert.equal(ruleFromTree(a.tree).logic, '(1 AND 2) OR (3 AND 4 AND 5)')     // the same rule (4 AND 5 inside an AND)
   assert.deepEqual(values(a.tree), values(five))                              // every condition kept as it was
   assert.equal(a.tree.items[1].group.items.length, 3)
-  // Words in any case, & |, and AND before OR without brackets.
-  assert.equal(ruleFromTree(apply('1 and 2 | 3 & 4 & 5').tree).logic, '(1 AND 2) OR (3 AND 4 AND 5)')
-  assert.equal(ruleFromTree(apply('1 OR 2 AND 3 OR 4 OR 5').tree).logic, '1 OR (2 AND 3) OR 4 OR 5')
+  // Words in any case, & |.
+  assert.equal(ruleFromTree(apply('(1 and 2) | (3 & 4 & 5)').tree).logic, '(1 AND 2) OR (3 AND 4 AND 5)')
+  assert.equal(ruleFromTree(apply('1 OR (2 AND 3) OR 4 OR 5').tree).logic, '1 OR (2 AND 3) OR 4 OR 5')
+  // AND and OR side by side with no brackets: not read either way on its own - the two readings are offered (asked
+  // about: "1 OR 2 OR (3 AND 4) is not the same as 1 OR 2 OR 3 AND (4)").
+  const user = treeFromLogic({ op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow')] }, '1 OR 2 OR 3 and (4)')
+  assert.equal(user.ok, false)
+  assert.match(user.error, /AND and OR side by side - which goes first/)
+  assert.deepEqual(user.choices, ['(1 OR 2 OR 3) AND 4', '1 OR 2 OR (3 AND 4)'])
+  for (const c of user.choices) assert.equal(ruleFromTree(treeFromLogic({ op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow')] }, c).tree).logic, c)
+  assert.deepEqual(apply('1 and 2 | 3 & 4 & 5').choices, ['1 AND (2 OR 3) AND 4 AND 5', '(1 AND 2) OR (3 AND 4 AND 5)'])
+  assert.deepEqual(apply('1 OR 2 AND 3 OR 4 OR 5').choices, ['(1 OR 2) AND (3 OR 4 OR 5)', '1 OR (2 AND 3) OR 4 OR 5'])
+  assert.deepEqual(apply('NOT 1 OR 2 AND 3 OR 4 OR 5').choices, [])                    // not a plain line of numbers: brackets asked for
+  assert.match(apply('(1 OR 2) AND 3 OR 4 OR 5').error, /side by side/)                 // mixed at the top level, even with brackets inside
+  assert.equal(mixedLogicReadings('(1 OR 2 OR 3) AND 4'), null)                         // every bracket level one kind: fine
+  assert.equal(mixedLogicReadings('1 OR 2 OR (3 AND (4 OR 5))'), null)
   // NOT and deeper brackets.
   assert.equal(ruleFromTree(apply('NOT (1 OR 2) AND (3 OR (4 AND 5))').tree).logic, 'NOT (1 OR 2) AND (3 OR (4 AND 5))')
   // Numbered again in the order written: "3 OR ..." makes the old 3 condition 1.

@@ -841,8 +841,60 @@ function groupDepth(g) {
 }
 
 /**
+ * AND and OR side by side with no brackets to say which goes first ("1 OR 2 OR 3 AND 4"): maths reads AND first (1 OR 2
+ * OR (3 AND 4)), a trader often means the other ((1 OR 2 OR 3) AND 4) - so typed logic must say. Null when every bracket
+ * level has one kind only; else { error, choices } - for a flat line of numbers (a bracket round one number is none) its
+ * two readings, AND first and OR first, written out to pick from.
+ */
+export function mixedLogicReadings(text) {
+  const src = String(text ?? '')
+  const tokens = []
+  let pos = 0
+  while (pos < src.length && !/^\s*$/.test(src.slice(pos))) {
+    LOGIC_TOKEN.lastIndex = pos
+    const m = LOGIC_TOKEN.exec(src)
+    if (!m) return null                                             // parseLogic says what it cannot read
+    pos = LOGIC_TOKEN.lastIndex
+    tokens.push(m[1] ? { t: 'num', v: Number(m[1]) } : m[2] ? { t: '(' } : m[3] ? { t: ')' } : m[4] ? { t: 'and' } : m[5] ? { t: 'or' } : { t: 'not' })
+  }
+  const levels = [new Set()]
+  let mixed = false
+  for (const tok of tokens) {
+    if (tok.t === '(') levels.push(new Set())
+    else if (tok.t === ')') { if (levels.length > 1) levels.pop() }
+    else if (tok.t === 'and' || tok.t === 'or') {
+      levels.at(-1).add(tok.t)
+      if (levels.at(-1).size > 1) mixed = true
+    }
+  }
+  if (!mixed) return null
+  const error = 'AND and OR side by side - which goes first? Add brackets, or pick one'
+  // Brackets round a single number say nothing: "3 AND (4)" is "3 AND 4".
+  const flat = []
+  for (let k = 0; k < tokens.length; k++) {
+    const tok = tokens[k]
+    if (tok.t === '(' && tokens[k + 1]?.t === 'num' && tokens[k + 2]?.t === ')') { flat.push(tokens[k + 1]); k += 2 } else flat.push(tok)
+  }
+  const isFlat = flat.length % 2 === 1 && flat.every((tok, k) => (k % 2 === 0 ? tok.t === 'num' : tok.t === 'and' || tok.t === 'or'))
+  if (!isFlat) return { error, choices: [] }
+  // One reading: `first` binds tighter - runs joined by it are bracketed, then joined by the other.
+  const reading = (first) => {
+    const other = first === 'and' ? 'or' : 'and'
+    const runs = [[flat[0].v]]
+    for (let k = 1; k < flat.length; k += 2) {
+      if (flat[k].t === first) runs.at(-1).push(flat[k + 1].v)
+      else runs.push([flat[k + 1].v])
+    }
+    const part = (r) => (r.length > 1 && runs.length > 1 ? `(${r.join(` ${first.toUpperCase()} `)})` : r.join(` ${first.toUpperCase()} `))
+    return runs.map(part).join(` ${other.toUpperCase()} `)
+  }
+  return { error, choices: [reading('or'), reading('and')].filter((x, k, all) => all.indexOf(x) === k) }
+}
+
+/**
  * The builder's tree from LOGIC TYPED over its conditions' numbers ("(1 AND 2) OR (3 AND (4 AND 5))" - AND / OR / NOT in
- * any case, & | !, brackets; AND binds tighter than OR): { ok: true, tree } or { ok: false, error } in words. Every
+ * any case, & | !, brackets): { ok: true, tree } or { ok: false, error, choices } in words. AND and OR side by side need
+ * brackets to say which goes first (`mixedLogicReadings` - its two readings are the `choices`). Every
  * condition must be in it exactly once - one left out or written twice is an error, never dropped or copied - and the
  * brackets at most `MAX_GROUP_DEPTH` deep. The conditions keep their own settings and are numbered again in the order the
  * logic names them ("3 OR (1 AND 2)" makes the old 3 condition 1).
@@ -855,6 +907,8 @@ export function treeFromLogic(tree, text) {
   if (src.length > MAX_LOGIC_LENGTH) return { ok: false, error: `at most ${MAX_LOGIC_LENGTH} characters` }
   const parsed = parseLogic(src, lines.length)
   if (!parsed.ok) return parsed
+  const mixed = mixedLogicReadings(src)
+  if (mixed) return { ok: false, ...mixed }
   const uses = new Map()
   const walk = (node) => {
     if (node.line != null) uses.set(node.line, (uses.get(node.line) ?? 0) + 1)

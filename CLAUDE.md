@@ -489,8 +489,12 @@ When adding or changing a strategy:
   section ... UI will also be updated"): `LogicInput` under the builder shows the builder's logic and logic TYPED there
   (condition numbers, AND / OR / NOT in any case, & | !, brackets) and applied - Apply, Enter or leaving the box - redraws
   the builder (`treeFromLogic`: every condition EXACTLY ONCE - one left out or written twice is an error, never dropped or
-  copied; AND before OR; brackets at most MAX_GROUP_DEPTH inside each other, measured BEFORE cleanTree, which would cut a
-  deeper group off; the conditions keep their settings and are numbered again in the order written). What cannot be read
+  copied; AND and OR SIDE BY SIDE with no brackets are NOT read either way (asked about: "1 OR 2 OR (3 AND 4) is not
+  the same as 1 OR 2 OR 3 AND (4)" - maths reads AND first, a trader often means the other): `mixedLogicReadings` asks
+  which, and for a plain line of numbers offers its two readings as one-tap buttons - OR first ((1 OR 2 OR 3) AND 4) and
+  AND first (1 OR 2 OR (3 AND 4)); brackets at most MAX_GROUP_DEPTH inside each other, measured BEFORE cleanTree, which
+  would cut a deeper group off; the conditions keep their settings and are numbered again in the order written). The
+  logic SHOWN always has its brackets, so it can be applied back as it stands. What cannot be read
   says why in red and changes nothing (Undo puts the rule's own back); the box is mounted again (`key` = the logic) when
   the builder changes, so a half-typed line never sits over a rule changed with the dropdowns. Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
   (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI lead, "within %" of a wall, spot's move, the
