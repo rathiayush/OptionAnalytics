@@ -419,9 +419,17 @@ function totalCondition(side, name, meaning) {
   }
 }
 
-const CUM_LINES = { ce: { key: 'ceCum', name: 'CE' }, pe: { key: 'peCum', name: 'PE' }, net: { key: 'netCum', name: 'Net (CE − PE)' } }
+// `follows`: how a line moves with price when the OI confirms the move - PE with it (puts written as price rises,
+// unwound as it falls), CE and Net (CE - PE) against it (calls written as price falls, unwound as it rises).
+const CUM_LINES = {
+  ce: { key: 'ceCum', name: 'CE', follows: -1 }, pe: { key: 'peCum', name: 'PE', follows: 1 }, net: { key: 'netCum', name: 'Net (CE − PE)', follows: -1 },
+}
+// DIVERGENCE (asked for - "commulative delta was x at 9:30, same at 10:00 or only some % decreased, not much, and price
+// dipped greater - that is divergence"): over the look-back, price moved >= `param` % one way but the line followed it by
+// less than `param2` % of its own range so far (held, barely moved, or went the other way).
+const DIVERGENCE = { windowed: true, param: pctParam('price ≥', 0.2, 5, 0.05), param2: { ...pctParam('followed <', 10, 100, 1), unit: '% of range' } }
 function cumCondition(line, group, meaning) {
-  const { key, name } = CUM_LINES[line]
+  const { key, name, follows } = CUM_LINES[line]
   return {
     id: `cum${line[0].toUpperCase()}${line.slice(1)}`, group, name: `${name} cumulative Δ`,
     options: [
@@ -430,9 +438,11 @@ function cumCondition(line, group, meaning) {
       opt('rising', `Rising (${meaning.up})`, 'falling', TOL), opt('falling', `Falling (${meaning.down})`, 'rising', TOL),
       opt('stable', 'Stable (moved under the tolerance of its range)', 'stable', TOL),
       opt('brokeResistance', 'Broke its resistance', 'brokeSupport', { ...W, ...PAST }), opt('brokeSupport', 'Broke its support', 'brokeResistance', { ...W, ...PAST }),
+      opt('divBull', 'Bullish divergence: price fell, the line did not follow', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, the line did not follow', 'divBull', DIVERGENCE),
     ],
     // "by ≥ %" = how far past 0 (or past the level broken) the line is now, in % of its range so far.
-    test: (d, i, v, w, p) => {
+    test: (d, i, v, w, p, p2) => {
       const series = d[key]
       if (!series) return false
       const x = (k) => series[k]
@@ -450,6 +460,22 @@ function cumCondition(line, group, meaning) {
           if (!(p > 0)) return hits.length > 0
           // With a %: still through the level broken, by that much of its range so far.
           return hits.some((b) => finite(b.level) && (up ? series[i] > b.level : series[i] < b.level) && atLeast(pastPct(x, i, b.level), p))
+        }
+        case 'divBull': case 'divBear': {
+          // Over the look-back: spot moved >= p % that way, the line moved the way that would confirm it (PE with price,
+          // CE / Net against it) by less than p2 % of its range so far - or the other way.
+          const dir = v === 'divBull' ? -1 : 1
+          const back = Math.max(0, i - w)
+          const s0 = d.spot.c[back], s1 = d.spot.c[i]
+          if (!(s0 > 0) || !finite(s1)) return false
+          const moved = ((s1 - s0) / s0) * 100 * dir
+          if (!(moved > 0) || moved < (p > 0 ? p : 0) - 1e-9) return false
+          const l0 = series[back], l1 = series[i]
+          if (!finite(l0) || !finite(l1)) return false
+          let lo = Infinity, hi = -Infinity
+          for (let k = 0; k <= i; k++) if (finite(series[k])) { lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k]) }
+          const followed = hi > lo ? ((follows * dir * (l1 - l0)) / (hi - lo)) * 100 : 0
+          return followed < (Number.isFinite(p2) ? p2 : DIVERGENCE.param2.default)
         }
         default: return false
       }
@@ -723,6 +749,11 @@ export function cleanLine(line) {
   if (o.param) {
     const v = Number(line.param)
     out.param = line.param != null && line.param !== '' && Number.isFinite(v) ? Math.min(o.param.max, Math.max(o.param.min, v)) : o.param.default
+  }
+  // A second number (a divergence's: how little the line may follow).
+  if (o.param2) {
+    const v = Number(line.param2)
+    out.param2 = line.param2 != null && line.param2 !== '' && Number.isFinite(v) ? Math.min(o.param2.max, Math.max(o.param2.min, v)) : o.param2.default
   }
   if (o.windowed) out.windowMin = WINDOW_CHOICES.includes(line.windowMin) ? line.windowMin : DEFAULT_WINDOW
   return out
@@ -1071,7 +1102,7 @@ export const mirrorIsSame = (lines) => lines.every((l) => optionOf(l.id, l.value
 export function lineText(line) {
   const c = CONDITION[line.id], o = optionOf(line.id, line.value)
   if (!c || !o) return ''
-  const num = o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : ''
+  const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + (o.param2 && line.param2 != null ? `, ${o.param2.label} ${line.param2}${o.param2.unit}` : '')
   const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
   return `${c.name}: ${o.label}${num}${win}`
 }
@@ -1094,7 +1125,7 @@ export function ruleText(lines, action, logic = '') {
   return `${ACTION[action]?.label ?? action} when ${text}`
 }
 
-const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0)
+const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2)
 // Does the rule hold at candle i: its logic tree (`tree`), else any OR group whose lines all hold.
 function ruleHolds(d, i, lines, groups, tree) {
   if (tree) return evalLogic(tree, (no) => lineHolds(d, i, lines[no - 1]))

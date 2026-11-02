@@ -512,7 +512,13 @@ When adding or changing a strategy:
   `TOTAL_LEAD` / `totalLeadPct`: the line ahead NOW by at least that % of the other, PE 4.4 cr over CE 4 cr = 10%; a cross
   only with that lead now too; 0 = any lead, the default, so a line saved before reads as it did). No PCR - removed on request; a line saved with the
   short-lived `totalPcr` is dropped (`cleanLine`), the rest of the rule kept. The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
-  its own S/R breaks), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
+  its own S/R breaks, and DIVERGENCE - asked for: "cumulative delta was x at 9:30, the same at 10:00 or only some %
+  decreased, and price dipped more - that is divergence": Bullish / Bearish divergence = over the look-back spot moved
+  >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or
+  went the other way; "followed" is the line's direction when OI confirms the move (`CUM_LINES.follows`: PE moves WITH
+  price - unwound into a fall; CE and Net against it - calls written into a fall); the mirror swaps bullish / bearish with
+  the same numbers. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
   ATM straddle (vs its VWAP and the decay-only line, crossed), the Initial Balance (after 10:15), and VOLUME PROFILE
   LEVELS - YESTERDAY'S, not today's developing ones (asked for; `levelCondition`): the PREVIOUS DAY's POC / HVN / LVN /

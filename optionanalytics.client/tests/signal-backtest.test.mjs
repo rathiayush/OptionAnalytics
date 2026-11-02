@@ -572,6 +572,47 @@ test('every comparison takes a "by ≥ %" - the crossings and turns too; 0 (the 
   assert.match(lineText({ id: 'cumNet', value: 'turnedNegative', param: 20, windowMin: 10 }), /Turned \+ve → −ve by ≥ 20% \(last 10 min\)$/)
 })
 
+test('cumulative Δ divergence: price moved >= A % over the look-back but the line followed by less than B % of its range', () => {
+  // Spot 25,000 until 30, then down to 24,900 by 60 (-0.4%) and back up to 25,100 by 100 (+0.8% from 60).
+  const spot = (i) => (i < 30 ? 25000 : i < 60 ? 25000 - (i - 30) * (100 / 30) : i < 100 ? 24900 + (i - 60) * 5 : 25100)
+  // The PE line (moves WITH price when OI confirms): -100 .. +100 early (its range 200), then as given from 30.
+  const day = (pe) => fakeDay({ spot, peCum: (i) => (i < 10 ? -100 + i * 20 : i < 30 ? 100 : pe(i)), ceCum: (i) => (i < 10 ? -100 + i * 20 : i < 30 ? 100 : 100 + (100 - pe(i))) })
+  const bull = (d, i, w, a, b) => holds(d, 'cumPe', 'divBull', i, w, a, b)
+  const holds = (d, id, value, i, w, a, b) => cond(id).test(d, i, value, w, a, b)
+  // PE held at 100 while price fell 0.4% over 30 minutes (30 -> 60): bullish divergence.
+  const held = day(() => 100)
+  assert.ok(bull(held, 60, 30, 0.3, 10))
+  assert.ok(!bull(held, 60, 30, 0.5, 10))                 // price fell only 0.4%: not by 0.5%
+  assert.ok(!bull(held, 25, 20, 0.3, 10))                 // price did not fall
+  // PE fell with price - 60 of its range 200 = 30% - it followed: no divergence at 10%, one at 40%.
+  const followed = day((i) => (i <= 60 ? 100 - (i - 30) * 2 : 40))
+  assert.ok(!bull(followed, 60, 30, 0.3, 10) && bull(followed, 60, 30, 0.3, 40))
+  // PE fell a little (10 of 200 = 5%) - "only some % decreased, not much": divergence at 10%.
+  assert.ok(bull(day((i) => (i <= 60 ? 100 - (i - 30) / 3 : 90)), 60, 30, 0.3, 10))
+  // PE rose while price fell (put writing into the fall): a divergence too.
+  assert.ok(bull(day((i) => (i <= 60 ? 100 + (i - 30) : 130)), 60, 30, 0.3, 10))
+  // Bearish: price rose 0.8% (60 -> 100) with PE held - and PE rising with it (confirming) is none.
+  assert.ok(holds(held, 'cumPe', 'divBear', 100, 40, 0.5, 10))
+  assert.ok(!holds(day((i) => (i <= 60 ? 100 : i < 100 ? 100 + (i - 60) * 3 : 220)), 'cumPe', 'divBear', 100, 40, 0.5, 10))
+  // CE moves AGAINST price when OI confirms (calls written into a fall): CE rising with the fall is no divergence,
+  // CE held is one.
+  assert.ok(!holds(followed, 'cumCe', 'divBull', 60, 30, 0.3, 10))      // CE rose 60 while price fell
+  assert.ok(holds(held, 'cumCe', 'divBull', 60, 30, 0.3, 10))
+  // Net (CE - PE) is read like CE.
+  const net = fakeDay({ spot, netCum: (i) => (i < 10 ? -100 + i * 20 : 100) })
+  assert.ok(holds(net, 'cumNet', 'divBull', 60, 30, 0.3, 10))
+  // In a rule: the page's look-back in minutes, both numbers kept, the mirror the bearish one with the same numbers.
+  const line = cleanLine({ id: 'cumPe', value: 'divBull', windowMin: 30, param: 0.3, param2: 10 })
+  assert.deepEqual(line, { id: 'cumPe', value: 'divBull', join: 'and', param: 0.3, param2: 10, windowMin: 30 })
+  assert.deepEqual(cleanLine({ id: 'cumPe', value: 'divBull' }), { id: 'cumPe', value: 'divBull', join: 'and', param: 0.2, param2: 10, windowMin: DEFAULT_WINDOW })
+  assert.equal(cleanLine({ id: 'cumPe', value: 'divBull', param2: 500 }).param2, 100)
+  assert.deepEqual(mirrorLines([line]).map((l) => [l.value, l.param, l.param2, l.windowMin]), [['divBear', 0.3, 10, 30]])
+  assert.match(lineText(line), /^PE cumulative Δ: Bullish divergence: price fell, the line did not follow price ≥ 0\.3%, followed < 10% of range \(last 30 min\)$/)
+  const signals = ruleSignals(held, lines([line], 'buyCE'))
+  assert.equal(signals[0].side, 'rule')
+  assert.ok(signals[0].i > 30 && signals[0].i <= 60)
+})
+
 test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
   const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
   const five = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow'), L('nearAbove')].map((x, k) => (k === 4 ? { line: { id: 'prevPoc', value: 'above', join: 'and', param: 0 } } : x)) }

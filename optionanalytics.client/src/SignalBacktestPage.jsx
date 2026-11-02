@@ -78,6 +78,7 @@ function editLine(line, change) {
     const before = CONDITION_OF[line.id].options.find((o) => o.value === line.value)
     const after = CONDITION_OF[line.id].options.find((o) => o.value === change.value)
     if (before?.param?.label !== after?.param?.label) delete next.param
+    if (before?.param2?.label !== after?.param2?.label) delete next.param2
   }
   return cleanLine(next) ?? line
 }
@@ -108,6 +109,12 @@ function ConditionRow({ line, no, onChange, onRemove }) {
         <InputNumber
           size="small" className="oa-rule-num" min={o.param.min} max={o.param.max} step={o.param.step} value={line.param}
           onChange={(v) => onChange(editLine(line, { param: v ?? o.param.default }))} addonBefore={o.param.label} addonAfter={o.param.unit}
+        />
+      )}
+      {o.param2 && (
+        <InputNumber
+          size="small" className="oa-rule-num oa-rule-num--wide" min={o.param2.min} max={o.param2.max} step={o.param2.step} value={line.param2}
+          onChange={(v) => onChange(editLine(line, { param2: v ?? o.param2.default }))} addonBefore={o.param2.label} addonAfter={o.param2.unit}
         />
       )}
       {o.windowed && (
