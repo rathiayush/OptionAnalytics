@@ -82,6 +82,7 @@ test('when the session is over every trade is closed - the day\'s report and its
   const text = dayReportText('VWAP cross', day, live)
   assert.match(text, /^📊 VWAP cross · NIFTY · Mon 5 Oct/)
   assert.match(text, new RegExp(`${fullTrades.length} trades`))
+  assert.match(text, /\nNet −?₹[\d,]+ after ₹[\d,]+ charges \(gross −?₹[\d,]+\)/)
   assert.equal(text.split('\n').filter((l) => /^\d+\. /.test(l)).length, fullTrades.length)
   // A day with no trade says so.
   const quiet = liveDayEvents(day, engineSettings(cleanBacktestSettings({ ...SETTINGS, rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'ib', value: 'inside' } }] }, action: 'buyCE', mirror: false }, maxTradesPerDay: 1 })), { complete: true })
@@ -98,7 +99,7 @@ test('the texts: an entry (and "seen late" after a restart), an exit with its re
   assert.match(liveDayEvents(day, ENGINE, { name: 'S', complete: true, nowMs: first.entryTime + 10 * MIN }).events[0].text, /seen late/)
   const exit = onTime.events.find((e) => e.kind === 'exit')
   assert.match(exit.text, /^(✅|❌) S · NIFTY: out of /)
-  assert.match(exit.text, / pts · −?₹/)
+  assert.match(exit.text, / pts · net −?₹[\d,]+ after ₹[\d,]+ charges$/)
 })
 
 // The loop against a fake server, as the server runs it.

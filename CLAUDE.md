@@ -557,7 +557,14 @@ When adding or changing a strategy:
   close and the trade enters at its last minute's option close, managed on the 1-minute bars as below; a line's look-back stays
   minutes (`span`); a change of timeframe loads nothing. A trade: the option's close at the signal minute, then its own
   1-minute bars from the next minute - a bar opening through the stop fills at its open, the stop before the target, the
-  time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). SL,
+  time stop and the 15:10 square-off at the bar's close, no entries before 09:30 or after 14:45 (`simulateTrade`). P&L is
+  NET OF CHARGES (asked for - "0.15% STT and then 20 - 20 Rs on each buy sell"): the backtest's own rates, set on the page
+  beside the Charges switch - `sttPct` 0.15 (% of the SELL side's premium: a bought option's exit, a sold one's entry),
+  `brokeragePerOrder` 20 (the buy and the sell order), `otherPerTrade` 0 (`BACKTEST_DEFAULTS`, `tradeCharges`; the Order
+  Flow scanner keeps its own rates, ₹7 other included); off = the gross. Every trade shows gross, charges and net (the
+  page, History, the CSV), the report heading says what was taken (`chargesText`), the live scan's exit alert says "net
+  ₹X after ₹Y charges" and its daily report the net, the charges and the gross; a saved strategy or background run keeps
+  its rates with the rest. SL,
   target and TRAILING STOP in % of the entry premium or in premium POINTS (`levelUnit`, `LEVEL_UNITS`; 0 = none): the
   trail is the paper panel's (`optionTrailLevel` / `tighterStop` from `optionTrail.js`) - `trailGap` behind the best
   premium reached (a bought option's highest high, a sold one's lowest low) once `trailStart` in profit, moved after each

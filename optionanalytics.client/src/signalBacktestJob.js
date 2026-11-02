@@ -61,7 +61,8 @@ const held = (v, min, max, fallback) => {
 /**
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
- * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay }. The rule goes through its tree, as
+ * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, timeframe,
+ * expiryDay }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -85,6 +86,9 @@ export function cleanBacktestSettings(s = {}) {
     cooldownMin: held(s?.cooldownMin, 0, 120, d.cooldownMin),
     lots: Math.round(held(s?.lots, 1, 100, d.lots)),
     charges: typeof s?.charges === 'boolean' ? s.charges : d.charges,
+    sttPct: held(s?.sttPct, 0, 1, d.sttPct),
+    brokeragePerOrder: held(s?.brokeragePerOrder, 0, 500, d.brokeragePerOrder),
+    otherPerTrade: held(s?.otherPerTrade, 0, 500, d.otherPerTrade),
     timeframe: TIMEFRAMES.includes(Number(s?.timeframe)) ? Number(s.timeframe) : d.timeframe,
     expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
   }
@@ -157,7 +161,14 @@ export function reportHead(s, okDays) {
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
-  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}`
+  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry} · ${chargesText(s)}`
+}
+
+/** The charges a run takes off its P&L, in words. */
+export function chargesText(s) {
+  if (s.charges === false) return 'no charges'
+  const other = s.otherPerTrade > 0 ? ` + ₹${s.otherPerTrade} a trade` : ''
+  return `net of STT ${s.sttPct}% + ₹${s.brokeragePerOrder} an order${other}`
 }
 
 /** A run's name when none is given: the index, the days and the trade. */

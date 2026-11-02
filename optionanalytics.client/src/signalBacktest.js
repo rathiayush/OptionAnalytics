@@ -1140,6 +1140,10 @@ export function ruleSignals(d, rule, { openAt = null } = {}) {
 export const BACKTEST_DEFAULTS = {
   moneyness: 0, slPct: 30, targetPct: 50, levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, maxTradesPerDay: 2, cooldownMin: 10,
   lots: 1, entryFrom: '09:30', lastEntry: '14:45', squareOff: '15:10', charges: true, timeframe: 1,
+  // The charges taken off each trade's P&L (asked for - "0.15% STT and then 20 - 20 Rs on each buy sell"): STT on the
+  // SELL side's premium (a bought option's exit, a sold one's entry), brokerage on each order (the buy and the sell), and
+  // anything else a trade - none by default. Each can be set on the page.
+  sttPct: 0.15, brokeragePerOrder: 20, otherPerTrade: 0,
   // On the options' EXPIRY DAY: trade as the rule says ('rule'), or always BUY / always SELL ('buy' / 'sell') - the
   // signal's direction kept (a bullish one buys the call or sells the put).
   expiryDay: 'rule',
@@ -1227,7 +1231,8 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
 
 /**
  * The rule's signals and trades for one prepared day under the settings (BACKTEST_DEFAULTS + `settings`: `rule`,
- * `lotSize`, `chargesCfg`, `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
+ * `lotSize`, `charges` (on / off) with `sttPct` / `brokeragePerOrder` / `otherPerTrade` (or a `chargesCfg` of them),
+ * `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
  * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
  * `lastEntry`. On the options' expiry day (`d.isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
  * signal's direction kept: bullish buys the call or sells the put). Returns `{ trades, signals }` - every trade `{ date,
@@ -1272,7 +1277,7 @@ export function simulateDay(d, settings = {}) {
     count++
     busyUntil = trade.exitIndex + Math.max(0, Math.round(s.cooldownMin))
     const qty = { lots: s.lots, lotSize }
-    const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg)
+    const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg ?? { sttPct: s.sttPct, brokeragePerOrder: s.brokeragePerOrder, otherPerTrade: s.otherPerTrade })
     const gross = trade.points * s.lots * lotSize
     trades.push({
       date: d.date, strategy: sig.side, dir, why, ...option, expiryDay: Boolean(d.isExpiry), overridden,

@@ -44,6 +44,9 @@ const STORE = {
   cooldownMin: 'optionanalytics.signalBacktest.cooldownMin',
   lots: 'optionanalytics.signalBacktest.lots',
   charges: 'optionanalytics.signalBacktest.charges',
+  sttPct: 'optionanalytics.signalBacktest.sttPct',
+  brokeragePerOrder: 'optionanalytics.signalBacktest.brokeragePerOrder',
+  otherPerTrade: 'optionanalytics.signalBacktest.otherPerTrade',
   timeframe: 'optionanalytics.signalBacktest.timeframe',
   rule: 'optionanalytics.signalBacktest.rule',
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
@@ -314,6 +317,10 @@ export default function SignalBacktestPage() {
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
   const [lots, setLots] = usePersistedState(STORE.lots, BACKTEST_DEFAULTS.lots)
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
+  // The charges taken off the P&L: STT on the sell side, brokerage on each order, anything else a trade.
+  const [sttPct, setSttPct] = usePersistedState(STORE.sttPct, BACKTEST_DEFAULTS.sttPct)
+  const [brokeragePerOrder, setBrokeragePerOrder] = usePersistedState(STORE.brokeragePerOrder, BACKTEST_DEFAULTS.brokeragePerOrder)
+  const [otherPerTrade, setOtherPerTrade] = usePersistedState(STORE.otherPerTrade, BACKTEST_DEFAULTS.otherPerTrade)
   const [storedTimeframe, setTimeframe] = usePersistedState(STORE.timeframe, BACKTEST_DEFAULTS.timeframe)
   const timeframe = TIMEFRAMES.includes(storedTimeframe) ? storedTimeframe : BACKTEST_DEFAULTS.timeframe
   // On the options' expiry day: as the rule, or always buy / always sell (overriding the rule's buy / sell there).
@@ -375,8 +382,10 @@ export default function SignalBacktestPage() {
   // The settings as set - held to their ranges exactly as a background run holds them (cleanBacktestSettings).
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
-    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay,
-  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, timeframe, expiryDay])
+    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
+    timeframe, expiryDay,
+  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder,
+    otherPerTrade, timeframe, expiryDay])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
   const engine = useMemo(() => engineSettings(runSettings), [runSettings])
@@ -404,6 +413,7 @@ export default function SignalBacktestPage() {
     setStoredRule(s.rule)
     setMoneyness(s.moneyness); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit); setTrailGap(s.trailGap); setTrailStart(s.trailStart)
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
+    setSttPct(s.sttPct); setBrokeragePerOrder(s.brokeragePerOrder); setOtherPerTrade(s.otherPerTrade)
     setExpiryDay(s.expiryDay)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
   }
@@ -480,6 +490,8 @@ export default function SignalBacktestPage() {
     { title: 'Exit', key: 'exit', width: 110, render: (_, t) => `${clock(t.exitTime)} · ${num(t.exit, 2)}` },
     { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 150 },
     { title: 'Points', dataIndex: 'points', key: 'points', width: 80, align: 'right', render: (v) => <span style={{ color: pnlColor(v) }}>{num(v, 2)}</span> },
+    { title: 'Gross', dataIndex: 'gross', key: 'gross', width: 90, align: 'right', render: (v) => <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> },
+    { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 80, align: 'right', render: (v) => rupees(v) },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
     { title: 'At the signal', dataIndex: 'why', key: 'why', width: 360, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
   ]
@@ -594,8 +606,13 @@ export default function SignalBacktestPage() {
                 </Space>
               </Tooltip>
               <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Lots</Text><InputNumber size="small" min={1} max={100} value={lots} onChange={(v) => setLots(v ?? 1)} style={{ width: 60 }} /><Text type="secondary" style={{ fontSize: 12 }}>× {lotSize}</Text></Space>
-              <Tooltip title="Net of STT on the sell side, ₹20 brokerage an order and ₹7 other a trade (the scanner's default charges).">
-                <Space size={4}><Switch size="small" checked={charges} onChange={setCharges} /><Text style={{ fontSize: 12 }}>Charges</Text></Space>
+              <Tooltip title="P&L net of the charges: STT on the SELL side's premium (a bought option's exit, a sold one's entry), brokerage on each order - the buy and the sell - and anything else a trade. Off = the gross P&L.">
+                <Space size={4} wrap>
+                  <Switch size="small" checked={charges} onChange={setCharges} /><Text style={{ fontSize: 12 }}>Charges</Text>
+                  <InputNumber size="small" min={0} max={1} step={0.01} value={sttPct} onChange={(v) => setSttPct(v ?? 0)} disabled={!charges} addonBefore="STT" addonAfter="%" style={{ width: 130 }} />
+                  <InputNumber size="small" min={0} max={500} value={brokeragePerOrder} onChange={(v) => setBrokeragePerOrder(v ?? 0)} disabled={!charges} addonBefore="₹" addonAfter="an order" style={{ width: 150 }} />
+                  <InputNumber size="small" min={0} max={500} value={otherPerTrade} onChange={(v) => setOtherPerTrade(v ?? 0)} disabled={!charges} addonBefore="+ ₹" addonAfter="a trade" style={{ width: 150 }} />
+                </Space>
               </Tooltip>
             </Space>
             {(running || run.status === 'stopped') && (
@@ -691,7 +708,7 @@ export default function SignalBacktestPage() {
                 </Space>
               )}
             >
-              <Table size="small" rowKey={(t) => `${t.strategy}|${t.entryTime}`} scroll={{ x: 1300 }} columns={tradeColumns} dataSource={shownTrades} pagination={{ pageSize: 25, showSizeChanger: false }} />
+              <Table size="small" rowKey={(t) => `${t.strategy}|${t.entryTime}`} scroll={{ x: 1480 }} columns={tradeColumns} dataSource={shownTrades} pagination={{ pageSize: 25, showSizeChanger: false }} />
             </Card>
           </>
         )}

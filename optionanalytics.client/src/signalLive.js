@@ -57,7 +57,8 @@ export function entryText(name, underlying, t, { late = false } = {}) {
 }
 /** A trade's exit, as Telegram shows it. */
 export function exitText(name, underlying, t) {
-  return `${t.net >= 0 ? '✅' : '❌'} ${name} · ${underlying}: out of ${tradeName(t)} @ ${t.exit.toFixed(2)} (${clock(t.exitTime)}, ${t.exitReason}) · ${signed(t.points)} pts · ${rupees(t.net)}`
+  const net = t.charges > 0 ? `net ${rupees(t.net)} after ${rupees(t.charges)} charges` : rupees(t.net)
+  return `${t.net >= 0 ? '✅' : '❌'} ${name} · ${underlying}: out of ${tradeName(t)} @ ${t.exit.toFixed(2)} (${clock(t.exitTime)}, ${t.exitReason}) · ${signed(t.points)} pts · ${net}`
 }
 
 /**
@@ -105,7 +106,7 @@ export function dayReportText(name, day, result) {
   const lines = [`📊 ${name} · ${day.underlying} · ${date}`]
   if (!s.trades) lines.push('No trades today.')
   else {
-    lines.push(`Net ${rupees(s.net)} · ${s.trades} trade${s.trades === 1 ? '' : 's'} · ${Math.round(s.winRate ?? 0)}% win · charges ${rupees(s.charges)}`)
+    lines.push(`Net ${rupees(s.net)} after ${rupees(s.charges)} charges (gross ${rupees(s.gross)}) · ${s.trades} trade${s.trades === 1 ? '' : 's'} · ${Math.round(s.winRate ?? 0)}% win`)
     result.closed.forEach((t, k) => lines.push(`${k + 1}. ${clock(t.entryTime)} - ${clock(t.exitTime)} ${tradeName(t)} ${t.entry.toFixed(2)} → ${t.exit.toFixed(2)} ${t.exitReason} ${rupees(t.net)}${tags(t).length ? ` (${tags(t).join(', ')})` : ''}`))
   }
   const skipped = result.signals - result.trades.length

@@ -75,6 +75,8 @@ const tradeColumns = [
   { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${t.entryTime} · ${t.entry}` },
   { title: 'Exit', key: 'exit', width: 110, render: (_, t) => `${t.exitTime} · ${t.exit}` },
   { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 140 },
+  { title: 'Gross', dataIndex: 'gross', key: 'gross', width: 90, align: 'right', render: (v) => <span style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</span> },
+  { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 80, align: 'right', render: (v) => rupees(num(v)) },
   { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</Text> },
   { title: 'At the signal', dataIndex: 'why', key: 'why', width: 320, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
 ]
@@ -108,7 +110,7 @@ export function StrategyHistoryModal({ strategy, onClose }) {
           size="small"
           items={[
             { key: 'days', label: `Days (${days.length})`, children: <Table size="small" rowKey="date" columns={dayColumns} dataSource={days} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 520 }} loading={!history && !error} /> },
-            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1000 }} /> },
+            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1180 }} /> },
             { key: 'events', label: `Alerts (${history?.events?.length ?? 0})`, children: <Table size="small" rowKey={(e, k) => `${e.key}|${k}`} columns={eventColumns} dataSource={history?.events ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 600 }} /> },
           ]}
         />

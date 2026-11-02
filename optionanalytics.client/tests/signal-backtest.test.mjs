@@ -812,6 +812,32 @@ test('on the options\' expiry day the Expiry day setting overrides the rule\'s b
   assert.deepEqual([prepareDay({ ...run, optionExpiry: null }).isExpiry, prepareDay({ ...run, optionExpiry: null }).expiry], [false, null])
 })
 
+test('P&L is net of the charges: STT 0.15% of the sell side\'s premium and ₹20 on each order (buy and sell) by default; set on the page; off = gross', () => {
+  // A bought call: in at 100, out at the 120 target - 2 lots of 65. Gross 20 x 130 = 2,600.
+  const legs = { ce: { 25000: (i) => (i < 20 ? flat(100)() : { o: 100, h: 125, l: 100, c: 120 }) }, pe: { 25000: flat(100) } }
+  const d = fakeDay({ legs, spot: (i) => (i < 15 ? 24980 : 25000), vwap: () => 24990 })
+  const buy = lines([{ id: 'vwap', value: 'crossedAbove' }], 'buyCE')
+  const run = (more) => simulateDay(d, { rule: buy, lotSize: 65, lots: 2, slPct: 0, targetPct: 20, maxTradesPerDay: 1, ...more }).trades[0]
+  const t = run({})
+  assert.equal(t.action, 'BUY')
+  assert.equal(t.gross, 2600)
+  // STT on the sell leg - the exit at 120: 0.15% x 120 x 130 = 23.40; brokerage 2 x 20; nothing else.
+  assert.ok(Math.abs(t.charges - (0.0015 * 120 * 130 + 40)) < 1e-9)
+  assert.ok(Math.abs(t.net - (2600 - 63.4)) < 1e-9)
+  // Set on the page: other rates; off: the gross.
+  const set = run({ sttPct: 0.1, brokeragePerOrder: 10, otherPerTrade: 7 })
+  assert.ok(Math.abs(set.charges - (0.001 * 120 * 130 + 20 + 7)) < 1e-9)
+  assert.equal(run({ charges: false }).net, 2600)
+  assert.equal(run({ charges: false }).charges, 0)
+  // A SOLD option pays its STT on the entry (its sell leg).
+  const sold = simulateDay(d, { rule: lines([{ id: 'vwap', value: 'crossedAbove' }], 'sellPE'), lotSize: 65, lots: 1, slPct: 0, targetPct: 0, timeStopMin: 2, maxTradesPerDay: 1 }).trades[0]
+  assert.equal(sold.action, 'SELL')
+  assert.ok(Math.abs(sold.charges - (0.0015 * sold.entry * 65 + 40)) < 1e-9)
+  // The report adds them up: net = gross - charges.
+  const s = summarize([t, set])
+  assert.ok(Math.abs(s.net - (s.gross - s.charges)) < 1e-9)
+})
+
 test('the synthetic day end to end: buy and sell, the call and the put; every trade exits after it enters', () => {
   const { run } = syntheticDay()
   const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })

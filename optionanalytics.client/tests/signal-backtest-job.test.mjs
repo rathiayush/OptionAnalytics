@@ -91,14 +91,21 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.deepEqual(s.rule, { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 0 } }] }, action: 'sellPE', mirror: false })
   assert.equal(cleanBacktestSettings({ levelUnit: 'pts', slPct: 9000 }).slPct, 5000)
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
-  assert.equal(reportHead(SETTINGS, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10%')
+  assert.equal(reportHead(SETTINGS, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · net of STT 0.15% + ₹20 an order')
+  assert.match(reportHead({ ...SETTINGS, charges: false }, 4), / · no charges$/)
+  assert.match(reportHead({ ...SETTINGS, otherPerTrade: 7 }, 4), / · net of STT 0.15% \+ ₹20 an order \+ ₹7 a trade$/)
+  // The charge rates: the defaults (0.15% STT, ₹20 an order, nothing else), held to their ranges, read by the engine.
+  assert.deepEqual([SETTINGS.sttPct, SETTINGS.brokeragePerOrder, SETTINGS.otherPerTrade], [0.15, 20, 0])
+  const rates = cleanBacktestSettings({ sttPct: 5, brokeragePerOrder: -3, otherPerTrade: '12' })
+  assert.deepEqual([rates.sttPct, rates.brokeragePerOrder, rates.otherPerTrade], [1, 0, 12])
+  assert.deepEqual(['sttPct', 'brokeragePerOrder', 'otherPerTrade'].map((k) => engineSettings(rates)[k]), [1, 0, 12])
   assert.equal(reportHead(SETTINGS, 0), '')
   // The expiry day's choice: kept when it is one, else "as the rule"; named in the heading when it overrides.
   assert.equal(cleanBacktestSettings({ expiryDay: 'sell' }).expiryDay, 'sell')
   assert.equal(cleanBacktestSettings({ expiryDay: 'hold' }).expiryDay, 'rule')
   assert.equal(engineSettings(cleanBacktestSettings({ expiryDay: 'sell' })).expiryDay, 'sell')   // what the engine (and a background run) reads
   assert.equal(SETTINGS.expiryDay, 'rule')
-  assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell')
+  assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell · net of STT 0.15% + ₹20 an order')
   assert.equal(defaultRunName(SETTINGS), 'NIFTY 19 Oct – 23 Oct · Buy CE + mirror')
   // A profit factor with no losing trade survives JSON.
   assert.deepEqual(JSON.parse(JSON.stringify({ pf: Infinity, w: -Infinity, x: 1 }, reportReplacer), reportReviver), { pf: Infinity, w: -Infinity, x: 1 })
