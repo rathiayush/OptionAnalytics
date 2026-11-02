@@ -587,7 +587,33 @@ When adding or changing a strategy:
   a block a run on a phone, no sideways scroll): Open shows a finished run's report on the page (its own rule and settings
   - the page's do not change it), Use settings puts its settings on the page, Cancel / Stop, Remove. The background run's
   report is the page's for the same days (`tests/signal-backtest-job.test.mjs` - the job script against a fake server;
-  `SignalBacktestJobServiceTests.cs` - the queue, the time, one at a time, restart, owners, limits, Telegram).
+  `SignalBacktestJobServiceTests.cs` - the queue, the time, one at a time, restart, owners, limits, Telegram). A background
+  run goes up to `MAX_BACKGROUND_DAYS` 300 weekdays (asked for - "I can schedule it for 300 days"; `SignalBacktestJobService.MaxDays`)
+  - it keeps only each day's outcome; the page's own run stays at `MAX_BACKTEST_DAYS` 60 (it holds every day it loaded)
+  and says when the range is longer than that.
+  SAVED STRATEGIES (asked for - "save strategy ... scanned in live as daily and send daily report to telegram ... store
+  history ... all csv no db"): the page's "Save strategy" keeps the rule and EVERY setting on the page by name on the
+  server - CSV, no database (`SignalStrategyStore`, `{Storage:ScannerRunnerPath}/signal-strategies/strategies.csv`: id,
+  name, owner, index, the Live / Alerts / Daily report switches, times, the settings as one JSON cell; `CsvTable` - one
+  line a row, formula-safe cells, written whole and moved into place); "Saved strategies" card (`SignalStrategiesCard.jsx`,
+  `signalStrategiesApi.js`): Load (onto the page), Update (with the page's settings), the switches, History, Remove (with
+  its history); each account its own, an admin every account's (`SignalStrategyController`, `/api/signal-strategies`,
+  Admin / User; `/live...` the Runner key only - `SignalStrategyStoreTests.cs` checks every endpoint's roles). The DAILY
+  LIVE SCAN (`SignalLiveHostedService` keeps `scanner-runner/signal-live.mjs` running - bundled by `vite.live.config.js`,
+  published beside the others; "SignalLive:Enabled"): each minute of the session (IST weekdays 09:16 - 15:59) for every
+  index with a strategy on Live, today's run as OI Replay's live mode reads it (`forceLive` - the server's memory),
+  CUT TO THE MINUTES COMPLETED at the clock (`completedRun` - the forming minute never counts) and prepared as the
+  backtest prepares a past day (`prepareLiveDay`, from 5 minutes - `minMinutes`), each strategy's day so far with ITS
+  OWN settings (`liveDayEvents` = `simulateDay` - the backtest's trades, paper): each trade's ENTRY at once and its EXIT
+  once it has one (a trade the data ran out on - "Day end" - before 15:31 is still OPEN), each event keyed
+  (date|rule-or-mirror|entry time|entry-or-exit) so the server keeps and sends it ONCE (`{id}-events.csv`; an entry
+  first seen over 3 minutes late - a restart - says "seen late"); from 15:31 the DAY'S REPORT once (`{id}-days.csv` a row
+  a day, `{id}-trades.csv` its closed trades in the backtest CSV's columns - posted again, the day's rows are replaced, the
+  Telegram not resent). Telegram: each entry / exit when Alerts is on, the report when Daily report is on (HTML-escaped).
+  An index whose day cannot be read is asked again later, the wait doubling 1 - 30 min (a holiday reads as one);
+  yesterday's profile is asked once an index a day. The live day equals the backtest of that day up to the clock
+  (`tests/signal-live.test.mjs` - read before, during and after each trade; the loop against a fake server: events
+  once, the report after the close, nothing outside the session, a failing day backed off).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

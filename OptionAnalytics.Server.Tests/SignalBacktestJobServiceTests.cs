@@ -292,7 +292,9 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         Assert.Equal(("2026-10-19", "2026-10-23"), (plan.From, plan.To));          // swapped into order
         Assert.Equal("BANKNIFTY", plan.Settings["underlying"]!.GetValue<string>());
         Assert.Equal("BANKNIFTY 19 Oct – 23 Oct", plan.Name);
-        Assert.Equal(60, SignalBacktestJobService.Validate(Request(Settings(from: "2025-01-01", to: "2026-10-25")), Now).Plan!.Days);   // the latest 60
+        Assert.Equal(SignalBacktestJobService.MaxDays, SignalBacktestJobService.Validate(Request(Settings(from: "2024-01-01", to: "2026-10-25")), Now).Plan!.Days);   // the latest 300
+        Assert.Equal(300, SignalBacktestJobService.MaxDays);
+        Assert.Equal(212, SignalBacktestJobService.Validate(Request(Settings(from: "2026-01-01", to: "2026-10-25")), Now).Plan!.Days);   // a range under it: all of it
         Assert.Equal(1, SignalBacktestJobService.Validate(Request(Settings(from: "2026-10-23", to: "2026-10-30")), Now).Plan!.Days);   // before today only
     }
 

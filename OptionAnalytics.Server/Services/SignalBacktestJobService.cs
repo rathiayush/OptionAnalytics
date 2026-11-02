@@ -30,7 +30,8 @@ public sealed class SignalBacktestJobService : BackgroundService
     public static readonly TimeSpan MaxStartAhead = TimeSpan.FromDays(14);
     public const int MaxSettingsBytes = 64 * 1024;
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
-    private const int MaxDays = 60;   // MAX_BACKTEST_DAYS - the job runs the latest 60 of a longer range
+    /// <summary>MAX_BACKGROUND_DAYS - the job runs the latest 300 weekdays of a longer range.</summary>
+    public const int MaxDays = 300;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = false };
 

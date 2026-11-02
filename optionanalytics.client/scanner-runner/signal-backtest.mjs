@@ -12,7 +12,7 @@
 // Progress goes to stdout as lines "PROGRESS {json}".
 
 import { writeFileSync, renameSync } from 'node:fs'
-import { backtestDays } from '../src/signalBacktest.js'
+import { MAX_BACKGROUND_DAYS, backtestDays } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -35,7 +35,7 @@ let settings = null
 async function main() {
   settings = cleanBacktestSettings(JSON.parse(process.env.BACKTEST_JOB ?? '{}'))
   if (!settings.from || !settings.to) throw new Error('no days chosen')
-  const dates = backtestDays(settings.from, settings.to, istToday)
+  const dates = backtestDays(settings.from, settings.to, istToday, MAX_BACKGROUND_DAYS)
   if (!dates.length) throw new Error('no past weekdays in the range')
   const engine = engineSettings(settings)
   const outcomes = new Map()

@@ -73,6 +73,11 @@
         <RelativePath>scanner-runner/signal-backtest.mjs</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
+      <!-- The saved strategies' daily live scan (SignalLiveHostedService). -->
+      <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/signal-live.mjs">
+        <RelativePath>scanner-runner/signal-live.mjs</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
       <ResolvedFileToPublish Include="../optionanalytics.client/scanner-runner/package.json">
         <RelativePath>scanner-runner/package.json</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>

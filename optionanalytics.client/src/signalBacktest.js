@@ -120,7 +120,7 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * `expiry` = the expiry of the options loaded (the run's `optionExpiry` - the weekly, BANKNIFTY's monthly), `isExpiry` =
  * the day IS that expiry (known before the open - the expiry calendar).
  */
-export function prepareDay(run, { underlying = null, prevProfile = null } = {}) {
+export function prepareDay(run, { underlying = null, prevProfile = null, minMinutes = 30 } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
   const session = (ms) => { const m = istMinute(ms); return m >= SESSION_FIRST && m <= SESSION_LAST }
   const spotBars = (run?.spotCandlesOneMinute ?? [])
@@ -128,7 +128,9 @@ export function prepareDay(run, { underlying = null, prevProfile = null } = {}) 
     .filter((b) => Number.isFinite(b.t) && b.c > 0 && session(b.t))
     .sort((a, b) => a.t - b.t)
     .filter((b, i, all) => i === 0 || b.t !== all[i - 1].t)
-  if (spotBars.length < 30) return { ok: false, reason: 'not enough spot minutes for the day' }
+  // A past day needs 30 minutes to be worth running; the live scan (`minMinutes` lower) reads today from early on - every
+  // minute is worked out from data up to its own end either way.
+  if (spotBars.length < minMinutes) return { ok: false, reason: 'not enough spot minutes for the day' }
   const n = spotBars.length
   const t = spotBars.map((b) => b.t)
   const date = new Date(t[0] + IST_MS).toISOString().slice(0, 10)
@@ -1298,6 +1300,9 @@ export function simulateRun(days, settings = {}) {
 // ---- The report -----------------------------------------------------------------------------------------------------
 
 export const MAX_BACKTEST_DAYS = 60
+// A run in the BACKGROUND (the server's queue - scanner-runner/signal-backtest.mjs) replays each day and keeps only its
+// outcome, so it can go much further back than the page, which holds every day it loaded.
+export const MAX_BACKGROUND_DAYS = 300
 
 /** The days a backtest runs: the weekdays from `from` to `to` ('YYYY-MM-DD'), before `today`, at most `max` (the latest
  *  kept). A holiday is in the list - the server says it has no data and the day is shown as not run. */

@@ -7,12 +7,14 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
+import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
+import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
@@ -343,6 +345,8 @@ export default function SignalBacktestPage() {
   const [viewing, setViewing] = useState(null)
   const [tradeFilter, setTradeFilter] = useState('all')
   const dates = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD')), [range])
+  // The same range in the background: up to MAX_BACKGROUND_DAYS (only each day's outcome is kept there).
+  const backgroundDays = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD'), MAX_BACKGROUND_DAYS).length, [range])
   const start = async () => {
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -392,6 +396,7 @@ export default function SignalBacktestPage() {
       message.error(`The report could not be opened: ${err.message}`)
     }
   }
+  // A background run's or a saved strategy's settings put on the page.
   const applyRunSettings = (job) => {
     const s = cleanBacktestSettings(job.settings)
     setUnderlying(s.underlying)
@@ -402,6 +407,9 @@ export default function SignalBacktestPage() {
     setExpiryDay(s.expiryDay)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
   }
+  // The saved strategies (the server's CSV) and their daily live scan.
+  const saved = useSavedStrategies()
+  const [saveOpen, setSaveOpen] = useState(false)
   // What the report cards show: the opened background run, else this page's run.
   const shown = useMemo(() => {
     if (viewing) {
@@ -495,12 +503,16 @@ export default function SignalBacktestPage() {
                 disabledDate={(d) => !d.isBefore(dayjs(), 'day')}
                 onChange={(v) => v && setRange([v[0].format('YYYY-MM-DD'), v[1].format('YYYY-MM-DD')])}
               />
-              <Text type="secondary" style={{ fontSize: 12 }}>{dates.length} trading day{dates.length === 1 ? '' : 's'} (weekdays; at most {MAX_BACKTEST_DAYS})</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {backgroundDays > dates.length
+                  ? `${backgroundDays} weekdays - here the latest ${MAX_BACKTEST_DAYS}; Run in background takes all ${backgroundDays} (up to ${MAX_BACKGROUND_DAYS})`
+                  : `${dates.length} trading day${dates.length === 1 ? '' : 's'} (weekdays; up to ${MAX_BACKTEST_DAYS} here, ${MAX_BACKGROUND_DAYS} in the background)`}
+              </Text>
               {running
                 ? <Button size="small" danger icon={<StopOutlined />} onClick={stop}>Stop</Button>
                 : <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={start} disabled={!dates.length}>Run backtest</Button>}
               <Tooltip title="Run it on the server instead - now, after the close or at a time. Close the browser; the report waits under Background runs.">
-                <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(true)} disabled={!dates.length || !hasLines}>Run in background</Button>
+                <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(true)} disabled={!backgroundDays || !hasLines}>Run in background</Button>
               </Tooltip>
             </Space>
 
@@ -619,6 +631,12 @@ export default function SignalBacktestPage() {
           </Space>
         </Card>
 
+        {saved.loaded && (
+          <SavedStrategiesCard
+            strategies={saved.strategies} today={saved.today} liveScan={saved.liveScan} refresh={saved.refresh} pageSettings={pageSettings}
+            onLoad={applyRunSettings} onSave={() => setSaveOpen(true)}
+          />
+        )}
         <BackgroundRunsCard jobs={jobs} refresh={refreshJobs} viewingId={viewing?.job.id ?? null} onOpen={openRun} onUse={applyRunSettings} />
 
         {shown && (
@@ -678,9 +696,15 @@ export default function SignalBacktestPage() {
           </>
         )}
       </Space>
+      {saveOpen && (
+        <SaveStrategyModal
+          settings={pageSettings} ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '')}
+          onClose={() => setSaveOpen(false)} onSaved={() => { setSaveOpen(false); saved.refresh() }}
+        />
+      )}
       {bgOpen && (
         <RunInBackgroundModal
-          settings={pageSettings} days={dates.length} telegram={bgTelegram} setTelegram={setBgTelegram}
+          settings={pageSettings} days={backgroundDays} telegram={bgTelegram} setTelegram={setBgTelegram}
           ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + (expiryDay !== 'rule' ? ` · on expiry day: ${expiryDay} options` : '')}
           onClose={() => setBgOpen(false)} onQueued={() => { setBgOpen(false); refreshJobs() }}
         />

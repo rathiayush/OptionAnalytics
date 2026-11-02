@@ -360,6 +360,12 @@ builder.Services.AddSingleton<StrategyTuningService>();
 // time picked on the page; the browser can be closed (SignalBacktestJobService / SignalBacktestController).
 builder.Services.AddSingleton<SignalBacktestJobService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SignalBacktestJobService>());
+// The Signal backtest's SAVED STRATEGIES (CSV) and their daily LIVE scan (scanner-runner/signal-live.mjs - entries / exits
+// and the day's report to Telegram, the history kept as CSV) - SignalStrategyStore / SignalLiveHostedService /
+// SignalStrategyController.
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.SignalStrategyStore>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.SignalLiveHostedService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.SignalStrategies.SignalLiveHostedService>());
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<KillSwitchService>());
