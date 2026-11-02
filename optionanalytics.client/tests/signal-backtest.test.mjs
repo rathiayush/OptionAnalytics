@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
   BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
-  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, treeFromRule,
+  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromRule,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -528,6 +528,46 @@ test('logic in a rule: it combines the lines (the mirror by the same logic); bad
   assert.equal(logicWithoutLine('not 2 and 1', 2, 2), '1')
   assert.equal(logicWithoutLine('1', 1, 1), '')
   assert.equal(logicWithoutLine('(1 and', 3, 1), '(1 and')   // does not read: left as typed
+})
+
+test('a tapped AND / OR changes only that one: AND-ed conditions get their own box, the numbers never move, tapping back undoes it', () => {
+  const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
+  const four = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow')] }
+  const logic = (t) => ruleFromTree(t).logic
+  const values = (t) => ruleFromTree(t).lines.map((l) => l.value)
+  // ANY of 1 - 4 (the user's rule): only 1 - 2 made AND.
+  const a = setConnectorAt(four, [], 1, 'and')
+  assert.equal(logic(a), '(1 AND 2) OR 3 OR 4')
+  assert.deepEqual(values(a), values(four))                                  // the conditions themselves untouched, in order
+  assert.equal(a.items[0].group.op, 'and')
+  // Then the one between (1 AND 2) and 3: it joins that box.
+  const b = setConnectorAt(a, [], 1, 'and')
+  assert.equal(logic(b), '(1 AND 2 AND 3) OR 4')
+  // Inside the box, 1 - 2 back to OR: 1 leaves it, the rest stays AND-ed.
+  const c = setConnectorAt(b, [0], 1, 'or')
+  assert.equal(logic(c), '1 OR (2 AND 3) OR 4')
+  // And 2 - 3 back to OR: the box is gone - as at the start.
+  assert.deepEqual(setConnectorAt(c, [1], 1, 'or'), four)
+  // From ALL of them: one made OR cuts it in two.
+  const all = { ...four, op: 'and' }
+  assert.equal(logic(setConnectorAt(all, [], 2, 'or')), '(1 AND 2) OR (3 AND 4)')
+  assert.equal(logic(setConnectorAt(all, [], 3, 'or')), '(1 AND 2 AND 3) OR 4')
+  // A NOT stays on its group.
+  assert.equal(logic(setConnectorAt({ ...all, not: true }, [], 1, 'or')), 'NOT (1 OR (2 AND 3 AND 4))')
+  // Two items: just the group's op.
+  assert.deepEqual(setConnectorAt({ op: 'or', not: false, items: [L('above'), L('below')] }, [], 1, 'and'), { op: 'and', not: false, items: [L('above'), L('below')] })
+  // Nothing to change / out of range: the same tree.
+  assert.equal(setConnectorAt(four, [], 1, 'or'), four)
+  assert.equal(setConnectorAt(four, [], 0, 'and'), four)
+  assert.equal(setConnectorAt(four, [], 4, 'and'), four)
+  // At the deepest level a group can have, a change that would need another box is not made.
+  let deep = four
+  for (let k = 0; k < MAX_GROUP_DEPTH; k++) deep = { op: k % 2 ? 'or' : 'and', not: false, items: [L('above'), { group: deep }] }
+  const path = Array.from({ length: MAX_GROUP_DEPTH }, () => 1)
+  assert.equal(setConnectorAt(deep, path, 1, 'and'), deep)
+  // The rule the engine reads has the same brackets.
+  const r = normalizeRule({ tree: a, action: 'buyCE', mirror: false })
+  assert.equal(r.logic, '(1 AND 2) OR 3 OR 4')
 })
 
 test('the builder\'s tree: groups (Match ALL / ANY, NOT) of conditions and groups - the lines and the logic worked out from it', () => {

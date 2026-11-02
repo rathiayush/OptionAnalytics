@@ -480,7 +480,12 @@ When adding or changing a strategy:
   (`rule.tree` - `cleanTree`, `RuleGroup` / `ConditionRow` on the page): each group "Match ALL of these (AND)" or "ANY of
   these (OR)", a NOT tick, its CONDITIONS and its own GROUPS (+ Condition / + Group ( ) - a group inside a group is a pair
   of brackets, at most `MAX_GROUP_DEPTH` 5 deep): (1 AND 2) OR (3 AND (4 AND 5)) = ANY of [ALL of 1, 2 - ALL of 3, ALL of
-  4, 5]. Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
+  4, 5]. The group's ALL / ANY dropdown sets EVERY AND / OR in its box (asked about: "all of existing conditions are also
+  getting changed"), so each AND / OR BETWEEN two items is its own tap switch (`Connector`, `setConnectorAt`): only that
+  one changes - AND binds tighter, so a run of AND-ed items gets its own ALL box (ANY [1, 2, 3, 4], 1 - 2 tapped = (1 AND
+  2) OR 3 OR 4), a group left with its parent's op (no NOT) is taken into it (tapping back undoes it), the conditions and
+  their numbers never move; not made where it would need a box past MAX_GROUP_DEPTH. A hint under the rule says so; no
+  tooltips on a touch screen (a tap opened one over the conditions). Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
   (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI lead, "within %" of a wall, spot's move, the
   cumulative line's tolerance) and its own LOOK-BACK for what happened "in the last N min" (`windowed` - crossed, turned,
   broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default); the same indicator may be used twice. The engine still

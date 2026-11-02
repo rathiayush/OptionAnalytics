@@ -1,14 +1,14 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined } from '@ant-design/icons'
+import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
-import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, usePersistedState } from './shared.jsx'
+import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
   BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  mirrorIsSame, mirrorLines, normalizeRule, ruleText, tradesCsv,
+  mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv,
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
@@ -113,8 +113,30 @@ function ConditionRow({ line, no, onChange, onRemove }) {
   )
 }
 
+/** The AND / OR between two items of a group - a tap switches THAT one only (`setConnectorAt`: AND binds tighter, so a
+ *  run of AND-ed items gets its own box - the brackets); disabled where that would need a group deeper than allowed. */
+function Connector({ op, tree, path, k, onConnector, touch }) {
+  const other = op === 'and' ? 'or' : 'and'
+  const can = setConnectorAt(tree, path, k, other) !== tree
+  const button = (
+    <Button size="small" type="text" className="oa-rule-connector-btn" disabled={!can} onClick={() => onConnector(path, k, other)} aria-label={`${op.toUpperCase()} - tap to make it ${other.toUpperCase()}`}>
+      {op === 'and' ? 'AND' : 'OR'} <SwapOutlined />
+    </Button>
+  )
+  // No tooltip on a touch screen: a tap opened it over the conditions below (the hint under the rule says the same).
+  return (
+    <div className="oa-rule-connector">
+      {touch ? button : (
+        <Tooltip title={can ? `Make this one ${other.toUpperCase()} - only between these two (the others stay; AND binds tighter, so AND-ed conditions get a box of their own - the brackets)` : 'A group cannot go deeper here'}>
+          {button}
+        </Tooltip>
+      )}
+    </div>
+  )
+}
+
 /** A group: NOT, Match ALL / ANY, its conditions and groups (the brackets) - each group inside a box of its own. */
-function RuleGroup({ group, path, tree, numbers, onEdit, onRemove }) {
+function RuleGroup({ group, path, tree, numbers, onEdit, onRemove, onConnector, touch }) {
   const depth = path.length
   const edit = (fn) => onEdit(path, fn)
   const items = (fn) => edit((g) => ({ ...g, items: fn(g.items) }))
@@ -125,10 +147,12 @@ function RuleGroup({ group, path, tree, numbers, onEdit, onRemove }) {
         <Tooltip title="NOT: the group holds when what is inside it does NOT.">
           <Checkbox checked={group.not} onChange={(e) => edit((g) => ({ ...g, not: e.target.checked }))}><Text style={{ fontSize: 12 }}>NOT</Text></Checkbox>
         </Tooltip>
-        <Select
-          size="small" value={group.op} onChange={(op) => edit((g) => ({ ...g, op }))} style={{ width: 170 }}
-          options={[{ value: 'and', label: 'ALL of these (AND)' }, { value: 'or', label: 'ANY of these (OR)' }]}
-        />
+        <Tooltip title={touch ? null : 'Sets EVERY AND / OR in this box at once. To change just one, click the AND / OR between two conditions.'}>
+          <Select
+            size="small" value={group.op} onChange={(op) => edit((g) => ({ ...g, op }))} style={{ width: 170 }}
+            options={[{ value: 'and', label: 'ALL of these (AND)' }, { value: 'or', label: 'ANY of these (OR)' }]}
+          />
+        </Tooltip>
         <Space size={6} wrap className="oa-rule-group-add">
           <Button size="small" icon={<PlusOutlined />} onClick={() => items((list) => [...list, { line: freshLine(nextId(tree)) }])}>Condition</Button>
           {depth < MAX_GROUP_DEPTH && (
@@ -142,7 +166,7 @@ function RuleGroup({ group, path, tree, numbers, onEdit, onRemove }) {
       {group.items.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>Empty - add a condition or a group (an empty group is left out).</Text>}
       {group.items.map((it, k) => (
         <Fragment key={k}>
-          {k > 0 && <div className="oa-rule-connector">{group.op === 'and' ? 'AND' : 'OR'}</div>}
+          {k > 0 && <Connector op={group.op} tree={tree} path={path} k={k} onConnector={onConnector} touch={touch} />}
           {it.line
             ? <ConditionRow
                 line={it.line} no={numbers.get([...path, k].join('.'))}
@@ -150,7 +174,7 @@ function RuleGroup({ group, path, tree, numbers, onEdit, onRemove }) {
                 onRemove={() => items((list) => list.filter((_, j) => j !== k))}
               />
             : <RuleGroup
-                group={it.group} path={[...path, k]} tree={tree} numbers={numbers} onEdit={onEdit}
+                group={it.group} path={[...path, k]} tree={tree} numbers={numbers} onEdit={onEdit} onConnector={onConnector} touch={touch}
                 onRemove={() => items((list) => list.filter((_, j) => j !== k))}
               />}
         </Fragment>
@@ -248,6 +272,9 @@ export default function SignalBacktestPage() {
   // The rule is kept as its tree (the builder's); the lines and the logic the engine reads come from it (normalizeRule).
   const setRule = (change) => setStoredRule({ tree: rule.tree, action: rule.action, mirror: rule.mirror, ...change })
   const editTree = (path, fn) => setRule({ tree: editGroup(rule.tree, path, fn) })
+  // One AND / OR between two items switched - only that one (the brackets follow).
+  const setConnector = (path, k, op) => setRule({ tree: setConnectorAt(rule.tree, path, k, op) })
+  const touch = useMediaQuery('(hover: none), (max-width: 768px)')
   const numbers = useMemo(() => lineNumbers(rule.tree), [rule.tree])
   const hasLines = rule.lines.length > 0
   const mirrorSame = hasLines && mirrorIsSame(rule.lines)
@@ -428,10 +455,15 @@ export default function SignalBacktestPage() {
                 <Text strong>The rule</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND) or ANY (OR) for each group; a group inside a group is a pair of brackets</Text>
               </Space>
-              <RuleGroup group={rule.tree} path={[]} tree={rule.tree} numbers={numbers} onEdit={editTree} />
+              <RuleGroup group={rule.tree} path={[]} tree={rule.tree} numbers={numbers} onEdit={editTree} onConnector={setConnector} touch={touch} />
               <Space wrap size={[8, 8]} style={{ marginTop: 8, display: 'flex' }}>
                 <Button size="small" onClick={() => setRule({ tree: { op: 'and', not: false, items: [] } })} disabled={!hasLines}>Clear all</Button>
                 {hasLines && <Text type="secondary" style={{ fontSize: 12 }}>Logic: <Text code style={{ fontSize: 12 }}>{rule.logic}</Text></Text>}
+                {rule.lines.length > 1 && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {touch ? 'Tap' : 'Click'} an AND / OR between two conditions to change just that one; the ALL / ANY dropdown changes every one in its box.
+                  </Text>
+                )}
               </Space>
               <Space wrap size={[16, 8]} align="center" style={{ marginTop: 10 }}>
                 <Space size={4}>

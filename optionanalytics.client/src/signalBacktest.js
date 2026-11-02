@@ -758,6 +758,49 @@ export function ruleFromTree(tree) {
   return { lines, logic: text(cleanTree(tree), true) }
 }
 
+/**
+ * The tree with ONE AND / OR changed - the one between items `j - 1` and `j` of the group at `path` (each step a group's
+ * place in its parent's items) - every other kept, as the builder's connectors are tapped. AND binds tighter than OR, so
+ * a group whose connectors are mixed is cut at its ORs and each run of AND-ed items becomes an ALL group of its own (one
+ * item stays itself): ANY [1, 2, 3, 4] with 1 - 2 made AND is ANY [ALL [1, 2], 3, 4] - (1 AND 2) OR 3 OR 4. A group
+ * left with the same op as the group it is in (and no NOT) is taken into it, so tapping it back undoes it. The order of
+ * the conditions - their numbers - never changes. At the deepest level a group can have (`MAX_GROUP_DEPTH`) a change
+ * that would need one more level is not made.
+ */
+export function setConnectorAt(tree, path, j, op) {
+  const want = op === 'or' ? 'or' : 'and'
+  const at = (g, p) => (p.length ? at(g.items[p[0]]?.group, p.slice(1)) : g)
+  const group = at(tree, path)
+  const n = group?.items?.length ?? 0
+  if (!group || j < 1 || j >= n) return tree
+  const joins = Array.from({ length: n - 1 }, () => group.op)
+  joins[j - 1] = want
+  if (joins[j - 1] === group.op && joins.every((x) => x === group.op)) return tree
+  // Same-op groups (no NOT) taken into the one they are in.
+  const flat = (items, o) => items.flatMap((it) => (it.group && !it.group.not && it.group.op === o ? it.group.items : [it]))
+  let next
+  if (joins.every((x) => x === joins[0])) next = { ...group, op: joins[0], items: flat(group.items, joins[0]) }
+  else {
+    if (path.length >= MAX_GROUP_DEPTH) return tree
+    const runs = [[group.items[0]]]
+    for (let k = 1; k < n; k++) {
+      if (joins[k - 1] === 'or') runs.push([group.items[k]])
+      else runs.at(-1).push(group.items[k])
+    }
+    next = { ...group, op: 'or', items: flat(runs.map((r) => (r.length === 1 ? r[0] : { group: { op: 'and', not: false, items: flat(r, 'and') } })), 'or') }
+  }
+  // Put it back; one that now matches its parent's op (and has no NOT) is taken into the parent.
+  const put = (g, p) => {
+    if (p.length === 1) {
+      const k = p[0]
+      const merge = !next.not && next.op === g.op
+      return { ...g, items: g.items.flatMap((it, i) => (i !== k ? [it] : merge ? next.items : [{ group: next }])) }
+    }
+    return { ...g, items: g.items.map((it, i) => (i === p[0] ? { group: put(it.group, p.slice(1)) } : it)) }
+  }
+  return path.length ? put(tree, path) : next
+}
+
 /** A rule's tree from its lines and logic: the typed logic's own structure (same-op chains as one group), else the lines'
  *  AND / OR (AND first: each run of AND-ed lines a group, ANY of them). Lines the logic leaves out are not in it. */
 export function treeFromRule({ lines = [], logic = '' } = {}) {

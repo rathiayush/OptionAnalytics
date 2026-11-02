@@ -256,7 +256,10 @@ body {
 .oa-rule-group--d3 { border-left-color: #9254de; }
 .oa-rule-group-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
 .oa-rule-group-head .oa-rule-group-add { margin-left: auto; }
-.oa-rule-connector { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: rgba(255, 255, 255, 0.45); padding-left: 10px; }
+.oa-rule-connector { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: rgba(255, 255, 255, 0.45); padding-left: 4px; }
+/* The AND / OR between two conditions: a tap switches that one only (setConnectorAt). */
+.oa-rule-connector .oa-rule-connector-btn { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: rgba(255, 255, 255, 0.6); height: 22px; padding: 0 6px; }
+.oa-rule-connector .oa-rule-connector-btn .anticon { font-size: 10px; opacity: 0.7; }
 @media (max-width: 600px) {
   .oa-rule-group .oa-rule-group { margin-left: 4px; }
   .oa-rule-group-head .oa-rule-group-add { margin-left: 0; }
