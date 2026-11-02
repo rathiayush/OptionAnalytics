@@ -6,10 +6,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
+  BACKTEST_DEFAULTS, DEFAULT_WINDOW, dayLevel, MAX_GROUP_DEPTH, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
   logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromLogic, treeFromRule, mixedLogicReadings,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
+import { tradeCharges } from '../src/tradeCharges.js'
 
 const MIN = 60_000
 const T915 = Date.parse('2026-10-05T09:15:00+05:30')
@@ -877,6 +878,95 @@ test('P&L is net of the charges: STT 0.15% of the sell side\'s premium and ₹20
   // The report adds them up: net = gross - charges.
   const s = summarize([t, set])
   assert.ok(Math.abs(s.net - (s.gross - s.charges)) < 1e-9)
+})
+
+test('the day\'s max loss / max profit: the premium where the day\'s net reaches it (charges in) - one more stop and target of the trade', () => {
+  const buy = { side: 'CE', strike: 25000, action: 'BUY' }
+  const sell = { side: 'CE', strike: 25000, action: 'SELL' }
+  // Exact, charges included: out at the level, the day's net (the trades before + this one, net) is the limit.
+  const rates = { sttPct: 0.15, brokeragePerOrder: 20, otherPerTrade: 0 }
+  const net = (option, exit) => tradeCharges({ action: option.action, premium: 100, current: exit, lots: 1, lotSize: 65 }, rates).net
+  for (const option of [buy, sell]) for (const realized of [0, -300, 250]) for (const amount of [-500, 1000]) {
+    const level = dayLevel(option, 100, amount, { realized, qty: 65, stt: 0.15, flat: 40 })
+    assert.ok(Math.abs(realized + net(option, level) - amount) < 1e-6, `${option.action} ${realized} ${amount}`)
+  }
+  // No charges: plain points - ₹650 on 65 is 10 points; a sold option's loss is above its entry.
+  assert.equal(dayLevel(buy, 100, -650, { qty: 65 }), 90)
+  assert.equal(dayLevel(sell, 100, -650, { qty: 65 }), 110)
+  const at = (bars) => fakeDay({ n: 20, legs: { ce: { 25000: (i) => bars[i] ?? { o: 100, h: 100, l: 100, c: 100 } } } })
+  const day = { maxLoss: 650, maxProfit: 1300, qty: 65 }     // -10 / +20 points
+  const dip = at({ 3: { o: 100, h: 101, l: 85, c: 88 } })
+  const pop = at({ 3: { o: 100, h: 125, l: 99, c: 120 } })
+  const what = (tr) => [tr.exit, tr.exitReason, tr.exitIndex]
+  // A stop: the day's max loss when it is the tighter, else the trade's own stop.
+  assert.deepEqual(what(simulateTrade(dip, 0, buy, { slPct: 20, targetPct: 0, day })), [90, 'Day max loss', 3])
+  assert.deepEqual(what(simulateTrade(dip, 0, buy, { slPct: 5, targetPct: 0, day })), [95, 'Stop', 3])
+  // A target: the day's max profit when it is the nearer, else the trade's own target.
+  assert.deepEqual(what(simulateTrade(pop, 0, buy, { slPct: 0, targetPct: 0, day })), [120, 'Day max profit', 3])
+  assert.deepEqual(what(simulateTrade(pop, 0, buy, { slPct: 0, targetPct: 10, day })), [110, 'Target', 3])
+  // A bar opening through it fills at its open.
+  assert.deepEqual(what(simulateTrade(at({ 3: { o: 80, h: 82, l: 78, c: 80 } }), 0, buy, { slPct: 0, targetPct: 0, day })), [80, 'Day max loss (opened through it)', 3])
+  // The trades closed earlier in the day count: ₹390 already lost leaves 4 points.
+  assert.deepEqual(what(simulateTrade(dip, 0, buy, { slPct: 0, targetPct: 0, day: { ...day, realized: -390 } })), [96, 'Day max loss', 3])
+  // SOLD: the loss is above the entry, the profit below.
+  assert.deepEqual(what(simulateTrade(at({ 3: { o: 100, h: 115, l: 99, c: 112 } }), 0, sell, { slPct: 0, targetPct: 0, day })), [110, 'Day max loss', 3])
+  assert.deepEqual(what(simulateTrade(at({ 3: { o: 100, h: 101, l: 75, c: 78 } }), 0, sell, { slPct: 0, targetPct: 0, day })), [80, 'Day max profit', 3])
+  // 0 = off.
+  assert.equal(simulateTrade(dip, 0, buy, { slPct: 0, targetPct: 0, day: { maxLoss: 0, maxProfit: 0, qty: 65 } }).exitReason, 'Day end')
+  assert.equal(simulateTrade(dip, 0, buy, { slPct: 0, targetPct: 0 }).exitReason, 'Day end')
+})
+
+test('the day\'s limits over a day: reached - the open trade out at it, no trade after it; 0 = off, the trades as before', () => {
+  // Price crossing VWAP every 20 minutes (the rule and its mirror take turns); every premium sliding 0.2 a minute - each
+  // trade loses 1 point (₹65 a lot of 65) in its 5 minutes.
+  const p = (i) => 200 - 0.2 * i
+  const fall = (i) => ({ o: p(i), h: p(i), l: p(i) - 0.2, c: p(i) - 0.2 })
+  const price = (i) => flat(Math.floor(i / 20) % 2 ? 25020 : 24980)()
+  const d = fakeDay({ price, vwap: () => 25000, legs: { ce: { 25000: fall }, pe: { 25000: fall } } })
+  const base = { rule: lines([{ id: 'vwap', value: 'above' }], 'buyCE', { mirror: true }), lotSize: 65, timeStopMin: 5, cooldownMin: 10, maxTradesPerDay: 10 }
+  const run = (more) => simulateDay(d, { ...base, ...more })
+  const total = (r) => r.trades.reduce((a, t) => a + t.net, 0)
+  // Off (the default, or 0): ten trades, nothing stops the day.
+  const off = run({})
+  assert.equal(off.trades.length, 10)
+  assert.equal(off.dayLimit, null)
+  assert.deepEqual(run({ maxDayLoss: 0, maxDayProfit: 0 }), off)
+  assert.ok(off.trades.every((t) => t.exitReason === 'Time stop 5 min'))
+  // Max loss ₹400, no charges: six trades of -₹65, the seventh out at the level - the day ends at exactly -₹400.
+  const gross = run({ maxDayLoss: 400, charges: false })
+  assert.equal(gross.trades.length, 7)
+  assert.equal(gross.trades.at(-1).exitReason, 'Day max loss')
+  assert.ok(Math.abs(total(gross) + 400) < 1e-6)
+  assert.equal(gross.dayLimit, 'loss')
+  const after = gross.signals.filter((x) => x.time > gross.trades.at(-1).exitTime && /^the day's max loss reached$/.test(x.skipped ?? ''))
+  assert.ok(after.length > 0)
+  assert.ok(!gross.signals.some((x) => x.time > gross.trades.at(-1).exitTime && x.taken))
+  // With the charges (~₹124 a trade, ~₹58 of it charges): -₹450 is reached inside the fourth trade, at the level, net.
+  const net = run({ maxDayLoss: 450 })
+  assert.equal(net.trades.length, 4)
+  assert.equal(net.trades.at(-1).exitReason, 'Day max loss')
+  assert.ok(Math.abs(total(net) + 450) < 1e-6)
+  // -₹400: after three (-₹371) there is no room left for a trade's own charges - the day ends there, no trade that can
+  // only lose past the limit.
+  const noRoom = run({ maxDayLoss: 400 })
+  assert.equal(noRoom.trades.length, 3)
+  assert.equal(noRoom.dayLimit, 'loss')
+  assert.ok(total(noRoom) > -400)
+  assert.ok(noRoom.signals.some((x) => /no room for this trade's charges/.test(x.skipped ?? '')))
+  // A trade's own stop that leaves the day above its limit does not end the day.
+  assert.equal(run({ maxDayLoss: 2000 }).trades.length, 10)
+  // Max profit: premiums rising 0.2 a minute - ₹65 a trade; ₹150 is reached inside the third, at the level.
+  const q = (i) => 100 + 0.2 * i
+  const rise = (i) => ({ o: q(i), h: q(i) + 0.2, l: q(i), c: q(i) + 0.2 })
+  const up = fakeDay({ price, vwap: () => 25000, legs: { ce: { 25000: rise }, pe: { 25000: rise } } })
+  const won = simulateDay(up, { ...base, maxDayProfit: 150, charges: false })
+  assert.equal(won.trades.length, 3)
+  assert.equal(won.trades.at(-1).exitReason, 'Day max profit')
+  assert.ok(Math.abs(total(won) - 150) < 1e-6)
+  assert.equal(won.dayLimit, 'profit')
+  assert.ok(won.signals.some((x) => /^the day's max profit reached$/.test(x.skipped ?? '')))
+  // Both set: whichever comes first.
+  assert.equal(simulateDay(up, { ...base, maxDayLoss: 100, maxDayProfit: 150, charges: false }).dayLimit, 'profit')
 })
 
 test('the synthetic day end to end: buy and sell, the call and the put; every trade exits after it enters', () => {

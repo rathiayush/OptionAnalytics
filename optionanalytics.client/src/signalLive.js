@@ -68,7 +68,7 @@ export function exitText(name, underlying, t) {
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
 export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null } = {}) {
-  const { trades, signals } = simulateDay(day, engine)
+  const { trades, signals, dayLimit } = simulateDay(day, engine)
   const isOpen = (t) => !complete && t.exitReason === 'Day end'
   const events = []
   for (const t of trades) {
@@ -79,7 +79,7 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
   }
   events.sort((a, b) => a.at - b.at || (a.kind === b.kind ? 0 : a.kind === 'entry' ? -1 : 1))
   const closed = trades.filter((t) => !isOpen(t))
-  return { trades, closed, open: trades.filter(isOpen), events, signals: signals.length, summary: summarize(closed) }
+  return { trades, closed, open: trades.filter(isOpen), events, signals: signals.length, dayLimit: dayLimit ?? null, summary: summarize(closed) }
 }
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null)
@@ -90,6 +90,7 @@ export function dayRecord(day, result) {
     day: {
       date: day.date, underlying: day.underlying, trades: s.trades, wins: s.wins, losses: s.losses, winRate: r2(s.winRate),
       net: r2(s.net), gross: r2(s.gross), charges: r2(s.charges), points: r2(s.points), signals: result.signals,
+      limit: result.dayLimit ?? '',
     },
     trades: result.closed.map((t) => ({
       date: t.date, side: t.strategy, signal: t.dir > 0 ? 'bullish' : 'bearish', action: t.action, option: `${t.strike} ${t.side}`,
@@ -109,7 +110,8 @@ export function dayReportText(name, day, result) {
     lines.push(`Net ${rupees(s.net)} after ${rupees(s.charges)} charges (gross ${rupees(s.gross)}) · ${s.trades} trade${s.trades === 1 ? '' : 's'} · ${Math.round(s.winRate ?? 0)}% win`)
     result.closed.forEach((t, k) => lines.push(`${k + 1}. ${clock(t.entryTime)} - ${clock(t.exitTime)} ${tradeName(t)} ${t.entry.toFixed(2)} → ${t.exit.toFixed(2)} ${t.exitReason} ${rupees(t.net)}${tags(t).length ? ` (${tags(t).join(', ')})` : ''}`))
   }
+  if (result.dayLimit) lines.push(`The day's max ${result.dayLimit} was reached - no more trades after it.`)
   const skipped = result.signals - result.trades.length
-  if (skipped > 0) lines.push(`${skipped} more signal${skipped === 1 ? '' : 's'} not taken (a trade open, the day's limit, the cooldown or outside 09:30 - 14:45).`)
+  if (skipped > 0) lines.push(`${skipped} more signal${skipped === 1 ? '' : 's'} not taken (a trade open, the day's limits, the cooldown or outside 09:30 - 14:45).`)
   return lines.join('\n')
 }

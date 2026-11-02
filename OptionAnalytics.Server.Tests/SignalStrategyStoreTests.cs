@@ -131,7 +131,7 @@ public sealed class SignalStrategyStoreTests : IDisposable
         var telegrams = new List<string>();
         var store = Store(telegrams);
         var s = store.Create("me@x.com", Request("S"), Now).Strategy!;
-        var day = new JsonObject { ["date"] = "2026-10-26", ["underlying"] = "NIFTY", ["trades"] = 2, ["wins"] = 1, ["losses"] = 1, ["winRate"] = 50, ["net"] = -1234.5, ["gross"] = -1100, ["charges"] = 134.5, ["points"] = -17.2, ["signals"] = 3 };
+        var day = new JsonObject { ["date"] = "2026-10-26", ["underlying"] = "NIFTY", ["trades"] = 2, ["wins"] = 1, ["losses"] = 1, ["winRate"] = 50, ["net"] = -1234.5, ["gross"] = -1100, ["charges"] = 134.5, ["points"] = -17.2, ["signals"] = 3, ["limit"] = "loss" };
         var trades = new JsonArray
         {
             new JsonObject { ["side"] = "rule", ["signal"] = "bullish", ["action"] = "BUY", ["option"] = "25000 CE", ["entryTime"] = "10:01", ["entry"] = 100, ["exitTime"] = "10:31", ["exit"] = 80, ["exitReason"] = "Stop", ["points"] = -20, ["net"] = -1400, ["why"] = "Buy CE: a, b" },
@@ -149,6 +149,7 @@ public sealed class SignalStrategyStoreTests : IDisposable
         var only = Assert.Single(history.Days);
         Assert.Equal("-1000", only["net"]);
         Assert.Equal(Now.ToString("O"), only["reportedUtc"]);                                      // when it was first reported
+        Assert.Equal("loss", only["limit"]);                                                     // the day's max loss ended it
         Assert.Single(history.Trades);
         Assert.Equal("Buy CE: a, b", history.Trades[0]["why"]);
         Assert.Equal("-1400", history.Trades[0]["net"]);                                         // a negative number is no formula

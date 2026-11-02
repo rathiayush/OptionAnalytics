@@ -574,7 +574,17 @@ When adding or changing a strategy:
   target and TRAILING STOP in % of the entry premium or in premium POINTS (`levelUnit`, `LEVEL_UNITS`; 0 = none): the
   trail is the paper panel's (`optionTrailLevel` / `tighterStop` from `optionTrail.js`) - `trailGap` behind the best
   premium reached (a bought option's highest high, a sold one's lowest low) once `trailStart` in profit, moved after each
-  completed bar (a bar is judged with the trail it had before it), only tightening, the tighter of it and the SL the stop. The
+  completed bar (a bar is judged with the trail it had before it), only tightening, the tighter of it and the SL the stop.
+  DAY LIMITS (asked for - "max loss of day / max return of day, 0 is by default off"): `maxDayLoss` / `maxDayProfit` in
+  rupees (0 = off, the default - nothing changes), on the page beside Max / cooldown: the day's NET P&L - the trades closed
+  that day and the one open, after charges - is held to them: each trade gets one more stop ("Day max loss") and one more
+  target ("Day max profit") at the premium where the day's net reaches the limit (`dayLevel` - solved exactly with the STT
+  on its sell side and the flat charges, so out at the level the day is at the limit to the rupee; a bar opening through
+  it fills at its open, as any stop); the tighter stop / nearer target wins. Once reached, every later signal is skipped
+  ("the day's max loss / profit reached"), and a trade with no room left for its own charges is not taken (the day ends
+  there - "no room for this trade's charges"). `simulateDay` returns `dayLimit`; the day table tags the day "max loss /
+  profit", the report heading names the limits; background runs, saved strategies and the live scan take them with the
+  rest (the live day report says the limit was reached; the strategy's day history keeps it - `limit` column). The
   report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
   factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
   trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places

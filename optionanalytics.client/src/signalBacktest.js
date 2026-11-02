@@ -28,7 +28,7 @@ import {
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { gexDay } from './gex.js'
 import { straddleRead } from './straddle.js'
-import { tradeCharges } from './tradeCharges.js'
+import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 
 const MIN = 60_000
@@ -1175,6 +1175,9 @@ export const BACKTEST_DEFAULTS = {
   // SELL side's premium (a bought option's exit, a sold one's entry), brokerage on each order (the buy and the sell), and
   // anything else a trade - none by default. Each can be set on the page.
   sttPct: 0.15, brokeragePerOrder: 20, otherPerTrade: 0,
+  // The DAY's limits in rupees (0 = off): once the day's P&L - the trades closed today and the one open, net of charges -
+  // reaches -maxDayLoss or +maxDayProfit, the open trade exits there and no trade is taken the rest of the day.
+  maxDayLoss: 0, maxDayProfit: 0,
   // On the options' EXPIRY DAY: trade as the rule says ('rule'), or always BUY / always SELL ('buy' / 'sell') - the
   // signal's direction kept (a bullish one buys the call or sells the put).
   expiryDay: 'rule',
@@ -1218,6 +1221,19 @@ function premiumAt(packed, i) {
 export const LEVEL_UNITS = ['pct', 'pts']
 
 /**
+ * The premium at which the DAY's P&L reaches `amount` (-max loss or +max profit): the trades closed today (`realized`) and
+ * this one, `qty` units, net of its charges when they are on - STT (`stt` %) on its sell side (a bought option's exit, a
+ * sold one's entry) and `flat` rupees (brokerage on both orders and anything else). Solved for the exit premium P:
+ * bought - realized + (P - entry) x qty - stt x P x qty - flat = amount; sold - realized + (entry - P) x qty - stt x entry
+ * x qty - flat = amount.
+ */
+export function dayLevel(option, entry, amount, { realized = 0, qty, stt = 0, flat = 0 }) {
+  const s = stt / 100
+  if (option.action === 'SELL') return entry + (realized - amount - s * entry * qty - flat) / qty
+  return (entry * qty + flat + amount - realized) / (qty * (1 - s))
+}
+
+/**
  * One trade, entered at minute `i`'s close of the option and managed from minute i + 1 on its 1-minute bars. `slPct` /
  * `targetPct` / `trailGap` / `trailStart` are in `levelUnit` - 'pct' (% of the entry premium) or 'pts' (premium points);
  * 0 = none. The stop before the target in the same bar; a bar opening through the stop fills at its open. The TRAILING
@@ -1225,7 +1241,7 @@ export const LEVEL_UNITS = ['pct', 'pts']
  * high, a sold one's lowest low), once the trade is `trailStart` in profit; it moves after each completed bar - a bar is
  * judged with the trail it had before it - and only tightens; the tighter of it and the fixed stop is the stop.
  */
-export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10' }) {
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
@@ -1234,18 +1250,26 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
   const slPts = size(slPct), targetPts = size(targetPct), gap = size(trailGap), start = size(trailStart)
   const fixed = slPts > 0 ? (short ? entry + slPts : entry - slPts) : null
   const target = targetPts > 0 ? (short ? entry - targetPts : entry + targetPts) : null
+  // The day's limits as premiums for this trade (`dayLevel`): one more stop (Day max loss) and one more target (Day max profit).
+  const dayLoss = day?.maxLoss > 0 ? dayLevel(option, entry, -day.maxLoss, day) : null
+  const dayProfit = day?.maxProfit > 0 ? dayLevel(option, entry, day.maxProfit, day) : null
   const off = clockMinute(squareOff) ?? 15 * 60 + 10
   let last = entry, exit = null, best = entry, trail = null
   for (let j = i + 1; j < d.n; j++) {
     const b = barAt(packed, j)
     const minute = istMinute(d.t[j])
     if (b) {
-      const stop = tighterStop(option.action, fixed, trail)
+      let stop = tighterStop(option.action, fixed, trail)
       const trailing = stop != null && trail != null && stop === trail && stop !== fixed
-      const name = trailing ? 'Trailing stop' : 'Stop'
+      let name = trailing ? 'Trailing stop' : 'Stop'
+      // The day's max loss is a stop too - the tighter one stops the trade.
+      if (dayLoss != null && (stop == null || (short ? dayLoss < stop : dayLoss > stop))) { stop = dayLoss; name = 'Day max loss' }
+      // The day's max profit is a target too - the nearer one takes it.
+      let take = target, takeName = 'Target'
+      if (dayProfit != null && (take == null || (short ? dayProfit > take : dayProfit < take))) { take = dayProfit; takeName = 'Day max profit' }
       if (stop != null && (short ? b.o >= stop : b.o <= stop)) exit = { j, price: b.o, reason: `${name} (opened through it)` }
       else if (stop != null && (short ? b.h >= stop : b.l <= stop)) exit = { j, price: stop, reason: name }
-      else if (target != null && (short ? b.l <= target : b.h >= target)) exit = { j, price: target, reason: 'Target' }
+      else if (take != null && (short ? b.l <= take : b.h >= take)) exit = { j, price: take, reason: takeName }
       last = b.c
       // After the bar: the best premium so far and the trail from it (never looser than the one it had).
       best = short ? Math.min(best, b.l) : Math.max(best, b.h)
@@ -1266,7 +1290,9 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
  * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
  * `lastEntry`. On the options' expiry day (`d.isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
- * signal's direction kept: bullish buys the call or sells the put). Returns `{ trades, signals }` - every trade `{ date,
+ * signal's direction kept: bullish buys the call or sells the put). `maxDayLoss` / `maxDayProfit` (rupees, 0 = off): once the
+ * day's net P&L - the closed trades and the open one - reaches either, the open trade exits at it ("Day max loss" / "Day
+ * max profit") and every later signal is skipped. Returns `{ trades, signals, dayLimit }` ('loss' | 'profit' | null) - every trade `{ date,
  * strategy ('rule' | 'mirror'), dir, why, side, strike, action, expiryDay, overridden, entryTime, exitTime, entry, exit,
  * exitReason, points, gross, charges, net, holdMin }`; every signal
  * `{ strategy, time, dir, why, taken, skipped }`.
@@ -1284,6 +1310,15 @@ export function simulateDay(d, settings = {}) {
   const minuteOfSignal = (k) => (view.at ? view.at[k] : k)
   let busyUntil = -1
   let count = 0
+  // The day's P&L so far (closed trades, net) and why the day stopped taking trades (its max loss / profit reached).
+  let realized = 0
+  let dayLimit = null
+  const rates = s.chargesCfg ?? { sttPct: s.sttPct, brokeragePerOrder: s.brokeragePerOrder, otherPerTrade: s.otherPerTrade }
+  // The day's limits as each trade's extra stop / target (`dayLevel`), with the same charges the trade's net takes off.
+  const cr = chargeRates(rates)
+  const dayCfg = s.maxDayLoss > 0 || s.maxDayProfit > 0
+    ? { maxLoss: s.maxDayLoss, maxProfit: s.maxDayProfit, qty: s.lots * lotSize, stt: s.charges ? cr.sttPct : 0, flat: s.charges ? 2 * cr.brokeragePerOrder + cr.otherPerTrade : 0 }
+    : null
   // The first candle whose close is in the entry window: a rule already holding then signals on it.
   let openAt = 0
   while (openAt < view.n && istMinute(view.t[openAt]) < from) openAt++
@@ -1301,23 +1336,41 @@ export function simulateDay(d, settings = {}) {
     if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
     if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
     if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
+    if (dayLimit) { row.skipped = `the day's max ${dayLimit} reached`; continue }
     const option = optionFor(dir, mode, d.atm[i], d.step, s.moneyness)
-    const trade = simulateTrade(d, i, option, s)
+    const day = dayCfg && { ...dayCfg, realized }
+    // No room left under the day's max loss for this trade's own charges (out at its entry would already breach it): the
+    // day is done - not a trade that can only exit at once at a loss past the limit.
+    if (day?.maxLoss > 0) {
+      const entry = premiumAt((option.side === 'CE' ? d.ce : d.pe).get(option.strike), i)
+      const level = entry > 0 ? dayLevel(option, entry, -day.maxLoss, day) : null
+      if (level != null && (option.action === 'SELL' ? level <= entry : level >= entry)) {
+        dayLimit = 'loss'
+        row.skipped = `the day's max loss reached (no room for this trade's charges)`
+        continue
+      }
+    }
+    const trade = simulateTrade(d, i, option, { ...s, day })
     if (!trade) { row.skipped = `no premium for ${option.strike} ${option.side}`; continue }
     row.taken = true
     count++
     busyUntil = trade.exitIndex + Math.max(0, Math.round(s.cooldownMin))
     const qty = { lots: s.lots, lotSize }
-    const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, s.chargesCfg ?? { sttPct: s.sttPct, brokeragePerOrder: s.brokeragePerOrder, otherPerTrade: s.otherPerTrade })
+    const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, rates)
     const gross = trade.points * s.lots * lotSize
+    const net = s.charges && money ? money.net : gross
     trades.push({
       date: d.date, strategy: sig.side, dir, why, ...option, expiryDay: Boolean(d.isExpiry), overridden,
       entryTime: d.t[trade.entryIndex], exitTime: d.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
-      points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net: s.charges && money ? money.net : gross,
+      points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net,
       holdMin: Math.round((d.t[trade.exitIndex] - d.t[trade.entryIndex]) / MIN),
     })
+    // The day's limits: reached (by this trade's own stop / target, or at the limit itself) - no more trades today.
+    realized += net
+    if (s.maxDayLoss > 0 && realized <= -s.maxDayLoss + 0.01) dayLimit = 'loss'
+    else if (s.maxDayProfit > 0 && realized >= s.maxDayProfit - 0.01) dayLimit = 'profit'
   }
-  return { trades, signals }
+  return { trades, signals, dayLimit }
 }
 
 /** The whole run, day by day in date order: { trades, signals }. */

@@ -84,6 +84,19 @@ test('when the session is over every trade is closed - the day\'s report and its
   assert.match(text, new RegExp(`${fullTrades.length} trades`))
   assert.match(text, /\nNet −?₹[\d,]+ after ₹[\d,]+ charges \(gross −?₹[\d,]+\)/)
   assert.equal(text.split('\n').filter((l) => /^\d+\. /.test(l)).length, fullTrades.length)
+  assert.equal(live.dayLimit, null)
+  assert.equal(record.day.limit, '')
+  assert.doesNotMatch(text, /max (loss|profit) was reached/)
+  // A day the strategy's own max loss / profit ended: its report says so, and the day ends with the trade that reached it.
+  const first = fullTrades[0]
+  const which = first.net >= 0 ? 'profit' : 'loss'
+  const capped = engineSettings(cleanBacktestSettings({ ...SETTINGS, [which === 'profit' ? 'maxDayProfit' : 'maxDayLoss']: Math.abs(first.net) / 2 }))
+  const limited = liveDayEvents(day, capped, { name: 'VWAP cross', complete: true, nowMs: at('15:35') })
+  assert.equal(limited.dayLimit, which)
+  assert.equal(limited.closed.length, 1)
+  assert.equal(limited.closed[0].exitReason, `Day max ${which}`)
+  assert.equal(dayRecord(day, limited).day.limit, which)                 // kept in the strategy's day history
+  assert.match(dayReportText('VWAP cross', day, limited), new RegExp(`\\nThe day's max ${which} was reached - no more trades after it\\.`))
   // A day with no trade says so.
   const quiet = liveDayEvents(day, engineSettings(cleanBacktestSettings({ ...SETTINGS, rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'ib', value: 'inside' } }] }, action: 'buyCE', mirror: false }, maxTradesPerDay: 1 })), { complete: true })
   assert.match(dayReportText('Quiet', day, { ...quiet, closed: [], trades: [], signals: 0, summary: { ...quiet.summary, trades: 0 } }), /No trades today\./)

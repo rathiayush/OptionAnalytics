@@ -42,6 +42,8 @@ const STORE = {
   timeStopMin: 'optionanalytics.signalBacktest.timeStopMin',
   maxTradesPerDay: 'optionanalytics.signalBacktest.maxTradesPerDay',
   cooldownMin: 'optionanalytics.signalBacktest.cooldownMin',
+  maxDayLoss: 'optionanalytics.signalBacktest.maxDayLoss',
+  maxDayProfit: 'optionanalytics.signalBacktest.maxDayProfit',
   lots: 'optionanalytics.signalBacktest.lots',
   charges: 'optionanalytics.signalBacktest.charges',
   sttPct: 'optionanalytics.signalBacktest.sttPct',
@@ -322,6 +324,9 @@ export default function SignalBacktestPage() {
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   const [maxTradesPerDay, setMaxTradesPerDay] = usePersistedState(STORE.maxTradesPerDay, BACKTEST_DEFAULTS.maxTradesPerDay)
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
+  // The day's limits in rupees (0 = off): the day stops at its max loss / max profit.
+  const [maxDayLoss, setMaxDayLoss] = usePersistedState(STORE.maxDayLoss, BACKTEST_DEFAULTS.maxDayLoss)
+  const [maxDayProfit, setMaxDayProfit] = usePersistedState(STORE.maxDayProfit, BACKTEST_DEFAULTS.maxDayProfit)
   const [lots, setLots] = usePersistedState(STORE.lots, BACKTEST_DEFAULTS.lots)
   const [charges, setCharges] = usePersistedState(STORE.charges, BACKTEST_DEFAULTS.charges)
   // The charges taken off the P&L: STT on the sell side, brokerage on each order, anything else a trade.
@@ -389,9 +394,9 @@ export default function SignalBacktestPage() {
   // The settings as set - held to their ranges exactly as a background run holds them (cleanBacktestSettings).
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
-    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
+    moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
     timeframe, expiryDay,
-  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder,
+  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
@@ -420,6 +425,7 @@ export default function SignalBacktestPage() {
     setStoredRule(s.rule)
     setMoneyness(s.moneyness); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit); setTrailGap(s.trailGap); setTrailStart(s.trailStart)
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
+    setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
     setSttPct(s.sttPct); setBrokeragePerOrder(s.brokeragePerOrder); setOtherPerTrade(s.otherPerTrade)
     setExpiryDay(s.expiryDay)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
@@ -474,7 +480,15 @@ export default function SignalBacktestPage() {
     { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 90, align: 'right', render: (v) => rupees(v) },
   ]
   const dayColumns = [
-    { title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 130, render: (v, r) => <Space size={4}>{dayjs(v).format('ddd D MMM')}{r.expiry && <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag>}</Space> },
+    {
+      title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 150, render: (v, r) => (
+        <Space size={4} wrap>
+          {dayjs(v).format('ddd D MMM')}
+          {r.expiry && <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag>}
+          {r.limit && <Tag color={r.limit === 'loss' ? 'red' : 'green'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>max {r.limit}</Tag>}
+        </Space>
+      ),
+    },
     { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right', render: (v, r) => (r.ok ? v : <Tooltip title={r.reason}><Tag style={{ margin: 0 }}>no data</Tag></Tooltip>) },
     { title: 'Net', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v, r) => (r.ok ? <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> : '') },
     ...(sides.length > 1 ? sides.map((id) => ({
@@ -610,6 +624,18 @@ export default function SignalBacktestPage() {
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Max</Text><InputNumber size="small" min={1} max={20} value={maxTradesPerDay} onChange={(v) => setMaxTradesPerDay(v ?? BACKTEST_DEFAULTS.maxTradesPerDay)} style={{ width: 60 }} />
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>a day · cooldown</Text><InputNumber size="small" min={0} max={120} value={cooldownMin} onChange={(v) => setCooldownMin(v ?? 0)} addonAfter="min" style={{ width: 100 }} />
+                </Space>
+              </Tooltip>
+              <Tooltip title="The DAY's limits in rupees (0 = off): once the day's P&L - the trades closed today and the one open, net of the charges - reaches the max loss (or the max profit), the open trade exits right there and no more trades are taken that day (nor one with no room left for its own charges).">
+                <Space size={[8, 4]} wrap>
+                  <Space size={4}>
+                    <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Day max loss</Text>
+                    <InputNumber size="small" min={0} max={10000000} step={500} value={maxDayLoss} onChange={(v) => setMaxDayLoss(v ?? 0)} addonBefore="₹" style={{ width: 120 }} />
+                  </Space>
+                  <Space size={4}>
+                    <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>max profit</Text>
+                    <InputNumber size="small" min={0} max={10000000} step={500} value={maxDayProfit} onChange={(v) => setMaxDayProfit(v ?? 0)} addonBefore="₹" style={{ width: 120 }} />
+                  </Space>
                 </Space>
               </Tooltip>
               <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Lots</Text><InputNumber size="small" min={1} max={100} value={lots} onChange={(v) => setLots(v ?? 1)} style={{ width: 60 }} /><Text type="secondary" style={{ fontSize: 12 }}>× {lotSize}</Text></Space>

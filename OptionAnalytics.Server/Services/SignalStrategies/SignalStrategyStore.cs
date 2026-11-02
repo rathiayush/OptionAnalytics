@@ -25,7 +25,7 @@ public sealed class SignalStrategyStore
     public const int MaxSettingsBytes = 64 * 1024;
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings" };
-    public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "reportedUtc" };
+    public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "limit", "reportedUtc" };
     public static readonly string[] TradeColumns = { "date", "side", "signal", "action", "option", "entryTime", "entry", "exitTime", "exit", "exitReason", "points", "gross", "charges", "net", "expiryDay", "why" };
     public static readonly string[] EventColumns = { "timeUtc", "date", "kind", "key", "text" };
     public static readonly string[] HistoryKinds = { "days", "trades", "events" };

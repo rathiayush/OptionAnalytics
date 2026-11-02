@@ -66,6 +66,18 @@ test('a run is its days\' outcomes: the same trades, signals and numbers simulat
     assert.deepEqual(report.noPrev, ['2026-10-23'])           // the rule reads the previous day's POC
     const last = report.lines.find((l) => l.id === 'all').points.at(-1)
     assert.equal(last.value, Math.round(trades.reduce((a, t) => a + t.net, 0)))
+    assert.ok(report.dayRows.every((r) => r.limit === null))   // no day limit set
+  }
+  // A day max profit: each day's outcome and row says which day it ended (no trade after it) - the same trades as the page.
+  const limited = { ...SETTINGS, maxDayProfit: 1500 }
+  const { engine, days, trades } = pageReport(limited)
+  const outcomes = days.map((d, k) => dayOutcome(DATES[k], d, engine))
+  const report = backtestReport(outcomes, limited)
+  assert.deepEqual(report.trades, trades)
+  assert.deepEqual(report.dayRows.map((r) => r.limit), ['profit', 'profit', null, 'profit', 'profit'])   // every day made more than ₹1,500 without it
+  for (const r of report.dayRows.filter((x) => x.limit)) {
+    assert.equal(outcomes.find((x) => x.date === r.date).limit, 'profit')
+    assert.ok(r.net >= 1500 - 0.01 && r.net < 3278)
   }
 })
 
@@ -106,6 +118,15 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.equal(engineSettings(cleanBacktestSettings({ expiryDay: 'sell' })).expiryDay, 'sell')   // what the engine (and a background run) reads
   assert.equal(SETTINGS.expiryDay, 'rule')
   assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell · net of STT 0.15% + ₹20 an order')
+  // The day's max loss / profit: off (0) by default, held to 0 - ₹1 crore, read by the engine, named in the heading.
+  assert.deepEqual([SETTINGS.maxDayLoss, SETTINGS.maxDayProfit], [0, 0])
+  const limits = cleanBacktestSettings({ maxDayLoss: '5000', maxDayProfit: 2e8 })
+  assert.deepEqual([limits.maxDayLoss, limits.maxDayProfit], [5000, 10_000_000])
+  assert.deepEqual([cleanBacktestSettings({ maxDayLoss: -5 }).maxDayLoss, cleanBacktestSettings({ maxDayProfit: true }).maxDayProfit], [0, 0])
+  assert.deepEqual(['maxDayLoss', 'maxDayProfit'].map((k) => engineSettings(limits)[k]), [5000, 10_000_000])
+  assert.equal(reportHead({ ...SETTINGS, maxDayLoss: 5000, maxDayProfit: 12500 }, 4),
+    'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · day max loss ₹5,000 · day max profit ₹12,500 · net of STT 0.15% + ₹20 an order')
+  assert.match(reportHead({ ...SETTINGS, maxDayProfit: 12500 }, 4), / · trail 10% · day max profit ₹12,500 · net of/)
   assert.equal(defaultRunName(SETTINGS), 'NIFTY 19 Oct – 23 Oct · Buy CE + mirror')
   // A profit factor with no losing trade survives JSON.
   assert.deepEqual(JSON.parse(JSON.stringify({ pf: Infinity, w: -Infinity, x: 1 }, reportReplacer), reportReviver), { pf: Infinity, w: -Infinity, x: 1 })

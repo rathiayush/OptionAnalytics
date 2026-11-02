@@ -61,8 +61,8 @@ const held = (v, min, max, fallback) => {
 /**
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
- * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, timeframe,
- * expiryDay }. The rule goes through its tree, as
+ * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, maxDayLoss,
+ * maxDayProfit, timeframe, expiryDay }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -89,6 +89,8 @@ export function cleanBacktestSettings(s = {}) {
     sttPct: held(s?.sttPct, 0, 1, d.sttPct),
     brokeragePerOrder: held(s?.brokeragePerOrder, 0, 500, d.brokeragePerOrder),
     otherPerTrade: held(s?.otherPerTrade, 0, 500, d.otherPerTrade),
+    maxDayLoss: held(s?.maxDayLoss, 0, 10_000_000, d.maxDayLoss),
+    maxDayProfit: held(s?.maxDayProfit, 0, 10_000_000, d.maxDayProfit),
     timeframe: TIMEFRAMES.includes(Number(s?.timeframe)) ? Number(s.timeframe) : d.timeframe,
     expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
   }
@@ -104,9 +106,9 @@ export function engineSettings(s) {
  *  engineSettings(...). Only the outcome is kept, not the day. */
 export function dayOutcome(date, day, engine) {
   if (!day?.ok) return { date, ok: false, reason: day?.reason ?? 'not loaded', trades: [], signals: { rule: 0, mirror: 0 } }
-  const { trades, signals } = simulateDay(day, engine)
+  const { trades, signals, dayLimit } = simulateDay(day, engine)
   return {
-    date, ok: true, prev: Boolean(day.prevVp), expiry: Boolean(day.isExpiry), trades,
+    date, ok: true, prev: Boolean(day.prevVp), expiry: Boolean(day.isExpiry), limit: dayLimit ?? null, trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
 }
@@ -134,7 +136,7 @@ export function backtestReport(outcomes, settings) {
   }))
   const all = { key: 'all', id: 'all', name: SIDE_NAMES.all, what: 'the rule and its mirror together', signals: count('rule') + count('mirror'), ...summarize(trades) }
   const dayRows = days.map((o) => {
-    const row = { key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, expiry: Boolean(o.expiry), trades: o.trades.length, net: netOf(o.trades) }
+    const row = { key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, expiry: Boolean(o.expiry), limit: o.limit ?? null, trades: o.trades.length, net: netOf(o.trades) }
     for (const id of sides) row[id] = netOf(o.trades.filter((t) => t.strategy === id))
     return row
   })
@@ -161,7 +163,9 @@ export function reportHead(s, okDays) {
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
-  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry} · ${chargesText(s)}`
+  const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
+  const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
+  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */

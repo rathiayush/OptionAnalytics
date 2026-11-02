@@ -62,7 +62,10 @@ export function SaveStrategyModal({ settings, ruleSummary, onClose, onSaved }) {
 }
 
 const dayColumns = [
-  { title: 'Day', dataIndex: 'date', key: 'date', width: 110, render: (v) => dayjs(v).format('ddd D MMM') },
+  {
+    title: 'Day', dataIndex: 'date', key: 'date', width: 150,
+    render: (v, r) => <span style={{ whiteSpace: 'nowrap' }}>{dayjs(v).format('ddd D MMM')}{r.limit ? <Tag color={r.limit === 'loss' ? 'red' : 'green'} style={{ marginLeft: 6 }}>max {r.limit}</Tag> : null}</span>,
+  },
   { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right' },
   { title: 'Win %', dataIndex: 'winRate', key: 'winRate', width: 70, align: 'right', render: (v) => (Number.isFinite(num(v)) ? Math.round(num(v)) : '—') },
   { title: 'Net', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</Text> },
