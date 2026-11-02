@@ -485,7 +485,14 @@ When adding or changing a strategy:
   one changes - AND binds tighter, so a run of AND-ed items gets its own ALL box (ANY [1, 2, 3, 4], 1 - 2 tapped = (1 AND
   2) OR 3 OR 4), a group left with its parent's op (no NOT) is taken into it (tapping back undoes it), the conditions and
   their numbers never move; not made where it would need a box past MAX_GROUP_DEPTH. A hint under the rule says so; no
-  tooltips on a touch screen (a tap opened one over the conditions). Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
+  tooltips on a touch screen (a tap opened one over the conditions). And the LOGIC AS TEXT, both ways (asked for - "an input
+  section ... UI will also be updated"): `LogicInput` under the builder shows the builder's logic and logic TYPED there
+  (condition numbers, AND / OR / NOT in any case, & | !, brackets) and applied - Apply, Enter or leaving the box - redraws
+  the builder (`treeFromLogic`: every condition EXACTLY ONCE - one left out or written twice is an error, never dropped or
+  copied; AND before OR; brackets at most MAX_GROUP_DEPTH inside each other, measured BEFORE cleanTree, which would cut a
+  deeper group off; the conditions keep their settings and are numbered again in the order written). What cannot be read
+  says why in red and changes nothing (Undo puts the rule's own back); the box is mounted again (`key` = the logic) when
+  the builder changes, so a half-typed line never sits over a rule changed with the dropdowns. Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
   (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI lead, "within %" of a wall, spot's move, the
   cumulative line's tolerance) and its own LOOK-BACK for what happened "in the last N min" (`windowed` - crossed, turned,
   broke, near, a 🎯, spot's move; `WINDOW_CHOICES`, 5 by default); the same indicator may be used twice. The engine still

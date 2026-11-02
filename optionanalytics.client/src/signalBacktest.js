@@ -801,6 +801,47 @@ export function setConnectorAt(tree, path, j, op) {
   return path.length ? put(tree, path) : next
 }
 
+/** How many groups deep a tree goes (the top group alone = 0). */
+function groupDepth(g) {
+  let deepest = 0
+  for (const it of g.items) if (it.group) deepest = Math.max(deepest, 1 + groupDepth(it.group))
+  return deepest
+}
+
+/**
+ * The builder's tree from LOGIC TYPED over its conditions' numbers ("(1 AND 2) OR (3 AND (4 AND 5))" - AND / OR / NOT in
+ * any case, & | !, brackets; AND binds tighter than OR): { ok: true, tree } or { ok: false, error } in words. Every
+ * condition must be in it exactly once - one left out or written twice is an error, never dropped or copied - and the
+ * brackets at most `MAX_GROUP_DEPTH` deep. The conditions keep their own settings and are numbered again in the order the
+ * logic names them ("3 OR (1 AND 2)" makes the old 3 condition 1).
+ */
+export function treeFromLogic(tree, text) {
+  const src = String(text ?? '').trim()
+  const { lines } = ruleFromTree(tree)
+  if (!lines.length) return { ok: false, error: 'add a condition first' }
+  if (!src) return { ok: false, error: 'type the logic - e.g. (1 AND 2) OR 3' }
+  if (src.length > MAX_LOGIC_LENGTH) return { ok: false, error: `at most ${MAX_LOGIC_LENGTH} characters` }
+  const parsed = parseLogic(src, lines.length)
+  if (!parsed.ok) return parsed
+  const uses = new Map()
+  const walk = (node) => {
+    if (node.line != null) uses.set(node.line, (uses.get(node.line) ?? 0) + 1)
+    else { walk(node.a); if (node.b) walk(node.b) }
+  }
+  walk(parsed.tree)
+  const missing = lines.map((_, k) => k + 1).filter((no) => !uses.has(no))
+  if (missing.length) {
+    const many = missing.length > 1
+    return { ok: false, error: `condition${many ? 's' : ''} ${missing.join(', ')} ${many ? 'are' : 'is'} not in it - add ${many ? 'them' : 'it'}, or remove the condition with its ✕` }
+  }
+  const twice = [...uses].filter(([, count]) => count > 1).map(([no]) => no)
+  if (twice.length) return { ok: false, error: `${twice.join(', ')} written more than once - each condition goes in once (add the indicator again for a second one)` }
+  // The depth before cleanTree - which leaves out a group past MAX_GROUP_DEPTH - so nothing is ever dropped.
+  const raw = treeFromRule({ lines, logic: src })
+  if (groupDepth(raw) > MAX_GROUP_DEPTH) return { ok: false, error: `brackets at most ${MAX_GROUP_DEPTH} inside each other` }
+  return { ok: true, tree: cleanTree(raw) }
+}
+
 /** A rule's tree from its lines and logic: the typed logic's own structure (same-op chains as one group), else the lines'
  *  AND / OR (AND first: each run of AND-ed lines a group, ANY of them). Lines the logic leaves out are not in it. */
 export function treeFromRule({ lines = [], logic = '' } = {}) {

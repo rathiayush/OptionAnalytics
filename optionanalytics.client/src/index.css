@@ -260,6 +260,10 @@ body {
 /* The AND / OR between two conditions: a tap switches that one only (setConnectorAt). */
 .oa-rule-connector .oa-rule-connector-btn { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; color: rgba(255, 255, 255, 0.6); height: 22px; padding: 0 6px; }
 .oa-rule-connector .oa-rule-connector-btn .anticon { font-size: 10px; opacity: 0.7; }
+/* The rule's logic typed (LogicInput): the label, the box (it takes the room), Apply / Undo on one row. */
+.oa-rule-logic { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-width: 720px; }
+.oa-rule-logic-row { display: flex; align-items: center; gap: 6px; }
+.oa-rule-logic-row .ant-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; flex: 1; min-width: 0; }
 @media (max-width: 600px) {
   .oa-rule-group .oa-rule-group { margin-left: 4px; }
   .oa-rule-group-head .oa-rule-group-add { margin-left: 0; }

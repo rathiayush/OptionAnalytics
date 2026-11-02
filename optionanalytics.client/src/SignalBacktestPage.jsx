@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, DatePicker, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
@@ -8,7 +8,7 @@ import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
   BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv,
+  mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
@@ -131,6 +131,44 @@ function Connector({ op, tree, path, k, onConnector, touch }) {
           {button}
         </Tooltip>
       )}
+    </div>
+  )
+}
+
+/**
+ * The rule's LOGIC as text, both ways: it shows the builder's logic ("(1 AND 2) OR 3"), and logic typed here and applied
+ * (Apply, Enter, or leaving the box) redraws the builder to it (`treeFromLogic`) - every condition in it once, AND before
+ * OR, brackets at most MAX_GROUP_DEPTH deep; what cannot be read says why and changes nothing. Mounted again (`key`) when
+ * the builder's logic changes, so a half-typed line never sits over a rule changed with the dropdowns.
+ */
+function LogicInput({ tree, logic, onApply }) {
+  const [draft, setDraft] = useState(null)
+  const [error, setError] = useState(null)
+  const changed = draft != null && draft.trim() !== logic
+  const apply = (quiet = false) => {
+    if (!changed) { setDraft(null); setError(null); return }
+    const r = treeFromLogic(tree, draft)
+    if (!r.ok) { if (!quiet || draft.trim()) setError(r.error); return }
+    onApply(r.tree)
+    // The same rule written another way ("1 or 2") leaves the logic as it was: show the rule's own again.
+    setDraft(null)
+    setError(null)
+  }
+  return (
+    <div className="oa-rule-logic">
+      <div className="oa-rule-logic-row">
+        <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Logic</Text>
+        <Input
+          size="small" value={draft ?? logic} status={error ? 'error' : undefined} placeholder="(1 AND 2) OR 3" spellCheck={false} autoComplete="off"
+          autoCorrect="off" autoCapitalize="characters" onChange={(e) => { setDraft(e.target.value); setError(null) }} onPressEnter={() => apply()} onBlur={() => apply(true)}
+          aria-label="The rule's logic - condition numbers with AND, OR, NOT and brackets"
+        />
+        <Button size="small" type="primary" disabled={!changed} onMouseDown={(e) => e.preventDefault()} onClick={() => apply()}>Apply</Button>
+        {changed && <Button size="small" onMouseDown={(e) => e.preventDefault()} onClick={() => { setDraft(null); setError(null) }}>Undo</Button>}
+      </div>
+      {error
+        ? <Text type="danger" style={{ fontSize: 12 }}>{error} - nothing changed.</Text>
+        : <Text type="secondary" style={{ fontSize: 12 }}>Type the condition numbers with AND, OR, NOT and brackets - e.g. (1 AND 2) OR (3 AND 4) - and Apply: the conditions above follow, numbered in the order written. Changing them above changes this too.</Text>}
     </div>
   )
 }
@@ -456,9 +494,9 @@ export default function SignalBacktestPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND) or ANY (OR) for each group; a group inside a group is a pair of brackets</Text>
               </Space>
               <RuleGroup group={rule.tree} path={[]} tree={rule.tree} numbers={numbers} onEdit={editTree} onConnector={setConnector} touch={touch} />
+              {hasLines && <LogicInput key={rule.logic} tree={rule.tree} logic={rule.logic} onApply={(tree) => setRule({ tree })} />}
               <Space wrap size={[8, 8]} style={{ marginTop: 8, display: 'flex' }}>
                 <Button size="small" onClick={() => setRule({ tree: { op: 'and', not: false, items: [] } })} disabled={!hasLines}>Clear all</Button>
-                {hasLines && <Text type="secondary" style={{ fontSize: 12 }}>Logic: <Text code style={{ fontSize: 12 }}>{rule.logic}</Text></Text>}
                 {rule.lines.length > 1 && (
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     {touch ? 'Tap' : 'Click'} an AND / OR between two conditions to change just that one; the ALL / ANY dropdown changes every one in its box.

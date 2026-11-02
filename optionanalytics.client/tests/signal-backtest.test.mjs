@@ -6,8 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
-  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromRule,
+  BACKTEST_DEFAULTS, DEFAULT_WINDOW, MAX_GROUP_DEPTH, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
+  logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromLogic, treeFromRule,
   simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
 } from '../src/signalBacktest.js'
 
@@ -528,6 +528,50 @@ test('logic in a rule: it combines the lines (the mirror by the same logic); bad
   assert.equal(logicWithoutLine('not 2 and 1', 2, 2), '1')
   assert.equal(logicWithoutLine('1', 1, 1), '')
   assert.equal(logicWithoutLine('(1 and', 3, 1), '(1 and')   // does not read: left as typed
+})
+
+test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
+  const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
+  const five = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow'), L('nearAbove')].map((x, k) => (k === 4 ? { line: { id: 'prevPoc', value: 'above', join: 'and', param: 0 } } : x)) }
+  const values = (t) => ruleFromTree(t).lines.map((l) => `${l.id}:${l.value}`)
+  const apply = (text) => treeFromLogic(five, text)
+  // The user's example: (1 AND 2) OR (3 AND (4 AND 5)).
+  const a = apply('(1 AND 2) OR (3 AND (4 AND 5))')
+  assert.equal(a.ok, true)
+  assert.equal(ruleFromTree(a.tree).logic, '(1 AND 2) OR (3 AND 4 AND 5)')     // the same rule (4 AND 5 inside an AND)
+  assert.deepEqual(values(a.tree), values(five))                              // every condition kept as it was
+  assert.equal(a.tree.items[1].group.items.length, 3)
+  // Words in any case, & |, and AND before OR without brackets.
+  assert.equal(ruleFromTree(apply('1 and 2 | 3 & 4 & 5').tree).logic, '(1 AND 2) OR (3 AND 4 AND 5)')
+  assert.equal(ruleFromTree(apply('1 OR 2 AND 3 OR 4 OR 5').tree).logic, '1 OR (2 AND 3) OR 4 OR 5')
+  // NOT and deeper brackets.
+  assert.equal(ruleFromTree(apply('NOT (1 OR 2) AND (3 OR (4 AND 5))').tree).logic, 'NOT (1 OR 2) AND (3 OR (4 AND 5))')
+  // Numbered again in the order written: "3 OR ..." makes the old 3 condition 1.
+  const moved = apply('3 OR (1 AND 2) OR 4 OR 5')
+  assert.equal(ruleFromTree(moved.tree).logic, '1 OR (2 AND 3) OR 4 OR 5')
+  assert.deepEqual(values(moved.tree), ['vwap:crossedAbove', 'vwap:above', 'vwap:below', 'vwap:crossedBelow', 'prevPoc:above'])
+  // Through the rule as the page keeps it.
+  assert.equal(normalizeRule({ tree: a.tree, action: 'buyCE', mirror: true }).logic, '(1 AND 2) OR (3 AND 4 AND 5)')
+  // Nothing dropped, nothing copied, nothing made up.
+  assert.match(apply('(1 AND 2) OR 3').error, /conditions 4, 5 are not in it/)
+  assert.match(apply('1 OR 2 OR 3 OR 4').error, /condition 5 is not in it/)
+  assert.match(apply('1 OR 1 OR 2 OR 3 OR 4 OR 5').error, /1 written more than once/)
+  assert.match(apply('1 OR 2 OR 3 OR 4 OR 6').error, /there is no line 6/)
+  assert.match(apply('(1 AND 2 OR 3 OR 4 OR 5').error, /"\)" is missing/)
+  assert.match(apply('1 AND AND 2 OR 3 OR 4 OR 5').error, /"AND" where a line number/)
+  assert.match(apply('').error, /type the logic/)
+  assert.match(apply('x'.repeat(MAX_LOGIC_LENGTH + 1)).error, /at most/)
+  assert.match(treeFromLogic({ op: 'and', not: false, items: [] }, '1').error, /add a condition first/)
+  // Brackets deeper than a group can go.
+  assert.match(apply('1 AND (2 OR (3 AND (4 OR (5 AND (1 OR 2)))))').error, /more than once/)
+  const two = { op: 'and', not: false, items: [L('above'), L('below')] }
+  assert.equal(treeFromLogic(two, '((((1 AND 2))))').ok, true)                         // brackets that change nothing are fine
+  // Groups 5 inside each other are allowed (as + Group allows); a 6th level is refused - not cut off.
+  const eight = { op: 'and', not: false, items: Array.from({ length: 8 }, () => L('above')) }
+  const fiveDeep = treeFromLogic(eight, '1 AND (2 OR (3 AND (4 OR (5 AND (6 OR 7))))) AND 8')
+  assert.equal(fiveDeep.ok, true)
+  assert.equal(ruleFromTree(fiveDeep.tree).lines.length, 8)                                         // nothing dropped
+  assert.match(treeFromLogic(eight, '1 AND (2 OR (3 AND (4 OR (5 AND (6 OR (7 AND 8))))))').error, new RegExp(`at most ${MAX_GROUP_DEPTH} inside each other`))
 })
 
 test('a tapped AND / OR changes only that one: AND-ed conditions get their own box, the numbers never move, tapping back undoes it', () => {
