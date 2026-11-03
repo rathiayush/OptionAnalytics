@@ -100,6 +100,9 @@ public sealed class OrderFlowService : BackgroundService
     public static string Group(string underlying) => $"of:{underlying.ToUpperInvariant()}";
     public static string ContractGroup(string underlying, DateOnly expiry) => $"of:{underlying.ToUpperInvariant()}:{expiry:yyyy-MM-dd}";
     public static string DomGroup(string underlying) => $"dom:{underlying.ToUpperInvariant()}";
+    /// <summary>The nearest contract's delta only ("orderFlowDelta" - OrderFlowEngine.LiveDelta): OI Replay's futures delta
+    /// and cumulative delta panes, live as the minutes trade (they reloaded the whole day every minute).</summary>
+    public static string DeltaGroup(string underlying) => $"ofd:{underlying.ToUpperInvariant()}";
 
     public OrderFlowDayStore PastDays => _pastDays;
 
@@ -375,5 +378,7 @@ public sealed class OrderFlowService : BackgroundService
         if (_batcher.HasMembers(group)) _batcher.SetLatest(group, "orderFlowLive", engine.Underlying, engine.Live);
         var dom = DomGroup(engine.Underlying);
         if (_batcher.HasMembers(dom)) _batcher.SetLatest(dom, "domLive", engine.Underlying, engine.Dom);
+        var delta = DeltaGroup(engine.Underlying);
+        if (_batcher.HasMembers(delta)) _batcher.SetLatest(delta, "orderFlowDelta", engine.Underlying, engine.LiveDelta);
     }
 }

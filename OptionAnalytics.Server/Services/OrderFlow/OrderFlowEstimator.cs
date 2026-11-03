@@ -8,8 +8,11 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// had). Everything here is an ESTIMATE and is labelled as one on the page:
 ///
 /// - Buy/sell split (delta): bulk volume classification (Easley, Lopez de Prado & O'Hara): a minute's
-///   buy share is the normal CDF of its price change over the day's typical one-minute change,
-///   Phi(dP / sigma) - a big up-minute is mostly buying, a flat one half and half.
+///   buy share is the normal CDF of its price change over the typical one-minute change, Phi(dP / sigma) -
+///   a big up-minute is mostly buying, a flat one half and half. Sigma is the root mean square of the
+///   day's one-minute changes UP TO that minute (TypicalChanges) - not the whole day's: a replayed
+///   minute used to depend on how volatile the afternoon after it was (look-ahead), and a live day's
+///   estimated morning shifted every time the day was loaded again.
 /// - Footprint rows: a candle cannot say where in its range it traded, so its volume is laid along the
 ///   path price most likely took inside the minute (see Rows) - rising legs as buying, falling legs as
 ///   selling, in whole lots. Volume profile, delta and cumulative delta are meaningful from this;
@@ -36,8 +39,7 @@ public static class OrderFlowEstimator
         var changes = new List<double>(ordered.Count);
         for (var i = 0; i < ordered.Count; i++)
             changes.Add((double)(ordered[i].Close - (i == 0 ? ordered[i].Open : ordered[i - 1].Close)));
-        var sigma = StdDev(changes);
-        if (sigma <= 0) sigma = (double)Math.Max(tickSize, 0.05m);
+        var sigmas = TypicalChanges(changes, (double)Math.Max(tickSize, 0.05m));
 
         var bars = new List<OrderFlowBar>(ordered.Count);
         var trades = new List<OrderFlowTrade>();
@@ -46,7 +48,7 @@ public static class OrderFlowEstimator
         for (var i = 0; i < ordered.Count; i++)
         {
             var c = ordered[i];
-            var buyShare = NormalCdf(changes[i] / sigma);
+            var buyShare = NormalCdf(changes[i] / sigmas[i]);
             // In whole lots - futures volume always is, so both sides stay whole lots.
             var lot = Math.Max(1, lotSize);
             var buy = Math.Min(c.Volume, (long)Math.Round(c.Volume * buyShare / lot) * lot);
@@ -63,6 +65,22 @@ public static class OrderFlowEstimator
             last.Close, ordered.Count > 0 ? last.Time.AddSeconds(59) : null, 0, day, expiry);
         return new OrderFlowSnapshot(meta, rowSize, bars, trades, Array.Empty<OrderFlowIceberg>(), Array.Empty<HeatmapColumn>(),
             new OrderFlowBook(Array.Empty<BookLevel>(), Array.Empty<BookLevel>()), "estimated", Note);
+    }
+
+    /// <summary>Each minute's typical one-minute change: the root mean square of the changes up to and including it (a
+    /// minute's own change is known at its close, when it is shown) - nothing after it; <paramref name="floor"/> (a
+    /// tick) while every change so far is zero.</summary>
+    internal static double[] TypicalChanges(IReadOnlyList<double> changes, double floor)
+    {
+        var sigmas = new double[changes.Count];
+        double sumSquares = 0;
+        for (var i = 0; i < changes.Count; i++)
+        {
+            sumSquares += changes[i] * changes[i];
+            var rms = Math.Sqrt(sumSquares / (i + 1));
+            sigmas[i] = rms > 0 ? rms : floor;
+        }
+        return sigmas;
     }
 
     /// <summary>
@@ -136,13 +154,6 @@ public static class OrderFlowEstimator
         var heaviest = Array.IndexOf(weights, weights.Max());
         result[heaviest] += total - lots * lot;
         return result;
-    }
-
-    private static double StdDev(IReadOnlyList<double> values)
-    {
-        if (values.Count < 2) return 0;
-        var mean = values.Average();
-        return Math.Sqrt(values.Sum(v => (v - mean) * (v - mean)) / (values.Count - 1));
     }
 
     /// <summary>The standard normal CDF (Abramowitz-Stegun 7.1.26 erf, error below 1.5e-7).</summary>

@@ -545,6 +545,18 @@ public sealed class OrderFlowEngine
         }
     }
 
+    /// <summary>The delta push (OrderFlowService.DeltaGroup - OI Replay's futures delta / cumulative delta panes): the
+    /// last two minutes' buy and sell volume only, the one still forming included - a few bytes, where the full live view
+    /// carries the whole book.</summary>
+    public OrderFlowDeltaLive LiveDelta()
+    {
+        lock (_lock)
+        {
+            var minutes = _bars.Values.Skip(Math.Max(0, _bars.Count - 2)).Select(b => new OrderFlowDeltaMinute(b.Time, b.Buy, b.Sell)).ToList();
+            return new OrderFlowDeltaLive(Underlying, SecurityId, _day == default ? null : _day, _clock, minutes);
+        }
+    }
+
     /// <summary>The DOM push: the whole book (all 200 levels per side when that feed streams), the
     /// day's traded volume at every price inside the book's range, and the latest prints.</summary>
     public OrderFlowDom Dom()
@@ -799,6 +811,12 @@ public sealed record HeatmapColumn(DateTimeOffset Time, IReadOnlyList<decimal[]>
 
 /// <summary>One minute of the estimated backfill (see OrderFlowSnapshot.Backfill).</summary>
 public sealed record OrderFlowBackfillMinute(DateTimeOffset Time, long Buy, long Sell);
+
+/// <summary>One minute's aggressor volume - see OrderFlowEngine.LiveDelta.</summary>
+public sealed record OrderFlowDeltaMinute(DateTimeOffset Time, long Buy, long Sell);
+
+/// <summary>The delta push: the contract, its IST day, the engine's clock and its latest minutes (OrderFlowEngine.LiveDelta).</summary>
+public sealed record OrderFlowDeltaLive(string Underlying, uint SecurityId, DateOnly? Day, DateTimeOffset Time, IReadOnlyList<OrderFlowDeltaMinute> Minutes);
 
 /// <summary>The DOM ladder's push - see OrderFlowEngine.Dom.</summary>
 public sealed record OrderFlowDom(

@@ -51,7 +51,7 @@ import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
 import { DomDrawer } from './DomDrawer.jsx'
 import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, analyzeBars } from './orderFlowMath.js'
-import { withBackfill, deltaMinutes } from './cvdBackfill.js'
+import { withBackfill, deltaMinutes, mergeDeltaPush } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { CardFitBox, ChartGrow, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
@@ -133,7 +133,11 @@ const RECONNECT_RETRY_POLICY = {
 // connection itself down, only on gating what it's ALLOWED to do once a tick arrives.
 const EMPTY_GROUPS = []
 
-export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS, onDivergence = null) {
+export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTicks, onRestSnapshot, onReconnected, onPainted, underlying, expiryFlag, onLivePositions = null, extraGroups = EMPTY_GROUPS, onDivergence = null, onOrderFlowDelta = null) {
+  // The futures' delta minutes ("orderFlowDelta", group "ofd:{underlying}" - passed in extraGroups while the delta
+  // panes are on, live).
+  const orderFlowDeltaRef = useRef(onOrderFlowDelta)
+  orderFlowDeltaRef.current = onOrderFlowDelta
   const spotRef = useRef(onSpotUpdate)
   const tickRef = useRef(onOiReplayTicks)
   const futuresRef = useRef(onFuturesTicks)
@@ -190,6 +194,7 @@ export function useOiReplayLiveFeed(onSpotUpdate, onOiReplayTicks, onFuturesTick
       oiReplayTicks: (ticks) => tickRef.current(ticks ?? []),
       futuresTicks: (ticks) => futuresRef.current?.(ticks ?? []),
       livePositions: (snapshot) => livePositionsRef.current?.(snapshot),
+      orderFlowDelta: (payload) => orderFlowDeltaRef.current?.(payload),
     }, (sentAtMs, clockOffsetMs) => paintedRef.current?.(sentAtMs, clockOffsetMs))
     // Dhan's option-chain snapshot (every ~30-90s per expiry) - the only live source of IV, since
     // the websocket tick carries none.
@@ -3246,7 +3251,7 @@ function ReviewFootprint({ state, asOfMs, isLive }) {
     // The minute the replay shows is a finished one (its bar holds its close), so its footprint bar is shown too.
     const minuteBars = isLive || asOfMs == null ? day.bars : day.bars.filter((b) => new Date(b.time).getTime() <= asOfMs)
     const analysed = analyzeBars(aggregateFootprintBars(minuteBars, timeframe), { rowSize: day.rowSize, minVolume: lotSize, estimated })
-    const withCvd = withBackfill(analysed, day.backfill, timeframe)
+    const withCvd = withBackfill(analysed, day.backfill, timeframe, minuteBars.length ? new Date(minuteBars[0].time).getTime() : null)
     return { all: withCvd.bars, last: withCvd.bars.slice(-REVIEW_FOOTPRINT_BARS) }
   }, [day, asOfMs, isLive, timeframe, lotSize, estimated])
   if (state.loading) return <Text type="secondary">Loading the futures footprint…</Text>
@@ -3508,6 +3513,8 @@ export default function OiReplayPage() {
   // saw live, else estimated from 1-minute candles (see futuresFlow below).
   const [futuresDeltaOn, setFuturesDeltaOn] = usePersistedState('optionanalytics.oiReplay.futuresDelta', true)
   const [futuresFlow, setFuturesFlow] = useState(null)
+  // Bumped to load the futures' delta day again (a live push found a minute missing).
+  const [flowReload, setFlowReload] = useState(0)
   // Which of the two whole-chain OI charts the Day OI Accumulation card shows - see the chart
   // itself, further down, for why this is a switch rather than the per-strike drilldown's own
   // stacked pair (both would double this card's already-tall height, and the day-level numbers
@@ -4529,8 +4536,25 @@ export default function OiReplayPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [underlying, liveExpiryFlag, isLive])
   const foreignChainKey = [...new Set([...foreignLegs].map((leg) => leg.split(':').slice(0, 2).join(':')))].sort().join('|')
-  const feedGroups = useMemo(() => [...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : [])], [liveExtraGroups, foreignChainKey])
-  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, feedGroups, handleDivergenceAlert)
+  // The futures delta panes, live: the engine's latest minutes ("orderFlowDelta") merged as they trade - the panes
+  // reloaded the whole day once a minute. A minute missed (a slow or sleeping page, a reconnect), another contract or
+  // another day loads the day again - once: pushes are not acted on while that load is on its way.
+  const deltaGroup = isLive && futuresDeltaOn && underlying ? `ofd:${underlying}` : null
+  const futuresFlowRef = useRef(null)
+  futuresFlowRef.current = futuresFlow
+  const flowReloadingRef = useRef(false)
+  const handleOrderFlowDelta = (payload) => {
+    const held = futuresFlowRef.current
+    if (!isLive || flowReloadingRef.current || !held?.bars || held.source === 'estimated' || !payload?.minutes?.length) return
+    if (payload.day !== held.day || payload.securityId !== held.securityId || mergeDeltaPush(held.bars, payload.minutes).gap) {
+      flowReloadingRef.current = true
+      setFlowReload((n) => n + 1)
+      return
+    }
+    setFuturesFlow((prev) => (prev?.bars ? { ...prev, bars: mergeDeltaPush(prev.bars, payload.minutes).minutes } : prev))
+  }
+  const feedGroups = useMemo(() => [...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : []), ...(deltaGroup ? [deltaGroup] : [])], [liveExtraGroups, foreignChainKey, deltaGroup])
+  const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, feedGroups, handleDivergenceAlert, handleOrderFlowDelta)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
   // real clock instead of purely as a side effect of the next incoming tick (same reasoning as Live
@@ -4709,7 +4733,8 @@ export default function OiReplayPage() {
   }, [showVwap, asOfMs, futuresVwapMinutes, displayFuturesBars])
   // The day's futures volume profile up to the replay time, from each minute's volume spread over its
   // range (FUTURES_PROFILE_ROWS-point rows).
-  // The day's per-minute buy/sell from the order flow server - refreshed every minute while live.
+  // The day's per-minute buy/sell from the order flow server, loaded once; live, the "orderFlowDelta" push keeps it up to
+  // date as the minutes trade (handleOrderFlowDelta), and a slow safety reload every 5 minutes covers a lost push.
   const flowDate = result?.date ?? null
   useEffect(() => {
     if (!futuresDeltaOn || !flowDate || !underlying) { setFuturesFlow(null); return undefined }
@@ -4717,12 +4742,16 @@ export default function OiReplayPage() {
     const load = (poll = false) => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`, poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => (r.ok ? r.json() : null))
       // A live day the server started recording part way (a restart) comes with the minutes before as an estimate.
-      .then((body) => { if (!cancelled) setFuturesFlow(body ? { source: body.source, bars: deltaMinutes(body.bars, body.backfill) } : null) })
+      .then((body) => {
+        if (cancelled) return
+        setFuturesFlow(body ? { source: body.source, day: body.meta?.day ?? null, securityId: body.meta?.securityId ?? null, bars: deltaMinutes(body.bars, body.backfill) } : null)
+      })
       .catch(() => { if (!cancelled) setFuturesFlow(null) })
-    load()
-    const id = isLive ? setInterval(() => load(true), 60_000) : null
+      .finally(() => { if (!cancelled) flowReloadingRef.current = false })
+    load(flowReload > 0)
+    const id = isLive ? setInterval(() => load(true), 300_000) : null
     return () => { cancelled = true; if (id) clearInterval(id) }
-  }, [futuresDeltaOn, flowDate, underlying, isLive])
+  }, [futuresDeltaOn, flowDate, underlying, isLive, flowReload])
   // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.
   const futuresDeltaBars = useMemo(() => {
     if (!futuresDeltaOn || !futuresFlow?.bars?.length || asOfMs == null) return null

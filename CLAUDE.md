@@ -669,6 +669,17 @@ When adding or changing a strategy:
   dropped by the next trade into that bar - the prints, the heatmap samples) and build outside it (a full day's page load
   held every tick ~75 ms; now ticks wait < 0.1 ms at p99 during loads); book lookups for icebergs are indexed (a 200-level
   scan each was most of an event's cost); the tape is trimmed in chunks (`TradesTrimChunk`). `OrderFlowRealtimeTests.cs`.
+  DELTA = a bar's aggressor buy - sell volume; CUMULATIVE DELTA = its running sum from the session's first bar (the Order
+  Flow page's chart and header, OI Replay's futures delta panes, the footprint's ΣΔ). A live day the server started
+  recording part way: the minutes before come ESTIMATED (`OrderFlowEstimator` - bulk volume classification, Phi(change /
+  typical change), the typical change the root mean square of the changes UP TO that minute, `TypicalChanges` - it was the
+  whole day's: a replayed minute depended on the afternoon after it, a live morning shifted at every load) and lead the
+  charts (`withBackfill`, drawn faded): on a 3 / 5 / 15-minute timeframe those in the first recorded candle before its
+  first recorded minute count too (`firstMinuteMs` - they were dropped from the delta from the open). The strategies read
+  exact bars only (relative CVD moves). OI Replay's futures delta panes are LIVE: the "orderFlowDelta" push (group
+  `ofd:{U}` - `OrderFlowService.DeltaGroup`, `OrderFlowEngine.LiveDelta`: the last two minutes' buy / sell, a few bytes;
+  External may not join it) merged as the minutes trade (`mergeDeltaPush`; a missed minute / another contract or day
+  loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`.
   Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
   prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
   (bars are whole; the server scanner is local and does not).

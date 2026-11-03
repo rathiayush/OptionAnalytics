@@ -433,7 +433,8 @@ export default function OrderFlowPage() {
   )
   // Delta / cumulative delta from the 09:15 open: when the server started recording after the open, the
   // minutes before are an estimate from candles (display only - see cvdBackfill.js).
-  const shown = useMemo(() => withBackfill(bars, view?.backfill, timeframe), [bars, view?.backfill, timeframe])
+  const firstMinuteMs = view?.minuteBars?.length ? new Date(view.minuteBars[0].time).getTime() : null
+  const shown = useMemo(() => withBackfill(bars, view?.backfill, timeframe, firstMinuteMs), [bars, view?.backfill, timeframe, firstMinuteMs])
   // Session VWAP of the futures: from the 1-minute bars (the precise one), read at each footprint bar
   // (alignToBars - on the bar's own time) for the footprint, and minute by minute for the heatmap.
   const vwapMinutes = useMemo(() => sessionVwapFromBars((view?.minuteBars ?? []).map((b) => ({

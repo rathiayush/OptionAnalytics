@@ -168,7 +168,52 @@ public sealed class OrderFlowRealtimeTests
         Assert.Equal(3, Volatile.Read(ref seen));
     }
 
-    private static OrderFlowService CreateService()
+    [Fact]
+    public void TheDeltaPush_CarriesTheLatestMinutesBuyAndSell_ToItsGroupOnly()
+    {
+        var batcher = new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance);
+        var service = CreateService(batcher);
+        var engine = NewEngine();
+        service.TrackForTests(engine);
+        batcher.Join("oi-replay-page", OrderFlowService.DeltaGroup("NIFTY"));
+        service.OnTick(Tick(100.00m, 1000, 99.95m, 100.00m, receivedAt: T0));
+        service.OnTick(Tick(100.00m, 1150, 99.95m, 100.00m, receivedAt: T0.AddSeconds(1)));     // 150 bought at the offer
+        service.OnTick(Tick(99.95m, 1225, 99.95m, 100.00m, receivedAt: T0.AddSeconds(61)));    // the next minute: 75 sold at the bid
+        service.DrainInbox();
+
+        var (connection, batch) = Assert.Single(batcher.Flush(T0.AddSeconds(62)));
+        Assert.Equal("oi-replay-page", connection);
+        var item = Assert.Single(batch.Items);   // only the delta - the page is in no full order flow group
+        Assert.Equal("orderFlowDelta", item.E);
+        var delta = Assert.IsType<OrderFlowDeltaLive>(item.D);
+        Assert.Equal(new[] { (150L, 0L), (0L, 75L) }, delta.Minutes.Select(m => (m.Buy, m.Sell)));
+        Assert.Equal((new DateOnly(2026, 10, 5), 35001u), (delta.Day!.Value, delta.SecurityId));
+        Assert.Equal("ofd:NIFTY", OrderFlowService.DeltaGroup("nifty"));
+    }
+
+    [Fact]
+    public void AnEstimatedMinutesBuySellSplit_UsesNothingAfterIt()
+    {
+        static OptionAnalytics.Server.Models.CandleWithVolume Candle(int minute, decimal close, decimal previous, long volume) =>
+            new(T0.AddMinutes(minute), previous, Math.Max(previous, close) + 0.5m, Math.Min(previous, close) - 0.5m, close, volume);
+        // A quiet morning, then a wild afternoon.
+        var closes = Enumerable.Range(0, 60).Select(i => 100m + (i % 4 == 0 ? 1.5m : i % 3 == 0 ? -1m : 0.4m) * (i < 30 ? 1 : 6)).ToList();
+        var candles = closes.Select((c, i) => Candle(i, c, i == 0 ? 100m : closes[i - 1], 3000)).ToList();
+        OrderFlowSnapshot Build(int minutes) => OrderFlowEstimator.Build("NIFTY", 35001, "NIFTY-FUT", "NSE_FNO", 0.05m, 75, null, new DateOnly(2026, 10, 5), candles.Take(minutes).ToList(), 1m, 75);
+        var morning = Build(30);
+        var wholeDay = Build(60);
+        // The morning's split is the same whether or not the afternoon is in the day - it used to divide by the whole day's
+        // typical move, so the afternoon's volatility changed the morning's delta (look-ahead, and a live day's estimated
+        // morning shifted at every load).
+        Assert.Equal(morning.Bars.Select(b => (b.Buy, b.Sell)), wholeDay.Bars.Take(30).Select(b => (b.Buy, b.Sell)));
+        // Each minute's typical move is the root mean square of the changes up to it; a tick while there has been none.
+        var sigmas = OrderFlowEstimator.TypicalChanges(new[] { 0.0, 2.0, -1.0 }, 0.05);
+        Assert.Equal(0.05, sigmas[0]);
+        Assert.Equal(Math.Sqrt(2.0), sigmas[1], 9);          // (0 + 4) / 2
+        Assert.Equal(Math.Sqrt(5.0 / 3), sigmas[2], 9);      // (0 + 4 + 1) / 3
+    }
+
+    private static OrderFlowService CreateService(LiveBroadcastBatcher? batcher = null)
     {
         var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", ClientId = "c" });
         var session = new DhanSession(options);
@@ -178,7 +223,7 @@ public sealed class OrderFlowRealtimeTests
             new DhanMarketFeedClient(options, session, NullLogger<DhanMarketFeedClient>.Instance),
             new DhanDepthFeedClient(options, session, NullLogger<DhanDepthFeedClient>.Instance, config),
             new DhanTwoHundredDepthClient(options, session, NullLogger<DhanTwoHundredDepthClient>.Instance, config),
-            new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance),
+            batcher ?? new LiveBroadcastBatcher(null, NullLogger<LiveBroadcastBatcher>.Instance),
             new OrderFlowDayStore(), NullLogger<OrderFlowService>.Instance, config);
     }
 }

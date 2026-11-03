@@ -5,28 +5,61 @@
 // footprint's running total and the header. The footprint cells, the strategy scanner and analyzeBars
 // never see them, so no signal changes.
 //
-// Only minutes before the first exact bar are used (all of them precede it by construction), so a
-// replay clock before the recording started shows nothing extra - no look-ahead.
+// Only minutes before the first exact MINUTE are used (all of them precede it by construction), so a
+// replay clock before the recording started shows nothing extra - no look-ahead. `firstMinuteMs` is that minute (the
+// first exact minute bar's time; default the first bar's): on a 3 / 5 / 15-minute timeframe the recording can start
+// part way into a candle (10:02 in the 10:00 - 10:05 one) - the estimated 10:00 and 10:01 are then counted in the
+// cumulative delta (they were dropped: the delta from the open missed them) and in that candle's delta on the chart,
+// which is drawn as estimated; its footprint bar keeps its own exact delta.
 
-export function withBackfill(bars, backfill, timeframeMinutes) {
+export function withBackfill(bars, backfill, timeframeMinutes, firstMinuteMs = null) {
   if (!bars?.length || !backfill?.length) return { bars, chartBars: bars, offset: 0, priorCount: 0 }
   const bucketMs = Math.max(1, timeframeMinutes) * 60_000
-  const firstMs = bars[0].time
+  const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
+  const firstBarMs = msOf(bars[0].time)
+  const firstMs = Number.isFinite(firstMinuteMs) ? firstMinuteMs : firstBarMs
   const buckets = new Map()
+  let carry = 0      // estimated minutes in the first exact bar's own candle, before its first exact minute
+  let carried = false
   for (const m of backfill) {
-    const ms = typeof m.time === 'number' ? m.time : new Date(m.time).getTime()
+    const ms = msOf(m.time)
+    if (!(ms < firstMs)) continue
     const start = Math.floor(ms / bucketMs) * bucketMs
-    if (start >= firstMs) continue
-    buckets.set(start, (buckets.get(start) ?? 0) + (m.buy - m.sell))
+    const delta = (m.buy ?? 0) - (m.sell ?? 0)
+    if (start >= firstBarMs) { carry += delta; carried = true; continue }
+    buckets.set(start, (buckets.get(start) ?? 0) + delta)
   }
   let cvd = 0
   const prior = [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, delta]) => {
     cvd += delta
     return { time, delta, cvd, estimated: true }
   })
-  if (prior.length === 0) return { bars, chartBars: bars, offset: 0, priorCount: 0 }
-  const shifted = bars.map((b) => ({ ...b, cvd: b.cvd + cvd }))
-  return { bars: shifted, chartBars: [...prior, ...shifted], offset: cvd, priorCount: prior.length }
+  if (prior.length === 0 && !carried) return { bars, chartBars: bars, offset: 0, priorCount: 0 }
+  const offset = cvd + carry
+  const shifted = bars.map((b) => ({ ...b, cvd: b.cvd + offset }))
+  const chartBars = [...prior, ...shifted]
+  if (carried) chartBars[prior.length] = { ...shifted[0], delta: shifted[0].delta + carry, estimated: true }
+  return { bars: shifted, chartBars, offset, priorCount: prior.length }
+}
+
+/**
+ * The live "orderFlowDelta" push - the futures engine's latest minutes as `{ time, buy, sell }`, the one still forming
+ * included - into a day's delta minutes (`deltaMinutes`'): each pushed minute replaces the same minute or extends the
+ * day. `{ minutes, gap }`: gap = a minute missing between the day held and the push (pushes skipped while the page was
+ * slow or away, or a reconnect) - the day must be loaded again; the minutes are then left as they were.
+ */
+export function mergeDeltaPush(minutes, pushed) {
+  const list = minutes ?? []
+  const fresh = (pushed ?? [])
+    .map((m) => ({ ms: typeof m.time === 'number' ? m.time : new Date(m.time).getTime(), delta: (m.buy ?? 0) - (m.sell ?? 0), estimated: false }))
+    .filter((m) => Number.isFinite(m.ms)).sort((a, b) => a.ms - b.ms)
+  if (!fresh.length) return { minutes: list, gap: false }
+  let lastExact = null
+  for (let i = list.length - 1; i >= 0; i--) if (!list[i].estimated) { lastExact = list[i]; break }
+  if (lastExact && fresh[0].ms > lastExact.ms + 60_000) return { minutes: list, gap: true }
+  // Minutes after the push stay (a push already in flight when the day was loaded again is older than the day).
+  const last = fresh.at(-1).ms
+  return { minutes: [...list.filter((m) => m.ms < fresh[0].ms), ...fresh, ...list.filter((m) => m.ms > last)], gap: false }
 }
 
 /**

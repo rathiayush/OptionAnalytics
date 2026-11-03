@@ -43,3 +43,38 @@ test('deltaMinutes puts the estimated minutes before the first recorded one in f
   assert.deepEqual(deltaMinutes([], backfill).map((m) => m.estimated), [true, true, true])
   assert.deepEqual(deltaMinutes(recorded, null).map((m) => m.delta), [-200, 500])
 })
+
+// A 5-minute timeframe whose recording started part way into a candle (10:02 in 10:00 - 10:05 here: minute 2 of the
+// bucket starting at minute 0): the estimated minutes 0 and 1 are before the first exact minute - counted in the
+// cumulative delta from the open and in that candle's delta on the chart (drawn as estimated), not dropped.
+test('estimated minutes in the first recorded candle, before its first recorded minute, still count', () => {
+  const first = bar(0, 7, 7) // the 5-minute candle starting at minute 0 holds the exact minutes 2 - 4 (delta 7)
+  const r = withBackfill([first, bar(5, -2, 5)], [fill(0, 10, 0), fill(1, 0, 4), fill(2, 99, 0)], 5, t0 + 2 * MIN)
+  assert.equal(r.offset, 6)                                   // +10 - 4; minute 2 is recorded - its estimate is not used
+  assert.deepEqual(r.bars.map((b) => [b.delta, b.cvd]), [[7, 13], [-2, 11]])   // the footprint keeps its own exact delta
+  assert.deepEqual(r.chartBars.map((b) => [b.delta, b.cvd, Boolean(b.estimated)]), [[13, 13, true], [-2, 11, false]])
+  assert.equal(r.priorCount, 0)
+  // Without the first exact minute it reads as before (the candle's start).
+  assert.equal(withBackfill([first], [fill(0, 10, 0), fill(1, 0, 4)], 5).offset, 0)
+})
+
+// OI Replay's futures delta panes, live: the "orderFlowDelta" push merged as the minutes trade.
+test('mergeDeltaPush replaces the forming minute, adds the next, and asks for a reload when a minute was missed', async () => {
+  const { mergeDeltaPush } = await import('../src/cvdBackfill.js')
+  const iso = (i) => new Date(t0 + i * MIN).toISOString()
+  const held = [{ ms: t0, delta: 30, estimated: true }, { ms: t0 + MIN, delta: 5, estimated: false }, { ms: t0 + 2 * MIN, delta: -3, estimated: false }]
+  // Minute 2 still forming (now -8), minute 3 new.
+  const next = mergeDeltaPush(held, [{ time: iso(2), buy: 2, sell: 10 }, { time: iso(3), buy: 6, sell: 1 }])
+  assert.equal(next.gap, false)
+  assert.deepEqual(next.minutes.map((m) => [(m.ms - t0) / MIN, m.delta, m.estimated]), [[0, 30, true], [1, 5, false], [2, -8, false], [3, 5, false]])
+  // The push starts at minute 4 while the page holds up to minute 2: minute 3 was missed - load the day again.
+  const missed = mergeDeltaPush(held, [{ time: iso(4), buy: 1, sell: 0 }, { time: iso(5), buy: 1, sell: 0 }])
+  assert.equal(missed.gap, true)
+  assert.equal(missed.minutes, held)
+  // A push older than a day just loaded leaves the later minutes alone.
+  const stale = mergeDeltaPush(next.minutes, [{ time: iso(1), buy: 9, sell: 0 }])
+  assert.deepEqual(stale.minutes.map((m) => [(m.ms - t0) / MIN, m.delta]), [[0, 30], [1, 9], [2, -8], [3, 5]])
+  // Nothing pushed, or nothing held yet: no change, no reload.
+  assert.deepEqual(mergeDeltaPush(held, []), { minutes: held, gap: false })
+  assert.deepEqual(mergeDeltaPush([], [{ time: iso(0), buy: 1, sell: 0 }]).minutes.map((m) => m.delta), [1])
+})
