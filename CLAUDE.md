@@ -682,8 +682,16 @@ When adding or changing a strategy:
   loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`. The Order Flow
   page's footprint "Delta per row" tick (`rowDelta`, `optionanalytics.orderFlow.rowDelta`, off by default - the cells as
   they were) adds a third column to every row: its buy - sell, green / red, shaded against the bar's largest (`rowDeltas`).
+  The live push carries only the engine's last two minute bars, so a page (or the server scanner) that missed a minute -
+  a phone asleep, pushes skipped, the connection down and back - LOADS THE DAY AGAIN (`orderFlowPushGap`; the Order Flow
+  page also on every hub reconnect, once a load is not already on its way): it used to fold in what came next and keep a
+  hole in the footprint, the cumulative delta and the tape until a manual reload (`tests/scanner-runner.test.mjs`).
   Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
   prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
   (bars are whole; the server scanner is local and does not).
+- The BACKTRACK page (`/backtest`) was removed on request, page and server endpoints (an old bookmark goes to the
+  dashboard). `BacktestService` and its `IBacktestStrategy` strategies STAY: they are what the armed Triggers run
+  (`StrategyTriggerHostedService` - `RunStrategy` / `ReplayForStrategy`, in memory) and their list is
+  `GET /api/triggers/strategies` (admin, the Triggers page). The Expired Backtest and Signal backtest pages are separate.
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode; alerts and the default auto trade are paper.

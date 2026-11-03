@@ -129,6 +129,20 @@ public sealed class OiReplayLiveFuturesTickTests
         new(id, price, price, price, price, price, volume, 0, 0, 1_000_000, Now);
 
     [Fact]
+    public void A_reading_is_filed_by_when_it_came_off_the_socket_not_when_its_queue_got_to_it()
+    {
+        var (service, _, store) = Service();
+        // It arrived at 11:00:59.900; a busy moment had this consumer handle it at 11:01:00.200.
+        Now = new DateTimeOffset(2026, 10, 23, 11, 1, 0, IstClock.Offset).AddMilliseconds(200);
+        var arrived = new DateTimeOffset(2026, 10, 23, 11, 0, 59, IstClock.Offset).AddMilliseconds(900);
+        service.OnTick(Tick(OptionId, 120m, 5_000) with { ReceivedAt = arrived });
+        service.OnTick(Tick(FuturesId, 25_600m, 9_000) with { ReceivedAt = arrived });
+        var from = new DateTimeOffset(2026, 10, 23, 10, 0, 0, IstClock.Offset);
+        Assert.Equal(new[] { 11 * 60 }, store.OptionPointsFrom("NIFTY", "WEEK", "CE", from).Select(p => IstClock.MinutesOfDay(p.Time)));
+        Assert.Equal(new[] { 11 * 60 }, store.FuturesBarsFrom("NIFTY", from).Select(b => IstClock.MinutesOfDay(b.Time)));
+    }
+
+    [Fact]
     public void A_futures_tick_is_sent_to_the_page_and_kept_as_todays_bar()
     {
         var (service, batcher, store) = Service();

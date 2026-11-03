@@ -524,8 +524,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
         // depth and bid/ask keep updating (and every periodic re-subscribe replays each leg's snapshot
         // stamped with that same old trade time). Stamping with it filed fresh OI into long-past
         // buckets and left the current one empty - the scattered live heatmap. The trade time is still
-        // forwarded as lastTradeTime for anything that genuinely wants it.
-        var observedAt = Clock().ToOffset(IstClock.Offset);
+        // forwarded as lastTradeTime for anything that genuinely wants it. Observed = when it came off the socket
+        // (SpotTick.ReceivedAt) - not when this consumer's queue got to it, which a busy moment pushed into the next minute.
+        var observedAt = (tick.ReceivedAt ?? Clock()).ToOffset(IstClock.Offset);
         var lastTradeTime = tick.ExchangeTimestamp.ToOffset(IstClock.Offset);
         // Outside the session: no new minute on the charts, no bar kept - only each leg's newest reading (its close).
         var inSession = InFnoSession(observedAt);

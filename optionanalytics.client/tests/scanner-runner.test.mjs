@@ -193,3 +193,28 @@ test('the Top 15 from the scanner log\'s signals', () => {
   assert.ok(top.ids.length > 0)
   assert.deepEqual(topFromSignalsCsv('').ids, topFromSignalsCsv(null).ids)
 })
+
+// The live push carries only the engine's last two minutes: a minute missed between the day held and the push (pushes
+// skipped - a sleeping page, a slow link, a reconnect) never arrives, so the day is loaded again instead of carrying on
+// with a hole in the footprint and a short cumulative delta. The Order Flow page does the same (and on a reconnect).
+test('a push that leaves a minute out loads the day again; a normal one is folded in', async () => {
+  const { orderFlowPushGap } = await import('../src/liveFeeds.js')
+  const bar = (i) => ({ ...minuteBars[i], levels: minuteBars[i].levels ?? [] })
+  const view = { minuteBars: [bar(10), bar(11)] }
+  assert.equal(orderFlowPushGap(view, { bars: [bar(11), bar(12)] }), false)   // the forming minute and the next
+  assert.equal(orderFlowPushGap(view, { bars: [bar(12), bar(13)] }), false)   // the next two
+  assert.equal(orderFlowPushGap(view, { bars: [bar(13), bar(14)] }), true)    // minute 12 missed
+  assert.equal(orderFlowPushGap({ minuteBars: [] }, { bars: [bar(3)] }), false)
+  assert.equal(orderFlowPushGap(view, { bars: [] }), false)
+
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.data = dataAt(at(40))
+  const held = scanner.data.view.minuteBars.length
+  scanner.onOrderFlowLive({ meta: { securityId: 1, day: DATE }, bars: [bar(held - 1), bar(held)], trades: [] })
+  assert.ok(scanner.data, 'a normal push is folded in')
+  assert.equal(scanner.data.view.minuteBars.length, held + 1)
+  scanner.onOrderFlowLive({ meta: { securityId: 1, day: DATE }, bars: [bar(held + 5), bar(held + 6)], trades: [] })
+  assert.equal(scanner.data, null, 'a gap drops the day so it is loaded again')
+})

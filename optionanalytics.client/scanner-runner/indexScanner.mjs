@@ -12,7 +12,7 @@ import {
   MIN, msOf, scanTick, trailFor, alertIdsFor, followSetups, setupEvents, newSetupEventMemory, newPosition, positionRows, sameSignal,
   withLevelChange, setupWasTraded, paperEntryText, setupExitText, paperExitText, scannerLogBody, scannerLogSig, scannerProfileOf, PAPER_TRADE_LOT_SIZE,
 } from '../src/scannerCore.js'
-import { orderFlowFromSnapshot, applyOrderFlowPush, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
+import { orderFlowFromSnapshot, applyOrderFlowPush, orderFlowPushGap, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
 import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
 import { tpoRowFor } from '../src/profiles.js'
@@ -199,6 +199,8 @@ export class IndexScanner {
     if (!d?.view || payload?.meta?.securityId !== d.view.meta?.securityId) return
     // The engine rolled into a new trading day (or another contract): start from its snapshot.
     if (payload.meta?.day && d.view.meta?.day && payload.meta.day !== d.view.meta.day) { this.invalidate(); return }
+    // A minute missed between the day held and this push (pushes skipped): load the day so far again.
+    if (orderFlowPushGap(d.view, payload)) { this.invalidate(); return }
     d.view = applyOrderFlowPush(d.view, payload, this.rowSize())
     if (payload.trades?.length) d.prints = mergePrints(d.prints, payload.trades)
   }

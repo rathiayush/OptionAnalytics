@@ -21,7 +21,7 @@ import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './Pr
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
-import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, toColumn, withFineHeatmap } from './liveFeeds.js'
+import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -59,19 +59,22 @@ const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '
 
 // One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
 // selection.
-export function useOrderFlowHub(group, onLive) {
+export function useOrderFlowHub(group, onLive, onReconnected = null) {
   const [state, setState] = useState('connecting')
   const connectionRef = useRef(null)
   const groupsRef = useRef([])
   const liveRef = useRef(onLive)
   liveRef.current = onLive
+  // A reconnect: whatever was pushed while the connection was down never comes - the page loads the day again.
+  const reconnectedRef = useRef(onReconnected)
+  useEffect(() => { reconnectedRef.current = onReconnected })
 
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder().withUrl('/hubs/spot').withAutomaticReconnect(RECONNECT_RETRY_POLICY).build()
     connectionRef.current = connection
     onLiveBatch(connection, { orderFlowLive: (payload) => liveRef.current?.(payload) })
     connection.onreconnecting(() => setState('reconnecting'))
-    connection.onreconnected(() => { setState('connected'); joinAllSignalRGroups(connection, groupsRef.current); checkForNewDeploy() })
+    connection.onreconnected(() => { setState('connected'); joinAllSignalRGroups(connection, groupsRef.current); checkForNewDeploy(); reconnectedRef.current?.() })
     connection.onclose(() => setState('disconnected'))
     connection.start()
       .then(() => { setState('connected'); joinAllSignalRGroups(connection, groupsRef.current) })
@@ -256,9 +259,21 @@ export default function OrderFlowPage() {
     return () => { cancelled = true }
   }, [isReplay, underlying, expiryQuery, rowSize, heatFetchRow, heatRowQuery, fetchLots, reloadNonce])
 
+  // A live day with a hole in it (minutes missed while the page slept, or while the connection was down) is loaded again
+  // - once: pushes are not folded in while that load is on its way.
+  const reloadingRef = useRef(false)
+  const dataRef = useRef(null)
+  dataRef.current = data
+  const reloadLiveDay = () => {
+    if (isReplay || reloadingRef.current) return
+    reloadingRef.current = true
+    setReloadNonce((n) => n + 1)
+  }
+  useEffect(() => { if (!loading) reloadingRef.current = false }, [loading])
   const handleLive = (payload) => {
     const { securityId, rowSize: rows } = contextRef.current
-    if (payload?.meta?.securityId !== securityId) return
+    if (payload?.meta?.securityId !== securityId || reloadingRef.current) return
+    if (orderFlowPushGap(dataRef.current, payload)) { reloadLiveDay(); return }
     setData((prev) => applyOrderFlowPush(prev, payload, rows))
   }
   // ---- Time & Sales tape: every print (not only big ones) - live: the latest, then each push's new
@@ -280,7 +295,7 @@ export default function OrderFlowPage() {
   const onLive = (payload) => { handleLive(payload); handleLiveTape(payload) }
 
   const liveGroup = isReplay ? null : data?.meta?.expiry ? `of:${underlying}:${data.meta.expiry}` : data ? `of:${underlying}` : null
-  const connectionState = useOrderFlowHub(liveGroup, onLive)
+  const connectionState = useOrderFlowHub(liveGroup, onLive, reloadLiveDay)
 
   // ---- Replay of a loaded day ----
   const [replayDay, setReplayDay] = useState(null)

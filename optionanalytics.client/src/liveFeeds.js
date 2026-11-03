@@ -42,6 +42,16 @@ export function withFineHeatmap(view, fineRow, rowSize) {
   return { ...view, heatFine: view.heatmap, heatFineRow: fineRow, heatmap: rebucketColumns(view.heatmap, rowSize) }
 }
 
+// Whether a push leaves a hole: it carries only the engine's last two minute bars, so when the view's last minute is more
+// than a minute before the push's first one (the page asleep in the background, pushes skipped on a slow link) the minutes
+// between never arrive - the footprint gets a gap and the cumulative delta comes up short until the day is loaded again.
+export function orderFlowPushGap(view, payload) {
+  const last = view?.minuteBars?.at(-1)
+  const first = payload?.bars?.[0]
+  if (!last || !first) return false
+  return new Date(first.time).getTime() - new Date(last.time).getTime() > MIN
+}
+
 // One "orderFlowLive" push folded into the view: new prints, icebergs and sweeps, the forming minute
 // bars (in `rowSize` rows) and - every HEATMAP_COLUMN_MS - a new heatmap column of the whole book.
 export function applyOrderFlowPush(prev, payload, rowSize) {
