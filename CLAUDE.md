@@ -682,6 +682,21 @@ When adding or changing a strategy:
   loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`. The Order Flow
   page's footprint "Delta per row" tick (`rowDelta`, `optionanalytics.orderFlow.rowDelta`, off by default - the cells as
   they were) adds a third column to every row: its buy - sell, green / red, shaded against the bar's largest (`rowDeltas`).
+  AUCTIONS (the "Auctions" tick, on by default, `optionanalytics.orderFlow.auctions`; every footprint - the OI Replay
+  review's too): each bar's high and low read on its sell (bid) x buy (ask) rows (`auctionOf`, in `analyzeBars`) - FINISHED
+  (FA) = no selling at the top row (0 x N) / no buying at the bottom row (N x 0): that side ran out; UNFINISHED (UA) = both
+  sides traded at the extreme - a dotted line runs on until a later bar trades back into that row (`unfinishedRevisits`),
+  to the right edge while open; the other side alone there = neither. Not on an estimated day (its rows are a spread, not
+  trades). `tests/order-flow-auction.test.mjs`.
+  RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
+  Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
+  imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
+  came back as the candle estimate, which has no imbalances at all). One gzip JSON per contract and day
+  (`{UNDERLYING}/{securityId}/{yyyy-MM-dd}.json.gz`, heatmap rows as [row, qty]; ~4 MB a full day), the newest
+  `OrderFlow:DaysOnDisk` dates (30) kept; written on ONE background queue (never on an engine's lock or the tick path), a
+  day read back kept for the next asks. TODAY is checkpointed every `CheckpointInterval` (5 min) and at shutdown, and a new
+  engine starts from it (`NewEngine` -> `ImportDay`): a deploy mid-session keeps the morning exact - only the minutes the
+  server was down are missing, and the first tick after sets a new baseline (no giant print). `OrderFlowDayStoreTests.cs`.
   The live push carries only the engine's last two minute bars, so a page (or the server scanner) that missed a minute -
   a phone asleep, pushes skipped, the connection down and back - LOADS THE DAY AGAIN (`orderFlowPushGap`; the Order Flow
   page also on every hub reconnect, once a load is not already on its way): it used to fold in what came next and keep a

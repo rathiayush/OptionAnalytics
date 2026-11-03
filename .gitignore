@@ -40,6 +40,7 @@ expired-option-data/
 
 # ScannerLogStore's CSVs (see Storage:ScannerLogPath) - the scanner's record, kept on the server.
 scanner-log/
+order-flow/
 visitor-log/
 geo/
 live-time-exits.json

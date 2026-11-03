@@ -6,7 +6,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
-import { bidShare, heatmapPriceRange, rowDeltas } from './orderFlowMath.js'
+import { bidShare, heatmapPriceRange, rowDeltas, unfinishedRevisits } from './orderFlowMath.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
 
 const { Text } = Typography
@@ -18,6 +18,9 @@ const { Text } = Typography
 const IST_OFFSET_S = 19800
 const IST_HHMM = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 const EXH_COLOR = '#9254de'
+// Finished (FA) / unfinished (UA) auction tags at a bar's extremes (auctionOf).
+const UA_COLOR = '#ffa940'
+const FA_COLOR = '#8c8c8c'
 // Stacked imbalances: a sell stack's bid-side (left) cells purple, a buy stack's ask-side (right) cells white.
 const STACK_SELL_FILL = '#8e44d6'
 const STACK_BUY_FILL = '#f2f2f2'
@@ -80,7 +83,9 @@ function zoomRows(l, factor, y, step, plotH) {
 
 // `rowDelta`: a third column on every row - its delta (buy - sell), green / red by sign, shaded by its size against the
 // bar's largest row delta (the page's "Delta per row" tick; off, the cells are as they always were).
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, rowDelta = false }) {
+// `auctions`: each bar's finished (FA) / unfinished (UA) auction at its high and low (analyzeBars' auction), an unfinished
+// one with a dotted line on to the bar that traded back into it (still open: to the right edge).
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, rowDelta = false, auctions = true }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -101,6 +106,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   const dotsRef = useRef([])
 
   const step = rowSize > 0 ? rowSize : 0.05
+  const revisits = useMemo(() => (auctions ? unfinishedRevisits(bars, step) : null), [auctions, bars, step])
   const plotW = Math.max(0, width - FP_AXIS_W)
   const profileW = profile?.rows?.length ? (narrow ? 54 : 96) : 0
   const barsW = Math.max(0, plotW - profileW)
@@ -168,7 +174,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.fillText('Waiting for futures trades…', 16, 64)
       return
     }
-    const { visible, hiPad, rowH, rightPad } = layout
+    const { visible, hiPad, rowH, rightPad, start } = layout
     const rowTop = (price) => FP_TOP + ((hiPad - price) / step) * rowH
     const yPrice = (price) => FP_TOP + ((hiPad + step - price) / step) * rowH
     const barX = (k) => barsW - rightPad - (visible.length - k) * colWidth
@@ -296,6 +302,32 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       }
       for (const a of bar.absorption ?? []) marker(a.price, a.side, 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
       for (const e of bar.exhaustion ?? []) marker(e.price, e.side, 'EXH', EXH_COLOR)
+
+      // Finished / unfinished auction at the high and the low: a tag just outside the extreme row; an unfinished one a
+      // dotted line on to the bar that traded back into it (until then a magnet), or to the right edge while open.
+      if (auctions && bar.auction) {
+        for (const side of ['high', 'low']) {
+          const a = bar.auction[side]
+          if (!a) continue
+          const top = rowTop(a.price)
+          const unfinished = a.kind === 'unfinished'
+          if (unfinished) {
+            const until = revisits?.get(start + k)?.[side]?.until
+            const y = top + rowH / 2
+            ctx.save()
+            ctx.strokeStyle = UA_COLOR
+            ctx.setLineDash([3, 3])
+            ctx.beginPath(); ctx.moveTo(cellX + cellsW, y); ctx.lineTo(until != null ? barX(until - start) : barsW, y); ctx.stroke()
+            ctx.restore()
+          }
+          ctx.font = `700 9px ${FONT}`
+          ctx.textAlign = 'center'
+          ctx.textBaseline = 'middle'
+          ctx.fillStyle = unfinished ? UA_COLOR : FA_COLOR
+          ctx.fillText(unfinished ? 'UA' : 'FA', cellX + cellsW / 2, side === 'high' ? top - 6 : top + rowH + 6)
+          ctx.textAlign = 'left'
+        }
+      }
       ctx.restore()
 
       // Delta + volume strip and time label.
@@ -499,7 +531,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta])
+  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta, auctions, revisits])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})

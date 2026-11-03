@@ -30,9 +30,11 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// QuotesAsOf), and the inbox's delay shows in the header's feed health with the market feed's consumers ("Order flow").
 /// Alerts and the scanner read the engine's pushes afterwards - they may lag; the ticks are applied as they arrive.
 ///
-/// REPLAY. Nothing is stored on disk. Today replays straight from the live engine; when an engine
-/// rolls into a new day, or is replaced at a futures rollover, its finished day goes to
-/// OrderFlowDayStore in memory, so the last few days replay too - until the server restarts.
+/// REPLAY. Today replays straight from the live engine; when an engine rolls into a new day, or is replaced at a
+/// futures rollover, its finished day goes to OrderFlowDayStore - memory and, with Storage:OrderFlowPath, DISK - so past
+/// days replay exactly (imbalances and all) through a restart too. Today's recording is checkpointed to disk every
+/// CheckpointInterval and at shutdown, and a new engine starts today from that checkpoint (OrderFlowEngine.ImportDay): a
+/// deploy mid-session keeps the morning exact - only the minutes the server was down are missing.
 /// OrderFlow:Enabled = false turns it all off.
 /// </summary>
 public sealed class OrderFlowService : BackgroundService
@@ -42,6 +44,8 @@ public sealed class OrderFlowService : BackgroundService
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan DepthFallbackAfter = TimeSpan.FromSeconds(90);
     private const int MaxExtraEngines = 4;
+    /// <summary>How often today's recording is written to disk (OrderFlowDayStore.Save - a background write).</summary>
+    public static readonly TimeSpan CheckpointInterval = TimeSpan.FromMinutes(5);
 
     private readonly DhanFuturesInstrumentMaster _futures;
     private readonly NseFuturesContractArchive? _archive;
@@ -171,8 +175,7 @@ public sealed class OrderFlowService : BackgroundService
                 if (oldest.Value.Engine.ExportDay() is { } day) _pastDays.Add(day);
                 _logger.LogInformation("Order flow: stopped tracking {Symbol} (least recently viewed).", oldest.Value.Engine.ContractSymbol);
             }
-            var engine = new OrderFlowEngine(underlying.ToUpperInvariant(), contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize, contract.Expiry);
-            engine.DayEnded += _pastDays.Add;
+            var engine = NewEngine(underlying.ToUpperInvariant(), contract);
             _extra[contract.SecurityId] = (engine, DateTimeOffset.UtcNow);
             _bySecurityId[contract.SecurityId] = engine;
             if (!_feed.IsSubscribed(contract.SecurityId))
@@ -190,6 +193,48 @@ public sealed class OrderFlowService : BackgroundService
 
     public bool DepthFeedConnected => _depth.IsConnected;
 
+    /// <summary>A new engine for a contract: today's recording kept on disk (a restart / deploy) first, so it carries on
+    /// from it; its finished days go to the day store.</summary>
+    internal OrderFlowEngine NewEngine(string underlying, DhanFuturesInstrument contract)
+    {
+        var engine = new OrderFlowEngine(underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize, contract.Expiry);
+        if (_pastDays.LoadSaved(underlying, contract.SecurityId, IstClock.Today()) is { } saved && engine.ImportDay(saved))
+            _logger.LogInformation("Order flow: {Symbol} carries on from today's recording kept on disk ({Bars} minutes).", contract.TradingSymbol, saved.Bars.Count);
+        engine.DayEnded += _pastDays.Add;
+        return engine;
+    }
+
+    /// <summary>Today's recording of every tracked contract to disk - `now` on the caller's thread (shutdown), else on the
+    /// store's background writer.</summary>
+    internal void Checkpoint(bool now = false)
+    {
+        if (!_pastDays.OnDisk) return;
+        var today = IstClock.Today();
+        foreach (var engine in _bySecurityId.Values.Distinct())
+        {
+            if (engine.ExportDayDate() != today || engine.ExportDay() is not { } day) continue;
+            if (now) _pastDays.SaveNow(day); else _pastDays.Save(day);
+        }
+    }
+
+    private async Task CheckpointLoopAsync(CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(CheckpointInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+                try { Checkpoint(); } catch (Exception ex) { _logger.LogWarning(ex, "Order flow: today's checkpoint failed."); }
+        }
+        catch (OperationCanceledException) { }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        await base.StopAsync(cancellationToken);
+        // A deploy / restart: today so far to disk, so the next start carries on from it.
+        try { Checkpoint(now: true); } catch (Exception ex) { _logger.LogWarning(ex, "Order flow: the shutdown checkpoint failed."); }
+    }
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         // Background work: its Dhan calls are not sent outside market hours (MarketHours).
@@ -205,6 +250,7 @@ public sealed class OrderFlowService : BackgroundService
         _depth.DepthUpdated += OnDepth;
         _fullDepth.DepthUpdated += OnDepth;
         var feedStatus = RefreshDepthFeedsAsync(stoppingToken);
+        var checkpoints = CheckpointLoopAsync(stoppingToken);
         try
         {
             while (!stoppingToken.IsCancellationRequested)
@@ -236,6 +282,7 @@ public sealed class OrderFlowService : BackgroundService
             _fullDepth.DepthUpdated -= OnDepth;
             _tickSubscription?.Dispose();
             try { await feedStatus; } catch (OperationCanceledException) { }
+            try { await checkpoints; } catch (OperationCanceledException) { }
         }
     }
 
@@ -308,8 +355,7 @@ public sealed class OrderFlowService : BackgroundService
             }
             else
             {
-                engine = new OrderFlowEngine(underlying, contract.SecurityId, contract.TradingSymbol, contract.DhanSegment, contract.TickSize, contract.LotSize, contract.Expiry);
-                engine.DayEnded += _pastDays.Add;
+                engine = NewEngine(underlying, contract);
             }
             _bySecurityId[contract.SecurityId] = engine;
             _byUnderlying[underlying] = engine;

@@ -79,8 +79,45 @@ export const DEFAULT_ANALYSIS = {
   imbalanceMinShare: 0.5,
 }
 
-// Per bar: POC, diagonal imbalances, stacked imbalance zones, absorption, exhaustion, and the
-// running cumulative delta.
+// FINISHED / UNFINISHED AUCTION at a bar's extremes, read on the footprint's sell (bid) x buy (ask) rows, as the footprint
+// tools mark it: the TOP row with no selling (0 x N) - the buyers ran out, the auction up finished; the BOTTOM row with no
+// buying (N x 0) - the sellers ran out. Both sides trading at the extreme (e.g. 33 x 45) = UNFINISHED: the auction stopped
+// mid-way, and price tends to come back to it. `ascending`: the bar's rows, lowest price first. Returns { high, low },
+// each { kind: 'finished' | 'unfinished', price } or null (the other side alone traded there - neither).
+export function auctionOf(ascending) {
+  const read = (row, emptySide) => {
+    if (!row || !(row.buy + row.sell > 0)) return null
+    if (row.buy > 0 && row.sell > 0) return { kind: 'unfinished', price: row.price }
+    return row[emptySide] === 0 ? { kind: 'finished', price: row.price } : null
+  }
+  return { high: read(ascending?.at(-1), 'sell'), low: read(ascending?.[0], 'buy') }
+}
+
+// Each bar's UNFINISHED extremes and the first later bar that traded back into them ("unfinished business" - a magnet
+// until it is revisited): Map barIndex -> { high, low }, each { price, until } (`until` the revisiting bar's index, null =
+// still open). `step`: the row size (a later bar revisits a row when its range reaches into it).
+export function unfinishedRevisits(bars, step) {
+  const out = new Map()
+  const row = step > 0 ? step : 0
+  ;(bars ?? []).forEach((bar, i) => {
+    const entry = {}
+    for (const side of ['high', 'low']) {
+      const a = bar.auction?.[side]
+      if (a?.kind !== 'unfinished') continue
+      let until = null
+      for (let j = i + 1; j < bars.length; j++) {
+        const b = bars[j]
+        if (side === 'high' ? b.high >= a.price : b.low < a.price + row) { until = j; break }
+      }
+      entry[side] = { price: a.price, until }
+    }
+    if (entry.high || entry.low) out.set(i, entry)
+  })
+  return out
+}
+
+// Per bar: POC, diagonal imbalances, stacked imbalance zones, absorption, exhaustion, the finished / unfinished auction
+// at its high and low (auctionOf), and the running cumulative delta.
 //
 // - Imbalance (diagonal, as footprint tools compare it): a BUY imbalance at price p when the buying
 //   at p is at least `imbalanceRatio` x the selling one row BELOW (p - row) - buyers lifted offers
@@ -190,7 +227,7 @@ export function analyzeBars(bars, { rowSize, minVolume = 1, estimated = false, .
       }
     }
 
-    return { ...bar, cvd, poc: poc?.price ?? null, imbalances, stacked, absorption, exhaustion }
+    return { ...bar, cvd, poc: poc?.price ?? null, imbalances, stacked, absorption, exhaustion, auction: auctionOf(ascending) }
   })
 }
 

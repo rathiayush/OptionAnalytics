@@ -122,7 +122,7 @@ function OrderFlowRead({ bias }) {
 }
 
 // What every mark on the footprint means.
-function FootprintLegend({ estimated, bigLabel, rowDelta = false }) {
+function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false }) {
   const item = (swatch, label) => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, whiteSpace: 'nowrap' }}>{swatch}{label}</span>
   )
@@ -141,6 +141,8 @@ function FootprintLegend({ estimated, bigLabel, rowDelta = false }) {
       {item(pill(UP_COLOR, 'ABS'), 'absorption')}
       {item(pill('#9254de', 'EXH'), 'exhaustion')}
       {item(<span style={{ display: 'inline-flex', gap: 2 }}>{dot(UP_COLOR, 9)}{dot(DOWN_COLOR, 13)}</span>, `${bigLabel} (size = quantity)`)}
+      {auctions && !estimated && item(<span style={{ fontSize: 9, fontWeight: 700, color: '#8c8c8c' }}>FA</span>, 'finished auction (that side ran out at the high / low)')}
+      {auctions && !estimated && item(<span style={{ fontSize: 9, fontWeight: 700, color: '#ffa940' }}>UA ┄</span>, 'unfinished auction (both sides at the extreme - a magnet until revisited)')}
       {rowDelta && item(<span style={{ display: 'inline-flex' }}>{box('#26a69aaa')}{box('#ef5350aa')}</span>, 'delta per row (buy − sell), third column')}
       {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
     </div>
@@ -172,6 +174,8 @@ export default function OrderFlowPage() {
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
   // The footprint's third column: each row's delta (buy - sell).
   const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.orderFlow.rowDelta', false)
+  // Finished (FA) / unfinished (UA) auction at each bar's high and low.
+  const [showAuctions, setShowAuctions] = usePersistedState('optionanalytics.orderFlow.auctions', true)
   // Telegram for a HEAVY iceberg (live view only): a hidden order that has traded at least this many lots in total.
   // (The server marks a level an iceberg from 5 lots; those small ones are only shown on the chart.)
   const [iceAlertOn, setIceAlertOn] = usePersistedState('optionanalytics.orderFlow.iceAlertOn', true)
@@ -789,6 +793,9 @@ export default function OrderFlowPage() {
             <Space size={4}><Switch size="small" checked={showProfile} onChange={setShowProfile} /><Text style={{ fontSize: 12 }}>Volume profile</Text></Space>
             <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}><Text style={{ fontSize: 12 }}>VWAP</Text></Checkbox>
             <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}><Text style={{ fontSize: 12 }}>Delta per row</Text></Checkbox>
+            <Tooltip title="At each bar's high and low: FA = finished auction (no selling at the top row / no buying at the bottom row - that side ran out); UA = unfinished (both sides traded at the extreme - price tends to come back), its dotted line running on until a later bar trades back into it. Read on the footprint's rows; not on an estimated day.">
+              <Checkbox checked={showAuctions} onChange={(e) => setShowAuctions(e.target.checked)}><Text style={{ fontSize: 12 }}>Auctions</Text></Checkbox>
+            </Tooltip>
           </Space>
           {isReplay && (
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
@@ -869,11 +876,11 @@ export default function OrderFlowPage() {
             <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy){rowDelta ? ' × Δ' : ''} · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
-              <FootprintLegend estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} />
+              <FootprintLegend estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} auctions={showAuctions} />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
-                rowDelta={rowDelta}
+                rowDelta={rowDelta} auctions={showAuctions && !estimated}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
