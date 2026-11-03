@@ -47,18 +47,50 @@ export const FAB_ITEM_SIZE = 34
 export const FAB_GAP = 8
 const FAB_MARGIN = 8
 const FAB_DRAG_PX = 6
+/** The button's first place: the BOTTOM LEFT of the page (right of the sidebar), this far from the edges - level with
+ *  the floating replay bar (FloatingReplayBar.jsx), which starts to its right. */
+export const FAB_EDGE = 16
 
-/** Where the button sits: `pos` ({ x, y } - its top-left) kept inside the screen (`viewport` { width, height }). */
-export function placeFab(pos, viewport) {
-  const maxX = Math.max(FAB_MARGIN, viewport.width - FAB_SIZE - FAB_MARGIN)
+/** Where the button sits: `pos` ({ x, y } - its top-left) kept inside the screen (`viewport` { width, height }) and right
+ *  of `leftInset` (the sidebar - the button never covers the menu or Log out). */
+export function placeFab(pos, viewport, leftInset = 0) {
+  const minX = leftInset + FAB_MARGIN
+  const maxX = Math.max(minX, viewport.width - FAB_SIZE - FAB_MARGIN)
   const maxY = Math.max(FAB_MARGIN, viewport.height - FAB_SIZE - FAB_MARGIN)
   const x = Number.isFinite(pos?.x) ? pos.x : maxX
   const y = Number.isFinite(pos?.y) ? pos.y : maxY
-  return { x: Math.min(maxX, Math.max(FAB_MARGIN, x)), y: Math.min(maxY, Math.max(FAB_MARGIN, y)) }
+  return { x: Math.min(maxX, Math.max(minX, x)), y: Math.min(maxY, Math.max(FAB_MARGIN, y)) }
 }
 
-/** Its first place: bottom right, clear of a phone browser's bottom bar. */
-export const fabDefault = (viewport) => ({ x: viewport.width - FAB_SIZE - 16, y: viewport.height - FAB_SIZE - 96 })
+/** Its first place: bottom left of the page, right of the sidebar. */
+export const fabDefault = (viewport, leftInset = 0) => ({ x: leftInset + FAB_EDGE, y: viewport.height - FAB_SIZE - FAB_EDGE })
+
+/** Where it was dropped, kept as its distance from the NEAREST CORNER of the page (`h` left / right, `v` top / bottom):
+ *  the place is an account preference, so a phone and a monitor read the same one - kept in pixels from the top left,
+ *  a spot picked on a phone put the button in the middle of a monitor's chart. */
+export function fabAnchor(pos, viewport, leftInset = 0) {
+  const p = placeFab(pos, viewport, leftInset)
+  const fromLeft = p.x - leftInset
+  const fromRight = viewport.width - FAB_SIZE - p.x
+  const fromBottom = viewport.height - FAB_SIZE - p.y
+  return {
+    h: fromLeft <= fromRight ? 'left' : 'right', dx: Math.round(fromLeft <= fromRight ? fromLeft : fromRight),
+    v: p.y <= fromBottom ? 'top' : 'bottom', dy: Math.round(p.y <= fromBottom ? p.y : fromBottom),
+  }
+}
+
+/** The place a saved anchor stands for on this screen (kept on it); anything else saved - the old pixel place - is null. */
+export function fabFromAnchor(anchor, viewport, leftInset = 0) {
+  if (!anchor || !['left', 'right'].includes(anchor.h) || !['top', 'bottom'].includes(anchor.v)) return null
+  if (!Number.isFinite(anchor.dx) || !Number.isFinite(anchor.dy)) return null
+  const x = anchor.h === 'left' ? leftInset + anchor.dx : viewport.width - FAB_SIZE - anchor.dx
+  const y = anchor.v === 'top' ? anchor.dy : viewport.height - FAB_SIZE - anchor.dy
+  return placeFab({ x, y }, viewport, leftInset)
+}
+
+/** Whether the button at `pos` sits in the floating replay bar's row at the bottom left - the bar then starts right of it. */
+export const fabInBarRow = (pos, viewport, leftInset = 0) =>
+  pos.y + FAB_SIZE >= viewport.height - FAB_EDGE - FAB_SIZE && pos.x < leftInset + FAB_EDGE + FAB_SIZE * 2
 
 /** A press that moved this far is a drag (it moves the button), else a tap (it opens / closes the icons). */
 export const isFabDrag = (dx, dy) => Math.hypot(dx, dy) >= FAB_DRAG_PX

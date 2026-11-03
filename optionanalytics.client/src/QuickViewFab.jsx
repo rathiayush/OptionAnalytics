@@ -1,41 +1,33 @@
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
-import { usePersistedState } from './shared.jsx'
-import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabDefault, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
+import { useSideNavInset, useViewport } from './useScreen.js'
+import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabFromAnchor, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
-// The quick views as a small round button that floats over the page and can be dragged anywhere (where it was left is
-// remembered): a tap opens the views as small icons with their names, a tap on one opens its popup, a tap elsewhere closes
-// them. On a phone it is the only way in (no keyboard for the Z X C V B N M keys, and scrolling to each card is slow); on a
-// monitor it saves the same scroll, so it shows there too - `enabled` (the page's "Quick button" tick) turns it off.
+// The quick views as a small round button that floats over the page and can be dragged anywhere: a tap opens the views as
+// small icons with their names, a tap on one opens its popup, a tap elsewhere closes them. On a phone it is the only way
+// in (no keyboard for the Z X C V B N M keys, and scrolling to each card is slow); on a monitor it saves the same scroll,
+// so it shows there too - `enabled` (the page's "Quick button" tick) turns it off. It starts at the BOTTOM LEFT of the
+// page, right of the sidebar (fabDefault); where it is dropped is `anchor` - its distance from the nearest corner
+// (fabAnchor), kept by the page, so the same place reads right on a phone and on a monitor.
 const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
-// Over the floating panels (900+), under the popups (1000).
+// Over the floating panels (900+) and the replay bar, under the popups (1000).
 const FAB_Z = 960
 const ACCENT = '#1677ff'
 
-function useViewport() {
-  const [viewport, setViewport] = useState(() => ({ width: window.innerWidth, height: window.innerHeight }))
-  useEffect(() => {
-    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight })
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [])
-  return viewport
-}
-
-export function QuickViewFab({ views, active = null, onOpen, enabled = true }) {
+export function QuickViewFab({ views, active = null, onOpen, enabled = true, anchor = null, onAnchorChange }) {
   const viewport = useViewport()
-  const [saved, setSaved] = usePersistedState('optionanalytics.oiReplay.quickFab', null)
+  const inset = useSideNavInset()
   const [dragPos, setDragPos] = useState(null)
   const [open, setOpen] = useState(false)
   const drag = useRef(null)
   const dragged = useRef(false)
   if (!enabled) return null
 
-  const pos = placeFab(dragPos ?? saved ?? fabDefault(viewport), viewport)
+  const pos = placeFab(dragPos ?? fabFromAnchor(anchor, viewport, inset) ?? fabDefault(viewport, inset), viewport, inset)
   const up = fabOpensUp(pos, views.length, viewport)
-  const labelsLeft = pos.x + FAB_SIZE / 2 > viewport.width / 2
+  const labelsLeft = pos.x + FAB_SIZE / 2 > inset + (viewport.width - inset) / 2
 
-  const moveTo = (e, d) => placeFab({ x: d.from.x + e.clientX - d.x, y: d.from.y + e.clientY - d.y }, viewport)
+  const moveTo = (e, d) => placeFab({ x: d.from.x + e.clientX - d.x, y: d.from.y + e.clientY - d.y }, viewport, inset)
   const onPointerDown = (e) => {
     e.currentTarget.setPointerCapture?.(e.pointerId)
     drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, from: pos, moved: false }
@@ -52,7 +44,7 @@ export function QuickViewFab({ views, active = null, onOpen, enabled = true }) {
     drag.current = null
     if (!d || d.id !== e.pointerId) return
     dragged.current = d.moved
-    if (d.moved) { setSaved(moveTo(e, d)); setDragPos(null) }
+    if (d.moved) { onAnchorChange?.(fabAnchor(moveTo(e, d), viewport, inset)); setDragPos(null) }
   }
   const onPointerCancel = () => { drag.current = null; setDragPos(null) }
   // A tap (not the end of a drag) opens or closes the icons.

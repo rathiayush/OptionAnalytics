@@ -331,9 +331,20 @@ When adding or changing a strategy:
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
   its DOM button stays on the card), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
-  (`QuickViewFab.jsx`, 40 px) opens them: dragged anywhere (kept on the screen; where it was left is remembered), a tap
-  opens the seven views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. It shows on
-  EVERY screen now (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+  (`QuickViewFab.jsx`, 40 px) opens them: it starts at the BOTTOM LEFT of the page, right of the sidebar (`fabDefault`,
+  `useSideNavInset` in `useScreen.js` - never over the menu), dragged anywhere (kept on the screen), a tap opens the seven
+  views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. Where it was dropped is
+  kept as its distance from the NEAREST CORNER (`fabAnchor` / `fabFromAnchor`, `optionanalytics.oiReplay.quickFabAnchor`)
+  - an account preference, so a phone and a monitor share it: kept in pixels from the top left (the old
+  `...quickFab`, no longer read), a spot picked on a phone put the button in the middle of a monitor's spot chart. It
+  shows on EVERY screen (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+  The REPLAY BAR (`FloatingReplayBar.jsx`, asked for - "replay bar also should be floating"): on a REPLAYED day, once the
+  Spot card's own replay controls are out of sight (`useOnScreen` on them; or that card is hidden), a slim bar floats at
+  the bottom of the window - Start / Pause, Reset, the minute shown, the slider (no handle tooltip), the speed - the SAME
+  handlers and state as the inline controls (`toggleReplay` / `resetReplay` / `scrubReplay` / `changeReplaySpeed`), which,
+  with their "Float" panel, are unchanged; not while that panel floats, never live. It starts right of the quick button
+  while that sits in its row (`fabInBarRow`), at most 980 px wide, centred; the page keeps 72 px of room at its bottom
+  for both. The "Replay bar" tick beside "Quick button" turns it off (`optionanalytics.oiReplay.replayBarOn`).
 - The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals, the scanner's,
   price / profile alerts, order errors) are set up ONCE in `main.jsx` (`notificationStack.jsx`, rules in
   `notificationStackRules.js`): STACKED - past `notificationStackThreshold` (1 on a phone, 3 wider) they fold into one pile,

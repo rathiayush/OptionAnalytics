@@ -6,7 +6,7 @@ import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, newReplayOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts, stepReplayOiBreakAlerts } from './oiLevelBreaks.js'
 import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -42,6 +42,8 @@ import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
+import { FloatingReplayBar } from './FloatingReplayBar.jsx'
+import { useOnScreen } from './useScreen.js'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
 import { EntryChecklistCard } from './EntryChecklistCard.jsx'
 import { useDashboardFlow } from './dashboardFlow.js'
@@ -59,7 +61,7 @@ import { FoldText } from './FoldText.jsx'
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_SECTIONS, STORED_SIZED,
+  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
@@ -3591,6 +3593,13 @@ export default function OiReplayPage() {
   const popupChartGrow = useMemo(() => chartGrow(viewportHeight, { popup: true }), [viewportHeight])
   // The quick views' floating button, on every screen now - see QuickViewFab.
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
+  // Where it was dropped (its nearest corner - quickViews.fabAnchor); null = the bottom left of the page.
+  const [quickFabAnchor, setQuickFabAnchor] = usePersistedState(STORED_QUICK_FAB_ANCHOR, null)
+  // The floating replay bar (FloatingReplayBar.jsx): on a replayed day, once the Spot card's own replay controls are
+  // out of sight - they are watched where they stand (replayInlineEl).
+  const [replayBarOn, setReplayBarOn] = usePersistedState(STORED_REPLAY_BAR, true)
+  const [replayInlineEl, setReplayInlineEl] = useState(null)
+  const replayInlineOnScreen = useOnScreen(replayInlineEl)
   // The controls card folded to one row: the day, the index and Load day - the rest (chart options, sections, quick
   // views, layout) behind "More". The warnings and the load's progress show either way.
   const [controlsCollapsed, setControlsCollapsed] = usePersistedState(STORED_CONTROLS_COLLAPSED, false)
@@ -5657,26 +5666,33 @@ export default function OiReplayPage() {
     </>
   )
 
+  // What the replay controls do - the inline ones, their floating panel and the floating replay bar alike.
+  const replayCannotPlay = oneMinBars.length === 0 || manualVisibleCount >= oneMinBars.length
+  const toggleReplay = () => { setPlaying((p) => !p); sync.userAction() }
+  const resetReplay = () => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0); sync.userAction() }
+  const scrubReplay = (v) => { setPlaying(false); setManualVisibleCount(v + 1); sync.userAction() }
+  const changeReplaySpeed = (v) => { setSpeedMs(v); sync.userAction() }
+  const replaySpeedOptions = withSpeedOption(SPEED_OPTIONS, speedMs, (v) => ({ value: v, label: `${Math.round((1000 / v) * 100) / 100}x` }))
   // Shared by the inline and floating placements of the replay controls (see replayControlsFloating).
   const replayButtons = (
     <>
       <Button
         icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
-        onClick={() => { setPlaying((p) => !p); sync.userAction() }}
-        disabled={oneMinBars.length === 0 || manualVisibleCount >= oneMinBars.length}
+        onClick={toggleReplay}
+        disabled={replayCannotPlay}
       >
         {playing ? 'Pause' : 'Start'}
       </Button>
       <Button
         icon={<ReloadOutlined />}
-        onClick={() => { setPlaying(false); setManualVisibleCount(oneMinBars.length > 0 ? 1 : 0); sync.userAction() }}
+        onClick={resetReplay}
       >
         Reset
       </Button>
       <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
       <Select
-        value={speedMs} onChange={(v) => { setSpeedMs(v); sync.userAction() }} style={{ width: 90 }}
-        options={withSpeedOption(SPEED_OPTIONS, speedMs, (v) => ({ value: v, label: `${Math.round((1000 / v) * 100) / 100}x` }))}
+        value={speedMs} onChange={changeReplaySpeed} style={{ width: 90 }}
+        options={replaySpeedOptions}
       />
       {/* A label rather than a hover tooltip: in the compact floating panel a tooltip above the
           picker sat right over the Start button. */}
@@ -5700,9 +5716,34 @@ export default function OiReplayPage() {
   const replaySlider = (
     <Slider
       min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1}
-      onChange={(v) => { setPlaying(false); setManualVisibleCount(v + 1); sync.userAction() }}
+      onChange={scrubReplay}
       tooltip={{ formatter: (v) => oneMinBars[v] ? istTimeFormatter(oneMinBars[v].time) : '' }}
     />
+  )
+  // The floating replay bar's slim set: Start / Pause, Reset, the minute shown, the slider and the speed. Native titles,
+  // no tooltips (a tap on a touch screen leaves one open), and no handle tooltip on the slider (the minute is beside it;
+  // on an iPhone a handle tooltip re-aligned at every replay step - the Profiles page's React error #185).
+  const replayBarControls = (
+    <>
+      <Button
+        type="primary" shape="circle" size="small" aria-label={playing ? 'Pause' : 'Start'} title={playing ? 'Pause' : 'Start'}
+        icon={playing ? <PauseOutlined /> : <CaretRightOutlined />} onClick={toggleReplay} disabled={replayCannotPlay}
+      />
+      <Button shape="circle" size="small" aria-label="Reset" title="Reset - back to the first minute" icon={<ReloadOutlined />} onClick={resetReplay} />
+      <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }} title={`${visibleCount} of ${oneMinBars.length} minutes`}>
+        {currentBar ? istTimeFormatter(currentBar.time) : '—'}
+      </Text>
+      <div style={{ flex: 1, minWidth: 70 }}>
+        <Slider
+          min={0} max={Math.max(0, oneMinBars.length - 1)} value={visibleCount - 1} onChange={scrubReplay}
+          tooltip={{ open: false }} style={{ margin: '6px 6px' }} aria-label="Replay minute"
+        />
+      </div>
+      <Select
+        size="small" value={speedMs} onChange={changeReplaySpeed} options={replaySpeedOptions} style={{ width: 66 }}
+        popupMatchSelectWidth={false} aria-label="Replay speed" title="Speed"
+      />
+    </>
   )
 
   // The Spot card's whole content, shared by its inline and floating placements (see spotFloating).
@@ -5740,7 +5781,7 @@ export default function OiReplayPage() {
           the canvas itself - the user's own "this bar should be near to chart just on
           top of chart, it is too far right now" (a separate card above it, even
           directly adjacent, still wasn't close enough). */}
-      <Space align="center" size={16} wrap style={{ marginBottom: 8 }}>
+      <Space ref={setReplayInlineEl} align="center" size={16} wrap style={{ marginBottom: 8 }}>
         {/* TODAY IS ALWAYS LIVE, FULL STOP - no Start/Pause/Speed/Slider at all, and no
             way for any control here to drop out of following the tip. The previous
             design let Start/Reset/the slider each pause live-following (to "review an
@@ -6184,7 +6225,8 @@ export default function OiReplayPage() {
     // ultra-wide trading monitor the grid's twelve columns simply get wider, so more cards fit side by side ("Cards a
     // row" offers six there) instead of the page sitting centred with empty space either side. It was capped at
     // 2600 px, which left a third of a 3440 px monitor empty.
-    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: '24px 16px' }}>
+    // Room at the bottom for the quick button and the replay bar floating there, so the last card can be scrolled clear of them.
+    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: `24px 16px ${result && (quickFabOn || replayBarOn) ? 72 : 24}px` }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
         <Space align="center" size={16} wrap className="oa-brand-row">
@@ -6367,8 +6409,11 @@ export default function OiReplayPage() {
                     <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.letter} · {v.label}</Button>
                   </Tooltip>
                 ))}
-                <Tooltip title="The same seven views from a small round button floating over the page - drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
+                <Tooltip title="The same seven views from a small round button floating over the page - at the bottom left, drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
                   <Checkbox checked={quickFabOn} onChange={(e) => setQuickFabOn(e.target.checked)}>Quick button</Checkbox>
+                </Tooltip>
+                <Tooltip title="On a replayed day, the replay controls (Start / Pause, Reset, the slider, the speed) as a slim bar floating at the bottom of the window once the Spot card's own controls are scrolled out of sight - the same controls, so either works.">
+                  <Checkbox checked={replayBarOn} onChange={(e) => setReplayBarOn(e.target.checked)}>Replay bar</Checkbox>
                 </Tooltip>
               </Space>
             )}
@@ -7092,7 +7137,10 @@ export default function OiReplayPage() {
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
-      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} />}
+      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} anchor={quickFabAnchor} onAnchorChange={setQuickFabAnchor} />}
+      {replayBarOn && !isLive && result && oneMinBars.length > 0 && !replayControlsFloating && !replayInlineOnScreen && (
+        <FloatingReplayBar fabOn={quickFabOn} fabAnchor={quickFabAnchor}>{replayBarControls}</FloatingReplayBar>
+      )}
       {result && (
         <ChartGrow value={popupChartGrow}>
           <OiTotalsChartsPopup

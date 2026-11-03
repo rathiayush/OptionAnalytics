@@ -3,7 +3,7 @@
 // typed in a box, a key held down (repeat), another letter - opens nothing.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabDefault, fabOpensUp, isFabDrag, isTypingField, placeFab, quickViewForKey } from '../src/quickViews.js'
+import { FAB_EDGE, FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, QUICK_VIEWS, fabAnchor, fabDefault, fabFromAnchor, fabInBarRow, fabOpensUp, isFabDrag, isTypingField, placeFab, quickViewForKey } from '../src/quickViews.js'
 
 const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey: false, metaKey: false, ...mods })
 
@@ -49,9 +49,9 @@ test('nothing else opens one', () => {
 })
 
 // The phone's floating quick-view button: dragged anywhere but always kept on the screen; a small move is still a tap.
-test('the floating button stays on the screen, starts bottom right, and opens its icons where they fit', () => {
+test('the floating button stays on the screen, starts bottom left, and opens its icons where they fit', () => {
   const phone = { width: 390, height: 800 }
-  assert.deepEqual(placeFab(fabDefault(phone), phone), { x: 390 - FAB_SIZE - 16, y: 800 - FAB_SIZE - 96 })
+  assert.deepEqual(placeFab(fabDefault(phone), phone), { x: 16, y: 800 - FAB_SIZE - 16 })
   assert.deepEqual(placeFab({ x: -50, y: 5000 }, phone), { x: 8, y: 800 - FAB_SIZE - 8 })
   assert.deepEqual(placeFab({ x: 900, y: -3 }, phone), { x: 390 - FAB_SIZE - 8, y: 8 })
   // Saved on a wide screen, opened on a phone: pulled back in.
@@ -65,6 +65,39 @@ test('the floating button stays on the screen, starts bottom right, and opens it
   assert.equal(fabOpensUp({ x: 300, y: 664 }, QUICK_VIEWS.length, phone), true)
   assert.equal(fabOpensUp({ x: 300, y: 40 }, QUICK_VIEWS.length, phone), false)
   assert.equal(fabOpensUp({ x: 300, y: need }, QUICK_VIEWS.length, phone), true)
+})
+
+// Asked for: the button sat in the middle of a monitor's spot chart - its place was kept in pixels from the top left and
+// is an account preference, so a spot picked on a phone (390 wide) landed mid-chart on a 1920 monitor. It starts at the
+// bottom left of the PAGE (right of the sidebar) and is kept as its distance from the nearest corner.
+test('the button starts at the bottom left of the page, right of the sidebar, and keeps its corner across screens', () => {
+  const monitor = { width: 1920, height: 1080 }
+  const phone = { width: 390, height: 800 }
+  // Bottom left, right of a folded (64 px) or open (216 px) sidebar; never under it.
+  assert.deepEqual(placeFab(fabDefault(monitor, 64), monitor, 64), { x: 64 + FAB_EDGE, y: 1080 - FAB_SIZE - FAB_EDGE })
+  assert.deepEqual(placeFab(fabDefault(monitor, 216), monitor, 216), { x: 216 + FAB_EDGE, y: 1080 - FAB_SIZE - FAB_EDGE })
+  assert.equal(placeFab({ x: 10, y: 500 }, monitor, 216).x, 216 + 8)
+  // Dropped near the bottom left of a phone: the same corner, the same distance, on the monitor.
+  const phoneSpot = { x: 30, y: 800 - FAB_SIZE - 120 }
+  const anchor = fabAnchor(phoneSpot, phone, 0)
+  assert.deepEqual(anchor, { h: 'left', dx: 30, v: 'bottom', dy: 120 })
+  assert.deepEqual(fabFromAnchor(anchor, monitor, 64), { x: 64 + 30, y: 1080 - FAB_SIZE - 120 })
+  // Near the top right of a monitor: the top right of a phone.
+  const topRight = fabAnchor({ x: 1920 - FAB_SIZE - 50, y: 90 }, monitor, 64)
+  assert.deepEqual(topRight, { h: 'right', dx: 50, v: 'top', dy: 90 })
+  assert.deepEqual(fabFromAnchor(topRight, phone, 0), { x: 390 - FAB_SIZE - 50, y: 90 })
+  // Far from every corner on a big screen: kept on a small one.
+  const far = fabFromAnchor({ h: 'left', dx: 900, v: 'top', dy: 900 }, phone, 0)
+  assert.deepEqual(far, { x: 390 - FAB_SIZE - 8, y: 800 - FAB_SIZE - 8 })
+  // The old pixel place (no corner) and anything else is not read: the button starts at the bottom left again.
+  for (const old of [null, { x: 330, y: 700 }, { h: 'middle', dx: 1, v: 'top', dy: 1 }, { h: 'left', dx: 'a', v: 'top', dy: 1 }]) {
+    assert.equal(fabFromAnchor(old, monitor, 64), null, JSON.stringify(old))
+  }
+  // The replay bar starts right of the button only while the button is in its row at the bottom left.
+  assert.equal(fabInBarRow(fabDefault(monitor, 64), monitor, 64), true)
+  assert.equal(fabInBarRow(fabDefault(phone), phone, 0), true)
+  assert.equal(fabInBarRow({ x: 64 + FAB_EDGE, y: 400 }, monitor, 64), false)
+  assert.equal(fabInBarRow({ x: 1700, y: 1080 - FAB_SIZE - FAB_EDGE }, monitor, 64), false)
 })
 
 test('the B / S ticket keys are kept from a box you type in - not from a checkbox, toggle or dropdown holding the focus', () => {
