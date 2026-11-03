@@ -23,12 +23,19 @@
 //    moves are damped (range, pin). Negative = dealers SHORT gamma: they buy rallies and sell dips - moves run (trend).
 //  - Who the dealers are is not in the data, so the sign is an assumption (`sign`):
 //      'standard' - dealers long the calls, short the puts (calls +, puts -), as GEX is usually shown;
-//      'buildup'  - the OI at the first reading signed as standard, then every minute's OI change signed by the premium
-//                   (the OI build-up read): OI added while the premium fell = written by customers, the dealers bought
-//                   it (+); added while it rose = bought by customers, the dealers sold it (-); OI taken off while the
-//                   premium rose = writers buying back (the dealers' long goes, -); off while it fell = holders selling
-//                   (the dealers' short goes, +) - i.e. each minute adds -|change in OI| x sign(change in premium).
-//                   The premium also moves with spot, so this is a rough read of who traded.
+//      'buildup'  - the OI at the first reading signed as standard, then every reading's OI change signed by who pushed
+//                   the option: its OWN IMPLIED VOLATILITY (Black-76 from its premium at that minute's forward and time
+//                   to expiry) rising = the buyers paid up, falling = the writers sold it down. OI added while the IV
+//                   rose = bought by customers, the dealers sold it (-); added while it fell = written by customers, the
+//                   dealers bought it (+); OI taken off while the IV rose = writers buying back (the dealers' long goes,
+//                   -); off while it fell = holders selling (the dealers' short goes, +) - each change adds -|change in OI|
+//                   x sign(change in IV). The IV, not the premium: over a minute the premium moves mostly with spot (a
+//                   call's rises in any rally), so the premium's sign read every call added in a rally as bought - call
+//                   writers selling into it included - and every put added as written: it followed the trend, not who
+//                   traded. The IV has the spot move and the time decay taken out. A change whose IV moved by less than
+//                   half a premium tick's worth (vega x change < 0.025), or whose IV cannot be read (a premium under its
+//                   intrinsic value), cannot be read either way: it takes the standard sign (it used to be dropped). A
+//                   rough read still - the IV also drifts with spot along the skew.
 //  - Levels, as the GEX tools publish them (SpotGamma, MenthorQ, the Indian GEX pages):
 //      NET GEX - all strikes added up;
 //      GAMMA FLIP (zero gamma) - the spot at which the net GEX would cross zero: the net worked out again at spots across
@@ -141,7 +148,7 @@ export function netGexAt(options, S, years, carry = 1) {
 }
 
 // Each strike's readings of one side, one per minute (a later point of the same minute is the newer reading - live), in
-// time order, each with the build-up change in the dealers' OI so far (`dealer` - see the top).
+// time order.
 function sideRows(points) {
   const byStrike = new Map()
   for (const p of points ?? []) {
@@ -154,17 +161,43 @@ function sideRows(points) {
     minutes.set(t, { t, price: p.price, oi: p.openInterest, iv: p.impliedVolatility > 0 ? p.impliedVolatility : prev?.iv ?? null })
   }
   const out = new Map()
-  for (const [strike, minutes] of byStrike) {
-    const rows = [...minutes.values()].sort((a, b) => a.t - b.t)
-    let change = 0
-    rows.forEach((r, i) => {
-      if (i > 0) change += -Math.abs(r.oi - rows[i - 1].oi) * Math.sign(r.price - rows[i - 1].price)
-      r.firstOi = rows[0].oi
-      r.change = change
-    })
-    out.set(strike, rows)
-  }
+  for (const [strike, minutes] of byStrike) out.set(strike, [...minutes.values()].sort((a, b) => a.t - b.t))
   return out
+}
+
+// Half the options' premium tick (0.05): an IV change worth less than this much premium is not read either way.
+const HALF_TICK = 0.025
+
+/** Black-76 vega (premium per 1.0 of volatility) on the forward. */
+function vegaOf(F, K, sigma, T) {
+  if (!(F > 0 && K > 0 && sigma > 0 && T > 0)) return 0
+  const v = sigma * Math.sqrt(T)
+  return F * pdf((Math.log(F / K) + v * v / 2) / v) * Math.sqrt(T)
+}
+
+/**
+ * The OI build-up read of one leg (see the top), moved on to its reading `row` of this minute: `book` holds each leg's
+ * `{ firstOi, change, row, iv }` - the OI it started from (signed as standard), the dealers' change since, and the
+ * reading and own IV it was last moved on with. `standard` is +1 (call) / -1 (put). Returns the leg's state.
+ */
+function stepBuildup(book, key, row, { strike, forward, years, isCall, standard }) {
+  let state = book.get(key)
+  if (state?.row === row) return state
+  const iv = impliedVol(row.price, forward, strike, years, isCall)
+  if (!state) {
+    state = { firstOi: row.oi, change: 0, row, iv }
+    book.set(key, state)
+    return state
+  }
+  const dOi = row.oi - state.row.oi
+  if (dOi !== 0) {
+    const dIv = iv != null && state.iv != null ? iv - state.iv : null
+    const readable = dIv != null && Math.abs(dIv) * vegaOf(forward, strike, iv, years) >= HALF_TICK
+    state.change += readable ? -Math.abs(dOi) * Math.sign(dIv) : standard * dOi
+  }
+  state.row = row
+  state.iv = iv
+  return state
 }
 
 // A leg's last reading at or before minute `t`, if it is at most STALE_MINUTES old.
@@ -179,8 +212,9 @@ function readingAt(rows, t) {
   return t - rows[found].t <= STALE_MINUTES * MIN ? rows[found] : null
 }
 
-// The dealers' OI of one reading (+ = dealers long), call side `+1` / put side `-1` as standard.
-const dealerOi = (row, standard, sign) => (sign === 'buildup' ? standard * row.firstOi + row.change : standard * row.oi)
+// The dealers' OI of one reading (+ = dealers long), call side `+1` / put side `-1` as standard; under the build-up sign
+// its leg's state (`stepBuildup`).
+const dealerOi = (row, standard, state) => (state ? standard * state.firstOi + state.change : standard * row.oi)
 
 // The strike holding a level this minute: the one with the most weight (gamma x OI) among the candidates - unless the
 // one holding it last minute is still a candidate and the leader is not WALL_SWITCH ahead of it.
@@ -229,6 +263,7 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
   const steps = strikes.slice(1).map((k, i) => strikes[i] - k).filter((d) => d > 0)
   const strikeStep = steps.length ? Math.min(...steps) : 0
   const held = { call: null, put: null, max: null }   // the strikes holding the levels, minute to minute
+  const book = sign === 'buildup' ? new Map() : null    // the build-up read of each leg, reading to reading
   const expiryMs = expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null
   const minutes = []
   let implied = null
@@ -276,10 +311,12 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       const cGamma = c ? bsGamma(spot, strike, sigma, years, forward) : 0
       const pGamma = p ? bsGamma(spot, strike, sigma, years, forward) : 0
       const unit = spot * spot * 0.01
-      const call = c ? cGamma * dealerOi(c, 1, sign) * unit : null
-      const put = p ? pGamma * dealerOi(p, -1, sign) * unit : null
-      if (c) options.push({ strike, sigma, dealerOi: dealerOi(c, 1, sign) })
-      if (p) options.push({ strike, sigma, dealerOi: dealerOi(p, -1, sign) })
+      const cState = book && c ? stepBuildup(book, `c${strike}`, c, { strike, forward, years, isCall: true, standard: 1 }) : null
+      const pState = book && p ? stepBuildup(book, `p${strike}`, p, { strike, forward, years, isCall: false, standard: -1 }) : null
+      const call = c ? cGamma * dealerOi(c, 1, cState) * unit : null
+      const put = p ? pGamma * dealerOi(p, -1, pState) * unit : null
+      if (c) options.push({ strike, sigma, dealerOi: dealerOi(c, 1, cState) })
+      if (p) options.push({ strike, sigma, dealerOi: dealerOi(p, -1, pState) })
       calls += call ?? 0
       puts += put ?? 0
       // The levels' weights: gamma x OI, whoever holds it - the call wall from the strikes clear above spot (or the one

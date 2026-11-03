@@ -198,7 +198,13 @@ When adding or changing a strategy:
   before is the expiry (`OptionExpiryResolverTests.cs`). No expiry (or past it): T implied from the ATM straddle at the
   ATM IV (`impliedYears`, Dhan's ATM IV) - kept on each minute too; no warning any more, since the IV from the premiums makes the
   gamma independent of T. Sign ("Sign"): Standard = calls +, puts -; OI build-up = the first
-  reading's OI as standard, then each minute's OI change adds -|change in OI| x sign(change in premium); both are worked
+  reading's OI as standard, then each reading's OI change adds -|change in OI| x sign(change in the option's OWN IV) -
+  Black-76 from its premium at that minute's forward and time to expiry (`stepBuildup`), so spot's move and the time decay
+  are out: IV up = buyers pushed (dealers short), down = writers (dealers long). It was the PREMIUM's sign, which over a
+  minute follows spot - every call added in a rally read as bought, call writers selling into it included, every put as
+  written: the trend, not who traded. A change whose IV moved by under half a premium tick's worth (vega x change < 0.025)
+  or that has no IV (a premium under its intrinsic value) counts as standard - it used to be dropped (`tests/gex.test.mjs`
+  holds the rally both ways, flat IV, the tick and the put side); both are worked
   out always, each with its flip (the card shows either), and a line says whether their regimes agree (`gexAgreement` -
   agree = act on it, disagree = unclear; `flips: false` leaves a flip out for a caller that needs only the net and walls). Levels, as the GEX tools publish them (SpotGamma, MenthorQ,
   the Indian GEX pages): net GEX; the gamma flip / zero gamma (the spot where the net would cross zero, OI / IV kept -

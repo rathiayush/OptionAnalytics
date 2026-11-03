@@ -96,7 +96,7 @@ test('the gamma flip is the spot where the net GEX crosses zero, nearest spot; n
   assert.equal(gexDay(calm.ce, calm.pe, calm.spots)[0].flip, null)
 })
 
-test('OI build-up sign: OI written (premium falling) adds to the dealers, OI bought (premium rising) takes from them', () => {
+test('OI build-up sign: OI written (its IV falling - here, spot still, the premium) adds to the dealers, OI bought takes from them', () => {
   // The 25100 call's dealers' OI under the build-up sign, against its OI as the standard sign counts it - the same day,
   // so the same gamma: the ratio is the dealers' OI over the OI.
   const ratio = ({ minutes, ceOi, premium }) => {
@@ -118,6 +118,37 @@ test('OI build-up sign: OI written (premium falling) adds to the dealers, OI bou
   const [std] = gexDay(d.ce, d.pe, d.spots)
   const [bu] = gexDay(d.ce, d.pe, d.spots, { sign: 'buildup' })
   assert.ok(close(std.net, bu.net, 1e-6))
+})
+
+test('OI build-up sign reads who pushed the option (its own IV), not the premium\'s move with spot', () => {
+  // A rally (spot +10 a minute) with 25100 call OI added (1M, +2M a minute for 4 minutes): the call's premium RISES with
+  // spot whoever traded - it used to read every call added in a rally as bought by customers (dealers short).
+  const ratio = (iv, more = {}) => {
+    const d = day({ minutes: 5, spot: (m) => 25000 + 10 * m, iv, ceOi: (k, m) => (k === 25100 ? 1e6 + 2e6 * m : 1e6), ...more })
+    const premium = d.ce.filter((x) => x.strike === 25100).map((x) => x.price)
+    assert.ok(premium.every((v, m) => m === 0 || v > premium[m - 1]))      // the premium rose every minute
+    const of = (sign) => gexDay(d.ce, d.pe, d.spots, { sign }).at(-1).strikes.find((r) => r.strike === 25100).call
+    return of('buildup') / of('standard')
+  }
+  // Call writers selling into the rally - the IV pressed down: written, the dealers bought it (1M + 8M).
+  assert.ok(close(ratio((m) => 12 - 0.1 * m), 9 / 9, 1e-9))
+  // Buyers chasing it - the IV bid up: bought, the dealers are short (1M - 8M).
+  assert.ok(close(ratio((m) => 12 + 0.1 * m), -7 / 9, 1e-9))
+  // The premium only followed spot (IV unchanged): it says nothing of who traded - the OI added counts as standard, not
+  // dropped: build-up == standard.
+  assert.ok(close(ratio(() => 12), 1, 1e-9))
+  // An IV change worth under half a premium tick is not read either way (standard) ...
+  const tiny = (side) => ratio(() => 12, { price: (s2, k, m) => (s2 === 'ce' && k === 25100 ? call(25000 + 10 * m, k, 0.12, YEARS) + side * 0.01 * m : null) })
+  assert.ok(close(tiny(1), 1, 1e-9) && close(tiny(-1), 1, 1e-9))
+  // ... nor a premium under its intrinsic value (no IV gives it): the OI added counts as standard.
+  const d = day({ minutes: 3, ceOi: (k, m) => (k === 24800 ? 1e6 + 1e6 * m : 1e6), price: (side, k) => (side === 'ce' && k === 24800 ? 150 : null) })
+  const of = (sign) => gexDay(d.ce, d.pe, d.spots, { sign }).at(-1).strikes.find((r) => r.strike === 24800).call
+  assert.ok(close(of('buildup'), of('standard'), 1e-6))
+  // A put the same way: writers pressing its IV down as it is added = the dealers long it (+, against the standard -).
+  const puts = day({ minutes: 5, spot: (m) => 25000 - 10 * m, iv: (m) => 12 - 0.1 * m, peOi: (k, m) => (k === 24900 ? 1e6 + 2e6 * m : 1e6) })
+  const put = (sign) => gexDay(puts.ce, puts.pe, puts.spots, { sign }).at(-1).strikes.find((r) => r.strike === 24900).put
+  assert.ok(put('standard') < 0 && put('buildup') > 0)
+  assert.ok(close(put('buildup') / put('standard'), -7 / 9, 1e-9))     // -1M (standard) + 8M (dealers bought)
 })
 
 test('with the expiry date, the time to expiry runs to 15:30 IST on that day; the IV from the premiums absorbs a wrong one', () => {
