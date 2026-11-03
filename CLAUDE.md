@@ -447,7 +447,12 @@ When adding or changing a strategy:
   `thinLvn`, the thinnest row of the thin areas) - as OI Replay's entry charts draw theirs (`PREV_PROFILE` colours), each labelled on the price axis and named in the header, the bars at the right
   (`VolumeProfilePrimitive`), and BOXES (`volumeZones`): busy areas (smoothed row >= 1.3x the mean - each with its
   HVN, the POC's marked) and thin areas INSIDE the range (<= 0.6x - each with its LVN; a thin run at the top / bottom row is
-  the day's edge, not a gap). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
+  the day's edge, not a gap). The BARS are drawn WIDE AND SOLID here (asked for - at OI Replay's 28% of the plot and 18 - 42% opacity the spot's were
+  too small to read): `PROFILE_PAGE_BARS` (0.82 / 0.55 opacity, the spot's neutral bars blue, a brighter tip at each bar's
+  end) and the "Bars" choice (`VP_BAR_SIZES` in `profileZones.js` - Narrow 30% / Normal 45%, the default / Wide 60% of the
+  plot for the POC row's bar, the time axis's empty room on the right following it; `optionanalytics.profiles.vpBars`).
+  `VolumeProfilePrimitive`'s own defaults (`DEFAULT_BAR_STYLE`) stay OI Replay's faint previous-day bars
+  (`tests/volume-profile-bars.test.mjs`). MARKET PROFILE: the TPO letters at the right (`TpoProfilePrimitive`, A = 09:15, blocks when rows
   are too thin), POC / VAH / VAL / IB lines, and BOXES (`marketProfileZones`): the value area and the rows with >= 0.7x the POC
   row's TPOs (where the market spent its time - accepted), single prints inside the range (`singlePrintGaps`) and tails (>= 2
   single-print rows at the high / low, ending at a row of 2+ periods); one made only by the period still running is

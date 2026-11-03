@@ -9,15 +9,21 @@ import { PREV_PROFILE } from './profileColors.js'
 
 const SELL = [239, 83, 80]
 const BUY = [38, 166, 154]
-// A row with no buy / sell split of its own (the spot profile's server-side bins) is one neutral bar.
-const NEUTRAL = [150, 170, 200]
 const rgba = ([r, g, b], a) => `rgba(${r},${g},${b},${a})`
 
+/** How the bars are drawn: the longest (the POC row's) `widthPct` of the plot, the value area's rows at `alphaIn` and the
+ *  rest at `alphaOut`, a row with no buy / sell split of its own (the index's volume, the spot profile's server-side
+ *  bins) one bar in `neutral`; `tip` - a brighter line at each bar's end, so its length reads over a coloured box.
+ *  These defaults are OI Replay's: the previous day's profile, faint behind its candles. The Profiles page, where the
+ *  profile is what the chart is for, draws them wider and solid (`PROFILE_PAGE_BARS`). */
+export const DEFAULT_BAR_STYLE = Object.freeze({ widthPct: 0.28, alphaIn: 0.42, alphaOut: 0.18, neutral: [150, 170, 200], tip: false })
+export const PROFILE_PAGE_BARS = Object.freeze({ alphaIn: 0.82, alphaOut: 0.55, neutral: [77, 148, 255], tip: true })
+
 export class VolumeProfilePrimitive {
-  constructor() {
+  constructor(style = {}) {
     this._profile = null
     this._rowSize = 0
-    this._widthPct = 0.28
+    this._style = { ...DEFAULT_BAR_STYLE, ...style }
     this._series = null
     this._requestUpdate = null
     const self = this
@@ -43,6 +49,12 @@ export class VolumeProfilePrimitive {
     this._requestUpdate?.()
   }
 
+  /** Changes how the bars are drawn (DEFAULT_BAR_STYLE's keys; the ones not given stay). */
+  setStyle(style) {
+    this._style = { ...this._style, ...style }
+    this._requestUpdate?.()
+  }
+
   updateAllViews() {}
 
   paneViews() {
@@ -53,9 +65,11 @@ export class VolumeProfilePrimitive {
     const profile = this._profile
     const series = this._series
     if (!profile?.rows?.length || !series || !(this._rowSize > 0)) return
+    const { widthPct, alphaIn, alphaOut, neutral, tip } = this._style
     target.useBitmapCoordinateSpace(({ context: ctx, bitmapSize, horizontalPixelRatio: hpr, verticalPixelRatio: vpr }) => {
-      const maxLen = bitmapSize.width * this._widthPct
+      const maxLen = bitmapSize.width * widthPct
       const right = bitmapSize.width
+      const tipWidth = Math.max(1, Math.round(hpr))
       for (const row of profile.rows) {
         const yTop = series.priceToCoordinate(row.price + this._rowSize)
         const yBottom = series.priceToCoordinate(row.price)
@@ -64,19 +78,26 @@ export class VolumeProfilePrimitive {
         const height = Math.max(1, Math.round(Math.abs(yBottom - yTop) * vpr) - 1)
         if (top > bitmapSize.height || top + height < 0) continue
         const inValue = row.price >= profile.val && row.price <= profile.vah
-        const alpha = inValue ? 0.42 : 0.18
+        const alpha = inValue ? alphaIn : alphaOut
         const buy = row.buy ?? 0
         const sell = row.sell ?? 0
         // Bins with no side of their own (binsProfile) are one neutral bar as wide as the whole row.
         const parts = buy > 0 || sell > 0
           ? [[buy, BUY], [sell, SELL]]
-          : [[row.total ?? 0, NEUTRAL]]
+          : [[row.total ?? 0, neutral]]
         let x = right
+        let last = null
         for (const [value, color] of parts) {
           const len = (value / profile.maxRow) * maxLen
+          if (!(len > 0)) continue
           ctx.fillStyle = rgba(color, alpha)
           ctx.fillRect(x - len, top, len, height)
           x -= len
+          last = color
+        }
+        if (tip && last && right - x >= tipWidth) {
+          ctx.fillStyle = rgba(last, Math.min(1, alpha + 0.3))
+          ctx.fillRect(Math.round(x), top, tipWidth, height)
         }
         if (row.price === profile.poc) {
           ctx.strokeStyle = 'rgba(250,219,20,0.9)'

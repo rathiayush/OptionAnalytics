@@ -12,11 +12,11 @@ import {
 import { mergeFuturesLive, mergeLiveFuturesTicks } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
 import { createZoomableChart } from './chartZoom.js'
-import { VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
+import { PROFILE_PAGE_BARS, VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
 import { TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
 import {
-  FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, withBackfillBars,
+  DEFAULT_VP_BARS, FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, VP_BAR_SIZES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
+  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, vpBarSize, withBackfillBars,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -46,8 +46,9 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 const { Text } = Typography
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const TIMEFRAMES = [1, 3, 5, 15, 30]
-// The right part of the time axis left empty for the profile drawn there (a share of the plot).
-const PROFILE_ROOM = { vp: 0.3, tpo: 0.28 }
+// The right part of the time axis left empty for the market profile drawn there (a share of the plot); the volume
+// profile's follows its "Bars" size (VP_BAR_SIZES).
+const PROFILE_ROOM = { tpo: 0.28 }
 const fmt = (v) => (v == null || !Number.isFinite(v) ? '—' : Number(v).toLocaleString('en-IN', { maximumFractionDigits: 2 }))
 const fmtClock = (ms) => (ms == null ? '' : istTimeFormatter(toChartTime(ms)))
 
@@ -59,6 +60,7 @@ const STORE = {
   days: 'optionanalytics.profiles.days',
   follow: 'optionanalytics.profiles.followOiReplay',
   vwap: 'optionanalytics.profiles.vwap',
+  vpBars: 'optionanalytics.profiles.vpBars',
   speed: 'optionanalytics.profiles.speedMs',
 }
 // A past day's replay, as OI Replay's: milliseconds per market minute.
@@ -423,7 +425,7 @@ function useChartHeight() {
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, resetKey, neutral = false, empty = null, dayError = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null }) {
   const sessions = useMemo(
     () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
@@ -488,15 +490,19 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
   ]), [tpo, row])
   const vpRange = useMemo(() => (hasVolume ? { low: vp.rows[0].price, high: vp.rows.at(-1).price + row } : null), [vp, row, hasVolume])
   const tpoRange = useMemo(() => (tpo?.rows?.length ? { low: tpo.rows[0].price, high: tpo.rows.at(-1).price + row } : null), [tpo, row])
-  // The index's volume has no side: its rows drawn as one neutral bar each.
-  const drawVp = useCallback((p) => p.setProfile(hasVolume ? (neutral ? { ...vp, rows: vp.rows.map((r) => ({ price: r.price, buy: 0, sell: 0, total: r.total })) } : vp) : null, row), [vp, row, neutral, hasVolume])
+  // The index's volume has no side: its rows drawn as one neutral bar each. The bars as wide as the "Bars" choice.
+  const drawVp = useCallback((p) => {
+    p.setStyle({ widthPct: vpBars.widthPct })
+    p.setProfile(hasVolume ? (neutral ? { ...vp, rows: vp.rows.map((r) => ({ price: r.price, buy: 0, sell: 0, total: r.total })) } : vp) : null, row)
+  }, [vp, row, neutral, hasVolume, vpBars])
   const singlePrices = useMemo(() => {
     const set = []
     for (const z of [...mz.singles, ...mz.tails]) for (let p = z.low; p < z.high - 1e-9; p = Math.round((p + row) * 100) / 100) set.push(p)
     return set
   }, [mz, row])
   const drawTpo = useCallback((p) => p.setProfile(tpo, singlePrices), [tpo, singlePrices])
-  const makeVp = useCallback(() => new VolumeProfilePrimitive(), [])
+  // Solid bars, wider than OI Replay's faint previous-day ones - here the profile is what the chart is for.
+  const makeVp = useCallback(() => new VolumeProfilePrimitive(PROFILE_PAGE_BARS), [])
   const makeTpo = useCallback(() => new TpoProfilePrimitive(), [])
   const many = sessions.length > 1 ? ` · ${sessions.length} sessions` : ''
   const extra = <Text type="secondary" style={{ fontSize: 11 }}>double-click: fit</Text>
@@ -520,13 +526,14 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             {empty ? null : (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
-                priceRange={vpRange} room={PROFILE_ROOM.vp} height={chartHeight} resetKey={resetKey}
+                priceRange={vpRange} room={vpBars.room} height={chartHeight} resetKey={resetKey}
               />
             )}
             <FoldText id="profiles.vp" label="how to read the volume profile" className="oa-note">
               <Text type="secondary" style={{ fontSize: 11 }}>
                 The bars at the right are the volume traded at each price ({row}-point rows; on the futures green bought at the
-                offer, red sold at the bid - the index&apos;s own volume has no side, so the spot&apos;s are one colour). POC = the
+                offer, red sold at the bid - the index&apos;s own volume has no side, so the spot&apos;s are one colour, blue; the
+                &quot;Bars&quot; choice sets how wide they are drawn). POC = the
                 price that traded the most; VAH / VAL = the band holding 70% of the volume. GREEN boxes are where the most volume
                 traded - prices the market agreed on, which tend to hold price (support / resistance, a magnet when price is near);
                 each names its HVN, its busiest row; the orange dotted HVN line marks the busiest of them (the POC aside), as on OI Replay's entry charts. RED boxes are where volume was thin inside the range - prices the market moved
@@ -607,6 +614,8 @@ export default function ProfilesPage() {
   const [days, setDays] = usePersistedState(STORE.days, 1)
   const [follow, setFollow] = usePersistedState(STORE.follow, true)
   const [showVwap, setShowVwap] = usePersistedState(STORE.vwap, true)
+  const [vpBarsKey, setVpBarsKey] = usePersistedState(STORE.vpBars, DEFAULT_VP_BARS)
+  const vpBars = vpBarSize(vpBarsKey)
   const todayKey = istDateKey(new Date())
   const [live, setLive] = useState(true)
   const [dateKey, setDateKey] = useState(todayKey)
@@ -756,7 +765,7 @@ export default function ProfilesPage() {
     if (state.error) return <Alert type="warning" showIcon message={`The ${what} of ${effectiveDate} is not available: ${state.error}`} action={<Button size="small" onClick={state.retry}>Retry</Button>} />
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
   }
-  const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, resetKey }
+  const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey }
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -800,6 +809,12 @@ export default function ProfilesPage() {
               </Tooltip>
               <Tooltip title="The day's VWAP on every chart - typical price x volume over the 1-minute bars, as the server works it out (the spot's on the index's own volume).">
                 <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+              </Tooltip>
+              <Tooltip title="How wide the volume profile's bars are drawn at the right of its charts - the busiest row's bar (the POC's) is this much of the chart; the newest candles stop short of most of it.">
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Bars</Text>
+                  <Segmented size="small" value={Object.hasOwn(VP_BAR_SIZES, vpBarsKey) ? vpBarsKey : DEFAULT_VP_BARS} onChange={setVpBarsKey} options={Object.entries(VP_BAR_SIZES).map(([value, b]) => ({ value, label: b.label }))} />
+                </Space>
               </Tooltip>
               <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. With no OI Replay running (a phone: one tab, or OI Replay's tab in the background) this page opens where OI Replay was last left, and its own controls play on from there. Nothing you do here moves OI Replay.">
                 <Space size={4}>

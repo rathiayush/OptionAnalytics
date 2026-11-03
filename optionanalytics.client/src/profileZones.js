@@ -27,6 +27,19 @@ export const ZONE_RULES = { highX: 1.3, lowX: 0.6, acceptX: 0.7, tailRows: 2, ma
 /** The default profile row (points) for an index - fine enough to show the shape, coarse enough to read. */
 export const PROFILE_ROWS = { NIFTY: 5, BANKNIFTY: 10, SENSEX: 10 }
 export const PROFILE_ROW_CHOICES = { NIFTY: [2, 5, 10, 20], BANKNIFTY: [5, 10, 20, 50], SENSEX: [5, 10, 20, 50] }
+/** The Profiles page's volume profile bars (its "Bars" control): the longest bar's (the POC row's) share of the plot, and
+ *  the share of the time axis left empty on the right for them - the newest candles stop short of most of the bars
+ *  (the rest of a bar runs on behind the candles). Wider than OI Replay's faint previous-day bars (28%), and solid
+ *  (`PROFILE_PAGE_BARS`): at 28% the spot's bars were too small to read on a phone. */
+export const VP_BAR_SIZES = {
+  narrow: { label: 'Narrow', widthPct: 0.3, room: 0.3 },
+  normal: { label: 'Normal', widthPct: 0.45, room: 0.36 },
+  wide: { label: 'Wide', widthPct: 0.6, room: 0.48 },
+}
+export const DEFAULT_VP_BARS = 'normal'
+/** A saved "Bars" choice read back: anything not one of VP_BAR_SIZES is the default. */
+export const vpBarSize = (key) => VP_BAR_SIZES[Object.hasOwn(VP_BAR_SIZES, key) ? key : DEFAULT_VP_BARS]
+
 /** The row the futures day is FETCHED in: the footprint's own (the Order Flow page's default), re-bucketed
  *  here into whichever profile row is picked, so changing the row asks the server nothing. */
 export const FETCH_ROWS = { NIFTY: 1, BANKNIFTY: 5, SENSEX: 5 }
