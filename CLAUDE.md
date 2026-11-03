@@ -679,7 +679,9 @@ When adding or changing a strategy:
   exact bars only (relative CVD moves). OI Replay's futures delta panes are LIVE: the "orderFlowDelta" push (group
   `ofd:{U}` - `OrderFlowService.DeltaGroup`, `OrderFlowEngine.LiveDelta`: the last two minutes' buy / sell, a few bytes;
   External may not join it) merged as the minutes trade (`mergeDeltaPush`; a missed minute / another contract or day
-  loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`.
+  loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`. The Order Flow
+  page's footprint "Delta per row" tick (`rowDelta`, `optionanalytics.orderFlow.rowDelta`, off by default - the cells as
+  they were) adds a third column to every row: its buy - sell, green / red, shaded against the bar's largest (`rowDeltas`).
   Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
   prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
   (bars are whole; the server scanner is local and does not).

@@ -6,7 +6,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
-import { bidShare, heatmapPriceRange } from './orderFlowMath.js'
+import { bidShare, heatmapPriceRange, rowDeltas } from './orderFlowMath.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
 
 const { Text } = Typography
@@ -78,7 +78,9 @@ function zoomRows(l, factor, y, step, plotH) {
   return { top, rowH: Math.max(rowH, plotH / 2000) }
 }
 
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null }) {
+// `rowDelta`: a third column on every row - its delta (buy - sell), green / red by sign, shaded by its size against the
+// bar's largest row delta (the page's "Delta per row" tick; off, the cells are as they always were).
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, rowDelta = false }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -196,8 +198,11 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       // Cells, candle and markers stay inside the plot; the strip below only inside the bars' width.
       clip(0, FP_TOP, barsW, plotH)
       const cellX = x0 + 15
-      const cellW = Math.max(8, (colWidth - 19) / 2)
+      const deltaW = rowDelta ? rowDeltaWidth(colWidth) : 0
+      const cellW = Math.max(8, (colWidth - 19 - deltaW) / 2)
+      const cellsW = cellW * 2 + deltaW
       const maxSide = Math.max(1, ...bar.levels.map((l) => Math.max(l.buy, l.sell)))
+      const deltas = rowDelta ? rowDeltas(bar.levels) : null
 
       // Stacked imbalance zones: a faint band extended to the right edge (support for a buy stack,
       // resistance for a sell stack), and the stacked rows themselves marked in the cells below.
@@ -233,10 +238,25 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
           ctx.fillText(formatVolume(level.buy, lotSize, showLots), cellX + cellW + 3, top + rowH / 2)
           ctx.textAlign = 'left'
         }
+        if (deltas) {
+          const d = level.buy - level.sell
+          const strength = Math.abs(d) / deltas.maxAbs
+          const dx = cellX + cellW * 2
+          ctx.fillStyle = d > 0 ? `rgba(38,166,154,${0.1 + 0.55 * strength})` : d < 0 ? `rgba(239,83,80,${0.1 + 0.55 * strength})` : 'rgba(255,255,255,0.04)'
+          ctx.fillRect(dx, top + 0.5, deltaW - 1, rowH - 1)
+          if (showText) {
+            ctx.font = `${strength >= 0.6 ? '600 ' : ''}${Math.min(textSize, 11)}px ${FONT}`
+            ctx.textBaseline = 'middle'
+            ctx.textAlign = 'center'
+            ctx.fillStyle = d > 0 ? '#dff5f1' : d < 0 ? '#fbdcdb' : AXIS_COLOR
+            ctx.fillText(rowDeltaText(d, lotSize, showLots), dx + (deltaW - 1) / 2, top + rowH / 2, deltaW - 4)
+            ctx.textAlign = 'left'
+          }
+        }
         if (level.price === bar.poc) {
           ctx.strokeStyle = POC_COLOR
           ctx.lineWidth = 1.5
-          ctx.strokeRect(cellX + 0.5, top + 0.5, cellW * 2 - 2, rowH - 1)
+          ctx.strokeRect(cellX + 0.5, top + 0.5, cellsW - 2, rowH - 1)
           ctx.lineWidth = 1
         }
       }
@@ -258,7 +278,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         const top = rowTop(price)
         ctx.strokeStyle = color
         ctx.lineWidth = 2
-        ctx.strokeRect(cellX - 1, top - 0.5, cellW * 2 + 1, Math.max(3, rowH))
+        ctx.strokeRect(cellX - 1, top - 0.5, cellsW + 1, Math.max(3, rowH))
         ctx.lineWidth = 1
         const text = `${label} ${side === 'buy' ? '▲' : '▼'}`
         ctx.font = `700 10px ${FONT}`
@@ -479,7 +499,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap])
+  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
@@ -978,6 +998,17 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       )}
     </div>
   )
+}
+
+// The footprint's row delta column: about 30% of the cells' width, 28 - 52 px.
+function rowDeltaWidth(colWidth) {
+  return Math.max(28, Math.min(52, Math.round((colWidth - 19) * 0.3)))
+}
+
+// A row's delta as the column writes it: + / − and the volume (lots when shown in lots), 0 bare.
+function rowDeltaText(delta, lotSize, showLots) {
+  if (!delta) return '0'
+  return `${delta > 0 ? '+' : '−'}${formatVolume(Math.abs(delta), lotSize, showLots)}`
 }
 
 // ---- Delta / cumulative delta ---------------------------------------------------------------

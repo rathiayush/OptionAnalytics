@@ -78,3 +78,13 @@ test('mergeDeltaPush replaces the forming minute, adds the next, and asks for a 
   assert.deepEqual(mergeDeltaPush(held, []), { minutes: held, gap: false })
   assert.deepEqual(mergeDeltaPush([], [{ time: iso(0), buy: 1, sell: 0 }]).minutes.map((m) => m.delta), [1])
 })
+
+// The footprint's "Delta per row" column: each row's buy - sell, shaded against the bar's largest.
+test('rowDeltas: each row is buy minus sell; the largest in size shades the rest', async () => {
+  const { rowDeltas } = await import('../src/orderFlowMath.js')
+  const { byPrice, maxAbs } = rowDeltas([{ price: 101, buy: 5700, sell: 2600 }, { price: 100.5, buy: 0, sell: 4500 }, { price: 100, buy: 325, sell: 520 }])
+  assert.deepEqual([...byPrice], [[101, 3100], [100.5, -4500], [100, -195]])
+  assert.equal(maxAbs, 4500)
+  assert.equal(rowDeltas([{ price: 1, buy: 10, sell: 10 }]).maxAbs, 1)   // all flat: no division by zero
+  assert.equal(rowDeltas(null).byPrice.size, 0)
+})

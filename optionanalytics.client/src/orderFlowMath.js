@@ -23,6 +23,19 @@ export function rebucketBar(bar, rowSize) {
   return { ...bar, levels: [...rows.values()].sort((a, b) => b.price - a.price) }
 }
 
+// A footprint bar's delta per row (the "Delta per row" column): each row's buy - sell by price, and the largest of them
+// in size (at least 1) - what a row's shade is measured against.
+export function rowDeltas(levels) {
+  const byPrice = new Map()
+  let maxAbs = 1
+  for (const l of levels ?? []) {
+    const d = (l.buy ?? 0) - (l.sell ?? 0)
+    byPrice.set(l.price, d)
+    maxAbs = Math.max(maxAbs, Math.abs(d))
+  }
+  return { byPrice, maxAbs }
+}
+
 // Minute bars merged into timeframeMinutes bars (bucketed on the clock: a 5-minute bar is 09:15-09:20).
 export function aggregateBars(minuteBars, timeframeMinutes) {
   const bucketMs = Math.max(1, timeframeMinutes) * 60_000

@@ -119,7 +119,7 @@ function OrderFlowRead({ bias }) {
 }
 
 // What every mark on the footprint means.
-function FootprintLegend({ estimated, bigLabel }) {
+function FootprintLegend({ estimated, bigLabel, rowDelta = false }) {
   const item = (swatch, label) => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, whiteSpace: 'nowrap' }}>{swatch}{label}</span>
   )
@@ -138,6 +138,7 @@ function FootprintLegend({ estimated, bigLabel }) {
       {item(pill(UP_COLOR, 'ABS'), 'absorption')}
       {item(pill('#9254de', 'EXH'), 'exhaustion')}
       {item(<span style={{ display: 'inline-flex', gap: 2 }}>{dot(UP_COLOR, 9)}{dot(DOWN_COLOR, 13)}</span>, `${bigLabel} (size = quantity)`)}
+      {rowDelta && item(<span style={{ display: 'inline-flex' }}>{box('#26a69aaa')}{box('#ef5350aa')}</span>, 'delta per row (buy − sell), third column')}
       {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
     </div>
   )
@@ -166,6 +167,8 @@ export default function OrderFlowPage() {
   // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
+  // The footprint's third column: each row's delta (buy - sell).
+  const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.orderFlow.rowDelta', false)
   // Telegram for a HEAVY iceberg (live view only): a hidden order that has traded at least this many lots in total.
   // (The server marks a level an iceberg from 5 lots; those small ones are only shown on the chart.)
   const [iceAlertOn, setIceAlertOn] = usePersistedState('optionanalytics.orderFlow.iceAlertOn', true)
@@ -770,6 +773,7 @@ export default function OrderFlowPage() {
             <Space size={4}><Switch size="small" checked={showLots} onChange={setShowLots} /><Text style={{ fontSize: 12 }}>Volume in lots</Text></Space>
             <Space size={4}><Switch size="small" checked={showProfile} onChange={setShowProfile} /><Text style={{ fontSize: 12 }}>Volume profile</Text></Space>
             <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}><Text style={{ fontSize: 12 }}>VWAP</Text></Checkbox>
+            <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}><Text style={{ fontSize: 12 }}>Delta per row</Text></Checkbox>
           </Space>
           {isReplay && (
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
@@ -847,13 +851,14 @@ export default function OrderFlowPage() {
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
-            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy) · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
+            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy){rowDelta ? ' × Δ' : ''} · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
-              <FootprintLegend estimated={estimated} bigLabel={bigLabel} />
+              <FootprintLegend estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
+                rowDelta={rowDelta}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
