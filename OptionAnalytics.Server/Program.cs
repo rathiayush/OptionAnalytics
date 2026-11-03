@@ -280,7 +280,8 @@ builder.Services.AddSingleton<IBacktestStrategy, DailyBiasSweepFvgStrategy>();
 builder.Services.AddSingleton<IBacktestStrategy, SweepIfvgTrendlineBreakStrategy>();
 
 // Stateless - reads SpotFeedHostedService/CdvHostedService's in-memory history fresh on every
-// request, nothing to run in the background. See BacktestController/BacktestService.
+// call, nothing to run in the background: the strategy engine the armed Triggers run (StrategyTriggerHostedService;
+// listed for the Triggers page at GET /api/triggers/strategies). See BacktestService.
 builder.Services.AddSingleton<BacktestService>();
 builder.Services.AddSingleton<ExpiredOptionBacktestService>();
 

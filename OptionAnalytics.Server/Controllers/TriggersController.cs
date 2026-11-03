@@ -31,6 +31,12 @@ public sealed class TriggersController : ControllerBase
     [HttpGet]
     public IActionResult GetAll() => Ok(_store.GetAll());
 
+    /// <summary>The strategies a trigger can run (BacktestService's registered ones) - key, name, description and their
+    /// parameter controls; ?timeframe= applies a strategy's own per-timeframe defaults. It was GET /api/backtest/strategies,
+    /// gone with the Backtrack page.</summary>
+    [HttpGet("strategies")]
+    public IActionResult GetStrategies([FromServices] BacktestService backtest, [FromQuery] int? timeframe = null) => Ok(backtest.GetStrategies(timeframe));
+
     /// <summary>Every order-pipeline outcome (placed/filled/failed/cancelled/skipped/...) any trigger
     /// has produced, most recent first - the same text each one already sent to Telegram via
     /// StrategyTriggerHostedService.NotifyFollowUpAsync, kept here so the page can show "what

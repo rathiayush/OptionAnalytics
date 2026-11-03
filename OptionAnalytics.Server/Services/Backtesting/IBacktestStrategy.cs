@@ -3,11 +3,11 @@ using OptionAnalytics.Server.Models;
 namespace OptionAnalytics.Server.Services.Backtesting;
 
 /// <summary>
-/// The extension point for the Backtrack page's trade simulation: implement this once per
+/// The extension point for the strategy engine's trade simulation (the Triggers and the Expired Backtest page): implement this once per
 /// strategy and register it with <c>builder.Services.AddSingleton&lt;IBacktestStrategy,
 /// YourStrategy&gt;()</c> in Program.cs - BacktestService picks it up automatically (it takes
-/// <c>IEnumerable&lt;IBacktestStrategy&gt;</c>), GET /api/backtest/strategies lists it, and the
-/// Backtrack page renders its Parameters as generic controls and lets a user pick and run it.
+/// <c>IEnumerable&lt;IBacktestStrategy&gt;</c>), GET /api/triggers/strategies lists it, and the
+/// Triggers page renders its Parameters as generic controls and lets an admin arm it.
 /// Nothing else needs to change - no controller edits, no frontend edits - to add a new strategy.
 ///
 /// A strategy only has to answer "given the Confluence signals and candle history that already
@@ -22,14 +22,14 @@ public interface IBacktestStrategy
     /// URLs referencing it break.</summary>
     string Key { get; }
 
-    /// <summary>Short display name for the Backtrack page's strategy dropdown.</summary>
+    /// <summary>Short display name for the Triggers / Expired Backtest strategy dropdown.</summary>
     string Name { get; }
 
     /// <summary>One or two sentences shown under the dropdown explaining what the strategy does.</summary>
     string Description { get; }
 
     /// <summary>Every numeric input this strategy needs, in the order they should be shown. The
-    /// Backtrack page renders one InputNumber per entry using Label/Default/Min/Max/Step - a
+    /// Triggers page renders one InputNumber per entry using Label/Default/Min/Max/Step - a
     /// strategy with no parameters can return an empty list.</summary>
     IReadOnlyList<BacktestParameterSpec> Parameters { get; }
 
@@ -39,7 +39,7 @@ public interface IBacktestStrategy
     /// own Default, so this is always complete - safe to index without a fallback).</summary>
     IReadOnlyList<BacktestTrade> Simulate(BacktestStrategyContext context, IReadOnlyDictionary<string, decimal> parameters);
 
-    /// <summary>The signals THIS strategy reasons about, newest first - what the Backtrack page's
+    /// <summary>The signals THIS strategy reasons about, newest first - what a trigger's
     /// signal table shows while this strategy is selected, so the table always explains the trades
     /// listed under it rather than describing some other strategy's logic. Same parameters as
     /// Simulate, since a strategy's signals usually depend on them.</summary>
@@ -47,7 +47,7 @@ public interface IBacktestStrategy
 
     /// <summary>Parameter Default overrides for a specific page timeframe (1/3/5 minutes) - GET
     /// .../strategies applies these on top of Parameters' own static Default when the caller names a
-    /// timeframe (see BacktestUtil.ApplyTimeframeDefaults), so the Backtrack/Expired Backtest pages
+    /// timeframe (see BacktestUtil.ApplyTimeframeDefaults), so the Triggers / Expired Backtest pages
     /// pre-fill a NEW parameter form with values suited to whichever timeframe is currently
     /// selected, rather than one fixed number that only really fits one of them. Only the keys
     /// present here are overridden; anything not returned keeps that spec's own Default, and a key

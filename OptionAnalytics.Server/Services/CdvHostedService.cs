@@ -83,10 +83,8 @@ public sealed class CdvHostedService : BackgroundService
     private static readonly TimeSpan OnDemandCandleLifetime = TimeSpan.FromMinutes(2);
 
     /// <summary>The same, once the session has closed for the day: today's candles are then FINAL,
-    /// so re-fetching them can only ever return the identical series. A Backtrack run can reference
-    /// dozens of untracked strikes (see BacktestService.FillMissingStrikesAsync) and every one is a
-    /// Dhan call, so an evening of re-running the same window would otherwise pay for the same data
-    /// over and over. Safe to hold this long precisely BECAUSE nothing can change until the next
+    /// so re-fetching them can only ever return the identical series - an evening of opening the same
+    /// strike charts would otherwise pay Dhan for the same data over and over. Safe to hold this long precisely BECAUSE nothing can change until the next
     /// session, and the day-keyed sweep below drops the whole lot the moment the IST date rolls
     /// over - a stale entry can never survive into a day whose bars are still forming.</summary>
     private static readonly TimeSpan OnDemandCandleLifetimeAfterClose = TimeSpan.FromHours(2);

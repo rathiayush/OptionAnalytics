@@ -176,7 +176,7 @@ Exactly two accounts exist, both fixed by configuration (see `AuthOptions`/`Auth
 
 - **Admin** (`admin@backtest.com` by default) - sees every page, including Triggers (arms real
   Dhan orders) and Contracts (the raw scrip-master/subscription diagnostic).
-- **User** (`user@backtest.com` by default) - sees Dashboard and Backtrack only; Triggers and
+- **User** (`user@backtest.com` by default) - sees the dashboard and the analysis pages; Triggers and
   Contracts are both hidden in the nav and rejected server-side (`403`) if requested directly.
 
 Passwords are fixed in `OptionAnalytics.Server/appsettings.json`'s `Auth` section (not read from

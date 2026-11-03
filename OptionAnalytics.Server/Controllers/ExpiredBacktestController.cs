@@ -19,9 +19,9 @@ public sealed class ExpiredBacktestController : ControllerBase
     }
 
     /// <summary>Just the strategies this page can run - see ExpiredOptionBacktestService.
-    /// SupportedStrategyKeys. Same BacktestStrategyInfo shape as GET /api/backtest/strategies, so
+    /// SupportedStrategyKeys. Same BacktestStrategyInfo shape as GET /api/triggers/strategies, so
     /// the frontend's existing generic strategy-picker/parameter-control code works unchanged.
-    /// ?timeframe=, when given, applies per-timeframe Default overrides - see BacktestController.
+    /// ?timeframe=, when given, applies per-timeframe Default overrides - see BacktestService.
     /// GetStrategies' own doc comment.</summary>
     [HttpGet("strategies")]
     public IActionResult GetStrategies([FromQuery] int? timeframe = null) => Ok(_service.GetStrategies(timeframe));
@@ -47,8 +47,7 @@ public sealed class ExpiredBacktestController : ControllerBase
     /// ExpiredOptionBacktestService.MaxLookbackDays - see that class's own doc comment for why: it
     /// is what keeps expiryCode=1 pointed unambiguously at this one contract). Every query param
     /// other than the named ones below that parses as a number is passed through as the strategy's
-    /// own parameter (?otmSteps=1&amp;slPoints=10&amp;...), the same generic convention
-    /// BacktestController.GetTrades uses.</summary>
+    /// own parameter (?otmSteps=1&amp;slPoints=10&amp;...) - generic, so a new strategy's parameters need no change here.</summary>
     [HttpGet("{underlying}/run")]
     public async Task<IActionResult> Run(
         string underlying,
@@ -122,8 +121,7 @@ public sealed class ExpiredBacktestController : ControllerBase
     }
 
     /// <summary>Every query param other than the named ones above that parses as a number, passed
-    /// through as the selected strategy's own parameter - generic on purpose, matching
-    /// BacktestController.ReadParameters, so a new strategy's parameters reach it with no
+    /// through as the selected strategy's own parameter - generic on purpose, so a new strategy's parameters reach it with no
     /// controller change.</summary>
     private Dictionary<string, decimal> ReadParameters()
     {

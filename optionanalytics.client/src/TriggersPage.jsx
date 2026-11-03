@@ -128,7 +128,7 @@ export default function TriggersPage() {
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
 
-    fetch('/api/backtest/strategies')
+    fetch('/api/triggers/strategies')
       .then((r) => r.json())
       .then((list) => {
         setStrategies(list ?? [])

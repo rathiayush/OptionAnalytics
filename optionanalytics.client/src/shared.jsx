@@ -2,7 +2,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
-  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined, HistoryOutlined, LineChartOutlined,
+  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined, LineChartOutlined,
   LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -324,10 +324,9 @@ export function FeedLagAlert({ delayMs, sourceDelayMs }) {
   return null
 }
 
-// Constants/components shared between App.jsx's DashboardPage and BacktestPage.jsx - kept in
-// their own module (not exported from App.jsx) specifically to avoid a circular import: App.jsx
-// imports BacktestPage for its route, so BacktestPage importing back from App.jsx creates a cycle
-// that breaks under Vite's dev-time ESM evaluation order ("Cannot access 'X' before
+// Constants/components shared between App.jsx's DashboardPage and the other pages - kept in their own module (not
+// exported from App.jsx) to avoid a circular import: App.jsx imports every page for its route, so a page importing back
+// from App.jsx creates a cycle that breaks under Vite's dev-time ESM evaluation order ("Cannot access 'X' before
 // initialization"), even though a production build happens to paper over it.
 
 export const UP_COLOR = '#26a69a'
@@ -1097,7 +1096,6 @@ export function DirectionTag({ direction }) {
 
 const NAV_ITEMS = [
   { key: '/', label: 'Dashboard', icon: <DashboardOutlined /> },
-  { key: '/backtest', label: 'Backtrack', icon: <HistoryOutlined /> },
   {
     key: 'strike-data-group',
     label: 'Strike Data',

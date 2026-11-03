@@ -4,7 +4,6 @@ import { createSeriesMarkers, CandlestickSeries, LineSeries, CrosshairMode, Line
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import BacktestPage from './BacktestPage.jsx'
 import StrikeDataPage from './StrikeDataPage.jsx'
 import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
 import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
@@ -1813,7 +1812,8 @@ export default function App() {
     <AuthContext.Provider value={{ user, logout }}>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
-        <Route path="/backtest" element={<BacktestPage />} />
+        {/* The Backtrack page is gone - an old bookmark lands on the dashboard. */}
+        <Route path="/backtest" element={<Navigate to="/" replace />} />
         <Route path="/strike-data" element={<StrikeDataPage />} />
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
