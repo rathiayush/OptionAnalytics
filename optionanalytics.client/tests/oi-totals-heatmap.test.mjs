@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { buildOiTotalsRows, oiMeaning, oiTotalsDeclined, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from '../src/oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiMeaning, oiTotalsDeclined, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend, withOrderFlowRows } from '../src/oiTotalsHeatmap.js'
 
 const m = (o) => new Map(Object.entries(o).map(([k, v]) => [Number(k), new Map(Object.entries(v).map(([t, x]) => [Number(t), x]))]))
 
@@ -71,4 +71,64 @@ test('market meaning: PE added / CE removed bullish, CE added / PE removed beari
   assert.equal(oiTotalsMeaning(rows, 'netDelta', 120), -1, 'net rose in the bucket (CE +4.54L, PE -6.12L): bearish')
   assert.equal(oiTotalsFlowMeaning(rows, 'netCum', 120), -1)
   assert.equal(oiTotalsFlowMeaning(rows, 'netDelta', 60), 1)
+})
+
+// Asked for: the futures ORDER FLOW's delta and cumulative delta as rows after the OI net cumulative, per the table's
+// bucket (3 min), live. The OI buckets are chart seconds (IST-shifted, as toChartTime).
+const MIN = 60_000
+const T915 = Date.parse('2026-10-05T03:45:00Z') // 09:15 IST
+const chartSec = (ms) => Math.floor(ms / 1000) + 5.5 * 3600
+const col = (minute) => chartSec(T915 + minute * MIN) // a bucket's chart time, `minute` minutes after 09:15
+const flowMinutes = [
+  { ms: T915, delta: 100 }, { ms: T915 + 1 * MIN, delta: -30 }, { ms: T915 + 2 * MIN, delta: 10 }, // 09:15 bucket +80
+  { ms: T915 + 3 * MIN, delta: 50 }, { ms: T915 + 4 * MIN, delta: -20 },                          // 09:18 bucket +30
+  { ms: T915 + 9 * MIN, delta: -40 }, { ms: T915 + 10 * MIN, delta: -10 },                        // 09:24 bucket -50 (09:21 none)
+  { ms: T915 + 12 * MIN, delta: 999 },                                                             // after the clock
+]
+const oiTotals = () => {
+  const ce = new Map([[100, new Map([[col(3), 10], [col(6), 5], [col(9), -2]])]])
+  const pe = new Map([[100, new Map([[col(3), 4], [col(6), 1], [col(9), 3]])]])
+  return buildOiTotalsRows(ce, pe)
+}
+
+test('order flow rows: each bucket\'s delta and the cumulative from the first minute, in the OI columns, nothing after the clock', () => {
+  const totals = oiTotals()
+  const out = withOrderFlowRows(totals, flowMinutes, 180, T915 + 11 * MIN + 30_000)
+  assert.deepEqual(out.buckets, totals.buckets)
+  assert.deepEqual([...out.rows.flowDelta.entries()], [[col(3), 30], [col(6), 0], [col(9), -50]])
+  // The 09:15 bucket has no OI column (a change needs the bucket before) - its +80 still opens the cumulative.
+  assert.deepEqual([...out.rows.flowCum.entries()], [[col(3), 110], [col(6), 110], [col(9), 60]])
+  // The OI rows are untouched.
+  for (const key of ['ceDelta', 'ceCum', 'peDelta', 'peCum', 'netDelta', 'netCum']) assert.equal(out.rows[key], totals.rows[key])
+  // Buyers ahead = bullish, a selling bucket bearish; the cumulative still bullish but falling in 09:24 (weakening).
+  assert.equal(oiTotalsMeaning(out.rows, 'flowDelta', col(3)), 1)
+  assert.equal(oiTotalsMeaning(out.rows, 'flowDelta', col(9)), -1)
+  assert.equal(oiTotalsMeaning(out.rows, 'flowCum', col(9)), 1)
+  assert.equal(oiTotalsFlowMeaning(out.rows, 'flowCum', col(9)), -1)
+  assert.equal(oiTotalsTrend(out.rows, 'flowCum', col(6)), 0)
+  assert.equal(oiTotalsDeclined(out.rows, 'flowCum', col(9)), true)
+  // The clock taken back: the 09:24 bucket's minutes are not known yet, so neither are their figures.
+  const earlier = withOrderFlowRows(totals, flowMinutes, 180, T915 + 8 * MIN)
+  assert.deepEqual([...earlier.rows.flowCum.entries()], [[col(3), 110], [col(6), 110], [col(9), 110]])
+  assert.equal(earlier.rows.flowDelta.get(col(9)), 0)
+})
+
+test('order flow rows: no minutes, or none yet - the totals as they were; a flow starting late leaves the columns before it empty', () => {
+  const totals = oiTotals()
+  assert.equal(withOrderFlowRows(totals, null, 180), totals)
+  assert.equal(withOrderFlowRows(totals, [], 180), totals)
+  assert.equal(withOrderFlowRows(totals, flowMinutes, 180, T915 - MIN), totals)
+  const late = withOrderFlowRows(totals, flowMinutes.slice(5), 180, T915 + 11 * MIN)
+  assert.equal(late.rows.flowDelta.has(col(3)), false)
+  assert.equal(late.rows.flowCum.has(col(6)), false)
+  assert.deepEqual([...late.rows.flowCum.entries()], [[col(9), -50]])
+})
+
+test('order flow rows: estimated minutes (the server recorded the day part way) mark their bucket and every cumulative after', () => {
+  const minutes = flowMinutes.map((m, i) => (i < 2 ? { ...m, estimated: true } : m))
+  const out = withOrderFlowRows(oiTotals(), minutes, 180, T915 + 11 * MIN)
+  assert.deepEqual([...out.estimated.flowDelta], [])                        // the 09:15 bucket has no column
+  assert.deepEqual([...out.estimated.flowCum], [col(3), col(6), col(9)])     // its minutes are in every cumulative
+  const mid = withOrderFlowRows(oiTotals(), flowMinutes.map((m, i) => (i === 3 ? { ...m, estimated: true } : m)), 180, T915 + 11 * MIN)
+  assert.deepEqual([...mid.estimated.flowDelta], [col(3)])
 })

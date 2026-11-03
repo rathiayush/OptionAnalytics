@@ -5,7 +5,7 @@ import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, newReplayOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts, stepReplayOiBreakAlerts } from './oiLevelBreaks.js'
 import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
-import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend } from './oiTotalsHeatmap.js'
+import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend, withOrderFlowRows } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -1732,6 +1732,17 @@ const OI_TOTALS_ROWS = [
   { key: 'netDelta', label: 'Net Δ (CE − PE)', cum: false, gap: true },
   { key: 'netCum', label: 'Net cumulative (CE − PE)', cum: true, gap: false },
 ]
+// LIVE, after the OI net rows: the near futures' ORDER FLOW in the same buckets (withOrderFlowRows) - each bucket's delta
+// (aggressor buy - sell volume) and the cumulative delta from the open, as on the Order Flow page and the futures chart's
+// Δ / ΣΔ panes. Green = buyers ahead, red = sellers; the cumulative's shade is what that bucket did, as the OI rows'.
+const ORDER_FLOW_TOTALS_ROWS = [
+  { key: 'flowDelta', label: 'Futures Δ (buy − sell)', cum: false, gap: true, orderFlow: true },
+  { key: 'flowCum', label: 'Futures cumulative Δ', cum: true, gap: false, orderFlow: true },
+]
+const totalsRowsOf = (rows) => (rows.flowCum ? [...OI_TOTALS_ROWS, ...ORDER_FLOW_TOTALS_ROWS] : OI_TOTALS_ROWS)
+// The OI totals with the order flow rows when there is a flow (live only - the caller passes none otherwise).
+const withFlow = (totals, orderFlow, timeframeMinutes, asOfMs) => (orderFlow?.length ? withOrderFlowRows(totals, orderFlow, timeframeMinutes * 60, asOfMs) : totals)
+const ESTIMATED_FLOW_NOTE = ' (estimated - the server recorded the futures only from part way through the day; the minutes before come from 1-minute candles)'
 const OI_TOTALS_ROW_HEIGHT = 24
 const OI_TOTALS_GAP = 6
 const OI_TOTALS_LABEL_WIDTH = 190
@@ -1741,7 +1752,9 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null }) {
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null, orderFlow = null }) {
+  // The futures order flow rows under the totals - live only (OI Replay's own flow; the External page passes none).
+  const totalsOrderFlow = live ? orderFlow : null
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card, the quick
   // view, the External page's tabs). The totals card's is the page's (`alerts` - useOiBreakAlertSettings): its alerts
@@ -1864,11 +1877,11 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
         />
         <br />
         <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
-          <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ</Text>
+          <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ{totalsOrderFlow?.length ? ' · futures order flow Δ' : ''}</Text>
         </Tooltip>
         {totalsView === 'numbers'
-          ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />
-          : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} />}
+          ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} />
+          : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} />}
       </div>
   )
   return (
@@ -1894,12 +1907,13 @@ function fmtOiNum(v) {
 // The totals as NUMBERS: the same six rows as the heatmap below it (CE, PE and net CE − PE; each bucket's
 // change and the running total), one column per time bucket, newest on the left - read off the figures
 // instead of a colour.
-export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
-  const { buckets, rows } = useMemo(() => {
+export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null }) {
+  const { buckets, rows, estimated } = useMemo(() => {
     const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
     const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
-    return buildOiTotalsRows(ce, pe)
-  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
+    return withFlow(buildOiTotalsRows(ce, pe), orderFlow, timeframeMinutes, asOfMs)
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow])
+  const shownRows = totalsRowsOf(rows)
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   if (buckets.length === 0) return <Empty description="No OI data yet." />
   // Green bullish / red bearish (oiTotalsMeaning). The figure's colour is its own meaning - a delta: what that
@@ -1912,22 +1926,23 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
       <table style={{ borderCollapse: 'collapse', fontVariantNumeric: 'tabular-nums', fontSize: 12, width: 'max-content', minWidth: '100%' }}>
         <thead>
           <tr>
-            <th style={{ ...head, ...sticky, textAlign: 'left', zIndex: 2 }}>OI (CE / PE / net)</th>
+            <th style={{ ...head, ...sticky, textAlign: 'left', zIndex: 2 }}>{rows.flowCum ? 'OI (CE / PE / net) · futures' : 'OI (CE / PE / net)'}</th>
             {columns.map((t, i) => <th key={t} style={{ ...head, color: i === 0 && live ? '#fff' : AXIS_COLOR }}>{istTimeFormatter(t)}</th>)}
           </tr>
         </thead>
         <tbody>
-          {OI_TOTALS_ROWS.map((r) => (
-            <tr key={r.key} style={{ borderTop: r.gap ? `6px solid #0d0e12` : undefined, background: r.cum ? 'rgba(255,255,255,0.03)' : undefined }}>
+          {shownRows.map((r) => (
+            <tr key={r.key} data-row={r.key} style={{ borderTop: r.gap ? `6px solid #0d0e12` : undefined, background: r.cum ? 'rgba(255,255,255,0.03)' : undefined }}>
               <td style={{ ...sticky, color: r.cum ? AXIS_COLOR : '#e6e6e6', fontWeight: r.cum ? 400 : 700 }}>{r.label}</td>
               {columns.map((t, i) => {
                 const v = rows[r.key].get(t)
                 const meaning = oiTotalsMeaning(rows, r.key, t)
                 const flow = oiTotalsFlowMeaning(rows, r.key, t)
+                const guessed = estimated?.[r.key]?.has(t)
                 return (
                   <td key={t} data-meaning={OI_MEANING_WORD[meaning]} data-flow={OI_MEANING_WORD[flow]}
-                    title={v == null ? undefined : oiTotalsCellTitle(r, v, meaning, flow, oiTotalsTrend(rows, r.key, t))}
-                    style={{ padding: '3px 8px', textAlign: 'right', color: oiMeaningColour(meaning), background: oiMeaningTint(flow), fontWeight: r.cum ? 400 : 600, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
+                    title={v == null ? undefined : oiTotalsCellTitle(r, v, meaning, flow, oiTotalsTrend(rows, r.key, t)) + (guessed ? ESTIMATED_FLOW_NOTE : '')}
+                    style={{ padding: '3px 8px', textAlign: 'right', color: oiMeaningColour(meaning), background: oiMeaningTint(flow), fontWeight: r.cum ? 400 : 600, fontStyle: guessed ? 'italic' : undefined, opacity: guessed ? 0.65 : undefined, outline: i === 0 && live ? '1px solid rgba(255,255,255,0.4)' : undefined, outlineOffset: -1 }}>
                     {fmtOiNum(v)}
                   </td>
                 )
@@ -1940,6 +1955,7 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
         <span style={{ color: OI_BULLISH_COLOR, background: OI_BULLISH_TINT, padding: '0 4px' }}>green</span> = bullish (PE added, CE removed, net CE − PE negative: PE writers ahead)
         · <span style={{ color: OI_BEARISH_COLOR, background: OI_BEARISH_TINT, padding: '0 4px' }}>red</span> = bearish (CE added, PE removed, net positive)
         · figure = its own meaning (a cumulative: who is ahead on the day), shade = what that column did - green on a red shade is weakening
+        {rows.flowCum && ' · Futures Δ = the near futures\' aggressor buy − sell volume in the column (order flow), cumulative from the open: green buyers ahead, red sellers; italic = estimated'}
       </div>
     </div>
   )
@@ -2105,30 +2121,31 @@ export function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, str
   )
 }
 
-export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null }) {
+export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
-  const { buckets, rows } = useMemo(() => {
+  const { buckets, rows, estimated } = useMemo(() => {
     const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
     const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
-    return buildOiTotalsRows(ce, pe)
-  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes])
+    return withFlow(buildOiTotalsRows(ce, pe), orderFlow, timeframeMinutes, asOfMs)
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow])
+  const shownRows = totalsRowsOf(rows)
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   const formatBucketTime = istTimeFormatter
 
   const scales = useMemo(() => {
     const out = {}
-    for (const r of OI_TOTALS_ROWS) {
+    for (const r of totalsRowsOf(rows)) {
       const mags = [...rows[r.key].values()].filter((v) => Number.isFinite(v) && v !== 0).map(Math.abs).sort((a, b) => a - b)
       out[r.key] = mags.length === 0 ? 0 : r.cum ? mags[mags.length - 1] : mags[Math.min(mags.length - 1, Math.floor(mags.length * HEATMAP_SCALE_PERCENTILE))]
     }
     return out
   }, [rows])
 
-  const rowY = (index) => index * OI_TOTALS_ROW_HEIGHT + OI_TOTALS_ROWS.slice(0, index + 1).filter((r) => r.gap).length * OI_TOTALS_GAP
+  const rowY = (index) => index * OI_TOTALS_ROW_HEIGHT + shownRows.slice(0, index + 1).filter((r) => r.gap).length * OI_TOTALS_GAP
   const plotWidth = buckets.length * HEATMAP_CELL_WIDTH
-  const plotHeight = rowY(OI_TOTALS_ROWS.length - 1) + OI_TOTALS_ROW_HEIGHT
+  const plotHeight = rowY(shownRows.length - 1) + OI_TOTALS_ROW_HEIGHT
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -2142,14 +2159,15 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
     const ctx = canvas.getContext('2d')
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, plotWidth, totalHeight)
-    OI_TOTALS_ROWS.forEach((r, i) => {
+    totalsRowsOf(rows).forEach((r, i) => {
       const y = rowY(i)
       columns.forEach((t, col) => {
         const v = rows[r.key].get(t)
         const meaning = oiTotalsMeaning(rows, r.key, t)
         if (v == null || meaning === 0 || scales[r.key] === 0) return
-        // Colour = what the figure means (green bullish / red bearish - a cumulative: who is ahead), strength = its size.
-        const alpha = HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / scales[r.key]) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)
+        // Colour = what the figure means (green bullish / red bearish - a cumulative: who is ahead), strength = its size;
+        // an estimated order flow cell at half the strength.
+        const alpha = (HEATMAP_MIN_ALPHA + Math.min(1, Math.abs(v) / scales[r.key]) * (HEATMAP_MAX_ALPHA - HEATMAP_MIN_ALPHA)) * (estimated?.[r.key]?.has(t) ? 0.5 : 1)
         ctx.fillStyle = hexToRgba(meaning > 0 ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, alpha)
         ctx.fillRect(col * HEATMAP_CELL_WIDTH, y, HEATMAP_CELL_WIDTH - 1, OI_TOTALS_ROW_HEIGHT - 1)
       })
@@ -2175,7 +2193,7 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
       nextFreeX = x + width + 6
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [columns, rows, scales, plotWidth, plotHeight, formatBucketTime, live])
+  }, [columns, rows, estimated, scales, plotWidth, plotHeight, formatBucketTime, live])
 
   const bucketCountRef = useRef(0)
   useEffect(() => {
@@ -2189,11 +2207,11 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     const col = Math.floor(x / HEATMAP_CELL_WIDTH)
-    const index = OI_TOTALS_ROWS.findIndex((_, i) => y >= rowY(i) && y < rowY(i) + OI_TOTALS_ROW_HEIGHT)
+    const index = shownRows.findIndex((_, i) => y >= rowY(i) && y < rowY(i) + OI_TOTALS_ROW_HEIGHT)
     if (col < 0 || col >= columns.length || index < 0) { setHover(null); return }
-    const r = OI_TOTALS_ROWS[index]
+    const r = shownRows[index]
     const t = columns[col]
-    setHover({ clientX: e.clientX, clientY: e.clientY, row: r, time: t, value: rows[r.key].get(t), meaning: oiTotalsMeaning(rows, r.key, t), flow: oiTotalsFlowMeaning(rows, r.key, t), trend: oiTotalsTrend(rows, r.key, t) })
+    setHover({ clientX: e.clientX, clientY: e.clientY, row: r, time: t, value: rows[r.key].get(t), meaning: oiTotalsMeaning(rows, r.key, t), flow: oiTotalsFlowMeaning(rows, r.key, t), trend: oiTotalsTrend(rows, r.key, t), estimated: !!estimated?.[r.key]?.has(t) })
   }
 
   if (buckets.length === 0) return <Empty description="No OI data yet." />
@@ -2202,7 +2220,7 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
   return (
     <div style={{ display: 'flex', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, overflow: 'hidden' }}>
       <div style={{ flexShrink: 0, width: OI_TOTALS_LABEL_WIDTH, background: '#161a22', position: 'relative' }}>
-        {OI_TOTALS_ROWS.map((r, i) => {
+        {shownRows.map((r, i) => {
           const v = latest(r.key)
           return (
             <div
@@ -2239,6 +2257,7 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
           {hover.row.cum && hover.trend !== 0 && (
             <Text style={{ color: oiMeaningColour(hover.flow) }}> · {hover.trend > 0 ? 'rose' : 'fell'} in this column ({OI_MEANING_WORD[hover.flow]})</Text>
           )}
+          {hover.estimated && <Text type="secondary"> · estimated</Text>}
         </div>
       )}
     </div>
@@ -4548,7 +4567,9 @@ export default function OiReplayPage() {
   // The futures delta panes, live: the engine's latest minutes ("orderFlowDelta") merged as they trade - the panes
   // reloaded the whole day once a minute. A minute missed (a slow or sleeping page, a reconnect), another contract or
   // another day loads the day again - once: pushes are not acted on while that load is on its way.
-  const deltaGroup = isLive && futuresDeltaOn && underlying ? `ofd:${underlying}` : null
+  // Live, the OI totals' futures order flow rows read the same minutes - so live they are kept whatever the panes' switch.
+  const futuresFlowWanted = futuresDeltaOn || isLive
+  const deltaGroup = isLive && futuresFlowWanted && underlying ? `ofd:${underlying}` : null
   const futuresFlowRef = useRef(null)
   futuresFlowRef.current = futuresFlow
   const flowReloadingRef = useRef(false)
@@ -4746,7 +4767,7 @@ export default function OiReplayPage() {
   // date as the minutes trade (handleOrderFlowDelta), and a slow safety reload every 5 minutes covers a lost push.
   const flowDate = result?.date ?? null
   useEffect(() => {
-    if (!futuresDeltaOn || !flowDate || !underlying) { setFuturesFlow(null); return undefined }
+    if (!futuresFlowWanted || !flowDate || !underlying) { setFuturesFlow(null); return undefined }
     let cancelled = false
     const load = (poll = false) => fetch(`/api/order-flow/${underlying}/day/${flowDate}?rowSize=50&minTradeLots=100000&heatmapColumns=50`, poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => (r.ok ? r.json() : null))
@@ -4760,7 +4781,13 @@ export default function OiReplayPage() {
     load(flowReload > 0)
     const id = isLive ? setInterval(() => load(true), 300_000) : null
     return () => { cancelled = true; if (id) clearInterval(id) }
-  }, [futuresDeltaOn, flowDate, underlying, isLive, flowReload])
+  }, [futuresFlowWanted, flowDate, underlying, isLive, flowReload])
+  // The OI totals' futures order flow rows (withOrderFlowRows): live only, the same minutes as the panes - a day the
+  // server did not record live at all (source "estimated") marked estimated throughout.
+  const totalsOrderFlow = useMemo(() => {
+    if (!isLive || !futuresFlow?.bars?.length) return null
+    return futuresFlow.source === 'estimated' ? futuresFlow.bars.map((b) => ({ ...b, estimated: true })) : futuresFlow.bars
+  }, [isLive, futuresFlow])
   // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.
   const futuresDeltaBars = useMemo(() => {
     if (!futuresDeltaOn || !futuresFlow?.bars?.length || asOfMs == null) return null
@@ -6658,7 +6685,7 @@ export default function OiReplayPage() {
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                   lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alerts={oiBreakAlertSettings}
-                  spotBars={oneMinBars} step={step}
+                  spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow}
                 />
               </Card>
               </LiveSection>
@@ -7106,7 +7133,7 @@ export default function OiReplayPage() {
               <OiChangeHeatmapSection
                 ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                 lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
-                spotBars={oneMinBars} step={step}
+                spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow}
               />
             )}
             {quickView === 'premium' && (

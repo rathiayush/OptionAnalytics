@@ -35,10 +35,56 @@ export function buildOiTotalsRows(cePerStrike, pePerStrike) {
   return { buckets, rows }
 }
 
+// shared.toChartTime for an epoch-ms time: the chart's seconds, shifted to IST - the OI buckets' own clock.
+const chartSeconds = (ms) => Math.floor(ms / 1000) + 5.5 * 3600
+
+/** The near futures' ORDER FLOW beside the OI totals, in the SAME buckets (asked for - "show order flow's delta and
+ *  cumulative delta after the OI net cumulative, per 3 min"): `flowDelta` = each bucket's delta (the aggressor buy - sell
+ *  volume of its minutes - the Order Flow page's delta), `flowCum` = the cumulative delta from the session's FIRST minute
+ *  (its CVD - the minutes before the first OI column count too). `minutes` - [{ ms, delta, estimated }] (cvdBackfill's
+ *  deltaMinutes, kept up to date live by the "orderFlowDelta" push); a minute counts once the clock `asOfMs` has reached
+ *  its start, as on the futures chart's delta panes - the newest column, like the OI's, is the bucket still trading. A
+ *  column before the first minute traded has none (no cell); a bucket with no trade is 0. `estimated` holds the columns
+ *  read from estimated minutes (the server recorded the day only from part way - cvdBackfill): the delta's own minutes,
+ *  the cumulative's any minute up to it. No minutes - the totals as they were. */
+export function withOrderFlowRows(totals, minutes, bucketSeconds, asOfMs = null) {
+  if (!minutes?.length || !(bucketSeconds > 0) || !totals?.buckets?.length) return totals
+  const byBucket = new Map()
+  for (const m of minutes) {
+    if (!Number.isFinite(m?.ms) || !Number.isFinite(m.delta) || (asOfMs != null && m.ms > asOfMs)) continue
+    const t = Math.floor(chartSeconds(m.ms) / bucketSeconds) * bucketSeconds
+    const b = byBucket.get(t) ?? { delta: 0, estimated: false }
+    byBucket.set(t, { delta: b.delta + m.delta, estimated: b.estimated || !!m.estimated })
+  }
+  const times = [...byBucket.keys()].sort((a, b) => a - b)
+  const flowDelta = new Map()
+  const flowCum = new Map()
+  const estimated = { flowDelta: new Set(), flowCum: new Set() }
+  let cum = 0
+  let cumEstimated = false
+  let i = 0
+  for (const t of totals.buckets) {
+    while (i < times.length && times[i] <= t) {
+      const b = byBucket.get(times[i])
+      cum += b.delta
+      cumEstimated ||= b.estimated
+      i++
+    }
+    if (i === 0) continue
+    const own = byBucket.get(t)
+    flowDelta.set(t, own?.delta ?? 0)
+    flowCum.set(t, cum)
+    if (own?.estimated) estimated.flowDelta.add(t)
+    if (cumEstimated) estimated.flowCum.add(t)
+  }
+  if (!flowCum.size) return totals
+  return { buckets: totals.buckets, rows: { ...totals.rows, flowDelta, flowCum }, estimated }
+}
+
 // Did this row's series DECLINE in bucket t - CE, PE or net OI falling in that bucket? A delta row: its
 // change is negative. A cumulative row: it fell from the bucket before, which is the same thing as its
 // delta row being negative (the cumulative of a positive day can still be falling).
-const DELTA_OF = { ceDelta: 'ceDelta', ceCum: 'ceDelta', peDelta: 'peDelta', peCum: 'peDelta', netDelta: 'netDelta', netCum: 'netDelta' }
+const DELTA_OF = { ceDelta: 'ceDelta', ceCum: 'ceDelta', peDelta: 'peDelta', peCum: 'peDelta', netDelta: 'netDelta', netCum: 'netDelta', flowDelta: 'flowDelta', flowCum: 'flowDelta' }
 export function oiTotalsDeclined(rows, key, t) {
   const v = rows[DELTA_OF[key]]?.get(t)
   return Number.isFinite(v) && v < 0
@@ -54,9 +100,9 @@ export function oiTotalsTrend(rows, key, t) {
 // writers supporting the market - bullish - and PE removed bearish; CE OI added is call writers capping it -
 // bearish - and CE removed bullish. Net = CE - PE: negative means the PE writers dominate - bullish; positive
 // the CE writers - bearish. The same for a bucket's change (delta rows) and for the running total (who is
-// ahead on the day: cumulative rows).
-const BULLISH_WHEN = { ce: -1, pe: 1, net: -1 }
-const SIDE_OF = { ceDelta: 'ce', ceCum: 'ce', peDelta: 'pe', peCum: 'pe', netDelta: 'net', netCum: 'net' }
+// ahead on the day: cumulative rows). The futures order flow: buyers ahead (delta positive) bullish, sellers bearish.
+const BULLISH_WHEN = { ce: -1, pe: 1, net: -1, flow: 1 }
+const SIDE_OF = { ceDelta: 'ce', ceCum: 'ce', peDelta: 'pe', peCum: 'pe', netDelta: 'net', netCum: 'net', flowDelta: 'flow', flowCum: 'flow' }
 export function oiMeaning(key, v) {
   if (!Number.isFinite(v) || v === 0 || !SIDE_OF[key]) return 0
   return Math.sign(v) * BULLISH_WHEN[SIDE_OF[key]]

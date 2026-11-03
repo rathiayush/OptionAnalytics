@@ -145,7 +145,14 @@ When adding or changing a strategy:
   re-rendering (`LiveSection`) and a hidden one is not there, and both used to silence them; the "OI totals" card
   (`oiTotals`: the CE / PE / Net Δ and cumulative Δ table, Charts, the bucket the alerts read and these settings -
   `OiChangeHeatmapSection show="totals"` with the page's `alerts`; the heatmap card is `show="strikes"`, no alerts) only
-  shows the settings. A PAST DAY REPLAYED raises them too, on the replay's clock (`stepReplayOiBreakAlerts`: the end of
+  shows the settings. LIVE ONLY, after the OI net rows, the card (Numbers and Heatmap, and the N quick view) adds the near
+  futures' ORDER FLOW in the same buckets (asked for - "order flow's delta and cumulative delta after the OI net cumulative,
+  per 3 min"): "Futures Δ (buy − sell)" = each bucket's aggressor buy - sell volume, "Futures cumulative Δ" = from the
+  session's first minute (the Order Flow page's / futures panes' CVD) - `withOrderFlowRows` in `oiTotalsHeatmap.js` on the
+  page's `futuresFlow` minutes (loaded live whatever the futures chart's Δ / ΣΔ switch, kept up to date by the
+  "orderFlowDelta" push), a minute counted once the clock reaches it, the newest column the bucket still trading; green
+  buyers ahead / red sellers, the shade what the bucket did; estimated minutes (a day recorded part way) italic / faded.
+  Not on a replayed day, not on the External page (it passes no flow) - `tests/oi-totals-heatmap.test.mjs`. A PAST DAY REPLAYED raises them too, on the replay's clock (`stepReplayOiBreakAlerts`: the end of
   the last minute shown, completed buckets only - nothing after it; the slider taken back starts the watch again, a jump
   announces only what is fresh), marked "replay", never to Telegram (`tests/oi-replay-alerts.test.mjs`). Which alerts
   the page raises - live and replayed - is its "Alerts" dropdown in the controls (`oiAlertTypes.js`,
