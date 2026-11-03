@@ -15,6 +15,13 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 ///  2. inside the spread, the midpoint - above it = buy, below = sell;
 ///  3. at the midpoint, the tick rule - up from the previous trade price = buy, down = sell,
 ///     unchanged = same side as the last trade.
+/// Every event is stamped with when it came off its socket (SpotTick.ReceivedAt, the depth socket's receive time - see
+/// OrderFlowService), and a trade is judged against the quotes that had ARRIVED by its tick's stamp: a book update that
+/// came after the tick (but was applied first - the two feeds are separate sockets) is the book the trade left behind.
+/// Volume traded while the feed was away (the first tick of a new connection - SpotTick.FeedSession) has no price or
+/// side: it is counted (Meta.UnbookedVolume), never booked as one giant print. Volume outside the F&amp;O session's hours
+/// (MarketHours.InSessionHours, 09:15 - 15:30 IST on any day a tick comes - a special Saturday session too; a pre-open
+/// auction's match is not an aggressor's trade) only moves the baseline.
 ///
 /// FOOTPRINT. Every trade lands in its IST minute's bar, at its price, as buy (ask-side) or sell
 /// (bid-side) volume. The page re-buckets minutes into its 1/3/5/15-minute bars and price rows, and
@@ -52,6 +59,9 @@ public sealed class OrderFlowEngine
     public const int SweepMinLevels = 3;
     public const int SweepMinLots = 10;
     private const int MaxTradesKept = 50_000;
+    // The tape is trimmed back to MaxTradesKept once it is this much over - not one print at a time (each trim shifts the
+    // whole list).
+    private const int TradesTrimChunk = 5_000;
     private const int MaxIcebergsKept = 500;
 
     private readonly object _lock = new();
@@ -62,6 +72,13 @@ public sealed class OrderFlowEngine
     private int _lastSide = 1;
     private DepthLevel[] _bids = Array.Empty<DepthLevel>();
     private DepthLevel[] _asks = Array.Empty<DepthLevel>();
+    // Each book side by price (built when first needed after the side changes) - what is displayed at a price, read for
+    // every open iceberg episode on every event: a scan of 200 levels each was most of an event's cost.
+    private Dictionary<decimal, long>? _bidIndex, _askIndex;
+    // The market feed connection the volume baseline came from (SpotTick.FeedSession), and the volume traded while it
+    // was away - counted, not booked (no price or side for it).
+    private int _feedSession;
+    private long _unbookedVolume;
     private DateTimeOffset? _deepBidAt, _deepAskAt;
     private int _deepDepth = 20;
     // What the book held now actually is, side by side: the feed it came from (200 / 20 levels, 5 = the market
@@ -126,9 +143,9 @@ public sealed class OrderFlowEngine
         return lastSide;
     }
 
-    /// <summary>The aggressor side against the quotes of the last QuoteLag (see the class comment): at or
-    /// above any recent best ask (and not at a recent bid) = buy, the mirror = sell; otherwise - the book
-    /// moved through the price within the window - the latest quote, midpoint and tick rule decide.</summary>
+    /// <summary>The aggressor side against the quotes of the last QuoteLag before the trade (see the class comment): at
+    /// or above any recent best ask (and not at a recent bid) = buy, the mirror = sell; otherwise - the book moved
+    /// through the price within the window - the quote as of the trade, midpoint and tick rule decide.</summary>
     internal static int Classify(decimal price, decimal recentAskMin, decimal recentBidMax, decimal prevBid, decimal prevAsk, decimal prevLtp, int lastSide)
     {
         var atAsk = recentAskMin > 0 && price >= recentAskMin;
@@ -138,29 +155,46 @@ public sealed class OrderFlowEngine
         return Classify(price, prevBid, prevAsk, prevLtp, lastSide);
     }
 
-    // The best bid / ask over the last QuoteLag (plus the current one).
+    // The best bid / ask as they arrived, stamped (kept QuoteHistory back from the latest event): the quote as of a
+    // trade, and the window of QuoteLag before it.
     private static readonly TimeSpan QuoteLag = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan QuoteHistory = TimeSpan.FromSeconds(3);
+    private const int MaxQuotesKept = 256;
     private readonly Queue<(DateTimeOffset At, decimal Bid, decimal Ask)> _recentQuotes = new();
+    private (decimal Bid, decimal Ask)? _lastQuote;
 
-    private void RecordQuote(DateTimeOffset now)
+    private void RecordQuote(DateTimeOffset at)
     {
-        if (_recentQuotes.Count == 0 || _recentQuotes.Last() is var last && (last.Bid != _prevBid || last.Ask != _prevAsk))
-            _recentQuotes.Enqueue((now, _prevBid, _prevAsk));
-        while (_recentQuotes.Count > 1 && now - _recentQuotes.Peek().At > QuoteLag) _recentQuotes.Dequeue();
-        while (_recentQuotes.Count > 64) _recentQuotes.Dequeue();
+        if (_lastQuote is not { } last || last.Bid != _prevBid || last.Ask != _prevAsk)
+        {
+            _recentQuotes.Enqueue((at, _prevBid, _prevAsk));
+            _lastQuote = (_prevBid, _prevAsk);
+        }
+        while (_recentQuotes.Count > 1 && _clock - _recentQuotes.Peek().At > QuoteHistory) _recentQuotes.Dequeue();
+        while (_recentQuotes.Count > MaxQuotesKept) _recentQuotes.Dequeue();
     }
 
-    private (decimal AskMin, decimal BidMax) RecentQuotes(DateTimeOffset now)
+    /// <summary>The book a trade stamped <paramref name="at"/> met: the latest quote that had arrived by then (Bid / Ask)
+    /// and, over the QuoteLag before it, the lowest ask and the highest bid. Quotes that arrived after it are left out
+    /// even when they were applied first; with none at or before it, the latest.</summary>
+    internal (decimal Bid, decimal Ask, decimal AskMin, decimal BidMax) QuotesAsOf(DateTimeOffset at)
     {
-        decimal askMin = _prevAsk > 0 ? _prevAsk : decimal.MaxValue;
-        var bidMax = _prevBid;
+        decimal bid = _prevBid, ask = _prevAsk;
+        DateTimeOffset? asOf = null;
+        decimal askMin = decimal.MaxValue, bidMax = 0;
         foreach (var q in _recentQuotes)
         {
-            if (now - q.At > QuoteLag) continue;
-            if (q.Ask > 0) askMin = Math.Min(askMin, q.Ask);
-            bidMax = Math.Max(bidMax, q.Bid);
+            if (q.At > at) continue;
+            if (asOf is null || q.At >= asOf) { asOf = q.At; bid = q.Bid; ask = q.Ask; }
+            if (at - q.At <= QuoteLag)
+            {
+                if (q.Ask > 0) askMin = Math.Min(askMin, q.Ask);
+                bidMax = Math.Max(bidMax, q.Bid);
+            }
         }
-        return (askMin == decimal.MaxValue ? 0 : askMin, bidMax);
+        if (ask > 0) askMin = Math.Min(askMin, ask);
+        bidMax = Math.Max(bidMax, bid);
+        return (bid, ask, askMin == decimal.MaxValue ? 0 : askMin, bidMax);
     }
 
     public static decimal Row(decimal price, decimal rowSize) => rowSize > 0 ? Math.Floor(price / rowSize) * rowSize : price;
@@ -173,6 +207,7 @@ public sealed class OrderFlowEngine
         return new DateTimeOffset(ist.Year, ist.Month, ist.Day, ist.Hour, ist.Minute, 0, IstClock.Offset);
     }
 
+    /// <summary>A market feed tick, <paramref name="now"/> = when it came off the socket (SpotTick.ReceivedAt).</summary>
     public void OnTick(SpotTick tick, DateTimeOffset now)
     {
         lock (_lock)
@@ -180,14 +215,17 @@ public sealed class OrderFlowEngine
             _importedDepth = null;
             RollDay(now);
             var price = tick.LastPrice > 0 ? Normalize(tick.LastPrice) : 0;
+            // The first tick of a new feed connection: the volume since the last one traded while the feed was away.
+            var reconnected = _prevVolume is not null && tick.FeedSession != _feedSession;
 
-            if (_prevVolume is { } prevVolume && tick.Volume >= prevVolume)
+            if (_prevVolume is { } prevVolume && tick.Volume > prevVolume)
             {
                 var traded = tick.Volume - prevVolume;
-                if (traded > 0 && price > 0)
+                if (reconnected) _unbookedVolume += traded;
+                else if (price > 0 && MarketHours.InSessionHours(now))
                 {
-                    var (askMin, bidMax) = RecentQuotes(now);
-                    var side = Classify(price, askMin, bidMax, _prevBid, _prevAsk, _prevLtp, _lastSide);
+                    var quotes = QuotesAsOf(now);
+                    var side = Classify(price, quotes.AskMin, quotes.BidMax, quotes.Bid, quotes.Ask, _prevLtp, _lastSide);
                     _lastSide = side;
                     AddTrade(now, price, traded, side);
                 }
@@ -195,12 +233,16 @@ public sealed class OrderFlowEngine
 
             // The book only moves AFTER the trade is classified and attributed - the trade happened
             // against the previous book. A fresh 20-level side is not overwritten by 5 levels.
-            if (tick.Bids is { Length: > 0 } bids && !Fresh(_deepBidAt, now)) { _bids = bids; _bidFeed = 5; _bidAt = now; }
-            if (tick.Asks is { Length: > 0 } asks && !Fresh(_deepAskAt, now)) { _asks = asks; _askFeed = 5; _askAt = now; }
+            if (tick.Bids is { Length: > 0 } bids && !Fresh(_deepBidAt, now)) { SetBids(bids); _bidFeed = 5; _bidAt = now; }
+            if (tick.Asks is { Length: > 0 } asks && !Fresh(_deepAskAt, now)) { SetAsks(asks); _askFeed = 5; _askAt = now; }
 
-            // The first tick only sets the volume baseline - nothing before it is in the day's bars.
+            // The first tick only sets the volume baseline - nothing before it is in the day's bars. The baseline only
+            // moves FORWARD, but for a new connection or a real reset (the day's volume falling to under half - a new
+            // session's count): a packet a little behind the last (out of order) moving it back would book that step twice.
             _recordedFrom ??= now;
-            _prevVolume = tick.Volume;
+            if (_prevVolume is not { } baseline || tick.Volume >= baseline || reconnected || tick.Volume < baseline / 2)
+                _prevVolume = tick.Volume;
+            _feedSession = tick.FeedSession;
             if (price > 0) _prevLtp = price;
             _prevBid = _bids.Length > 0 ? _bids[0].Price : tick.BestBidPrice;
             _prevAsk = _asks.Length > 0 ? _asks[0].Price : tick.BestAskPrice;
@@ -217,8 +259,8 @@ public sealed class OrderFlowEngine
         {
             _importedDepth = null;
             RollDay(now);
-            if (packet.IsBid) { _bids = packet.Levels; _deepBidAt = _bidAt = now; _bidFeed = packet.Depth; _prevBid = packet.Levels[0].Price; }
-            else { _asks = packet.Levels; _deepAskAt = _askAt = now; _askFeed = packet.Depth; _prevAsk = packet.Levels[0].Price; }
+            if (packet.IsBid) { SetBids(packet.Levels); _deepBidAt = _bidAt = now; _bidFeed = packet.Depth; _prevBid = packet.Levels[0].Price; }
+            else { SetAsks(packet.Levels); _deepAskAt = _askAt = now; _askFeed = packet.Depth; _prevAsk = packet.Levels[0].Price; }
             _depthPackets.Enqueue(now);
             while (_depthPackets.Count > 0 && now - _depthPackets.Peek() > TimeSpan.FromMinutes(1)) _depthPackets.Dequeue();
             RecordQuote(now);
@@ -230,6 +272,23 @@ public sealed class OrderFlowEngine
     }
 
     private static bool Fresh(DateTimeOffset? at, DateTimeOffset now) => at is { } t && now - t < DeepBookFreshness;
+
+    private void SetBids(DepthLevel[] levels) { _bids = levels; _bidIndex = null; }
+    private void SetAsks(DepthLevel[] levels) { _asks = levels; _askIndex = null; }
+
+    /// <summary>The quantity shown at <paramref name="price"/> on one side of the book (the first level at it), 0 when none.</summary>
+    private long DisplayedAt(bool bid, decimal price)
+    {
+        var index = bid ? (_bidIndex ??= IndexOf(_bids)) : (_askIndex ??= IndexOf(_asks));
+        return index.TryGetValue(price, out var quantity) ? quantity : 0;
+    }
+
+    private static Dictionary<decimal, long> IndexOf(DepthLevel[] levels)
+    {
+        var index = new Dictionary<decimal, long>(levels.Length);
+        foreach (var level in levels) index.TryAdd(level.Price, level.Quantity);
+        return index;
+    }
 
     private void RollDay(DateTimeOffset now)
     {
@@ -245,6 +304,8 @@ public sealed class OrderFlowEngine
         _recordedFrom = null;
         _prevLtp = _prevBid = _prevAsk = 0;
         _recentQuotes.Clear();
+        _lastQuote = null;
+        _unbookedVolume = 0;
         _bars.Clear();
         _dayDepth = 5;
         _dayVolume.Clear();
@@ -265,6 +326,7 @@ public sealed class OrderFlowEngine
         bar.Low = Math.Min(bar.Low, price);
         bar.Close = price;
         bar.Trades++;
+        bar.Frozen = null;
         if (!bar.Levels.TryGetValue(price, out var level)) bar.Levels[price] = level = new LevelVolume();
         if (!_dayVolume.TryGetValue(price, out var atPrice)) _dayVolume[price] = atPrice = new LevelVolume();
         if (side > 0) { level.Buy += quantity; bar.Buy += quantity; atPrice.Buy += quantity; }
@@ -274,13 +336,12 @@ public sealed class OrderFlowEngine
         if (quantity >= LotSize)
         {
             _trades.Add(new OrderFlowTrade(++_sequence, now, price, quantity, side > 0));
-            if (_trades.Count > MaxTradesKept) _trades.RemoveRange(0, _trades.Count - MaxTradesKept);
+            if (_trades.Count > MaxTradesKept + TradesTrimChunk) _trades.RemoveRange(0, _trades.Count - MaxTradesKept);
         }
 
         // A seller hitting a bid that is still in the book (or a buyer lifting an offer) - possible
         // iceberg at that level.
-        var book = side < 0 ? _bids : _asks;
-        var displayed = QuantityAt(book, price);
+        var displayed = DisplayedAt(side < 0, price);
         if (displayed <= 0) return;
         var episodes = side < 0 ? _bidEpisodes : _askEpisodes;
         if (!episodes.TryGetValue(price, out var episode))
@@ -289,25 +350,18 @@ public sealed class OrderFlowEngine
         episode.MaxDisplayed = Math.Max(episode.MaxDisplayed, displayed);
     }
 
-    private static long QuantityAt(DepthLevel[] book, decimal price)
-    {
-        foreach (var level in book)
-            if (level.Price == price) return level.Quantity;
-        return 0;
-    }
-
     private void UpdateEpisodes(DateTimeOffset now)
     {
-        Update(_bidEpisodes, _bids, isBid: true);
-        Update(_askEpisodes, _asks, isBid: false);
+        Update(_bidEpisodes, isBid: true);
+        Update(_askEpisodes, isBid: false);
 
-        void Update(Dictionary<decimal, LevelEpisode> episodes, DepthLevel[] book, bool isBid)
+        void Update(Dictionary<decimal, LevelEpisode> episodes, bool isBid)
         {
             if (episodes.Count == 0) return;
             List<decimal>? ended = null;
             foreach (var (price, episode) in episodes)
             {
-                var displayed = QuantityAt(book, price);
+                var displayed = DisplayedAt(isBid, price);
                 if (displayed <= 0)
                 {
                     // The level left the book - traded through or pulled. The episode is over.
@@ -374,30 +428,50 @@ public sealed class OrderFlowEngine
     /// <summary>Everything the Order Flow page loads: the day's minute footprints bucketed into
     /// <paramref name="rowSize"/>-point rows, prints of at least <paramref name="minTradeQty"/>, icebergs,
     /// the depth heatmap reduced to at most <paramref name="heatmapColumns"/> snapshots - in
-    /// <paramref name="heatmapRowSize"/>-point rows when given (the page's own heatmap rows), else the footprint's - and the book.</summary>
+    /// <paramref name="heatmapRowSize"/>-point rows when given (the page's own heatmap rows), else the footprint's - and the book.
+    /// The engine's lock is held only to COPY the day (the bars' frozen levels, the prints, the heatmap samples - all
+    /// immutable once copied) and everything is built from the copy outside it: building a whole day under the lock held
+    /// every live tick and depth packet behind a page load (~75 ms on a full day, ~30 ms the scanner's load).</summary>
     public OrderFlowSnapshot Snapshot(decimal rowSize, long minTradeQty, int heatmapColumns, decimal? heatmapRowSize = null)
     {
         var heatRow = heatmapRowSize ?? rowSize;
+        BarCopy[] bars;
+        OrderFlowTrade[] trades;
+        List<DepthSnapshot> samples;
+        IReadOnlyList<OrderFlowIceberg> icebergs;
+        OrderFlowBook book;
+        OrderFlowMeta meta;
         lock (_lock)
         {
-            var bars = _bars.Values.Select(b => ToDto(b, rowSize)).ToList();
-            var trades = _trades.Where(t => t.Quantity >= minTradeQty).TakeLast(5000).ToList();
-            var heatmap = new List<HeatmapColumn>();
+            bars = CopyBars(_bars.Values);
+            trades = _trades.ToArray();
+            samples = new List<DepthSnapshot>();
             if (_snapshots.Count > 0)
             {
                 var step = Math.Max(1, (int)Math.Ceiling(_snapshots.Count / (double)Math.Max(1, heatmapColumns)));
-                for (var i = step - 1; i < _snapshots.Count + step - 1; i += step)
-                {
-                    var snapshot = _snapshots[Math.Min(i, _snapshots.Count - 1)];
-                    heatmap.Add(new HeatmapColumn(snapshot.Time, Bucket(snapshot.Bids, heatRow), Bucket(snapshot.Asks, heatRow)));
-                }
+                for (var i = step - 1; i < _snapshots.Count + step - 1; i += step) samples.Add(_snapshots[Math.Min(i, _snapshots.Count - 1)]);
             }
-            return new OrderFlowSnapshot(Meta(), rowSize, bars, trades, Icebergs(), heatmap, BookDto())
-            {
-                Sweeps = DetectSweeps(_trades, SweepMinLots * (long)LotSize),
-            };
+            icebergs = Icebergs();
+            book = BookDto();
+            meta = Meta();
         }
+        var heatmap = samples.Select(x => new HeatmapColumn(x.Time, Bucket(x.Bids, heatRow), Bucket(x.Asks, heatRow))).ToList();
+        return new OrderFlowSnapshot(meta, rowSize, bars.Select(b => ToDto(b, rowSize)).ToList(),
+            trades.Where(t => t.Quantity >= minTradeQty).TakeLast(5000).ToList(), icebergs, heatmap, book)
+        {
+            Sweeps = DetectSweeps(trades, SweepMinLots * (long)LotSize),
+        };
     }
+
+    // A bar as copied out of the lock: its levels are the bar's frozen ones (native prices, high to low), never changed
+    // afterwards - a trade into the bar makes it a new array.
+    private sealed record BarCopy(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels);
+
+    private static BarCopy[] CopyBars(IEnumerable<MinuteBar> bars) =>
+        bars.Select(b => new BarCopy(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Frozen ??= Freeze(b))).ToArray();
+
+    private static FootprintLevel[] Freeze(MinuteBar bar) =>
+        bar.Levels.OrderByDescending(kv => kv.Key).Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToArray();
 
     /// <summary>The Time &amp; Sales tape: the last <paramref name="count"/> prints of at least
     /// <paramref name="minQty"/> at or before <paramref name="until"/> (null = the latest), oldest first.</summary>
@@ -461,7 +535,7 @@ public sealed class OrderFlowEngine
     {
         lock (_lock)
         {
-            var recentBars = _bars.Values.TakeLast(2).Select(b => ToDto(b, 0)).ToList();
+            var recentBars = CopyBars(_bars.Values.Skip(Math.Max(0, _bars.Count - 2))).Select(b => ToDto(b, 0)).ToList();
             return new OrderFlowLive(Meta(), _clock, recentBars, _trades.TakeLast(40).ToList(),
                 Icebergs().TakeLast(30).ToList(), BookDto(),
                 new HeatmapColumn(_clock, Bucket(HeatRows(_bids), HeatmapBaseRow), Bucket(HeatRows(_asks), HeatmapBaseRow)))
@@ -499,6 +573,7 @@ public sealed class OrderFlowEngine
         Fresh(_deepBidAt, _clock) || Fresh(_deepAskAt, _clock) ? _deepDepth : _importedDepth ?? 5, _day == default ? null : _day, Expiry, DepthFeed)
     {
         Received = Received(),
+        UnbookedVolume = _unbookedVolume,
     };
 
     /// <summary>The book as it actually arrived from Dhan (null before any book): see OrderFlowDepthReceived.</summary>
@@ -521,29 +596,34 @@ public sealed class OrderFlowEngine
         _bids.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList(),
         _asks.Select(l => new BookLevel(l.Price, l.Quantity, l.Orders)).ToList());
 
-    private static OrderFlowBar ToDto(MinuteBar bar, decimal rowSize)
+    // The bar in rowSize-point rows, high to low: its levels are high to low, and a row only ever takes the prices next
+    // to each other - one pass.
+    private static OrderFlowBar ToDto(BarCopy bar, decimal rowSize)
     {
-        var levels = new SortedDictionary<decimal, (long Buy, long Sell)>();
-        foreach (var (price, volume) in bar.Levels)
+        var rows = new List<FootprintLevel>(bar.Levels.Length);
+        foreach (var level in bar.Levels)
         {
-            var row = Row(price, rowSize);
-            levels.TryGetValue(row, out var existing);
-            levels[row] = (existing.Buy + volume.Buy, existing.Sell + volume.Sell);
+            var row = Row(level.Price, rowSize);
+            if (rows.Count > 0 && rows[^1].Price == row) rows[^1] = new FootprintLevel(row, rows[^1].Buy + level.Buy, rows[^1].Sell + level.Sell);
+            else rows.Add(new FootprintLevel(row, level.Buy, level.Sell));
         }
-        return new OrderFlowBar(bar.Time, bar.Open, bar.High, bar.Low, bar.Close, bar.Buy, bar.Sell, bar.Trades,
-            levels.Reverse().Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToList());
+        return new OrderFlowBar(bar.Time, bar.Open, bar.High, bar.Low, bar.Close, bar.Buy, bar.Sell, bar.Trades, rows);
     }
 
+    // A heatmap side in rowSize-point rows, low to high: HeatRows are low to high, so a row only ever takes the rows next
+    // to each other - one pass, no sorted map a column (a page load buckets thousands of columns).
     private static IReadOnlyList<decimal[]> Bucket(HeatRow[] levels, decimal rowSize)
     {
-        var rows = new SortedDictionary<decimal, long>();
+        for (var i = 1; i < levels.Length; i++)
+            if (levels[i].Row < levels[i - 1].Row) { levels = levels.OrderBy(l => l.Row).ToArray(); break; }   // not ours: sort a copy
+        var rows = new List<decimal[]>(levels.Length);
         foreach (var level in levels)
         {
             var row = Row(level.Row * HeatmapBaseRow, rowSize);
-            rows.TryGetValue(row, out var quantity);
-            rows[row] = quantity + level.Quantity;
+            if (rows.Count > 0 && rows[^1][0] == row) rows[^1][1] += level.Quantity;
+            else rows.Add(new[] { row, (decimal)level.Quantity });
         }
-        return rows.Select(kv => new[] { kv.Key, (decimal)kv.Value }).ToList();
+        return rows;
     }
 
     private sealed class MinuteBar
@@ -553,6 +633,8 @@ public sealed class OrderFlowEngine
         public long Buy, Sell;
         public int Trades;
         public readonly Dictionary<decimal, LevelVolume> Levels = new();
+        // The levels as an immutable array (high to low) - made when first copied, dropped by the next trade into the bar.
+        public FootprintLevel[]? Frozen;
     }
 
     private sealed class LevelVolume { public long Buy, Sell; }
@@ -588,9 +670,8 @@ public sealed class OrderFlowEngine
             {
                 Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment, Expiry = Expiry,
                 TickSize = TickSize, LotSize = LotSize, Day = _day, Sequence = _sequence, LastPrice = _prevLtp, LastTradeAt = _lastTradeAt,
-                Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5), RecordedFrom = _recordedFrom,
-                Bars = _bars.Values.Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades,
-                    b.Levels.Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToArray())).ToList(),
+                Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5), RecordedFrom = _recordedFrom, UnbookedVolume = _unbookedVolume,
+                Bars = CopyBars(_bars.Values).Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Levels)).ToList(),
                 Trades = _trades.ToList(),
                 Icebergs = Icebergs().ToList(),
                 Snapshots = _snapshots.Select(x => new OrderFlowDay.Snapshot(x.Time, x.Bids, x.Asks)).ToList(),
@@ -613,6 +694,7 @@ public sealed class OrderFlowEngine
             _sequence = Math.Max(_sequence, day.Sequence);
             if (_prevLtp == 0) _prevLtp = day.LastPrice;
             _lastTradeAt ??= day.LastTradeAt;
+            _unbookedVolume = Math.Max(_unbookedVolume, day.UnbookedVolume);   // importing the same day again adds nothing
             if (_bars.Count == 0 && _snapshots.Count == 0) _importedDepth = day.DepthLevels;
             _dayDepth = Math.Max(_dayDepth, day.DepthLevels);
 
@@ -677,6 +759,8 @@ public sealed class OrderFlowDay
     public DateTimeOffset Clock { get; init; }
     public DateTimeOffset? RecordedFrom { get; init; }
     public int DepthLevels { get; init; }
+    /// <summary>Volume traded while the feed was away (OrderFlowMeta.UnbookedVolume) - in the day's total, in no bar.</summary>
+    public long UnbookedVolume { get; init; }
     public List<Bar> Bars { get; init; } = new();
     public List<OrderFlowTrade> Trades { get; init; } = new();
     public List<OrderFlowIceberg> Icebergs { get; init; } = new();
@@ -729,6 +813,10 @@ public sealed record OrderFlowMeta(
 {
     /// <summary>What Dhan has actually sent - the live book's rows; null for a day without one.</summary>
     public OrderFlowDepthReceived? Received { get; init; }
+    /// <summary>Volume traded while the market feed was away (a reconnect, a silent feed re-subscribed): Dhan's running
+    /// day volume says how much, but not at what prices or on which side - so it is in no bar and no print (booked as
+    /// one print it was a giant false "big order"). 0 on a day with no gap.</summary>
+    public long UnbookedVolume { get; init; }
 }
 
 /// <summary>The book a live contract holds, as Dhan actually sent it: rows per side (the 200-level feed sends up to 200 -

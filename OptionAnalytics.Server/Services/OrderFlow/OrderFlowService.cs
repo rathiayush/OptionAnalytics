@@ -23,6 +23,13 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// nearest contracts) - from that moment on, keeping at most MaxExtraEngines of them. Each engine's
 /// live view goes to "of:{underlying}:{expiry}"; the nearest one's also to the older "of:{underlying}".
 ///
+/// TIMING. Every tick (from the market feed's own consumer queue) and every depth packet (from the depth sockets'
+/// receive loops) goes into ONE inbox stamped with when it came off its socket, and one worker applies them to the
+/// engines in that order: the depth sockets' receive loops never wait on an engine (a page load copying the day used to
+/// hold the 200-level socket's loop), a trade is judged against the book as it had arrived by its tick (the engine's
+/// QuotesAsOf), and the inbox's delay shows in the header's feed health with the market feed's consumers ("Order flow").
+/// Alerts and the scanner read the engine's pushes afterwards - they may lag; the ticks are applied as they arrive.
+///
 /// REPLAY. Nothing is stored on disk. Today replays straight from the live engine; when an engine
 /// rolls into a new day, or is replaced at a futures rollover, its finished day goes to
 /// OrderFlowDayStore in memory, so the last few days replay too - until the server restarts.
@@ -54,6 +61,14 @@ public sealed class OrderFlowService : BackgroundService
     private readonly SemaphoreSlim _extraLock = new(1, 1);
     private IDisposable? _tickSubscription;
 
+    /// <summary>The inbox's bound: past it the OLDEST event goes (counted) - a book side is replaced whole by the next
+    /// packet and Dhan's volume is a running total, so a dropped event loses detail, never volume. Depth packets of 200
+    /// levels are ~6 KB each: 20,000 is minutes of backlog at Dhan's rate and stays far under a GB.</summary>
+    public const int InboxCapacity = 20_000;
+
+    private readonly record struct FlowEvent(SpotTick? Tick, DepthSidePacket? Depth, DateTimeOffset ReceivedAt);
+    private readonly LiveEventQueue<FlowEvent> _inbox;
+
     public OrderFlowService(
         DhanFuturesInstrumentMaster futures, DhanMarketFeedClient feed, DhanDepthFeedClient depth, DhanTwoHundredDepthClient fullDepth,
         LiveBroadcastBatcher batcher, OrderFlowDayStore pastDays, ILogger<OrderFlowService> logger, IConfiguration? configuration = null,
@@ -69,6 +84,17 @@ public sealed class OrderFlowService : BackgroundService
         _logger = logger;
         _enabled = configuration?.GetValue("OrderFlow:Enabled", true) ?? true;
         _depthMode = configuration?["OrderFlow:DepthMode"]?.Trim() is { Length: > 0 } mode ? mode : "200";
+        // Started by ExecuteAsync (tests drain it themselves).
+        _inbox = new LiveEventQueue<FlowEvent>("Order flow", Apply, logger, InboxCapacity, startWorker: false);
+    }
+
+    /// <summary>How the inbox is keeping up (see TickConsumerStats) - shown with the market feed's consumers.</summary>
+    public TickConsumerStats InboxStats() => _inbox.GetStats();
+
+    public override void Dispose()
+    {
+        _inbox.Dispose();
+        base.Dispose();
     }
 
     public static string Group(string underlying) => $"of:{underlying.ToUpperInvariant()}";
@@ -171,7 +197,8 @@ public sealed class OrderFlowService : BackgroundService
             return;
         }
 
-        _tickSubscription = _feed.AddTickConsumer("Order flow", OnTick);
+        _inbox.Start();
+        _tickSubscription = _feed.AddTickConsumer("Order flow ticks", OnTick);
         _depth.DepthUpdated += OnDepth;
         _fullDepth.DepthUpdated += OnDepth;
         var feedStatus = RefreshDepthFeedsAsync(stoppingToken);
@@ -300,20 +327,40 @@ public sealed class OrderFlowService : BackgroundService
         return true;
     }
 
-    private void OnTick(SpotTick tick)
+    // On the market feed consumer's worker: into the inbox, stamped when it came off the socket.
+    internal void OnTick(SpotTick tick)
     {
-        if (!_bySecurityId.TryGetValue(tick.SecurityId, out var engine)) return;
-        engine.OnTick(tick, DateTimeOffset.UtcNow);
+        if (!_bySecurityId.ContainsKey(tick.SecurityId)) return;
+        _inbox.Enqueue(new FlowEvent(tick, null, tick.ReceivedAt ?? DateTimeOffset.UtcNow));
+    }
+
+    // On a depth socket's receive loop: stamped now, into the inbox - nothing else, it must never wait.
+    internal void OnDepth(DepthSidePacket packet)
+    {
+        if (!_bySecurityId.ContainsKey(packet.SecurityId)) return;
+        // The 20-level fallback alongside a 200-level book that is streaming again: the deeper one wins.
+        if (packet.Depth < DhanDepthPacketParser.TwoHundredLevelCount && _fullDepth.IsStreaming(packet.SecurityId)) return;
+        _inbox.Enqueue(new FlowEvent(null, packet, DateTimeOffset.UtcNow));
+    }
+
+    // The inbox's worker: one event into its engine, then the live view marked for the next push.
+    private void Apply(FlowEvent e)
+    {
+        var securityId = e.Tick?.SecurityId ?? e.Depth?.SecurityId;
+        if (securityId is null || !_bySecurityId.TryGetValue(securityId.Value, out var engine)) return;
+        if (e.Tick is { } tick) engine.OnTick(tick, e.ReceivedAt);
+        else if (e.Depth is { } depth) engine.OnDepth(depth, e.ReceivedAt);
         Push(engine);
     }
 
-    private void OnDepth(DepthSidePacket packet)
+    /// <summary>Tests: applies everything in the inbox on the calling thread.</summary>
+    internal void DrainInbox() => _inbox.Drain();
+
+    /// <summary>Tests: tracks <paramref name="engine"/> as its contract's nearest engine.</summary>
+    internal void TrackForTests(OrderFlowEngine engine)
     {
-        if (!_bySecurityId.TryGetValue(packet.SecurityId, out var engine)) return;
-        // The 20-level fallback alongside a 200-level book that is streaming again: the deeper one wins.
-        if (packet.Depth < DhanDepthPacketParser.TwoHundredLevelCount && _fullDepth.IsStreaming(packet.SecurityId)) return;
-        engine.OnDepth(packet, DateTimeOffset.UtcNow);
-        Push(engine);
+        _bySecurityId[engine.SecurityId] = engine;
+        _byUnderlying[engine.Underlying] = engine;
     }
 
     private void Push(OrderFlowEngine engine)

@@ -15,16 +15,29 @@ namespace OptionAnalytics.Server.Dhan;
 /// a stuck consumer grow memory without limit - its newest ticks are the ones worth processing.
 /// Stats (queue depth, slowest handler, longest wait, drops) cover roughly the last minute, so the
 /// app can show which consumer, if any, is falling behind.</summary>
-public sealed class TickConsumerQueue : IDisposable
+public sealed class TickConsumerQueue : LiveEventQueue<SpotTick>
 {
     public const int Capacity = 100_000;
+
+    public TickConsumerQueue(string name, Action<SpotTick> handler, ILogger logger, bool startWorker = true)
+        : base(name, handler, logger, Capacity, startWorker) { }
+
+    protected override string Describe(SpotTick tick) => $"a tick for security {tick.SecurityId}";
+}
+
+/// <summary>A live event queue with one worker (see TickConsumerQueue): Enqueue never blocks the caller (a socket's
+/// receive loop), events are handled in the order they were queued, past `capacity` the OLDEST is dropped and counted,
+/// and its stats say how far behind the worker has been over roughly the last minute (TickConsumerStats).</summary>
+public class LiveEventQueue<T> : IDisposable
+{
     private static readonly TimeSpan StatsWindow = TimeSpan.FromSeconds(60);
 
-    private readonly Channel<(SpotTick Tick, long EnqueuedAt)> _channel;
-    private readonly Action<SpotTick> _handler;
+    private readonly Channel<(T Tick, long EnqueuedAt)> _channel;
+    private readonly Action<T> _handler;
     private readonly ILogger _logger;
     private readonly CancellationTokenSource _stop = new();
-    private readonly Task _worker;
+    private Task _worker = Task.CompletedTask;
+    private int _started;
 
     private readonly object _statsLock = new();
     private long _processed;
@@ -34,21 +47,30 @@ public sealed class TickConsumerQueue : IDisposable
     private double _windowMaxWaitMs, _previousMaxWaitMs;
     private long _lastErrorLoggedAt;
 
-    public TickConsumerQueue(string name, Action<SpotTick> handler, ILogger logger, bool startWorker = true)
+    public LiveEventQueue(string name, Action<T> handler, ILogger logger, int capacity, bool startWorker = true)
     {
         Name = name;
         _handler = handler;
         _logger = logger;
-        _channel = Channel.CreateBounded<(SpotTick, long)>(
-            new BoundedChannelOptions(Capacity) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false },
+        _channel = Channel.CreateBounded<(T, long)>(
+            new BoundedChannelOptions(capacity) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true, SingleWriter = false },
             _ => Interlocked.Increment(ref _dropped));
-        _worker = startWorker ? Task.Run(RunAsync) : Task.CompletedTask;
+        if (startWorker) Start();
+    }
+
+    /// <summary>Starts the worker (once) - for a queue made with startWorker: false whose owner starts it later.</summary>
+    public void Start()
+    {
+        if (Interlocked.Exchange(ref _started, 1) == 0) _worker = Task.Run(RunAsync);
     }
 
     public string Name { get; }
 
     /// <summary>Called on the receive loop - never blocks.</summary>
-    public void Enqueue(SpotTick tick) => _channel.Writer.TryWrite((tick, Stopwatch.GetTimestamp()));
+    public void Enqueue(T tick) => _channel.Writer.TryWrite((tick, Stopwatch.GetTimestamp()));
+
+    /// <summary>How an event is named in the log when its handler fails.</summary>
+    protected virtual string Describe(T item) => typeof(T).Name;
 
     /// <summary>Processes everything queued so far on the calling thread (tests drive the queue
     /// with startWorker: false).</summary>
@@ -69,7 +91,7 @@ public sealed class TickConsumerQueue : IDisposable
         }
     }
 
-    private void Process(SpotTick tick, long enqueuedAt)
+    private void Process(T tick, long enqueuedAt)
     {
         var started = Stopwatch.GetTimestamp();
         try
@@ -83,7 +105,7 @@ public sealed class TickConsumerQueue : IDisposable
             if (now - Interlocked.Read(ref _lastErrorLoggedAt) > 60_000)
             {
                 Interlocked.Exchange(ref _lastErrorLoggedAt, now);
-                _logger.LogError(ex, "Live tick consumer {Consumer} failed on a tick for security {SecurityId}.", Name, tick.SecurityId);
+                _logger.LogError(ex, "Live consumer {Consumer} failed on {Item}.", Name, Describe(tick));
             }
         }
         var finished = Stopwatch.GetTimestamp();
@@ -124,6 +146,7 @@ public sealed class TickConsumerQueue : IDisposable
 
     public void Dispose()
     {
+        GC.SuppressFinalize(this);
         _channel.Writer.TryComplete();
         _stop.Cancel();
         try { _worker.Wait(TimeSpan.FromSeconds(2)); } catch { /* stopping anyway */ }

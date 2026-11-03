@@ -38,6 +38,14 @@ public static class MarketHours
     public static readonly TimeSpan SessionOpens = new(9, 15, 0);
     public static readonly TimeSpan SessionCloses = new(15, 30, 0);
 
+    /// <summary>The session's hours on any day, weekend or not (09:15 - 15:30 IST): for a consumer of ticks, which only come
+    /// when there is a session - a special Saturday one (Budget day) included.</summary>
+    public static bool InSessionHours(DateTimeOffset time)
+    {
+        var ist = time.ToOffset(IstClock.Offset);
+        return ist.TimeOfDay >= SessionOpens && ist.TimeOfDay < SessionCloses;
+    }
+
     public static bool InTradingSession(DateTimeOffset time)
     {
         var ist = time.ToOffset(IstClock.Offset);

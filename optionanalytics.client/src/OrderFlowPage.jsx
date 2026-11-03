@@ -838,6 +838,11 @@ export default function OrderFlowPage() {
         {isReplay && replayError && <Alert type="warning" showIcon message={replayError} />}
         {isReplay && estimated && <Alert type="info" showIcon message="Estimated order flow" description={replayDay?.note} />}
         {isReplay && rebuilt && <Alert type="info" showIcon message="Order flow rebuilt from TrueData's tick history" description={replayDay?.note} />}
+        {meta?.unbookedVolume > 0 && (
+          <Alert type="info" showIcon
+            message={`${formatVolume(meta.unbookedVolume, lotSize, true)} lots traded while Dhan's feed was reconnecting - not in the footprint`}
+            description="Dhan's volume is the day's running total, so the first tick after a reconnect carries everything traded meanwhile - at prices and sides unknown. It is left out rather than drawn as one giant print." />
+        )}
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>

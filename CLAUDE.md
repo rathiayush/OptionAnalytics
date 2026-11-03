@@ -652,5 +652,25 @@ When adding or changing a strategy:
   lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
   `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
   reaches the file.
+- ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
+  UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
+  tick's last price, its aggressor side by Lee-Ready (quote rule against the last second of quotes, midpoint, tick rule). EVERY
+  tick (`SpotTick.ReceivedAt`, stamped on the market feed's receive loop) and depth packet (stamped on its socket's loop) goes
+  into ONE inbox (`LiveEventQueue`, the tick consumers' own queue, made generic) and ONE worker applies them in arrival order
+  - a depth socket's receive loop never takes an engine's lock; a trade is judged against the quotes that had ARRIVED by its
+  tick (`QuotesAsOf` - a book update that came later but was applied first is the book the trade left behind). The inbox's
+  delay is in the header's feed health ("Order flow"). A NEW FEED CONNECTION (`SpotTick.FeedSession`, bumped on every connect
+  and every re-subscribe of a silent feed): the volume since the last tick traded while the feed was away - counted
+  (`Meta.UnbookedVolume`, an info line on the Order Flow page), NEVER booked as one giant print (it read as a huge "big
+  order" / sweep). Dhan's volume baseline only moves FORWARD (a packet a little behind - out of order - booked its step
+  twice), except a new connection or a real reset (under half - `ADroppedVolumeResets...`). Volume outside 09:15 - 15:30 IST
+  (`MarketHours.InSessionHours` - any day a tick comes, a special Saturday session too) only moves the baseline. READERS
+  never hold the tick path: `Snapshot` / `ExportDay` copy the day under the lock (each minute bar's FROZEN levels - made once,
+  dropped by the next trade into that bar - the prints, the heatmap samples) and build outside it (a full day's page load
+  held every tick ~75 ms; now ticks wait < 0.1 ms at p99 during loads); book lookups for icebergs are indexed (a 200-level
+  scan each was most of an event's cost); the tape is trimmed in chunks (`TradesTrimChunk`). `OrderFlowRealtimeTests.cs`.
+  Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
+  prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
+  (bars are whole; the server scanner is local and does not).
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode; alerts and the default auto trade are paper.

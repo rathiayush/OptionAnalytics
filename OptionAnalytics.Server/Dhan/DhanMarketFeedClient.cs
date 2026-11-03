@@ -63,6 +63,9 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
 
     private int _lastDisconnectCode;
 
+    // The connection the ticks come on (SpotTick.FeedSession): bumped on every connect and every re-subscribe of a silent feed.
+    private int _feedSession;
+
     // Announced once per security id per connection, so it's obvious from the console alone
     // which subscribed instruments are actually ticking and which are silent - the exact
     // question "what is ATM and what strikes are you tracking, and are they actually live" needs
@@ -304,6 +307,8 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
                         tokens.Length);
                     try
                     {
+                        // The feed was silent: what it sends now may follow a gap in the data.
+                        Interlocked.Increment(ref _feedSession);
                         await ResendSubscriptionsAsync(tokens, cancellationToken);
                     }
                     catch (Exception ex)
@@ -332,6 +337,7 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
         _socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
         _stall.OnConnected(DateTimeOffset.UtcNow);
         _loggedFirstTick.Clear();
+        Interlocked.Increment(ref _feedSession);
 
         var accessToken = _session.AccessToken ?? throw new InvalidOperationException("No Dhan access token configured.");
         var clientId = _session.ClientId ?? throw new InvalidOperationException("No Dhan client id configured.");
@@ -473,6 +479,8 @@ public sealed class DhanMarketFeedClient : IAsyncDisposable
             TotalSellQty = packet.TotalSellQty > 0 ? packet.TotalSellQty : previous?.TotalSellQty ?? 0,
             Bids = packet.Bids ?? previous?.Bids,
             Asks = packet.Asks ?? previous?.Asks,
+            ReceivedAt = DateTimeOffset.UtcNow,
+            FeedSession = Volatile.Read(ref _feedSession),
         };
 
         _lastTick[packet.SecurityId] = tick;

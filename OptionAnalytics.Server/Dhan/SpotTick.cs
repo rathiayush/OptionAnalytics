@@ -33,4 +33,15 @@ public sealed record SpotTick(
     public long TotalSellQty { get; init; }
     public DepthLevel[]? Bids { get; init; }
     public DepthLevel[]? Asks { get; init; }
+
+    /// <summary>When the packet came off the socket (DhanMarketFeedClient's receive loop) - the moment a consumer that
+    /// orders this tick against other live data (the order flow engine against the depth feeds) must use, not when its
+    /// own queue got to it. Null for a tick not from the live feed (tests, history).</summary>
+    public DateTimeOffset? ReceivedAt { get; init; }
+
+    /// <summary>The market feed connection the tick came on - a new number after every reconnect and every re-subscribe
+    /// of a silent feed. Dhan's Volume is the day's running total, so the first tick of a new connection carries all
+    /// the volume traded while the feed was away: a consumer turning volume changes into trades must not book that
+    /// as one trade (OrderFlowEngine). 0 for a tick not from the live feed.</summary>
+    public int FeedSession { get; init; }
 }

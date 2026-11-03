@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.Dhan;
+using OptionAnalytics.Server.Services.OrderFlow;
 using OptionAnalytics.Server.Services.Visitors;
 
 namespace OptionAnalytics.Server.Controllers;
@@ -140,9 +141,13 @@ public sealed class SystemController : ControllerBase
         var cache = HttpContext?.RequestServices.GetService<DhanDataCache>();
         var folder = DhanCacheFolder;
         return new SystemInfo(buildTimeUtc, StartedUtc, oldestKey, LoginsSurvivedRestart(oldestKey, StartedUtc),
-            _feedClient.SubscribedCount, _feedClient.GetConsumerStats(),
+            _feedClient.SubscribedCount, FeedStats(_feedClient.GetConsumerStats(), HttpContext?.RequestServices.GetService<OrderFlowService>()?.InboxStats()),
             cache is null || folder is null ? null : CacheStatus(folder.Value, DhanCacheKeptAtStart, cache.Hits, cache.Writes, cache.WriteErrors, StartedUtc));
     }
+
+    /// <summary>The market feed's consumers, and the order flow inbox (ticks and depth together) after them.</summary>
+    internal static IReadOnlyList<TickConsumerStats> FeedStats(IReadOnlyList<TickConsumerStats> consumers, TickConsumerStats? orderFlow) =>
+        orderFlow is null ? consumers : consumers.Append(orderFlow).ToList();
 
     internal static DhanCacheStatus CacheStatus((bool Writable, bool? KeptAcrossDeploys) folder, (long Files, long Bytes, DateTimeOffset? OldestSavedUtc)? kept,
         long reads, long writes, long writeErrors, DateTimeOffset processStartedUtc) =>
