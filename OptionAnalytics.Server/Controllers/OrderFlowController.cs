@@ -38,6 +38,21 @@ public sealed class OrderFlowController : ControllerBase
         return await _history.WithBackfillAsync(engine, snapshot, cancellationToken);
     }
 
+    /// <summary>A recorded day's delta by each candidate side rule, candle by candle (OrderFlowEngine.DeltaRules) - today when
+    /// <paramref name="date"/> is omitted; empty for a day the server did not record.</summary>
+    [HttpGet("{underlying}/delta-rules")]
+    public async Task<ActionResult<IReadOnlyList<OrderFlowRuleRow>>> DeltaRules(string underlying, [FromQuery] DateOnly? date, [FromQuery] DateOnly? expiry,
+        [FromQuery] int timeframe = 3, CancellationToken cancellationToken = default)
+    {
+        var day = date ?? IstClock.Today();
+        var contract = await _orderFlow.ResolveContractAsync(underlying, expiry, day, cancellationToken);
+        if (contract is null) return NotFound(new { error = $"No {underlying.ToUpperInvariant()} futures contract for {day:dd MMM yyyy}." });
+        var engine = _orderFlow.TrackedEngine(contract.SecurityId) is { } live && live.ExportDayDate() == day
+            ? live
+            : _orderFlow.PastDays.EngineFor(underlying, contract.SecurityId, day);
+        return Ok(engine?.DeltaRules(timeframe) ?? Array.Empty<OrderFlowRuleRow>());
+    }
+
     /// <summary>The futures contracts listed on <paramref name="date"/> (default today), nearest first - a
     /// past date includes contracts that have since expired (NseFuturesContractArchive).</summary>
     [HttpGet("{underlying}/contracts")]

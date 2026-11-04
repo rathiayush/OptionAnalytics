@@ -1,3 +1,5 @@
+using System.IO.Compression;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -53,6 +55,31 @@ public sealed class OrderFlowDayStoreTests : IDisposable
         Trades = s.Trades.Select(t => (t.Seq, t.Time, t.Price, t.Quantity, t.Buy)).ToList(),
         Heat = s.Heatmap.Select(c => (c.Time, string.Join(";", c.Bids.Select(r => $"{r[0]}:{r[1]}")), string.Join(";", c.Asks.Select(r => $"{r[0]}:{r[1]}")))).ToList(),
     };
+
+    [Fact]
+    public void The_delta_rule_comparison_survives_the_disk_and_a_day_saved_before_it_still_loads()
+    {
+        var recorded = RecordedDay(T0);
+        var day = recorded.ExportDay()!;
+        using (var store = Store()) store.SaveNow(day);
+        using (var store = Store())
+            Assert.Equal(recorded.DeltaRules(3), OrderFlowEngine.FromDay(store.LoadSaved("NIFTY", 35001, day.Day)!).DeltaRules(3));
+
+        // The same file as this morning's build wrote it: no Rules on any bar.
+        var path = Directory.GetFiles(_root, "*.json.gz", SearchOption.AllDirectories).Single();
+        string json;
+        using (var read = new StreamReader(new GZipStream(File.OpenRead(path), CompressionMode.Decompress))) json = read.ReadToEnd();
+        var old = Regex.Replace(json, @",""Rules"":\[[^\]]*\]", "");
+        Assert.DoesNotContain("Rules", old);
+        using (var write = new StreamWriter(new GZipStream(File.Create(path), CompressionLevel.Fastest))) write.Write(old);
+
+        using (var store = Store())
+        {
+            var rows = OrderFlowEngine.FromDay(store.LoadSaved("NIFTY", 35001, day.Day)!).DeltaRules(3);
+            Assert.Equal(recorded.DeltaRules(3).Select(r => (r.Time, r.Volume, r.Delta)), rows.Select(r => (r.Time, r.Volume, r.Delta)));
+            Assert.All(rows, r => Assert.Null(r.TickRule));
+        }
+    }
 
     [Fact]
     public void A_recorded_day_kept_on_disk_replays_exactly_after_a_restart()

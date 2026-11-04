@@ -49,6 +49,144 @@ public sealed class OrderFlowRealtimeTests
         Assert.Equal((99.95m, 100.00m), (asOf.Bid, asOf.Ask));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheSameTrade_IsTheSameSide_WhicheverSocketArrivesFirst(bool bookFirst)
+    {
+        // A seller takes the 100.00 bid and the rest of the order rests there as the new offer. The side used to turn on
+        // which socket delivered first: the book first read as a buyer at the ask.
+        var seller = NewEngine();
+        seller.OnTick(Tick(100.05m, 1000, 100.00m, 100.05m), T0);
+        void SellerBook()
+        {
+            seller.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(99.95m, 750, 5) }, 200), T0.AddMilliseconds(300));
+            seller.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(100.00m, 750, 5) }, 200), T0.AddMilliseconds(300));
+        }
+        if (bookFirst) SellerBook();
+        seller.OnTick(Tick(100.00m, 1150, 99.95m, 100.00m), T0.AddMilliseconds(bookFirst ? 400 : 250));
+        if (!bookFirst) SellerBook();
+        Assert.Equal((0L, 150L), (OnlyBar(seller).Buy, OnlyBar(seller).Sell));
+
+        // The mirror: a buyer takes the 100.05 offer and the rest rests there as the new bid.
+        var buyer = NewEngine();
+        buyer.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m), T0);
+        void BuyerBook()
+        {
+            buyer.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(100.05m, 750, 5) }, 200), T0.AddMilliseconds(300));
+            buyer.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(100.10m, 750, 5) }, 200), T0.AddMilliseconds(300));
+        }
+        if (bookFirst) BuyerBook();
+        buyer.OnTick(Tick(100.05m, 1150, 100.05m, 100.10m), T0.AddMilliseconds(bookFirst ? 400 : 250));
+        if (!bookFirst) BuyerBook();
+        Assert.Equal((150L, 0L), (OnlyBar(buyer).Buy, OnlyBar(buyer).Sell));
+    }
+
+    [Fact]
+    public void AMarketFeedQuote_BeatsADepthSocketThatWentQuiet()
+    {
+        // The depth book is 4 s old - still "fresh" for the book held - while the market feed shows the market 5 points lower.
+        var engine = NewEngine();
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(100.00m, 750, 5) }, 200), T0);
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(100.05m, 750, 5) }, 200), T0);
+        engine.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m), T0);
+        engine.OnTick(Tick(95.05m, 1000, 95.00m, 95.05m), T0.AddMilliseconds(3900));
+        engine.OnTick(Tick(95.05m, 1150, 95.00m, 95.05m), T0.AddMilliseconds(4000));   // a buyer lifts the 95.05 offer
+
+        Assert.Equal((150L, 0L), (OnlyBar(engine).Buy, OnlyBar(engine).Sell));
+    }
+
+    [Fact]
+    public void WithNoRecentMarketFeedQuote_TheDepthSocketsDecide()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m), T0);
+        // A quiet market feed: its quote is 5 s old, the depth sockets have the book at 99.00 / 99.05.
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(99.00m, 750, 5) }, 200), T0.AddSeconds(4));
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(99.05m, 750, 5) }, 200), T0.AddSeconds(4));
+        engine.OnTick(Tick(99.05m, 1150, 99.00m, 99.05m), T0.AddSeconds(5));
+
+        Assert.Equal((150L, 0L), (OnlyBar(engine).Buy, OnlyBar(engine).Sell));
+    }
+
+    [Fact]
+    public void APacketBehindTheLast_IsNotThePriceTheTickRuleReads()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.20m, 1000, 100.05m, 100.15m), T0);
+        engine.OnTick(Tick(100.10m, 1100, 100.05m, 100.15m), T0.AddMilliseconds(100));   // at the mid, down: a seller
+        engine.OnTick(Tick(100.00m, 1050, 100.05m, 100.15m), T0.AddMilliseconds(200));   // an older packet, out of order
+        engine.OnTick(Tick(100.10m, 1150, 100.05m, 100.15m), T0.AddMilliseconds(300));   // at the mid, unchanged: the same side
+
+        Assert.Equal((0L, 150L), (OnlyBar(engine).Buy, OnlyBar(engine).Sell));
+    }
+
+    [Fact]
+    public void ATradeGoesInTheExchangesMinute_NotTheMinuteItArrived()
+    {
+        var engine = NewEngine();
+        var traded = T0.AddSeconds(59);
+        engine.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m) with { ExchangeTimestamp = traded }, traded);
+        engine.OnTick(Tick(100.05m, 1150, 100.00m, 100.05m) with { ExchangeTimestamp = traded }, traded.AddSeconds(1.3));   // reached us at 09:31:00.3
+
+        Assert.Equal(T0, OnlyBar(engine).Time);
+    }
+
+    [Fact]
+    public void AnExchangeTimeFarFromArrival_IsNotBelieved_TheBarIsByArrival()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m), T0);
+        // The stale last trade time a first packet can carry: the bar is the minute it came, not a minute long gone.
+        engine.OnTick(Tick(100.05m, 1150, 100.00m, 100.05m) with { ExchangeTimestamp = T0.AddMinutes(-20) }, T0.AddSeconds(30));
+
+        Assert.Equal(T0, OnlyBar(engine).Time);
+    }
+
+    [Fact]
+    public void EveryCandidateRule_IsTalliedOnItsOwn_CandleByCandle_AndKeptWithTheDay()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.05m, 1000, 100.00m, 100.05m), T0);
+        // A seller at the 100.00 bid, the new book first. The bars' rule: a sell. The depth sockets' and the trade's own
+        // packet's quotes: at the ask, a buy. The tick rule: down, a sell.
+        engine.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(99.95m, 750, 5) }, 200), T0.AddMilliseconds(300));
+        engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(100.00m, 750, 5) }, 200), T0.AddMilliseconds(300));
+        engine.OnTick(Tick(100.00m, 1150, 99.95m, 100.00m), T0.AddMilliseconds(400));
+        // The next minute, the same candle at 3 minutes: a buyer at the offer, every rule agrees.
+        var next = T0.AddMinutes(1);
+        engine.OnTick(Tick(100.00m, 1300, 99.95m, 100.00m), next);
+
+        var row = Assert.Single(engine.DeltaRules(3));
+        Assert.Equal(T0, row.Time);
+        Assert.Equal((300L, 0L), (row.Volume, row.Delta));                                 // -150, +150
+        Assert.Equal((300L, 300L), (row.DepthBook, row.OwnPacket));                        // +150, +150
+        Assert.Equal(-300L, row.TickRule);                                                 // down, then unchanged: the same side
+        Assert.Equal(2, engine.DeltaRules(1).Count);
+
+        // Through the day's copy (a deploy, a past day's replay).
+        var restored = OrderFlowEngine.FromDay(engine.ExportDay()!);
+        Assert.Equal(engine.DeltaRules(3), restored.DeltaRules(3));
+    }
+
+    [Fact]
+    public void ADaySavedBeforeTheRulesWereKept_ShowsNoComparison_NotZero()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.00m, 1000, 100.00m, 100.05m), T0);
+        engine.OnTick(Tick(100.05m, 1150, 100.00m, 100.05m), T0.AddMilliseconds(100));
+        var day = engine.ExportDay()!;
+        var old = new OrderFlowDay
+        {
+            Underlying = day.Underlying, SecurityId = day.SecurityId, ContractSymbol = day.ContractSymbol, ExchangeSegment = day.ExchangeSegment,
+            TickSize = day.TickSize, LotSize = day.LotSize, Day = day.Day, Bars = day.Bars.Select(b => b with { Rules = null }).ToList(),
+        };
+
+        var row = Assert.Single(OrderFlowEngine.FromDay(old).DeltaRules(3));
+        Assert.Equal(150, row.Delta);
+        Assert.Null(row.TickRule);
+    }
+
     [Fact]
     public void TheFirstTickAfterAReconnect_IsNotBookedAsOneGiantPrint()
     {

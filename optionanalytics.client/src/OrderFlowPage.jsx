@@ -21,6 +21,7 @@ import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './Pr
 import { ServerScannerCard } from './ServerScanner.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
+import { DeltaRulesCard } from './OrderFlowDeltaRules.jsx'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
@@ -966,6 +967,8 @@ export default function OrderFlowPage() {
                   extra={shown.priorCount > 0 && <Tooltip title="The server started recording after the 09:15 open, so the minutes before it are estimated from Dhan's 1-minute candles (dimmed bars). Everything after is exact tick data."><Tag color="orange">09:15 → start estimated</Tag></Tooltip>}>
                   <CumulativeDeltaChart bars={shown.chartBars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
                 </Card>
+
+                {!estimated && <DeltaRulesCard underlying={underlying} date={isReplay ? replayDate : null} expiryQuery={expiryQuery} timeframe={timeframe} />}
 
                 <ProfilesCard prevDate={prevSession.data?.date} prevVp={prevVp} todayVp={todayVp} prevTpo={prevTpo} todayTpo={todayTpo} lastPrice={meta?.lastPrice}
                   loading={prevSession.loading} estimatedPrev={prevSession.data?.source === 'estimated'} lotSize={lotSize} showLots={showLots} height={narrow ? 340 : 440} />

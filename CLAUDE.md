@@ -686,11 +686,21 @@ When adding or changing a strategy:
   reaches the file.
 - ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
-  tick's last price, its aggressor side by Lee-Ready (quote rule against the last second of quotes, midpoint, tick rule). EVERY
+  tick's last price, its aggressor side by Lee-Ready: the quote rule against the PREVIOUS MARKET FEED PACKET's best bid / ask
+  (asked for - "match Dhan's delta": the same socket as the trade, so always the book before it. Against the depth sockets the
+  side turned on which socket won: a seller who took the bid and left the rest as the new offer read as a BUY when the new
+  book came first - the trades that move the market, cancelling real delta), midpoint, tick rule; a crossed or locked book
+  (bid and ask are separate depth packets) never decides (it read as a buy). No market feed quote in the last `QuoteMaxAge` 3 s:
+  the depth sockets' quotes (`QuotesAsOf`). Dhan's packets carry no side and Dhan does not publish how its chart gets one, so
+  no rule is known to equal it: every bar also tallies the other candidate rules (`DeltaRules`, `RuleCount` - depth sockets,
+  the trade's own packet, tick rule - kept in the day's file, `/api/order-flow/{u}/delta-rules`), shown on the Order Flow page's
+  "Delta rules" card (folded, `OrderFlowDeltaRules.jsx`, Dhan's "K" format) to set against Dhan's candles before changing the
+  rule. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
+  stale time); the tape and sweeps stay on arrival (they need the milliseconds). A packet behind the last moves neither the
+  price the tick rule reads nor the quote. EVERY
   tick (`SpotTick.ReceivedAt`, stamped on the market feed's receive loop) and depth packet (stamped on its socket's loop) goes
   into ONE inbox (`LiveEventQueue`, the tick consumers' own queue, made generic) and ONE worker applies them in arrival order
-  - a depth socket's receive loop never takes an engine's lock; a trade is judged against the quotes that had ARRIVED by its
-  tick (`QuotesAsOf` - a book update that came later but was applied first is the book the trade left behind). The inbox's
+  - a depth socket's receive loop never takes an engine's lock. The inbox's
   delay is in the header's feed health ("Order flow"). A NEW FEED CONNECTION (`SpotTick.FeedSession`, bumped on every connect
   and every re-subscribe of a silent feed): the volume since the last tick traded while the feed was away - counted
   (`Meta.UnbookedVolume`, an info line on the Order Flow page), NEVER booked as one giant print (it read as a huge "big

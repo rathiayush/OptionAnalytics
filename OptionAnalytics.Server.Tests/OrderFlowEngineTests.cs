@@ -92,6 +92,13 @@ public sealed class OrderFlowEngineTests
     public void InsideTheSpread_TheMidpointDecidesBeforeTheTickRule(double price, double bid, double ask, double prevLtp, int lastSide, int expected) =>
         Assert.Equal(expected, OrderFlowEngine.Classify((decimal)price, (decimal)bid, (decimal)ask, (decimal)prevLtp, lastSide));
 
+    [Theory]
+    [InlineData(100.00, 100.05, 100.00, 100.05, 1, -1)]   // crossed, down from the last price -> sell, not "at the ask"
+    [InlineData(100.05, 100.05, 100.00, 100.00, -1, 1)]   // crossed, up from the last price -> buy
+    [InlineData(100.00, 100.00, 100.00, 100.00, -1, -1)]  // locked, unchanged -> same side as the last trade
+    public void ACrossedOrLockedBook_DoesNotDecideTheSide_TheTickRuleDoes(double price, double bid, double ask, double prevLtp, int lastSide, int expected) =>
+        Assert.Equal(expected, OrderFlowEngine.Classify((decimal)price, (decimal)bid, (decimal)ask, (decimal)prevLtp, lastSide));
+
     [Fact]
     public void ABuyerWhoLiftedTheOffer_IsABuy_EvenWhenTheNewBookArrivesBeforeTheTick()
     {
@@ -110,13 +117,26 @@ public sealed class OrderFlowEngineTests
     }
 
     [Fact]
-    public void WhenTheBookMovedThroughThePrice_TheLatestQuoteDecides()
+    public void WhenTheDepthSocketShowsTheBookFirst_ThePreviousMarketFeedPacketIsStillTheBookBeforeTheTrade()
     {
         var engine = NewEngine();
         engine.OnTick(Tick(22709.95m, 1000, 22709.95m, 22710.00m), T0);
-        // The book jumps up: bid 22710.05 / ask 22710.10. A trade at 22710.05 hits that bid.
+        // A buyer pays through the 22710.00 offer to 22710.05 and the rest of the order rests there as the new bid. The
+        // depth socket shows bid 22710.05 / ask 22710.10 before the tick: judged against that, it read as a seller.
         engine.OnDepth(new DepthSidePacket(35001, 2, true, new[] { new DepthLevel(22710.05m, 750, 5) }, 20), T0.AddMilliseconds(200));
         engine.OnDepth(new DepthSidePacket(35001, 2, false, new[] { new DepthLevel(22710.10m, 750, 5) }, 20), T0.AddMilliseconds(200));
+        engine.OnTick(Tick(22710.05m, 1150, 22710.05m, 22710.10m), T0.AddMilliseconds(400));
+
+        var bar = Assert.Single(engine.Snapshot(rowSize: 0, minTradeQty: 1, heatmapColumns: 10).Bars);
+        Assert.Equal(150, bar.Buy);
+    }
+
+    [Fact]
+    public void ASellerHittingANewBid_IsASell_OnceTheMarketFeedHasShownThatBid()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(22709.95m, 1000, 22709.95m, 22710.00m), T0);
+        engine.OnTick(Tick(22709.95m, 1000, 22710.05m, 22710.10m), T0.AddMilliseconds(200));   // a quote update, no trade
         engine.OnTick(Tick(22710.05m, 1150, 22710.05m, 22710.10m), T0.AddMilliseconds(400));
 
         var bar = Assert.Single(engine.Snapshot(rowSize: 0, minTradeQty: 1, heatmapColumns: 10).Bars);
