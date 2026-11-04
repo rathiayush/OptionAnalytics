@@ -1104,3 +1104,57 @@ test('the timeframe on a real day: the OI totals\' breaks on its own buckets, an
   const count = (tf) => simulateDay(full, { lotSize: 65, timeframe: tf, rule: ANY_DAY_RULE }).signals.length
   assert.ok(count(15) < count(1), `${count(15)} < ${count(1)}`)
 })
+
+// Asked for: "since morning the OI indicator was CE > PE and then it flipped" - on OI since open, Total OI and the
+// cumulative lines (Net asked for; CE / PE the same). param2 = how long the other side held: 0 = since the morning (the
+// day's first flip), N = at least N minutes straight before the flip.
+test('held since the morning, then flipped: OI since open, Total OI and the cumulative lines', () => {
+  const flip = (d, id, value, i, w = 5, p = 0, p2 = 0) => cond(id).test(d, i, value, w, p, p2)
+  // OI since open: level at the open (both 0), CE ahead 1 - 59, PE crosses above at 60 and stays.
+  const morning = fakeDay({ oi: (i) => (i === 0 ? { ce: 0, pe: 0 } : i < 60 ? { ce: 2e5 + i * 1e3, pe: 1e5 } : { ce: 2e5, pe: 3e5 + i * 1e3 }) })
+  assert.ok(flip(morning, 'oiOpen', 'peFlip', 62))                 // flipped 2 minutes ago, CE ahead all morning before it
+  assert.ok(!flip(morning, 'oiOpen', 'ceFlip', 62))                // the mirror: no
+  assert.ok(!flip(morning, 'oiOpen', 'peFlip', 66))                // 6 minutes ago: out of a 5-minute window
+  assert.ok(flip(morning, 'oiOpen', 'peFlip', 66, 10))             // in a 10-minute one
+  assert.ok(!flip(morning, 'oiOpen', 'peFlip', 50, 60))            // not flipped yet
+  assert.ok(flip(morning, 'oiOpen', 'peFlip', 62, 5, 25) && !flip(morning, 'oiOpen', 'peFlip', 62, 5, 30)) // its lead now (28.8%), as the crosses'
+  // A noisy start - PE ahead for the first minutes, then CE all morning: not "since the morning" ...
+  const noisy = fakeDay({ oi: (i) => (i === 0 ? { ce: 0, pe: 0 } : i < 4 ? { ce: 1e4, pe: 2e4 } : i < 60 ? { ce: 2e5, pe: 1e5 } : { ce: 2e5, pe: 3e5 }) })
+  assert.ok(!flip(noisy, 'oiOpen', 'peFlip', 62))
+  assert.ok(flip(noisy, 'oiOpen', 'peFlip', 62, 5, 0, 30))         // ... but CE held 56 minutes straight before it: held ≥ 30 min
+  assert.ok(!flip(noisy, 'oiOpen', 'peFlip', 62, 5, 0, 60))        // not 60
+  // The day's SECOND flip: CE 1 - 39, PE 40 - 49, CE 50 - 59, PE from 60.
+  const twice = fakeDay({ oi: (i) => (i === 0 ? { ce: 0, pe: 0 } : (i < 40 || (i >= 50 && i < 60)) ? { ce: 2e5, pe: 1e5 } : { ce: 1e5, pe: 2e5 }) })
+  assert.ok(!flip(twice, 'oiOpen', 'peFlip', 62))                  // since the morning = the day's first flip (at 40, long gone)
+  assert.ok(flip(twice, 'oiOpen', 'peFlip', 62, 25))               // ... which a 25-minute window still holds, PE above now
+  assert.ok(flip(twice, 'oiOpen', 'peFlip', 62, 5, 0, 10) && !flip(twice, 'oiOpen', 'peFlip', 62, 5, 0, 15)) // CE held 10 min before 60
+  // Flipped back since: not now.
+  const back = fakeDay({ oi: (i) => (i === 0 ? { ce: 0, pe: 0 } : i < 60 || i >= 63 ? { ce: 2e5, pe: 1e5 } : { ce: 1e5, pe: 2e5 }) })
+  assert.ok(flip(back, 'oiOpen', 'peFlip', 62) && !flip(back, 'oiOpen', 'peFlip', 64))
+
+  // Total OI: CE above PE all morning, PE above from 90.
+  const totals = fakeDay({ tot: (i) => (i < 90 ? { ce: 4.4e7, pe: 4e7 } : { ce: 4e7, pe: 4.4e7 }) })
+  assert.ok(flip(totals, 'totalOi', 'peFlip', 91) && !flip(totals, 'totalOi', 'ceFlip', 91))
+  assert.ok(flip(totals, 'totalOi', 'peFlip', 91, 5, 10) && !flip(totals, 'totalOi', 'peFlip', 91, 5, 11)) // PE ahead by 10% now
+  assert.ok(!flip(fakeDay({ tot: () => ({ ce: 4e7, pe: 4.4e7 }) }), 'totalOi', 'peFlip', 91)) // PE above all day: no flip
+
+  // Net cumulative Δ: no reading for the first bucket, positive (CE writers ahead) all morning, negative from 120.
+  const net = fakeDay({ netCum: (i) => (i < 3 ? NaN : i < 120 ? 5e5 : -2e5) })
+  assert.ok(flip(net, 'cumNet', 'flipNegative', 121) && !flip(net, 'cumNet', 'flipPositive', 121))
+  assert.ok(!flip(net, 'cumNet', 'turnedNegative', 130) && flip(net, 'cumNet', 'flipNegative', 130, 15))
+  const pe = fakeDay({ peCum: (i) => (i < 100 ? -3e5 : 1e5) })
+  assert.ok(flip(pe, 'cumPe', 'flipPositive', 100) && flip(pe, 'cumPe', 'flipPositive', 100, 5, 0, 60))
+
+  // Saved and said: the held minutes default to 0 (since the open), the mirror keeps them, and the words say which.
+  assert.deepEqual(cleanLine({ id: 'oiOpen', value: 'peFlip' }), { id: 'oiOpen', value: 'peFlip', join: 'and', param: 0, param2: 0, windowMin: DEFAULT_WINDOW })
+  assert.equal(cleanLine({ id: 'cumNet', value: 'flipNegative', param2: 999 }).param2, 375)
+  assert.match(lineText({ id: 'oiOpen', value: 'peFlip', param2: 0, windowMin: 10 }), /CE ahead since the morning, then PE crossed above, held since the open \(last 10 min\)$/)
+  assert.match(lineText({ id: 'totalOi', value: 'ceFlip', param: 2, param2: 30 }), /PE above since the morning, then CE crossed above by ≥ 2%, held ≥ 30 min before/)
+  assert.deepEqual(mirrorLines([{ id: 'cumNet', value: 'flipNegative', param2: 30, windowMin: 15 }]), [{ id: 'cumNet', value: 'flipPositive', param2: 30, windowMin: 15 }])
+
+  // Through the engine: the rule signals once, at the flip; its mirror (PE ahead since the morning, then CE) never does.
+  assert.deepEqual(at(ruleSignals(morning, lines([{ id: 'oiOpen', value: 'peFlip' }], 'buyCE', { mirror: true }))), [[60, 'rule', 'buyCE']])
+  // The noisy morning signals only with a "held ≥" that its 56 minutes meet.
+  assert.deepEqual(at(ruleSignals(noisy, lines([{ id: 'oiOpen', value: 'peFlip' }]))), [])
+  assert.deepEqual(at(ruleSignals(noisy, lines([{ id: 'oiOpen', value: 'peFlip', param2: 30 }]))), [[60, 'rule', 'buyCE']])
+})

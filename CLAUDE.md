@@ -540,7 +540,15 @@ When adding or changing a strategy:
   above CE / CE crossed above PE in the window (still above now), each "by ≥ %" (asked for, like OI since open's lead -
   `TOTAL_LEAD` / `totalLeadPct`: the line ahead NOW by at least that % of the other, PE 4.4 cr over CE 4 cr = 10%; a cross
   only with that lead now too; 0 = any lead, the default, so a line saved before reads as it did). No PCR - removed on request; a line saved with the
-  short-lived `totalPcr` is dropped (`cleanLine`), the rest of the rule kept. The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
+  short-lived `totalPcr` is dropped (`cleanLine`), the rest of the rule kept. HELD SINCE THE MORNING, THEN FLIPPED (asked for -
+  "since morning the OI indicator was CE > PE and then it flipped"): OI since open ("CE ahead since the morning, then PE
+  crossed above" and the mirror), Total OI CE vs PE ("CE above since the morning, then PE crossed above") and the CE / PE /
+  Net cumulative Δ ("Positive since the morning, then turned −ve" and the mirror) - `flippedAfterHeld`: the flip in the
+  look-back and the line still on its new side, after holding the other side for `param2` "held ≥ N min" (`HELD`): 0, the
+  default, = since the open - the day's FIRST flip (every reading from the first that was not level on the other side;
+  OI since open starts level), N = at least N minutes straight right before the flip (an earlier flip allowed); with the
+  crosses' own "by ≥ %"; the box says "min = since open" at 0 (`param2.after`), the words "held since the open" /
+  "held ≥ N min before" (`param2.text`). The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks, and DIVERGENCE - asked for: "cumulative delta was x at 9:30, the same at 10:00 or only some %
   decreased, and price dipped more - that is divergence": Bullish / Bearish divergence = over the look-back spot moved
   >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or

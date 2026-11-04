@@ -359,6 +359,31 @@ function crossed(x, i, w, up) {
   if (!finite(now) || (up ? !(now > 0) : !(now < 0))) return false
   return inWindow(i, w, (k) => { const a = x(k - 1), b = x(k); return finite(a) && finite(b) && (up ? a <= 0 && b > 0 : a >= 0 && b < 0) }) >= 0
 }
+// HELD SINCE THE MORNING, THEN FLIPPED (asked for - "since morning the OI indicator was CE > PE and then it flipped"):
+// `x` (a function of the candle) went to `up` (> 0) / down (< 0) in the window and is there now, after holding the OTHER
+// side - `heldMin` 0 (the default): since the morning - the day's FIRST flip: its first reading that was not level was on
+// the other side and so was every one up to the flip (OI since open starts level, both 0); N: at least N minutes straight
+// on the other side right before the flip (`t` - the candles' times), an earlier flip allowed.
+function flippedAfterHeld(x, t, i, w, up, heldMin) {
+  const on = (v) => (up ? v > 0 : v < 0)
+  const other = (v) => (up ? v < 0 : v > 0)
+  if (!finite(x(i)) || !on(x(i))) return false
+  if (!(heldMin > 0)) {
+    let started = false
+    for (let k = 0; k <= i; k++) {
+      const v = x(k)
+      if (!finite(v) || v === 0) continue
+      if (!started) { if (!other(v)) return false; started = true; continue }
+      if (on(v)) return k > i - w
+    }
+    return false
+  }
+  const k = inWindow(i, w, (k) => { const a = x(k - 1), b = x(k); return finite(a) && finite(b) && (up ? a <= 0 && b > 0 : a >= 0 && b < 0) })
+  if (k < 0) return false
+  let j = k - 1
+  while (j >= 0 && finite(x(j)) && other(x(j))) j--
+  return j + 1 <= k - 1 && t[k] - t[j + 1] >= heldMin * MIN
+}
 // A level known at the candle before (`level(k - 1)`) closed through by `c` in the window - up or down - and still
 // through, by at least `p` % of the level now (0 = any).
 function brokeLevel(c, level, i, w, up, p = 0) {
@@ -393,6 +418,10 @@ const PAST = { param: pctParam('by ≥', 0, 100, 1) }
 // "by ≥ %" of the decay-only line - a straddle runs further from it than from its VWAP.
 const OVER_WIDE = { param: pctParam('by ≥', 0, 50, 0.5) }
 const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
+// How long the line held the other side before it flipped (flippedAfterHeld): 0 = since the morning (the day's first
+// flip), N = at least N minutes straight. `text` - how lineText says it.
+// `after` - the box's unit for its value (short: it shares a phone's line): "0 min = since open".
+const HELD = { param2: { label: 'held ≥', unit: ' min', default: 0, min: 0, max: 375, step: 5, after: (v) => (v > 0 ? 'min' : 'min = since open'), text: (v) => (v > 0 ? `held ≥ ${v} min before` : 'held since the open') } }
 // How far one Total OI line is over the other, in % of the lower one (PE 4.4 cr over CE 4 cr = 10%); 0 = any lead.
 const TOTAL_LEAD = { param: pctParam('by ≥', 0, 100, 0.5) }
 const totalLeadPct = (x) => { const lo = x ? Math.min(x.ce, x.pe) : 0; return lo > 0 ? (Math.abs(x.pe - x.ce) / lo) * 100 : NaN }
@@ -435,6 +464,8 @@ function cumCondition(line, group, meaning) {
     options: [
       opt('positive', 'Positive (above 0)', 'negative', PAST), opt('negative', 'Negative (below 0)', 'positive', PAST),
       opt('turnedPositive', 'Turned −ve → +ve', 'turnedNegative', { ...W, ...PAST }), opt('turnedNegative', 'Turned +ve → −ve', 'turnedPositive', { ...W, ...PAST }),
+      opt('flipPositive', 'Negative since the morning, then turned +ve', 'flipNegative', { ...W, ...PAST, ...HELD }),
+      opt('flipNegative', 'Positive since the morning, then turned −ve', 'flipPositive', { ...W, ...PAST, ...HELD }),
       opt('rising', `Rising (${meaning.up})`, 'falling', TOL), opt('falling', `Falling (${meaning.down})`, 'rising', TOL),
       opt('stable', 'Stable (moved under the tolerance of its range)', 'stable', TOL),
       opt('brokeResistance', 'Broke its resistance', 'brokeSupport', { ...W, ...PAST }), opt('brokeSupport', 'Broke its support', 'brokeResistance', { ...W, ...PAST }),
@@ -451,6 +482,8 @@ function cumCondition(line, group, meaning) {
         case 'negative': return series[i] < 0 && atLeast(pastPct(x, i), p)
         case 'turnedPositive': return crossed(x, i, w, true) && atLeast(pastPct(x, i), p)
         case 'turnedNegative': return crossed(x, i, w, false) && atLeast(pastPct(x, i), p)
+        case 'flipPositive': return flippedAfterHeld(x, d.t, i, w, true, p2) && atLeast(pastPct(x, i), p)
+        case 'flipNegative': return flippedAfterHeld(x, d.t, i, w, false, p2) && atLeast(pastPct(x, i), p)
         case 'rising': return lineMove(series, i, w, p) === 1
         case 'falling': return lineMove(series, i, w, p) === -1
         case 'stable': return lineMove(series, i, w, p) === 0
@@ -534,8 +567,10 @@ export const RULE_CONDITIONS = [
     options: [
       opt('peAhead', 'PE added > CE added (put writing ahead)', 'ceAhead', LEAD), opt('ceAhead', 'CE added > PE added (call writing ahead)', 'peAhead', LEAD),
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...LEAD }),
+      opt('peFlip', 'CE ahead since the morning, then PE crossed above', 'ceFlip', { ...W, ...LEAD, ...HELD }),
+      opt('ceFlip', 'PE ahead since the morning, then CE crossed above', 'peFlip', { ...W, ...LEAD, ...HELD }),
     ],
-    test: (d, i, v, w, p) => {
+    test: (d, i, v, w, p, p2) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
       const lead = () => { const { ce, pe } = d.oi[i]; const size = Math.abs(ce) + Math.abs(pe); return size > 0 ? Math.abs(pe - ce) / size >= frac(p) : false }
       switch (v) {
@@ -543,6 +578,8 @@ export const RULE_CONDITIONS = [
         case 'ceAhead': return gap(i) < 0 && lead()
         case 'peCross': return crossed(gap, i, w, true) && lead()
         case 'ceCross': return crossed(gap, i, w, false) && lead()
+        case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
+        case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
         default: return false
       }
     },
@@ -557,8 +594,10 @@ export const RULE_CONDITIONS = [
     options: [
       opt('peAbove', 'PE above CE (more put OI - bullish)', 'ceAbove', TOTAL_LEAD), opt('ceAbove', 'CE above PE (more call OI - bearish)', 'peAbove', TOTAL_LEAD),
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...TOTAL_LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...TOTAL_LEAD }),
+      opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
+      opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
     ],
-    test: (d, i, v, w, p) => {
+    test: (d, i, v, w, p, p2) => {
       const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
       const lead = () => totalLeadPct(d.tot?.[i]) >= (p ?? 0) - 1e-9
       switch (v) {
@@ -566,6 +605,8 @@ export const RULE_CONDITIONS = [
         case 'ceAbove': return gap(i) < 0 && lead()
         case 'peCross': return crossed(gap, i, w, true) && lead()
         case 'ceCross': return crossed(gap, i, w, false) && lead()
+        case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
+        case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
         default: return false
       }
     },
@@ -1102,7 +1143,8 @@ export const mirrorIsSame = (lines) => lines.every((l) => optionOf(l.id, l.value
 export function lineText(line) {
   const c = CONDITION[line.id], o = optionOf(line.id, line.value)
   if (!c || !o) return ''
-  const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + (o.param2 && line.param2 != null ? `, ${o.param2.label} ${line.param2}${o.param2.unit}` : '')
+  const second = o.param2 && line.param2 != null ? (o.param2.text ? o.param2.text(line.param2) : `${o.param2.label} ${line.param2}${o.param2.unit}`) : null
+  const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + (second ? `, ${second}` : '')
   const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
   return `${c.name}: ${o.label}${num}${win}`
 }
