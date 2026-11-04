@@ -3,7 +3,7 @@ import { Button, Card, Checkbox, DatePicker, Input, Modal, Popconfirm, Progress,
 import { DeleteOutlined, FolderOpenOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
-import { defaultRunName } from './signalBacktestJob.js'
+import { defaultRunName, runRange } from './signalBacktestJob.js'
 import { afterTheClose, cancelRun, deleteRun, queueRun } from './signalBacktestQueue.js'
 
 // The Signal backtest's BACKGROUND runs, on the page: queue one (now, after the close or at a time - the server runs it,
@@ -45,7 +45,7 @@ export function RunInBackgroundModal({ settings, days, ruleSummary, telegram, se
           under &quot;Background runs&quot; here. Runs go one at a time; days the server has kept are quick, a day it has not comes from Dhan once.
         </Text>
         <Text style={{ fontSize: 12 }}>
-          <Text strong style={{ fontSize: 12 }}>{settings.underlying}</Text> · {days} trading day{days === 1 ? '' : 's'} ({dayjs(settings.from).format('D MMM')} – {dayjs(settings.to).format('D MMM YYYY')}) · {ruleSummary}
+          <Text strong style={{ fontSize: 12 }}>{settings.underlying}</Text> · {days} trading day{days === 1 ? '' : 's'} ({runRange(settings.from, settings.to)}) · {ruleSummary}
         </Text>
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
@@ -124,7 +124,7 @@ function RunCell({ job: j, me }) {
     <Space direction="vertical" size={0}>
       <Text strong style={{ fontSize: 13 }}>{j.name}</Text>
       <Text type="secondary" style={{ fontSize: 11 }}>
-        {j.underlying} · {j.days} day{j.days === 1 ? '' : 's'} · {dayjs(j.from).format('D MMM')} – {dayjs(j.to).format('D MMM')} · queued {when(j.createdUtc)}
+        {j.underlying} · {j.days} day{j.days === 1 ? '' : 's'} · {runRange(j.from, j.to)} · queued {when(j.createdUtc)}
         {j.owner && j.owner.toLowerCase() !== me ? ` · ${j.owner}` : ''}{j.telegram ? ' · Telegram' : ''}
       </Text>
     </Space>

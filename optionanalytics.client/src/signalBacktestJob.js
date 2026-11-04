@@ -156,7 +156,13 @@ export function backtestReport(outcomes, settings) {
   }
 }
 
-/** The report's heading: the index, the days run, the timeframe and the stop / target / trail. */
+/** A run's days with their years: "1 Jan 2026 – 3 Nov 2026". */
+export function runRange(from, to) {
+  const day = (v) => (v ? new Date(`${v}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' }) : '?')
+  return `${day(from)} – ${day(to)}`
+}
+
+/** The report's heading: the index, the days run and their range, the timeframe and the stop / target / trail. */
 export function reportHead(s, okDays) {
   if (!okDays) return ''
   const unit = s.levelUnit === 'pts' ? ' pts' : '%'
@@ -165,7 +171,7 @@ export function reportHead(s, okDays) {
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */
@@ -177,8 +183,7 @@ export function chargesText(s) {
 
 /** A run's name when none is given: the index, the days and the trade. */
 export function defaultRunName(s) {
-  const day = (v) => (v ? new Date(`${v}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone: 'UTC' }) : '?')
-  return `${s.underlying} ${day(s.from)} – ${day(s.to)} · ${ACTION_OF[s.rule?.action]?.label ?? ''}${s.rule?.mirror ? ' + mirror' : ''}`
+  return `${s.underlying} ${runRange(s.from, s.to)} · ${ACTION_OF[s.rule?.action]?.label ?? ''}${s.rule?.mirror ? ' + mirror' : ''}`
 }
 
 // A report as JSON and back: a profit factor with no losing trade is Infinity, which JSON has no word for.

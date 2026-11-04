@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, loadBacktestDay, reportHead, reportReplacer, reportReviver,
+  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
 } from '../src/signalBacktestJob.js'
 
 const { run } = syntheticDay()
@@ -103,7 +103,7 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.deepEqual(s.rule, { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 0 } }] }, action: 'sellPE', mirror: false })
   assert.equal(cleanBacktestSettings({ levelUnit: 'pts', slPct: 9000 }).slPct, 5000)
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
-  assert.equal(reportHead(SETTINGS, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · net of STT 0.15% + ₹20 an order')
+  assert.equal(reportHead(SETTINGS, 4), 'NIFTY · 4 days · 19 Oct 2026 – 23 Oct 2026 · 1m candles · SL 30% · target 50% · trail 10% · net of STT 0.15% + ₹20 an order')
   assert.match(reportHead({ ...SETTINGS, charges: false }, 4), / · no charges$/)
   assert.match(reportHead({ ...SETTINGS, otherPerTrade: 7 }, 4), / · net of STT 0.15% \+ ₹20 an order \+ ₹7 a trade$/)
   // The charge rates: the defaults (0.15% STT, ₹20 an order, nothing else), held to their ranges, read by the engine.
@@ -117,7 +117,7 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.equal(cleanBacktestSettings({ expiryDay: 'hold' }).expiryDay, 'rule')
   assert.equal(engineSettings(cleanBacktestSettings({ expiryDay: 'sell' })).expiryDay, 'sell')   // what the engine (and a background run) reads
   assert.equal(SETTINGS.expiryDay, 'rule')
-  assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell · net of STT 0.15% + ₹20 an order')
+  assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 19 Oct 2026 – 23 Oct 2026 · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell · net of STT 0.15% + ₹20 an order')
   // The day's max loss / profit: off (0) by default, held to 0 - ₹1 crore, read by the engine, named in the heading.
   assert.deepEqual([SETTINGS.maxDayLoss, SETTINGS.maxDayProfit], [0, 0])
   const limits = cleanBacktestSettings({ maxDayLoss: '5000', maxDayProfit: 2e8 })
@@ -125,9 +125,13 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.deepEqual([cleanBacktestSettings({ maxDayLoss: -5 }).maxDayLoss, cleanBacktestSettings({ maxDayProfit: true }).maxDayProfit], [0, 0])
   assert.deepEqual(['maxDayLoss', 'maxDayProfit'].map((k) => engineSettings(limits)[k]), [5000, 10_000_000])
   assert.equal(reportHead({ ...SETTINGS, maxDayLoss: 5000, maxDayProfit: 12500 }, 4),
-    'NIFTY · 4 days · 1m candles · SL 30% · target 50% · trail 10% · day max loss ₹5,000 · day max profit ₹12,500 · net of STT 0.15% + ₹20 an order')
+    'NIFTY · 4 days · 19 Oct 2026 – 23 Oct 2026 · 1m candles · SL 30% · target 50% · trail 10% · day max loss ₹5,000 · day max profit ₹12,500 · net of STT 0.15% + ₹20 an order')
   assert.match(reportHead({ ...SETTINGS, maxDayProfit: 12500 }, 4), / · trail 10% · day max profit ₹12,500 · net of/)
-  assert.equal(defaultRunName(SETTINGS), 'NIFTY 19 Oct – 23 Oct · Buy CE + mirror')
+  assert.equal(defaultRunName(SETTINGS), 'NIFTY 19 Oct 2026 – 23 Oct 2026 · Buy CE + mirror')
+  // A run's days carry their years: two runs of "1 Jan – 31 Dec" can be different years, and a range can cross one.
+  assert.equal(runRange('2025-01-01', '2025-12-31'), '1 Jan 2025 – 31 Dec 2025')
+  assert.equal(runRange('2025-12-01', '2026-01-31'), '1 Dec 2025 – 31 Jan 2026')
+  assert.equal(runRange(null, '2026-11-03'), '? – 3 Nov 2026')
   // A profit factor with no losing trade survives JSON.
   assert.deepEqual(JSON.parse(JSON.stringify({ pf: Infinity, w: -Infinity, x: 1 }, reportReplacer), reportReviver), { pf: Infinity, w: -Infinity, x: 1 })
 })

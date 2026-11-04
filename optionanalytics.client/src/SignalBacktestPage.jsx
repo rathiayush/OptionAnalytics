@@ -516,7 +516,8 @@ export default function SignalBacktestPage() {
     { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
     { title: 'At the signal', dataIndex: 'why', key: 'why', width: 360, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
   ]
-  const head = shown ? reportHead(shown.settings, report.okDays) : ''
+  // The days the report covers, not the range picker's - that can have moved on since the run.
+  const head = shown ? reportHead({ ...shown.settings, from: report.dayRows[0]?.date, to: report.dayRows.at(-1)?.date }, report.okDays) : ''
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>

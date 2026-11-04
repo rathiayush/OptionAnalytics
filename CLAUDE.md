@@ -642,7 +642,8 @@ When adding or changing a strategy:
   progress; `{id}.result.json` - the report): the queue and the reports survive a restart / deploy, a run the restart cut
   off is queued again (failed after `MaxAttempts` 3 starts); `MaxJobs` 60 kept (the oldest finished go first), 20 waiting
   an account. Telegram when a run ends (on by default in the dialog - `optionanalytics.signalBacktest.bgTelegram`). The
-  page's "Background runs" card lists them (state, day k of n, the result so far / its numbers; a page TIMER with
+  page's "Background runs" card lists them (the days with their years - `runRange`, the run's name and the report's
+  heading carry them too; state, day k of n, the result so far / its numbers; a page TIMER with
   `POLL_HEADERS` - 5 s while one runs or waits to run now, 30 s while one only waits for its time - `signalBacktestQueue.js`;
   a block a run on a phone, no sideways scroll): Open shows a finished run's report on the page (its own rule and settings
   - the page's do not change it), Use settings puts its settings on the page, Cancel / Stop, Remove. The background run's
