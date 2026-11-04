@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Alert, Button, Card, Table, Typography } from 'antd'
-import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
+import { DOWN_COLOR, POLL_HEADERS, UP_COLOR, usePersistedState } from './shared.jsx'
 
 // The Order Flow page's "Delta rules" card: a day's delta, candle by candle, by each way of inferring a trade's side
 // (OrderFlowEngine.DeltaRules). Dhan's packets carry no side and Dhan does not publish how its own chart gets one, so this
@@ -32,9 +32,9 @@ export function DeltaRulesCard({ underlying, date, expiryQuery, timeframe }) {
   useEffect(() => {
     if (!open) return undefined
     let stale = false
-    const load = async () => {
+    const load = async (init) => {
       try {
-        const r = await fetch(url)
+        const r = await fetch(url, init)
         const body = await r.json().catch(() => null)
         if (!r.ok) throw new Error(body?.error || `Request failed (HTTP ${r.status})`)
         if (!stale) { setRows([...body].reverse()); setError(null) }
@@ -43,7 +43,7 @@ export function DeltaRulesCard({ underlying, date, expiryQuery, timeframe }) {
       }
     }
     load()
-    const timer = date ? null : setInterval(load, REFRESH_MS)
+    const timer = date ? null : setInterval(() => load({ headers: POLL_HEADERS }), REFRESH_MS)
     return () => { stale = true; if (timer) clearInterval(timer) }
   }, [open, url, date])
 
