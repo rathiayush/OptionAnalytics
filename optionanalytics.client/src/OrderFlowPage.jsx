@@ -121,11 +121,24 @@ function OrderFlowRead({ bias }) {
   )
 }
 
-// What every mark on the footprint means.
-function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false }) {
+// What every mark on the footprint means. An item is its swatch and its words, kept together on a line while they fit
+// and wrapping inside the card when they do not - the longest ("unfinished auction ...") did not wrap and made the page
+// wider than a phone, which then drew the whole page shrunk. On a phone (`narrow`) the legend is ONE line until opened
+// (`open` / `onToggle` - remembered): its ten lines came before the chart.
+function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false, narrow = false, open = true, onToggle = null }) {
   const item = (swatch, label) => (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, whiteSpace: 'nowrap' }}>{swatch}{label}</span>
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, maxWidth: '100%', verticalAlign: 'top' }}>
+      <span style={{ flex: 'none', display: 'inline-flex', alignItems: 'center' }}>{swatch}</span>
+      <span style={{ minWidth: 0 }}>{label}</span>
+    </span>
   )
+  if (narrow && !open) {
+    return (
+      <button type="button" className="oa-of-fold-toggle" onClick={onToggle} aria-expanded={false}>
+        ▸ Legend - what the colours and marks mean
+      </button>
+    )
+  }
   const box = (bg, border) => <span style={{ width: 12, height: 10, background: bg, border: border ? `1.5px solid ${border}` : 'none', borderRadius: 2 }} />
   const pill = (bg, text) => <span style={{ background: bg, color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: 3, padding: '0 4px', lineHeight: '14px' }}>{text}</span>
   const dot = (color, size) => <span style={{ width: size, height: size, borderRadius: '50%', background: `${color}cc`, border: '1.5px solid #fff' }} />
@@ -145,6 +158,7 @@ function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = fal
       {auctions && !estimated && item(<span style={{ fontSize: 9, fontWeight: 700, color: '#ffa940' }}>UA ┄</span>, 'unfinished auction (both sides at the extreme - a magnet until revisited)')}
       {rowDelta && item(<span style={{ display: 'inline-flex' }}>{box('#26a69aaa')}{box('#ef5350aa')}</span>, 'delta per row (buy − sell), third column')}
       {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
+      {narrow && <button type="button" className="oa-of-fold-toggle" onClick={onToggle} aria-expanded>▾ Hide the legend</button>}
     </div>
   )
 }
@@ -192,6 +206,11 @@ export default function OrderFlowPage() {
   const heatFetchRow = heatmapFetchRow(rowSize, heatRow)
   const heatRowQuery = heatFetchRow !== rowSize ? `&heatmapRowSize=${heatFetchRow}` : ''
   const narrow = useNarrow()
+  // On a phone the footprint's legend and the less-used settings fold to one line each (remembered) - together they were
+  // over twenty lines before the chart. A wide screen shows both as always.
+  const [legendOpen, setLegendOpen] = usePersistedState('optionanalytics.orderFlow.legendOpen', false)
+  const [settingsOpen, setSettingsOpen] = usePersistedState('optionanalytics.orderFlow.settingsOpen', false)
+  const settingsShown = !narrow || settingsOpen
   const [domOpen, setDomOpen] = useState(false)
 
   // ---- What is shown: Go Live (a contract, live) or Load day (a date, replayed) ----
@@ -725,8 +744,10 @@ export default function OrderFlowPage() {
   ]
 
   return (
-    <div style={{ maxWidth: 2600, margin: '0 auto', padding: '24px 16px' }}>
-      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+    // oa-of-page: never wider than the screen (overflow-x: clip - a page wider than a phone is drawn shrunk), less side
+    // padding and 16 px inputs on a phone (index.css).
+    <div className="oa-of-page" style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px' : '24px 16px' }}>
+      <Space direction="vertical" size={narrow ? 12 : 16} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
@@ -771,6 +792,10 @@ export default function OrderFlowPage() {
           <Space wrap size={12} align="center" style={{ marginTop: 10 }}>
             <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
             <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [underlying]: v })} style={{ width: 120 }} options={ROW_SIZE_OPTIONS} />
+            {narrow && (
+              <Button onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen}>{settingsOpen ? 'Less ▴' : 'Settings ▾'}</Button>
+            )}
+            {settingsShown && (<>
             <Tooltip title="Diagonal imbalance: buying at a price vs selling one row below (and the mirror) must be at least this many times larger.">
               <InputNumber value={imbalanceRatio} onChange={(v) => setImbalanceRatio(v ?? 3)} min={1.5} max={10} step={0.5} style={{ width: 140 }} addonBefore="Imbalance" addonAfter="x" disabled={estimated} />
             </Tooltip>
@@ -796,6 +821,7 @@ export default function OrderFlowPage() {
             <Tooltip title="At each bar's high and low: FA = finished auction (no selling at the top row / no buying at the bottom row - that side ran out); UA = unfinished (both sides traded at the extreme - price tends to come back), its dotted line running on until a later bar trades back into it. Read on the footprint's rows; not on an estimated day.">
               <Checkbox checked={showAuctions} onChange={(e) => setShowAuctions(e.target.checked)}><Text style={{ fontSize: 12 }}>Auctions</Text></Checkbox>
             </Tooltip>
+            </>)}
           </Space>
           {isReplay && (
             <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
@@ -876,7 +902,10 @@ export default function OrderFlowPage() {
             <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy){rowDelta ? ' × Δ' : ''} · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
-              <FootprintLegend estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} auctions={showAuctions} />
+              <FootprintLegend
+                estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} auctions={showAuctions}
+                narrow={narrow} open={legendOpen} onToggle={() => setLegendOpen(!legendOpen)}
+              />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}

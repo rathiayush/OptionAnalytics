@@ -277,3 +277,24 @@ body {
 /* The Signal backtest's background runs on a phone: one block a run (SignalBacktestRuns.jsx). */
 .oa-bg-run { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
 .oa-bg-run:last-of-type { border-bottom: none; }
+
+/* The Order Flow page (OrderFlowPage.jsx): never wider than the screen - one line that would not wrap made the page wider
+   than a phone, and the phone then drew the WHOLE page shrunk, the menu button off its edge. On a phone its inputs are
+   16 px: iOS zooms the page in on a smaller one when it is tapped, and leaves it zoomed. */
+.oa-of-page { overflow-x: clip; }
+.oa-of-fold-toggle {
+  display: block;
+  margin: 0 0 6px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: #8c8c8c;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.oa-of-fold-toggle:hover, .oa-of-fold-toggle:focus-visible { color: #1677ff; }
+@media (max-width: 768px) {
+  /* !important: antd's own (CSS-in-JS) input rules are more specific. */
+  .oa-of-page input, .oa-of-page textarea { font-size: 16px !important; }
+}

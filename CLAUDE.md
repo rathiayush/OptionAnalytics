@@ -727,6 +727,15 @@ When adding or changing a strategy:
   Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
   prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
   (bars are whole; the server scanner is local and does not).
+  ON A PHONE (asked for - "order flow is not mobile supportive"): the page is never wider than the screen
+  (`.oa-of-page { overflow-x: clip }` in `index.css`) - the footprint legend's longest line did not wrap, the page came out
+  wider than a phone, and iOS drew the WHOLE page shrunk with the ☰ off its edge; legend items now wrap inside the card.
+  Under 640 px (`useNarrow`) the less-used settings (imbalance, stack, big order, iceberg Telegram, the switches) fold
+  behind "Settings ▾" and the footprint legend to one line ("▸ Legend"), both remembered (`optionanalytics.orderFlow.
+  settingsOpen` / `legendOpen`; a wide screen shows both always); the page's side padding is 8 px; inputs are 16 px
+  (iOS zooms in on a smaller one when tapped and stays zoomed). The footprint's narrow mode (its own width < 640) draws
+  big-order bubbles smaller (3 - 10 px radius - a 30 px one hid a phone's 28 px cells) and the profile levels' labels on
+  a dark backing (they ran over the narrow profile's bars).
 - The BACKTRACK page (`/backtest`) was removed on request, page and server endpoints (an old bookmark goes to the
   dashboard). `BacktestService` and its `IBacktestStrategy` strategies STAY: they are what the armed Triggers run
   (`StrategyTriggerHostedService` - `RunStrategy` / `ReplayForStrategy`, in memory) and their list is

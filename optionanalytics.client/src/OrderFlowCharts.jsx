@@ -369,7 +369,8 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         const x0 = barX(k)
         const x = x0 + 15 + ((ms - start) / bucketMs) * Math.max(4, colWidth - 30)
         if (x < 0 || x > barsW) continue
-        const r = 4 + 11 * Math.sqrt(t.quantity / maxQty)
+        // Smaller on a phone (narrow): its cells are about 28 px wide, and a 30 px bubble hid the bar's numbers.
+        const r = narrow ? 3 + 7 * Math.sqrt(t.quantity / maxQty) : 4 + 11 * Math.sqrt(t.quantity / maxQty)
         dots.push({ x, y, r, trade: t })
       }
       dots.sort((a, b) => b.r - a.r)
@@ -424,11 +425,18 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(barsW, y); ctx.stroke()
         ctx.globalAlpha = 1
         ctx.setLineDash([])
-        ctx.fillStyle = color
-        ctx.font = `600 10px ${FONT}`
+        ctx.font = `600 ${narrow ? 9 : 10}px ${FONT}`
         ctx.textBaseline = 'middle'
         ctx.textAlign = 'right'
-        ctx.fillText(label, barsW + profileW - 3, Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (isVal ? -6 : isVah ? 6 : 0))))
+        const labelY = Math.min(FP_TOP + plotH - 6, Math.max(FP_TOP + 6, y + (isVal ? -6 : isVah ? 6 : 0)))
+        // On a phone the profile is narrower than its labels ("today VAH" runs over its bars): a dark backing keeps it read.
+        if (narrow) {
+          const w = ctx.measureText(label).width + 4
+          ctx.fillStyle = 'rgba(13,17,26,0.8)'
+          ctx.fillRect(barsW + profileW - 3 - w + 2, labelY - 6, w, 12)
+        }
+        ctx.fillStyle = color
+        ctx.fillText(label, barsW + profileW - 3, labelY)
         ctx.textAlign = 'left'
       }
       // ONE HVN (the strongest after the POC) and ONE LVN (the thinnest) - the previous session's.
@@ -531,7 +539,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta, auctions, revisits])
+  }, [layout, width, narrow, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta, auctions, revisits])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
