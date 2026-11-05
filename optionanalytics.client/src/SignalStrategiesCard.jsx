@@ -21,7 +21,8 @@ const LIVE_STATE = { running: 'Live scan running', missing: 'Live scan not insta
 
 /** "Save strategy": a name and the live switches for the rule and settings on the page. Mounted on open. */
 export function SaveStrategyModal({ settings, ruleSummary, onClose, onSaved }) {
-  const [name, setName] = useState(() => `${settings.underlying} · ${ACTION_LABEL[settings.rule?.action] ?? ''}${settings.rule?.mirror ? ' + mirror' : ''}`)
+  // The strategy's own name when the page has one (a template loaded, or typed), else the index and the trade.
+  const [name, setName] = useState(() => settings.strategyName || `${settings.underlying} · ${ACTION_LABEL[settings.rule?.action] ?? ''}${settings.rule?.mirror ? ' + mirror' : ''}`)
   const [live, setLive] = useState(true)
   const [alerts, setAlerts] = useState(true)
   const [dailyReport, setDailyReport] = useState(true)

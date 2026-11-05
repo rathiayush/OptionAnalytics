@@ -62,7 +62,7 @@ const held = (v, min, max, fallback) => {
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
  * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, maxDayLoss,
- * maxDayProfit, timeframe, expiryDay }. The rule goes through its tree, as
+ * maxDayProfit, timeframe, expiryDay, strategyName }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -93,12 +93,19 @@ export function cleanBacktestSettings(s = {}) {
     maxDayProfit: held(s?.maxDayProfit, 0, 10_000_000, d.maxDayProfit),
     timeframe: TIMEFRAMES.includes(Number(s?.timeframe)) ? Number(s.timeframe) : d.timeframe,
     expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
+    strategyName: strategyName(s?.strategyName),
   }
+}
+
+/** A strategy's name as the runs carry it (asked for - "add strategy name ... to runs"): one line, trimmed, at most 80
+ *  characters; '' when none. */
+export function strategyName(v) {
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, 80) : ''
 }
 
 /** What the engine reads (simulateDay): the settings with the rule made whole and the index's lot size. */
 export function engineSettings(s) {
-  const { underlying, from: _from, to: _to, rule, ...rest } = s
+  const { underlying, from: _from, to: _to, rule, strategyName: _name, ...rest } = s
   return { ...rest, rule: normalizeRule(rule), lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1 }
 }
 
@@ -166,7 +173,8 @@ export function runRange(from, to) {
   return `${day(from)} – ${day(to)}`
 }
 
-/** The report's heading: the index, the days run and their range, the timeframe and the stop / target / trail. */
+/** The report's heading: the strategy's name (when it has one), the index, the days run and their range, the timeframe and
+ *  the stop / target / trail. */
 export function reportHead(s, okDays) {
   if (!okDays) return ''
   const unit = s.levelUnit === 'pts' ? ' pts' : '%'
@@ -175,7 +183,7 @@ export function reportHead(s, okDays) {
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */
@@ -185,8 +193,9 @@ export function chargesText(s) {
   return `net of STT ${s.sttPct}% + ₹${s.brokeragePerOrder} an order${other}`
 }
 
-/** A run's name when none is given: the index, the days and the trade. */
+/** A run's name when none is given: the strategy's name (when it has one), the index and the days - else the trade. */
 export function defaultRunName(s) {
+  if (s.strategyName) return `${s.strategyName} · ${s.underlying} ${runRange(s.from, s.to)}`
   return `${s.underlying} ${runRange(s.from, s.to)} · ${ACTION_OF[s.rule?.action]?.label ?? ''}${s.rule?.mirror ? ' + mirror' : ''}`
 }
 

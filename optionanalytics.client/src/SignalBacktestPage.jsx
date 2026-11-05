@@ -56,6 +56,7 @@ const STORE = {
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
   expiryDay: 'optionanalytics.signalBacktest.expiryDay',
   chartOpen: 'optionanalytics.signalBacktest.chartOpen',
+  strategyName: 'optionanalytics.signalBacktest.strategyName',
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
@@ -375,6 +376,9 @@ export default function SignalBacktestPage() {
   const [storedExpiryDay, setExpiryDay] = usePersistedState(STORE.expiryDay, BACKTEST_DEFAULTS.expiryDay)
   const expiryDay = EXPIRY_DAY_CHOICES.some((c) => c.value === storedExpiryDay) ? storedExpiryDay : BACKTEST_DEFAULTS.expiryDay
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
+  // The strategy's NAME (asked for - "add strategy name ... to runs"): a template's or a saved strategy's when one is
+  // loaded, or typed - carried by the run's settings into its report heading, a background run's name and the list.
+  const [strategyNameText, setStrategyName] = usePersistedState(STORE.strategyName, '')
   // Always through its tree: a rule saved before the builder (lines + typed logic) opens as groups, numbered as shown.
   const rule = useMemo(() => {
     const saved = normalizeRule(storedRule)
@@ -431,9 +435,9 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay,
+    timeframe, expiryDay, strategyName: strategyNameText,
   }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
-    otherPerTrade, timeframe, expiryDay])
+    otherPerTrade, timeframe, expiryDay, strategyNameText])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
   const engine = useMemo(() => engineSettings(runSettings), [runSettings])
@@ -453,9 +457,10 @@ export default function SignalBacktestPage() {
       message.error(`The report could not be opened: ${err.message}`)
     }
   }
-  // A background run's or a saved strategy's settings put on the page.
-  const applyRunSettings = (job) => {
+  // A background run's or a saved strategy's settings put on the page - with its strategy's name (a saved strategy's own).
+  const applyRunSettings = (job, name = cleanBacktestSettings(job.settings).strategyName) => {
     const s = cleanBacktestSettings(job.settings)
+    setStrategyName(name ?? '')
     setUnderlying(s.underlying)
     if (s.from && s.to) setRange([s.from, s.to])
     setStoredRule(s.rule)
@@ -476,17 +481,19 @@ export default function SignalBacktestPage() {
   const applyTemplate = (id, quiet = false) => {
     const tpl = templateById(id)
     if (!tpl) return
-    setUndoTemplate({ name: tpl.name, rule: storedRule, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin } })
+    setUndoTemplate({ name: tpl.name, rule: storedRule, strategyName: strategyNameText, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin } })
     const s = withTemplate(pageSettings, tpl)
     setStoredRule(s.rule)
+    setStrategyName(tpl.name)
     setTimeframe(s.timeframe); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit)
     setTrailGap(s.trailGap); setTrailStart(s.trailStart); setTimeStopMin(s.timeStopMin)
     if (!quiet) message.success(`"${tpl.name}" is on the page - its rule, timeframe and levels. Change anything, then Run.`)
   }
   const undoTemplateLoad = () => {
     if (!undoTemplate) return
-    const { rule: before, levels } = undoTemplate
+    const { rule: before, levels, strategyName: nameBefore } = undoTemplate
     setStoredRule(before)
+    setStrategyName(nameBefore ?? '')
     setTimeframe(levels.timeframe); setSlPct(levels.slPct); setTargetPct(levels.targetPct); setLevelUnit(levels.levelUnit)
     setTrailGap(levels.trailGap); setTrailStart(levels.trailStart); setTimeStopMin(levels.timeStopMin)
     setUndoTemplate(null)
@@ -666,6 +673,11 @@ export default function SignalBacktestPage() {
                   </Button>
                 </Tooltip>
               </Space>
+              <Input
+                size="small" value={strategyNameText} onChange={(e) => setStrategyName(e.target.value)} maxLength={80} allowClear
+                addonBefore="Strategy name" placeholder="Optional - shown on its runs and reports" aria-label="Strategy name"
+                style={{ width: touch ? '100%' : 460, maxWidth: '100%', marginBottom: 10 }}
+              />
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
                 <Text strong>The rule</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND), ANY (OR) or IN ORDER (THEN) for each group; a group inside a group is a pair of brackets</Text>
@@ -873,7 +885,7 @@ export default function SignalBacktestPage() {
         {saved.loaded && (
           <SavedStrategiesCard
             strategies={saved.strategies} today={saved.today} liveScan={saved.liveScan} refresh={saved.refresh} pageSettings={pageSettings}
-            onLoad={applyRunSettings} onSave={() => setSaveOpen(true)}
+            onLoad={(st) => applyRunSettings(st, st.name)} onSave={() => setSaveOpen(true)}
           />
         )}
         <BackgroundRunsCard jobs={jobs} refresh={refreshJobs} viewingId={viewing?.job.id ?? null} onOpen={openRun} onUse={applyRunSettings} />
