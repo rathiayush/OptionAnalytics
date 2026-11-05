@@ -10,7 +10,7 @@ import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   mirrorIsSame, mirrorLines, normalizeRule, optionName, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
-import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, indexLevels, loadBacktestDay, reportHead, withIndexLevels } from './signalBacktestJob.js'
+import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, indexLevels, loadBacktestDay, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
@@ -678,6 +678,25 @@ export default function SignalBacktestPage() {
       title: SIDE[id].name, dataIndex: id, key: id, width: 100, align: 'right', render: (v, r) => (r.ok && v ? <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> : ''),
     })) : []),
   ]
+  // Month by month (`monthRows` - from the report's own days and trades).
+  const months = monthRows(report)
+  const monthColumns = [
+    { title: 'Month', dataIndex: 'month', key: 'month', fixed: 'left', width: 100, render: (v) => dayjs(`${v}-01`).format('MMM YYYY') },
+    // The net first after the month - on a phone it is what shows before the table scrolls sideways.
+    { title: 'Net', dataIndex: 'net', key: 'net', width: 110, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
+    { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right' },
+    { title: 'Win %', dataIndex: 'winRate', key: 'winRate', width: 70, align: 'right', render: (v) => num(v, 0) },
+    { title: 'Days', dataIndex: 'days', key: 'days', width: 60, align: 'right' },
+    ...(sides.length > 1 ? sides.map((id) => ({
+      title: SIDE[id].name, dataIndex: id, key: id, width: 100, align: 'right', render: (v) => (v ? <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> : ''),
+    })) : []),
+    { title: 'Green days', key: 'green', width: 90, align: 'right', render: (_, r) => (r.daysTraded ? `${r.greenDays} / ${r.daysTraded}` : '—') },
+    { title: 'Best day', dataIndex: 'best', key: 'best', width: 100, align: 'right', render: (v) => (v == null ? '—' : <span style={{ color: pnlColor(v) }}>{rupees(v)}</span>) },
+    { title: 'Worst day', dataIndex: 'worst', key: 'worst', width: 100, align: 'right', render: (v) => (v == null ? '—' : <span style={{ color: pnlColor(v) }}>{rupees(v)}</span>) },
+    { title: 'Gross', dataIndex: 'gross', key: 'gross', width: 100, align: 'right', render: (v) => rupees(v) },
+    { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 90, align: 'right', render: (v) => rupees(v) },
+    { title: 'Total so far', dataIndex: 'total', key: 'total', width: 110, align: 'right', render: (v) => <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> },
+  ]
   const tradeColumns = [
     { title: 'Day', dataIndex: 'date', key: 'date', width: 100, render: (v) => dayjs(v).format('D MMM') },
     ...(sides.length > 1 ? [{ title: 'From', dataIndex: 'strategy', key: 'strategy', width: 90, render: (v) => sideTag(v) }] : []),
@@ -1053,6 +1072,12 @@ export default function SignalBacktestPage() {
             </Card>
             <Card size="small" title="Running P&L, day by day">
               <EquityChart lines={chartLines} />
+            </Card>
+            <Card
+              size="small" title="Month by month"
+              extra={months.length > 1 ? <Text type="secondary" style={{ fontSize: 12 }}>{months.filter((m) => m.net > 0).length} of {months.length} months green</Text> : null}
+            >
+              <Table size="small" pagination={false} scroll={{ x: 1100 + 100 * (sides.length > 1 ? sides.length : 0) }} columns={monthColumns} dataSource={months} />
             </Card>
             <Card size="small" title="Day by day">
               <Table

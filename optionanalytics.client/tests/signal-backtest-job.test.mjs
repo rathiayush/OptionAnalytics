@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, indexLevels, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
+  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, indexLevels, loadBacktestDay, monthRows, reportHead, reportReplacer, reportReviver, runRange,
   withIndexLevels,
 } from '../src/signalBacktestJob.js'
 
@@ -362,4 +362,41 @@ test('SL / target / trail kept per index: each index its own once set, the old l
   // Held to the ranges: % at most 1000, points 5000; junk = the default.
   assert.deepEqual(indexLevels({ NIFTY: { slPct: 9000, targetPct: 'x', levelUnit: 'pts', costAfter: -5 } }, 'NIFTY'), { slPct: 5000, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pts', trailGap: 0, trailStart: 0, costAfter: 0 })
   assert.equal(indexLevels({ NIFTY: 'junk' }, 'NIFTY', old).slPct, 25)
+})
+
+test('month by month: the report\'s days and trades by calendar month - the totals the report\'s, each month its own days', () => {
+  // A run over the end of September into October, one day that did not run.
+  const dates = ['2026-09-28', '2026-09-29', '2026-09-30', '2026-10-01', '2026-10-02', '2026-10-05']
+  const settings = { ...SETTINGS, from: dates[0], to: dates.at(-1) }
+  const engine = engineSettings(settings)
+  const outcomes = dates.map((date) => (date === '2026-10-01'
+    ? dayOutcome(date, { ok: false, reason: 'holiday' }, engine)
+    : dayOutcome(date, prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV }), engine)))
+  const report = backtestReport(outcomes, settings)
+  const months = monthRows(report)
+  assert.deepEqual(months.map((m) => [m.month, m.days]), [['2026-09', 3], ['2026-10', 2]])   // the holiday not counted
+  assert.ok(report.all.trades > 3)
+  // Together they are the report: trades, wins, gross, charges, net; each side's net adds up to the month's.
+  const sum = (k) => months.reduce((a, m) => a + m[k], 0)
+  assert.equal(sum('trades'), report.all.trades)
+  assert.equal(sum('wins'), report.all.wins)
+  for (const k of ['gross', 'charges', 'net']) assert.ok(Math.abs(sum(k) - report.all[k]) < 1e-6, k)
+  for (const m of months) {
+    assert.ok(Math.abs(m.rule + m.mirror - m.net) < 1e-6)
+    const days = report.dayRows.filter((d) => d.ok && d.date.startsWith(m.month))
+    assert.ok(Math.abs(days.reduce((a, d) => a + d.net, 0) - m.net) < 1e-6)
+    const traded = days.filter((d) => d.trades > 0)
+    assert.equal(m.daysTraded, traded.length)
+    assert.equal(m.greenDays, traded.filter((d) => d.net > 0).length)
+    assert.equal(m.best, Math.max(...traded.map((d) => d.net)))
+    assert.equal(m.worst, Math.min(...traded.map((d) => d.net)))
+    assert.equal(m.winRate, (m.wins / m.trades) * 100)
+  }
+  // The running total to each month's end; the last is the run's net.
+  assert.ok(Math.abs(months[0].total - months[0].net) < 1e-6)
+  assert.ok(Math.abs(months.at(-1).total - report.all.net) < 1e-6)
+  // A report read back from JSON (a background run's, written before month by month) gives the same; nothing = none.
+  assert.deepEqual(monthRows(JSON.parse(JSON.stringify(report, reportReplacer), reportReviver)), months)
+  assert.deepEqual(monthRows(null), [])
+  assert.deepEqual(monthRows({ dayRows: [{ date: '2026-09-28', ok: true, trades: 0, net: 0 }], trades: [] }).map((m) => [m.month, m.days, m.trades, m.winRate, m.best]), [['2026-09', 1, 0, null, null]])
 })
