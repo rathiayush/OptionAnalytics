@@ -532,9 +532,9 @@ test('logic in a rule: it combines the lines (the mirror by the same logic); bad
 })
 
 test('every comparison takes a "by ≥ %" - the crossings and turns too; 0 (the default) changes nothing', () => {
-  // Only what has nothing to measure is without one: a 🎯 (an event) and "inside".
+  // Only what has nothing to measure is without one: a 🎯 (an event) and "inside" (the IB, the value area, the CPR).
   const without = RULE_CONDITIONS.flatMap((c) => c.options.filter((o) => !o.param).map((o) => `${c.id}:${o.value}`))
-  assert.deepEqual(without, ['hp:bullish', 'hp:bearish', 'ib:inside', 'valueArea:inside'])
+  assert.deepEqual(without, ['hp:bullish', 'hp:bearish', 'ib:inside', 'valueArea:inside', 'cpr:inside'])
   const step = (i) => (i < 50 ? 24980 : 25100)                     // spot / price: under 25000 until 50, then 0.4% over it
   // OI since open crossed - with the lead now (PE 130 v CE 100 = 30 / 230 = 13%).
   const oi = fakeDay({ oi: (i) => (i < 50 ? { ce: 100, pe: 90 } : { ce: 100, pe: 130 }) })

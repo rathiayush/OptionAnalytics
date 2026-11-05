@@ -108,7 +108,7 @@ export function dayOutcome(date, day, engine) {
   if (!day?.ok) return { date, ok: false, reason: day?.reason ?? 'not loaded', trades: [], signals: { rule: 0, mirror: 0 } }
   const { trades, signals, dayLimit } = simulateDay(day, engine)
   return {
-    date, ok: true, prev: Boolean(day.prevVp), expiry: Boolean(day.isExpiry), limit: dayLimit ?? null, trades,
+    date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), limit: dayLimit ?? null, trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
 }
@@ -119,7 +119,8 @@ const netOf = (trades) => trades.reduce((a, t) => a + t.net, 0)
 /**
  * The report of a run from its days' outcomes: the rule, its mirror and both (`summarize`), day by day, the running net
  * at each day's end (`lines` - { id, name, points: [{ time, value }] }), every trade, the days that did not run
- * (`failed`) and - when the rule reads the previous day's volume profile - the days run without one (`noPrev`).
+ * (`failed`) and - when the rule reads the previous day's volume profile / its pivot points - the days run without one
+ * (`noPrev` / `noPivots`).
  */
 export function backtestReport(outcomes, settings) {
   const rule = normalizeRule(settings.rule)
@@ -149,10 +150,13 @@ export function backtestReport(outcomes, settings) {
     lineOf('all', netOf),
   ]
   const readsPrev = rule.lines.some((l) => GROUP_OF[l.id] === 'PrevProfile')
+  const readsPivots = rule.lines.some((l) => GROUP_OF[l.id] === 'Pivots')
   return {
     trades, rows, all, dayRows, lines, okDays: okDays.length, sides,
     failed: days.filter((o) => !o.ok).map((o) => ({ date: o.date, reason: o.reason })),
     noPrev: readsPrev ? okDays.filter((o) => !o.prev).map((o) => o.date) : [],
+    // A day outcome kept before the pivot points (an older background run) has no `pivots` - not listed as without them.
+    noPivots: readsPivots ? okDays.filter((o) => o.pivots === false).map((o) => o.date) : [],
   }
 }
 

@@ -563,10 +563,24 @@ When adding or changing a strategy:
   its first HVN / LVN; fixed all day, known before the open, read on spot; loaded with each day, a day without one runs
   and says so): price above / below (by ≥ %), crossed above / below, touched it and closed back above / below (support /
   resistance held, within %) and near it; inside / above / below the value area. A line saved while they were today's
-  developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). EVERY comparison takes a "by ≥ %"
+  developing ones (`poc` / `vpHvn` / `vpLvn`) reads as the previous day's same level (`RENAMED`). INDICATORS OF THE SPOT
+  CANDLES (asked for - "rsi vwap pivot points ... ema crossover"; VWAP was already "Price vs VWAP"): RSI (`rsi` - above /
+  below / crossed a LEVEL, its `param`, period `param2`; the mirror reads the level from the other end, `param.mirror`:
+  above 60 <-> below 40), EMA crossover (`emaCross` - fast over / under the slow, crossed in the look-back, "by ≥ %" of the
+  slow; fast / slow = `param2` / `param3` - a THIRD number, `cleanLine` / `lineText` / the row take it) and price vs EMA
+  (`emaPrice`, period `param2`) - `rsiSeries` / `emaSeries` (TradingView's ta.rsi / ta.ema: Wilder's RSI and the EMA started
+  at the simple average of the first values; no change at all = RSI 50) on the spot closes of the TIMEFRAME's candles, RUN ON
+  FROM THE PREVIOUS SESSION'S candles of the same timeframe (`prevDay` - else from 09:15), worked out once a day / view, a
+  candle's value from its close and those before (no look-ahead). PIVOT POINTS (`pivotLevels`, the classic floor pivots of
+  the previous session's spot high / low / close - P, R1 - R3, S1 - S3 - levelCondition like yesterday's profile levels; a
+  pivot's mirror is the other side's, R1 <-> S1, the condition's `mirror`) and the CPR (`cpr` - BC = (H + L) / 2, TC = 2P - BC,
+  the higher one TC: above / inside / below, crossed through TC / BC, narrow / wide by its width in % of P). The previous
+  session is the previous-day profile response's own `bars` (`previousDayBars` - its session minutes, of its own day, before
+  the day run) - a day whose previous session had no index volume has no profile, so no pivots (the report lists those days,
+  `noPivots`, when the rule reads them) and its RSI / EMAs start at 09:15. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
-  reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the two
-  "inside" have none (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
+  reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
+  "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
   GEX walls broken - `brokeLevel(..., p)`, the IB, yesterday's levels and value area) the level; OI since open CE + PE
   added (`LEAD`, its crosses too); Total OI CE vs PE the lower line; a CUMULATIVE Δ line (positive / negative, turned,
   broke - the break keeps the `level` broken, `brokenLevel`) and the NET GEX (regime, turned) - no price - their own range
@@ -624,7 +638,19 @@ When adding or changing a strategy:
   rest (the live day report says the limit was reached; the strategy's day history keeps it - `limit` column). The
   report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
   factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
-  trade with the readings at its signal, and a CSV (`tradesCsv`). A backtest of the rule as set, not a tuning; it places
+  trade with the readings at its signal, and a CSV (`tradesCsv`). The DAY CHART (asked for - "spot chart ... with buy sell
+  tag ... for already run as well as next run"; `SignalBacktestChart.jsx`, `signalBacktestChart.js`): any day of the report
+  shown (the picker, ◀ ▶, or a click on a Day by day / Trades row) on the run's own timeframe's spot candles - or the futures
+  the VWAP is read on ("Spot / Futures") - with every trade TAGGED: "BUY / SELL strike CE / PE" at the candle its signal
+  closed (under it, up, green for a bullish signal; over it, down, red for a bearish one), a dot at its exit candle with its
+  net (green / red), a grey dot for a signal not taken (the day run again with the run's own settings - `simulateDay`); VWAP
+  (on spot the index's own - `spotVwap`, kept in `prepareDay` - none without index volume; on futures the rule's), the EMAs
+  and RSI pane (the rule's periods, else 9 / 21 and 14; RSI's lines at the rule's levels) and the pivots / CPR - the engine's
+  own series, so it shows what the rule read; the ticks default to what the rule reads (`ruleIndicators`) and are kept once
+  changed (`optionanalytics.signalBacktest.chartShow` / `chartSource`). The page's run has its days already; a BACKGROUND
+  run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
+  loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
+  `tests/signal-backtest-chart.test.mjs`. A backtest of the rule as set, not a tuning; it places
   nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every value and number on its case and
   not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).
   A RUN is its days' OUTCOMES put together (`signalBacktestJob.js` - `loadBacktestDay`, `cleanBacktestSettings` (the
