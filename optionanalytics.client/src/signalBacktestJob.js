@@ -205,6 +205,49 @@ export function runRange(from, to) {
   return `${day(from)} – ${day(to)}`
 }
 
+/**
+ * MONTH BY MONTH (asked for - "add month by month pnl as well, day by day is perfectly fine"): a report's days and trades
+ * put together by calendar month, oldest first - worked out from the report itself (`dayRows` and `trades`), so a
+ * background run's report written before it has them too. Each row: { key, month (YYYY-MM), days (run), daysTraded,
+ * greenDays (days with trades that ended up), trades, wins, winRate, gross, charges, net, rule, mirror (each side's net),
+ * best / worst (the month's best / worst day's net, days with trades), total (the run's net to the month's end) }.
+ */
+export function monthRows(report) {
+  const months = new Map()
+  const at = (date) => {
+    const key = String(date).slice(0, 7)
+    if (!months.has(key)) {
+      months.set(key, { key, month: key, days: 0, daysTraded: 0, greenDays: 0, trades: 0, wins: 0, gross: 0, charges: 0, net: 0, rule: 0, mirror: 0, best: null, worst: null })
+    }
+    return months.get(key)
+  }
+  for (const d of report?.dayRows ?? []) {
+    if (!d.ok) continue
+    const m = at(d.date)
+    m.days++
+    if (d.trades > 0) {
+      m.daysTraded++
+      if (d.net > 0) m.greenDays++
+      m.best = m.best == null ? d.net : Math.max(m.best, d.net)
+      m.worst = m.worst == null ? d.net : Math.min(m.worst, d.net)
+    }
+  }
+  for (const t of report?.trades ?? []) {
+    const m = at(t.date)
+    m.trades++
+    if (t.net > 0) m.wins++
+    m.gross += t.gross
+    m.charges += t.charges
+    m.net += t.net
+    if (t.strategy === 'rule' || t.strategy === 'mirror') m[t.strategy] += t.net
+  }
+  let total = 0
+  return [...months.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)).map((m) => {
+    total += m.net
+    return { ...m, winRate: m.trades ? (m.wins / m.trades) * 100 : null, total }
+  })
+}
+
 /** The report's heading: the strategy's name (when it has one), the index, the days run and their range, the timeframe and
  *  the stop / target / trail. */
 export function reportHead(s, okDays) {

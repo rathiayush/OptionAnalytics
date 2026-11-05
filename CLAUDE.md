@@ -716,8 +716,12 @@ When adding or changing a strategy:
   profit", the report heading names the limits; background runs, saved strategies and the live scan take them with the
   rest (the live day report says the limit was reached; the strategy's day history keeps it - `limit` column). The
   report (`summarize`): the rule, its mirror and both - trades, win %, net / gross P&L, points, average win / loss, profit
-  factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a day-by-day table, every
-  trade with the readings at its signal, and a CSV (`tradesCsv`). The DAY CHART (asked for - "spot chart ... with buy sell
+  factor, max drawdown, per trade, green days, average hold, charges - the running P&L by day, a MONTH-BY-MONTH table (asked
+  for - "add month by month pnl as well, day by day is perfectly fine"; `monthRows` in `signalBacktestJob.js`, worked out
+  from the report's own `dayRows` and `trades`, so a background run's report written before it has them too: each calendar
+  month's net first - a phone shows it before the table scrolls - trades, win %, days run, the rule's / mirror's net, green
+  days of the days traded, best / worst day, gross, charges and the total so far; "N of M months green"), a day-by-day
+  table, every trade with the readings at its signal, and a CSV (`tradesCsv`). The DAY CHART (asked for - "spot chart ... with buy sell
   tag ... for already run as well as next run"; `SignalBacktestChart.jsx`, `signalBacktestChart.js`): any day of the report
   shown (the picker, ◀ ▶, or a click on a Day by day / Trades row) on the run's own timeframe's spot candles - or the futures
   the VWAP is read on ("Spot / Futures") - with every trade TAGGED: "BUY / SELL strike CE / PE" at the candle its signal
