@@ -491,7 +491,7 @@ test('logic: the lines by number with AND / OR / NOT and brackets, any nesting -
   // What does not read, said in words.
   assert.match(parseLogic('(1 and 2', 3).error, /"\)" is missing/)
   assert.match(parseLogic('1 and 7', 3).error, /no line 7/)
-  assert.match(parseLogic('1 2', 3).error, /AND \/ OR is missing/)
+  assert.match(parseLogic('1 2', 3).error, /AND \/ OR \/ THEN is missing/)
   assert.match(parseLogic('1 and', 3).error, /ends too early/)
   assert.match(parseLogic('1 xor 2', 3).error, /cannot read/)
   assert.match(parseLogic('1 and )', 3).error, /should be/)

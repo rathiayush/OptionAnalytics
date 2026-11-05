@@ -759,7 +759,8 @@ const pivotLevel = (key, name, mirror) => ({ ...levelCondition({ id: `pivot${key
 // The EMA conditions read at the CANDLE'S CLOSE (asked for - "for ema candle close and crossover condition"), spot's and a
 // premium's alike - `bars` { o, h, l, c } the timeframe's candles, the EMAs of their closes. Against ONE EMA: the close
 // above / below it, the CLOSE crossing it (a close on one side, a later close on the other), a CANDLE crossing it (opening
-// on one side and closing on the other) and a WHOLE candle clear of it (its low over it / its high under it). Against TWO
+// on one side and closing on the other), a WHOLE candle clear of it (its low over it / its high under it) and a cross
+// one way, then back (`reclaimed` - crossed down, then up again; `lost` - up, then down - both in the look-back). Against TWO
 // (the crossover): the fast over / under the slow, the fast crossing the slow, that crossover with the candle closing
 // beyond BOTH EMAs, and a close beyond both. A cross must be in the look-back and still hold now; "by ≥ %" of the EMA (the
 // slow one for the crossover's gap, the nearer one for a close beyond both). `mirrored` false: each option is its own
@@ -774,6 +775,8 @@ function emaPriceOptions(pct, more, mirrored = true) {
     o('candleCrossDown', 'A candle crossed down through the EMA (opened above, closed below)', 'candleCrossUp', W),
     o('wholeAbove', 'Whole candle above the EMA (its low over it)', 'wholeBelow'),
     o('wholeBelow', 'Whole candle below the EMA (its high under it)', 'wholeAbove'),
+    o('reclaimed', 'Crossed down through the EMA, then back up (reclaimed it)', 'lost', W),
+    o('lost', 'Crossed up through the EMA, then back down (lost it)', 'reclaimed', W),
   ]
 }
 /** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %")? */
@@ -790,6 +793,15 @@ export function emaPriceHolds(bars, e, i, v, w, p) {
     case 'candleCrossDown': return gap(i) < 0 && far() && inWindow(i, w, (k) => bars.o[k] > e[k] && bars.c[k] < e[k]) >= 0
     case 'wholeAbove': return bars.l[i] > e[i] && bars.l[i] - e[i] >= by
     case 'wholeBelow': return bars.h[i] < e[i] && e[i] - bars.h[i] >= by
+    // In the look-back a close crossing one way, then a later close crossing back - and the close still back now.
+    case 'reclaimed': case 'lost': {
+      const crossUp = (k) => gap(k - 1) <= 0 && gap(k) > 0
+      const crossDown = (k) => gap(k - 1) >= 0 && gap(k) < 0
+      const [last, first] = v === 'reclaimed' ? [crossUp, crossDown] : [crossDown, crossUp]
+      if (!(v === 'reclaimed' ? gap(i) > 0 : gap(i) < 0) || !far()) return false
+      const back = inWindow(i, w, last)
+      return back >= 0 && inWindow(back - 1, w - (i - back) - 1, first) >= 0
+    }
     default: return false
   }
 }
@@ -1204,7 +1216,7 @@ export const RULE_ACTIONS = [
   { value: 'sellCE', label: 'Sell CE', dir: -1, mode: 'sell', opposite: 'sellPE' },
 ]
 const ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a]))
-export const WINDOW_CHOICES = [1, 3, 5, 10, 15, 30]
+export const WINDOW_CHOICES = [1, 3, 5, 10, 15, 30, 60]
 export const DEFAULT_WINDOW = 5
 
 /** A line made whole: a known condition and value, its number within its range (else the default), a window offered,
@@ -1258,9 +1270,16 @@ export function normalizeRule(rule, fallback = BACKTEST_DEFAULTS.rule) {
 // reads lines + logic: the tree gives them (`ruleFromTree`), and a rule without a tree gives its tree (`treeFromRule`).
 
 export const MAX_GROUP_DEPTH = 5
+// IN ORDER (THEN) - asked for: "PE crossover CE, then bullish divergence appears and EMA crossed down then came back up":
+// a group whose parts must happen ONE AFTER ANOTHER, all within its `within` minutes (`logicAt`). The choices offered.
+export const THEN_WINDOWS = [5, 10, 15, 30, 45, 60, 90, 120, 180]
+export const DEFAULT_THEN_WINDOW = 30
+const MAX_THEN_WINDOW = 375
+const fitWithin = (v) => { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= 1 ? Math.min(MAX_THEN_WINDOW, n) : DEFAULT_THEN_WINDOW }
 const emptyGroup = (op = 'and') => ({ op, not: false, items: [] })
 
-/** A tree made whole: ops 'and' / 'or', each condition a known line (`cleanLine`), groups at most MAX_GROUP_DEPTH deep. */
+/** A tree made whole: ops 'and' / 'or' / 'then' (in order - with its `within` minutes), each condition a known line
+ *  (`cleanLine`), groups at most MAX_GROUP_DEPTH deep. */
 export function cleanTree(tree, depth = 0) {
   const items = []
   for (const it of Array.isArray(tree?.items) ? tree.items : []) {
@@ -1269,7 +1288,10 @@ export function cleanTree(tree, depth = 0) {
       if (line) items.push({ line })
     } else if (it?.group && depth < MAX_GROUP_DEPTH) items.push({ group: cleanTree(it.group, depth + 1) })
   }
-  return { op: tree?.op === 'or' ? 'or' : 'and', not: Boolean(tree?.not), items }
+  const op = tree?.op === 'or' ? 'or' : tree?.op === 'then' ? 'then' : 'and'
+  const out = { op, not: Boolean(tree?.not), items }
+  if (op === 'then') out.within = fitWithin(tree?.within)
+  return out
 }
 
 /** The tree as the engine reads it: { lines } in the tree's order (numbered 1, 2, … as the page shows them) and the logic
@@ -1285,7 +1307,8 @@ export function ruleFromTree(tree) {
       }
     }
     if (!parts.length) return ''
-    const body = parts.join(` ${g.op.toUpperCase()} `)
+    // A THEN chain says its window: "1 THEN 2 THEN 3 WITHIN 30 MIN".
+    const body = parts.join(` ${g.op.toUpperCase()} `) + (g.op === 'then' && parts.length > 1 ? ` WITHIN ${g.within ?? DEFAULT_THEN_WINDOW} MIN` : '')
     if (g.not) return parts.length > 1 ? `NOT (${body})` : `NOT ${body}`
     return parts.length > 1 && !top ? `(${body})` : body
   }
@@ -1306,7 +1329,8 @@ export function setConnectorAt(tree, path, j, op) {
   const at = (g, p) => (p.length ? at(g.items[p[0]]?.group, p.slice(1)) : g)
   const group = at(tree, path)
   const n = group?.items?.length ?? 0
-  if (!group || j < 1 || j >= n) return tree
+  // In an IN ORDER (THEN) group every connector is THEN - its order is what it says, not a switch.
+  if (!group || group.op === 'then' || j < 1 || j >= n) return tree
   const joins = Array.from({ length: n - 1 }, () => group.op)
   joins[j - 1] = want
   if (joins[j - 1] === group.op && joins.every((x) => x === group.op)) return tree
@@ -1357,19 +1381,32 @@ export function mixedLogicReadings(text) {
     const m = LOGIC_TOKEN.exec(src)
     if (!m) return null                                             // parseLogic says what it cannot read
     pos = LOGIC_TOKEN.lastIndex
-    tokens.push(m[1] ? { t: 'num', v: Number(m[1]) } : m[2] ? { t: '(' } : m[3] ? { t: ')' } : m[4] ? { t: 'and' } : m[5] ? { t: 'or' } : { t: 'not' })
+    tokens.push(tokenOf(m))
   }
   const levels = [new Set()]
   let mixed = false
   for (const tok of tokens) {
     if (tok.t === '(') levels.push(new Set())
     else if (tok.t === ')') { if (levels.length > 1) levels.pop() }
-    else if (tok.t === 'and' || tok.t === 'or') {
+    else if (tok.t === 'and' || tok.t === 'or' || tok.t === 'then') {
       levels.at(-1).add(tok.t)
       if (levels.at(-1).size > 1) mixed = true
     }
   }
   if (!mixed) return null
+  // THEN beside AND / OR: which parts go in order? Only brackets can say.
+  if (levels.some((l) => l.has('then') && l.size > 1) || tokens.some((t) => t.t === 'then')) {
+    const thenMixed = (() => {
+      const stack = [new Set()]
+      for (const tok of tokens) {
+        if (tok.t === '(') stack.push(new Set())
+        else if (tok.t === ')') { if (stack.length > 1) stack.pop() }
+        else if (tok.t === 'and' || tok.t === 'or' || tok.t === 'then') { stack.at(-1).add(tok.t); if (stack.at(-1).has('then') && stack.at(-1).size > 1) return true }
+      }
+      return false
+    })()
+    if (thenMixed) return { error: 'THEN beside AND / OR - add brackets to say what goes in order, e.g. (1 AND 2) THEN 3', choices: [] }
+  }
   const error = 'AND and OR side by side - which goes first? Add brackets, or pick one'
   // Brackets round a single number say nothing: "3 AND (4)" is "3 AND 4".
   const flat = []
@@ -1414,6 +1451,7 @@ export function treeFromLogic(tree, text) {
   const uses = new Map()
   const walk = (node) => {
     if (node.line != null) uses.set(node.line, (uses.get(node.line) ?? 0) + 1)
+    else if (node.items) node.items.forEach(walk)
     else { walk(node.a); if (node.b) walk(node.b) }
   }
   walk(parsed.tree)
@@ -1443,6 +1481,7 @@ export function treeFromRule({ lines = [], logic = '' } = {}) {
         const g = inner.group && !inner.group.not ? inner.group : { op: 'and', items: [inner] }
         return { group: { ...g, not: true } }
       }
+      if (node.op === 'then') return { group: { op: 'then', not: false, within: node.within, items: node.items.map(toItem) } }
       const items = []
       const collect = (n) => { if (n.op === node.op) { collect(n.a); collect(n.b) } else items.push(toItem(n)) }
       collect(node)
@@ -1461,10 +1500,13 @@ export function treeFromRule({ lines = [], logic = '' } = {}) {
 // "1 OR (2 AND 3)". Words in any case, or & | !. With logic set the lines' own AND / OR are not used; empty, they are.
 
 export const MAX_LOGIC_LENGTH = 300
-const LOGIC_TOKEN = /\s*(?:(\d+)|(\()|(\))|(and(?![a-z])|&&|&)|(or(?![a-z])|\|\||\|)|(not(?![a-z])|!))/iy
+const LOGIC_TOKEN = /\s*(?:(\d+)|(\()|(\))|(and(?![a-z])|&&|&)|(or(?![a-z])|\|\||\|)|(not(?![a-z])|!)|(then(?![a-z])|->|>>)|(within(?![a-z]))|(min(?:utes?|s)?(?![a-z])|m(?![a-z])))/iy
+// A token read: a number, a bracket, AND / OR / NOT, THEN, WITHIN, or a WITHIN's unit ("min").
+const tokenOf = (m) => (m[1] ? { t: 'num', v: Number(m[1]) } : m[2] ? { t: '(' } : m[3] ? { t: ')' } : m[4] ? { t: 'and' } : m[5] ? { t: 'or' } : m[6] ? { t: 'not' }
+  : m[7] ? { t: 'then' } : m[8] ? { t: 'within' } : { t: 'unit' })
 
 /** Reads `text` against `n` lines: { ok: true, tree, used: Set of line numbers } or { ok: false, error } (in words). A tree
- *  node is { line } (1-based), { op: 'not', a } or { op: 'and' | 'or', a, b }. */
+ *  node is { line } (1-based), { op: 'not', a }, { op: 'and' | 'or', a, b } or { op: 'then', items, within } (in order). */
 export function parseLogic(text, n) {
   const src = String(text ?? '')
   const tokens = []
@@ -1472,9 +1514,9 @@ export function parseLogic(text, n) {
   while (pos < src.length && !/^\s*$/.test(src.slice(pos))) {
     LOGIC_TOKEN.lastIndex = pos
     const m = LOGIC_TOKEN.exec(src)
-    if (!m) return { ok: false, error: `cannot read "${src.slice(pos).trim().slice(0, 12)}" - use line numbers, AND, OR, NOT and brackets` }
+    if (!m) return { ok: false, error: `cannot read "${src.slice(pos).trim().slice(0, 12)}" - use line numbers, AND, OR, NOT, THEN and brackets` }
     pos = LOGIC_TOKEN.lastIndex
-    tokens.push(m[1] ? { t: 'num', v: Number(m[1]) } : m[2] ? { t: '(' } : m[3] ? { t: ')' } : m[4] ? { t: 'and' } : m[5] ? { t: 'or' } : { t: 'not' })
+    tokens.push(tokenOf(m))
   }
   if (!tokens.length) return { ok: false, error: 'empty' }
   const used = new Set()
@@ -1485,7 +1527,7 @@ export function parseLogic(text, n) {
     if (!tok) throw new Error('it ends too early - a line number or "(" is missing at the end')
     if (tok.t === 'not') return { op: 'not', a: factor() }
     if (tok.t === '(') {
-      const e = expr()
+      const e = chain()
       if (tokens[k]?.t !== ')') throw new Error('a ")" is missing')
       k++
       return e
@@ -1507,11 +1549,29 @@ export function parseLogic(text, n) {
     while (tokens[k]?.t === 'or') { k++; left = { op: 'or', a: left, b: term() } }
     return left
   }
+  // THEN binds loosest: "1 THEN 2 THEN 3 WITHIN 30" - its parts in order, all within the minutes after WITHIN (30 when none).
+  function chain() {
+    const first = expr()
+    if (tokens[k]?.t === 'within') throw new Error('WITHIN goes after a THEN - e.g. 1 THEN 2 WITHIN 30')
+    if (tokens[k]?.t !== 'then') return first
+    const items = [first]
+    while (tokens[k]?.t === 'then') { k++; items.push(expr()) }
+    let within = DEFAULT_THEN_WINDOW
+    if (tokens[k]?.t === 'within') {
+      k++
+      const tok = tokens[k++]
+      if (tok?.t !== 'num') throw new Error('WITHIN needs its minutes - e.g. WITHIN 30')
+      if (tok.v < 1 || tok.v > MAX_THEN_WINDOW) throw new Error(`WITHIN 1 - ${MAX_THEN_WINDOW} minutes`)
+      within = tok.v
+      if (tokens[k]?.t === 'unit') k++
+    }
+    return { op: 'then', items, within }
+  }
   try {
-    const tree = expr()
+    const tree = chain()
     if (k < tokens.length) {
       const tok = tokens[k]
-      throw new Error(tok.t === ')' ? 'a ")" with no "(" before it' : `an AND / OR is missing before "${word(tok)}"`)
+      throw new Error(tok.t === ')' ? 'a ")" with no "(" before it' : `an AND / OR / THEN is missing before "${word(tok)}"`)
     }
     return { ok: true, tree, used }
   } catch (e) {
@@ -1526,16 +1586,24 @@ export function logicText(tree, leaf = String) {
   const show = (node, parent) => {
     if (node.line != null) return leaf(node.line)
     if (node.op === 'not') return `NOT ${show(node.a, 3)}`
+    // A THEN chain: each compound part in brackets, its window after it; in brackets itself inside anything else.
+    if (node.op === 'then') {
+      const inner = `${node.items.map((x) => show(x, 4)).join(' THEN ')} WITHIN ${node.within ?? DEFAULT_THEN_WINDOW} MIN`
+      return parent > 0 ? `(${inner})` : inner
+    }
     const inner = `${show(node.a, rank[node.op])} ${node.op.toUpperCase()} ${show(node.b, rank[node.op])}`
     return rank[node.op] < parent || (node.op === 'and' && parent === 1) ? `(${inner})` : inner
   }
   return show(tree, 0)
 }
 
-/** Whether the tree holds, `line(no)` saying whether line no (1-based) holds. */
+/** Whether the tree holds at one moment, `line(no)` saying whether line no (1-based) holds (a THEN chain as all its parts -
+ *  the engine reads the rule over the day's candles, `logicAt`). */
 export function evalLogic(tree, line) {
   if (tree.line != null) return line(tree.line)
   if (tree.op === 'not') return !evalLogic(tree.a, line)
+  // At one moment a THEN chain can only be read as all of its parts (the engine reads it over time - `logicAt`).
+  if (tree.op === 'then') return tree.items.every((x) => evalLogic(x, line))
   return tree.op === 'and' ? evalLogic(tree.a, line) && evalLogic(tree.b, line) : evalLogic(tree.a, line) || evalLogic(tree.b, line)
 }
 
@@ -1547,6 +1615,10 @@ export function logicWithoutLine(text, n, k) {
   const drop = (node) => {
     if (node.line != null) return node.line === k ? null : { line: node.line > k ? node.line - 1 : node.line }
     if (node.op === 'not') { const a = drop(node.a); return a ? { op: 'not', a } : null }
+    if (node.op === 'then') {
+      const items = node.items.map(drop).filter(Boolean)
+      return items.length > 1 ? { op: 'then', items, within: node.within } : items[0] ?? null
+    }
     const a = drop(node.a), b = drop(node.b)
     return a && b ? { op: node.op, a, b } : a ?? b
   }
@@ -1605,10 +1677,48 @@ export function ruleText(lines, action, logic = '') {
 }
 
 const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2, l.param3)
-// Does the rule hold at candle i: its logic tree (`tree`), else any OR group whose lines all hold.
-function ruleHolds(d, i, lines, groups, tree) {
-  if (tree) return evalLogic(tree, (no) => lineHolds(d, i, lines[no - 1]))
-  return groups.some((g) => g.every((l) => lineHolds(d, i, l)))
+
+/**
+ * The logic read over a day's `n` candles: (i) => does it hold at candle i. `leaf(no, k)` - line no (1-based) at candle k;
+ * `candles(minutes)` - a window in candles. Each part's reading at each candle is worked out once. AND / OR / NOT at the
+ * candle. A THEN chain [A, B, ..., Z] WITHIN W (in order): Z holds at i, and - from the candle Z's current run started, back
+ * - each part before it BECAME true (holds at k, not at k - 1; the day's first candle counts) at or before the part after it
+ * became true, the first of them within the last W minutes (a part already true before then - a state since the morning -
+ * does not count: it did not happen in the window; a cross / turn is the event). Nothing after candle i is read.
+ */
+export function logicAt(tree, n, leaf, candles = (m) => m) {
+  const memo = new Map()
+  const at = (node, k) => {
+    if (k < 0 || k >= n) return false
+    let m = memo.get(node)
+    if (!m) memo.set(node, m = new Int8Array(n).fill(-1))
+    if (m[k] >= 0) return m[k] === 1
+    let v
+    if (node.line != null) v = Boolean(leaf(node.line, k))
+    else if (node.op === 'not') v = !at(node.a, k)
+    else if (node.op === 'and') v = at(node.a, k) && at(node.b, k)
+    else if (node.op === 'or') v = at(node.a, k) || at(node.b, k)
+    else v = thenAt(node, k)
+    m[k] = v ? 1 : 0
+    return v
+  }
+  const began = (node, k) => at(node, k) && (k === 0 || !at(node, k - 1))
+  const thenAt = (node, i) => {
+    const last = node.items.at(-1)
+    if (!at(last, i)) return false
+    const from = i - Math.max(1, candles(node.within ?? DEFAULT_THEN_WINDOW)) + 1
+    let bound = i
+    while (bound > 0 && at(last, bound - 1)) bound--
+    if (bound < from) return false
+    for (let s = node.items.length - 2; s >= 0; s--) {
+      let k = bound
+      while (k >= from && !began(node.items[s], k)) k--
+      if (k < from) return false
+      bound = k
+    }
+    return true
+  }
+  return (i) => at(tree, i)
 }
 
 /**
@@ -1630,9 +1740,13 @@ export function ruleSignals(d, rule, { openAt = null } = {}) {
   const out = []
   for (const s of sides) {
     const groups = orGroups(s.lines)
+    // The logic over the day (a THEN chain reads the candles before), else the lines' own AND / OR.
+    const holds = tree
+      ? logicAt(tree, d.n, (no, k) => lineHolds(d, k, s.lines[no - 1]), (minutes) => span(d, minutes))
+      : (i) => groups.some((g) => g.every((l) => lineHolds(d, i, l)))
     let was = false
     for (let i = 0; i < d.n; i++) {
-      const now = ruleHolds(d, i, s.lines, groups, tree)
+      const now = holds(i)
       // Entries open at `openAt`: a rule already holding then signals there - it became true before entries were allowed.
       if (i === openAt) was = false
       if (now && !was) {
