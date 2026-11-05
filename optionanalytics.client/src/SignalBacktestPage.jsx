@@ -16,6 +16,7 @@ import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
+import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
 // ANY, NOT) of conditions (an indicator, what it says, its number and look-back) and of groups (the brackets), the trade it
@@ -53,10 +54,14 @@ const STORE = {
   rule: 'optionanalytics.signalBacktest.rule',
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
   expiryDay: 'optionanalytics.signalBacktest.expiryDay',
+  chartOpen: 'optionanalytics.signalBacktest.chartOpen',
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
-const GROUP_TITLE = { OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Straddle: 'ATM straddle', Profile: "Today's market profile", PrevProfile: "Previous day's volume profile (yesterday's levels)" }
+const GROUP_TITLE = {
+  OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Options: "Option premium - the ATM strike's own chart (VWAP, EMA, RSI)", Straddle: 'ATM straddle', Profile: "Today's market profile",
+  PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
+}
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
 // The indicator dropdown: the conditions under their group's title.
@@ -81,6 +86,7 @@ function editLine(line, change) {
     const after = CONDITION_OF[line.id].options.find((o) => o.value === change.value)
     if (before?.param?.label !== after?.param?.label) delete next.param
     if (before?.param2?.label !== after?.param2?.label) delete next.param2
+    if (before?.param3?.label !== after?.param3?.label) delete next.param3
   }
   return cleanLine(next) ?? line
 }
@@ -117,6 +123,12 @@ function ConditionRow({ line, no, onChange, onRemove }) {
         <InputNumber
           size="small" className="oa-rule-num oa-rule-num--wide" min={o.param2.min} max={o.param2.max} step={o.param2.step} value={line.param2}
           onChange={(v) => onChange(editLine(line, { param2: v ?? o.param2.default }))} addonBefore={o.param2.label} addonAfter={o.param2.after ? o.param2.after(line.param2) : o.param2.unit}
+        />
+      )}
+      {o.param3 && (
+        <InputNumber
+          size="small" className="oa-rule-num oa-rule-num--wide" min={o.param3.min} max={o.param3.max} step={o.param3.step} value={line.param3}
+          onChange={(v) => onChange(editLine(line, { param3: v ?? o.param3.default }))} addonBefore={o.param3.label} addonAfter={o.param3.unit}
         />
       )}
       {o.windowed && (
@@ -442,6 +454,18 @@ export default function SignalBacktestPage() {
     return run.results.length ? { report: localReport, settings: runSettings, dates: run.dates, job: null } : null
   }, [viewing, run.results.length, run.dates, localReport, runSettings])
   const report = shown?.report
+  // The day chart: the day picked (a click on a day / trade row picks it too) - the page's own days are already loaded, a
+  // background run's day is loaded when it is picked.
+  const [chartDate, setChartDate] = useState(null)
+  const [chartOpen, setChartOpen] = usePersistedState(STORE.chartOpen, true)
+  const chartRef = useRef(null)
+  const ownDays = useMemo(() => new Map(run.results.filter((r) => r.day?.ok).map((r) => [r.date, r.day])), [run.results])
+  const dayOf = useMemo(() => (viewing ? () => null : (date) => ownDays.get(date) ?? null), [viewing, ownDays])
+  const showOnChart = (date) => {
+    setChartDate(date)
+    setChartOpen(true)
+    chartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
   const chartLines = useMemo(() => (report?.lines ?? []).map((l) => ({ ...l, color: SIDE[l.id]?.color ?? '#e6e6e6' })), [report])
 
   const shownTrades = useMemo(() => {
@@ -461,6 +485,8 @@ export default function SignalBacktestPage() {
   const failed = report?.failed ?? []
   // Days run without the previous day's volume profile, when the rule reads it.
   const noPrev = report?.noPrev ?? []
+  // Days run without the previous session's high / low / close (its volume profile's own bars), when the rule reads the pivots.
+  const noPivots = report?.noPivots ?? []
   const sides = report?.sides ?? ['rule']
   const sideTag = (id) => <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: SIDE[id].color, display: 'inline-block' }} />{SIDE[id].name}</Space>
   const summaryColumns = [
@@ -570,7 +596,7 @@ export default function SignalBacktestPage() {
                   <Text strong style={{ fontSize: 12 }}>Then</Text>
                   <Select size="small" value={rule.action} onChange={(v) => setRule({ action: v })} style={{ width: 100 }} options={RULE_ACTIONS.map((a) => ({ value: a.value, label: a.label }))} />
                 </Space>
-                <Tooltip title="Also trade the mirror: every condition the other way (above ↔ below, support ↔ resistance, rising ↔ falling; GEX regime, the straddle, 'inside' and 'stable' stay as they are) - numbers, windows and the groups kept - and the opposite trade.">
+                <Tooltip title="Also trade the mirror: every condition the other way (above ↔ below, support ↔ resistance, rising ↔ falling; RSI's level from the other end - above 60 ↔ below 40; pivot R1 ↔ S1; GEX regime, the straddle, 'inside' and 'stable' stay as they are) - numbers, windows and the groups kept - and the opposite trade.">
                   <Space size={4}><Switch size="small" checked={rule.mirror} onChange={(v) => setRule({ mirror: v })} /><Text style={{ fontSize: 12 }}>Mirror (other side)</Text></Space>
                 </Tooltip>
               </Space>
@@ -675,7 +701,13 @@ export default function SignalBacktestPage() {
                 &quot;by ≥ %&quot; (0 = any, the default): price against a level (VWAP, a wall, the IB, yesterday&apos;s levels) in % of that level;
                 OI since open in % of CE + PE added; Total OI CE vs PE in % of the lower line; a cumulative Δ line and the net GEX - which
                 have no price - in % of their own range so far (how far past 0, or past the level broken, they are now); a straddle in % of
-                its VWAP or of the decay-only line. Run in background hands the same run to the server - now,
+                its VWAP or of the decay-only line. RSI and the EMAs (price vs one, or a fast / slow crossover - their periods on the
+                row) are worked out on the spot candles of the Timeframe, run on from the previous session&apos;s; RSI&apos;s number is
+                its level (the mirror reads it from the other end: above 60 is below 40). The pivot points (P, R1 - R3, S1 - S3) and the
+                CPR are the classic floor pivots of the previous session&apos;s high, low and close (the mirror of R1 is S1). The ATM CE /
+                PE premium conditions read the ATM strike&apos;s own chart - its premium against its own VWAP (from its traded volume), an
+                EMA, an EMA crossover or RSI, on the Timeframe&apos;s candles from 09:15; the mirror reads the other side&apos;s (CE ↔ PE). After a run
+                the spot chart shows any day with its trades tagged BUY / SELL - click a day or a trade. Run in background hands the same run to the server - now,
                 after the close or at a time - so the browser can be closed; its report waits under Background runs (Open).
               </Text>
             </FoldText>
@@ -719,6 +751,12 @@ export default function SignalBacktestPage() {
                 description={`${noPrev.map((date) => dayjs(date).format('D MMM')).join(' · ')} (the index has volume from January 2026 on).`}
               />
             )}
+            {noPivots.length > 0 && (
+              <Alert
+                type="info" showIcon message={`No previous session for ${noPivots.length} day${noPivots.length === 1 ? '' : 's'} - the rule's pivot / CPR lines never hold on ${noPivots.length === 1 ? 'it' : 'them'}`}
+                description={`${noPivots.map((date) => dayjs(date).format('D MMM')).join(' · ')} (the previous session comes with its volume profile - the index has volume from January 2026 on).`}
+              />
+            )}
             <Card
               size="small" title={head}
               extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
@@ -729,8 +767,15 @@ export default function SignalBacktestPage() {
               <EquityChart lines={chartLines} />
             </Card>
             <Card size="small" title="Day by day">
-              <Table size="small" pagination={false} scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows} />
+              <Table
+                size="small" pagination={false} scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows}
+                onRow={(r) => ({ onClick: () => r.ok && showOnChart(r.date), style: r.ok ? { cursor: 'pointer' } : undefined })}
+              />
             </Card>
+            <BacktestDayChartCard
+              report={report} settings={shown.settings} runKey={shown.job?.id ?? 'page'} dayOf={dayOf} loadDay={loadDay}
+              date={chartDate} onDate={setChartDate} open={chartOpen !== false} onOpen={setChartOpen} cardRef={chartRef}
+            />
             <Card
               size="small" title={`Trades (${shownTrades.length})`}
               extra={(
@@ -742,7 +787,10 @@ export default function SignalBacktestPage() {
                 </Space>
               )}
             >
-              <Table size="small" rowKey={(t) => `${t.strategy}|${t.entryTime}`} scroll={{ x: 1480 }} columns={tradeColumns} dataSource={shownTrades} pagination={{ pageSize: 25, showSizeChanger: false }} />
+              <Table
+                size="small" rowKey={(t) => `${t.strategy}|${t.entryTime}`} scroll={{ x: 1480 }} columns={tradeColumns} dataSource={shownTrades} pagination={{ pageSize: 25, showSizeChanger: false }}
+                onRow={(t) => ({ onClick: () => showOnChart(t.date), style: { cursor: 'pointer' } })}
+              />
             </Card>
           </>
         )}
