@@ -5,7 +5,7 @@
 // what a backtest of that day says later. What has happened so far is a list of EVENTS, each with its own key so it is
 // sent once: a trade's ENTRY, and its EXIT once it has one (a trade the data ran out on before the session is over is
 // still OPEN - no exit yet). Once the session is over the day's REPORT: the closed trades and their numbers.
-import { istMinute, prepareDay, simulateDay, summarize } from './signalBacktest.js'
+import { istMinute, optionName, prepareDay, simulateDay, summarize } from './signalBacktest.js'
 import { runUrl } from './signalBacktestJob.js'
 
 const MIN_MS = 60_000
@@ -47,7 +47,7 @@ const pad = (v) => String(v).padStart(2, '0')
 const clock = (ms) => { const m = istMinute(ms); return `${pad(Math.floor(m / 60))}:${pad(m % 60)}` }
 const rupees = (v) => `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}`
 const signed = (v, digits = 2) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(digits)}`
-const tradeName = (t) => `${t.action} ${t.strike} ${t.side}`
+const tradeName = (t) => `${t.action} ${optionName(t)}`
 const tags = (t) => [t.strategy === 'mirror' ? 'mirror' : null, t.overridden ? 'expiry day' : null].filter(Boolean)
 
 /** A trade's entry, as Telegram shows it. */
@@ -67,8 +67,8 @@ export function exitText(name, underlying, t) {
  * `closed` and still `open`, and the closed ones' `summary`. `complete`: the session is over - a trade the data ran out on
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
-export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null } = {}) {
-  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine)
+export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null } = {}) {
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay })
   const isOpen = (t) => !complete && t.exitReason === 'Day end'
   const events = []
   for (const t of trades) {
@@ -81,6 +81,7 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
   const closed = trades.filter((t) => !isOpen(t))
   return {
     trades, closed, open: trades.filter(isOpen), events, signals: signals.length, dayLimit: dayLimit ?? null, expirySkipped: Boolean(expirySkipped),
+    tradeIn: engine.tradeIn || '',
     summary: summarize(closed),
   }
 }
@@ -96,7 +97,7 @@ export function dayRecord(day, result) {
       limit: result.dayLimit ?? '',
     },
     trades: result.closed.map((t) => ({
-      date: t.date, side: t.strategy, signal: t.dir > 0 ? 'bullish' : 'bearish', action: t.action, option: `${t.strike} ${t.side}`,
+      date: t.date, side: t.strategy, signal: t.dir > 0 ? 'bullish' : 'bearish', action: t.action, option: optionName(t),
       entryTime: clock(t.entryTime), entry: r2(t.entry), exitTime: clock(t.exitTime), exit: r2(t.exit), exitReason: t.exitReason,
       points: r2(t.points), gross: r2(t.gross), charges: r2(t.charges), net: r2(t.net), expiryDay: t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', why: t.why,
     })),
@@ -107,7 +108,7 @@ export function dayRecord(day, result) {
 export function dayReportText(name, day, result) {
   const s = result.summary
   const date = new Date(`${day.date}T00:00:00Z`).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' })
-  const lines = [`📊 ${name} · ${day.underlying} · ${date}`]
+  const lines = [`📊 ${name} · ${day.underlying}${result.tradeIn ? ` → traded in ${result.tradeIn}` : ''} · ${date}`]
   if (result.expirySkipped) lines.push(`Expiry day - not traded (the strategy's Expiry day setting)${result.signals ? `; ${result.signals} signal${result.signals === 1 ? '' : 's'} not taken` : ''}.`)
   else if (!s.trades) lines.push('No trades today.')
   else {

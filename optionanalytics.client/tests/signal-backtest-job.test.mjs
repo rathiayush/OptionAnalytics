@@ -226,6 +226,80 @@ test('the background job, as the server runs it, writes the report the page woul
   assert.equal(progress.at(-1).trades, page.trades.length)
 })
 
+// The same day as SENSEX's - its premiums half as high again, so a trade taken in it differs from NIFTY's.
+const sensexFor = (date) => {
+  const r = runFor(date)
+  const priced = (p) => ({ ...p, price: p.price * 1.5 })
+  return { ...r, underlying: 'SENSEX', cePoints: r.cePoints.map(priced), pePoints: r.pePoints.map(priced) }
+}
+
+test('trade in another index: the settings, the traded lot size, the heading; a day without the traded index\'s does not run', () => {
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'SENSEX' }).tradeIn, 'SENSEX')
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'NIFTY' }).tradeIn, '')        // its own index = no trade-in
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'FTSE' }).tradeIn, '')
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY' }).tradeIn, '')
+  assert.equal(SETTINGS.tradeIn, '')
+  assert.deepEqual([engineSettings(SETTINGS).lotSize, engineSettings({ ...SETTINGS, tradeIn: 'SENSEX' }).lotSize, engineSettings({ ...SETTINGS, tradeIn: 'BANKNIFTY' }).lotSize], [65, 20, 30])
+  assert.match(reportHead({ ...SETTINGS, tradeIn: 'SENSEX' }, 4), /^NIFTY signals → traded in SENSEX · 4 days · /)
+  const day = prepareDay(runFor('2026-10-19'), { underlying: 'NIFTY', prevProfile: PREV })
+  const engine = engineSettings({ ...SETTINGS, tradeIn: 'SENSEX' })
+  assert.deepEqual(dayOutcome('2026-10-19', day, engine, { ok: false, reason: 'holiday' }), { date: '2026-10-19', ok: false, reason: 'SENSEX: holiday', trades: [], signals: { rule: 0, mirror: 0 } })
+  const traded = dayOutcome('2026-10-19', day, engine, prepareDay(sensexFor('2026-10-19'), { underlying: 'SENSEX', prevProfile: PREV }))
+  assert.ok(traded.ok && traded.trades.length > 0)
+  assert.ok(traded.trades.every((t) => t.tradeIndex === 'SENSEX' && Math.abs(t.gross - t.points * 20) < 1e-6))
+  // The signals are NIFTY's: the same as trading in NIFTY itself, the trades' minutes too.
+  const own = dayOutcome('2026-10-19', day, engineSettings(SETTINGS))
+  assert.deepEqual(traded.signals, own.signals)
+  assert.deepEqual(traded.trades.map((t) => t.entryTime), own.trades.map((t) => t.entryTime))
+  assert.notDeepEqual(traded.trades.map((t) => t.entry), own.trades.map((t) => t.entry))
+})
+
+test('trade in another index in the background: each day loads that index\'s day too - the page\'s report', async (t) => {
+  const asked = []
+  let failOnce = true
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const date = url.searchParams.get('date')
+    asked.push({ path: url.pathname, date })
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, PREV)
+    if (url.pathname === '/api/oi-replay/NIFTY/run') return json(200, date === HOLIDAY ? { success: false, error: 'holiday' } : runFor(date))
+    if (url.pathname === '/api/oi-replay/SENSEX/run') {
+      if (date === '2026-10-20' && failOnce) { failOnce = false; return json(503, { error: 'busy' }) }
+      return json(200, sensexFor(date))
+    }
+    return json(404, { error: 'not mocked' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json')
+  const settings = { ...SETTINGS, tradeIn: 'SENSEX' }
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
+      env: { ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26', BACKTEST_JOB: JSON.stringify(settings) },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    })
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  assert.equal(code, 0)
+  const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
+  // The page's report for the same days: NIFTY's days, each with SENSEX's of the same date.
+  const engine = engineSettings(settings)
+  const outcomes = DATES.map((date) => {
+    if (date === HOLIDAY) return dayOutcome(date, { ok: false, date, reason: 'holiday' }, engine)
+    return dayOutcome(date, prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV }), engine, prepareDay(sensexFor(date), { underlying: 'SENSEX', prevProfile: PREV }))
+  })
+  const page = JSON.parse(JSON.stringify(backtestReport(outcomes, settings), reportReplacer), reportReviver)
+  assert.deepEqual(result.report, page)
+  assert.ok(page.trades.length > 3 && page.trades.every((t) => t.tradeIndex === 'SENSEX'))
+  // SENSEX asked for every day NIFTY ran (not the holiday), the one that failed on the way once more.
+  const sensexRuns = (date) => asked.filter((a) => a.path === '/api/oi-replay/SENSEX/run' && a.date === date).length
+  assert.deepEqual(DATES.map(sensexRuns), [1, 2, 0, 1, 1])
+})
+
 test('the background job writes why when it cannot run', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))

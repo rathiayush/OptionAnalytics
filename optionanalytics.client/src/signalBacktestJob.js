@@ -60,7 +60,7 @@ const held = (v, min, max, fallback) => {
 
 /**
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
- * reads: { underlying, from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
+ * reads: { underlying, tradeIn (another index the trades are taken in - '' = the same), from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
  * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, maxDayLoss,
  * maxDayProfit, timeframe, expiryDay, strategyName }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
@@ -70,8 +70,10 @@ export function cleanBacktestSettings(s = {}) {
   const levelUnit = LEVEL_UNITS.includes(s?.levelUnit) ? s.levelUnit : d.levelUnit
   const max = levelUnit === 'pts' ? 5000 : 1000
   const saved = normalizeRule(s?.rule)
+  const underlying = BACKTEST_UNDERLYINGS.includes(s?.underlying) ? s.underlying : 'NIFTY'
   return {
-    underlying: BACKTEST_UNDERLYINGS.includes(s?.underlying) ? s.underlying : 'NIFTY',
+    underlying,
+    tradeIn: BACKTEST_UNDERLYINGS.includes(s?.tradeIn) && s.tradeIn !== underlying ? s.tradeIn : '',
     from: isDate(s?.from) ? s.from : null,
     to: isDate(s?.to) ? s.to : null,
     rule: { tree: saved.tree, action: saved.action, mirror: saved.mirror },
@@ -103,17 +105,20 @@ export function strategyName(v) {
   return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, 80) : ''
 }
 
-/** What the engine reads (simulateDay): the settings with the rule made whole and the index's lot size. */
+/** What the engine reads (simulateDay): the settings with the rule made whole and the TRADED index's lot size (the trade-in
+ *  index's when there is one). */
 export function engineSettings(s) {
   const { underlying, from: _from, to: _to, rule, strategyName: _name, ...rest } = s
-  return { ...rest, rule: normalizeRule(rule), lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1 }
+  return { ...rest, tradeIn: s.tradeIn || '', rule: normalizeRule(rule), lotSize: PAPER_TRADE_LOT_SIZE[s.tradeIn || underlying] ?? 1 }
 }
 
 /** A day's part of a run: its trades and how many signals each side gave - or why it did not run. `engine` =
- *  engineSettings(...). Only the outcome is kept, not the day. */
-export function dayOutcome(date, day, engine) {
+ *  engineSettings(...); `tradeDay` - the trade-in index's day of the date (`engine.tradeIn`). Only the outcome is kept,
+ *  not the day. */
+export function dayOutcome(date, day, engine, tradeDay = null) {
   if (!day?.ok) return { date, ok: false, reason: day?.reason ?? 'not loaded', trades: [], signals: { rule: 0, mirror: 0 } }
-  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine)
+  if (engine.tradeIn && !tradeDay?.ok) return { date, ok: false, reason: `${engine.tradeIn}: ${tradeDay?.reason ?? 'not loaded'}`, trades: [], signals: { rule: 0, mirror: 0 } }
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay })
   return {
     date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
     limit: dayLimit ?? null, trades,
@@ -187,7 +192,7 @@ export function reportHead(s, okDays) {
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */

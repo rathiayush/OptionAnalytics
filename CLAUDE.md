@@ -644,7 +644,20 @@ When adding or changing a strategy:
   target / trail - or, "Don't trade" (`skip`, asked for - "give option to trade on expiry or do not trade"), takes NO trade
   that day: its signals are listed, each skipped "expiry day - not traded" (`EXPIRY_SKIP_REASON`, the chart's grey dots),
   `simulateDay`'s `expirySkipped`, the day table's tag "expiry · not traded", the heading's "expiry day: not traded", the
-  live scan sends nothing that day and its report says so; other days as the rule. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
+  live scan sends nothing that day and its report says so; other days as the rule. TRADE IN ANOTHER INDEX (asked for - "order
+  punched seeing NIFTY's data but actually to SENSEX ... chart will be shown of SENSEX"): the "Trade in" choice beside the
+  index (`tradeIn`, `optionanalytics.signalBacktest.tradeIn`, '' = the same; `cleanBacktestSettings` drops the index's own):
+  the rule reads the index picked, every trade is taken in the other's options - `simulateDay(d, s, { tradeDay })`: that
+  index's day of the same date, its minute at the signal's clock (the last at or before it, within `STALE_MINUTES`; none =
+  the signal skipped "no X minute"), ITS ATM, step, premiums and expiry (the Expiry day choice reads the TRADED options'),
+  its lot size (`engineSettings`); the entry time stays the signal's; each trade carries `tradeIndex` (`optionName` -
+  "SENSEX 82000 CE" in the trades, the CSV, the live alerts). No day of it = every signal skipped "no X data" (`dayOutcome`:
+  the day not run, "X: <why>"). Each day loads BOTH indices - the page (`results[].tradeDay`, Compare all 20 too), the
+  background job (a trade day that failed on the way tried once more) and the live scan (today's day of every index wanted,
+  read once a round; a strategy whose traded index was not read waits for the next round, the others go on). The day chart
+  shows the TRADED index by default ("SENSEX" / "NIFTY (signal)" / the signal's futures / Option - the traded index's
+  strikes), saying the rule read the other; a page run's report is of ITS indices (a change waits for the next run - the
+  page says so). `tests/signal-backtest.test.mjs` / `-job` / `signal-live.test.mjs`. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
   and day tables, the CSV's "expiry day" column, its `why` starting "Expiry day - selling instead"); the report heading
   names it; a background run takes it with the rest of the settings. MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no

@@ -45,7 +45,7 @@ export function RunInBackgroundModal({ settings, days, ruleSummary, telegram, se
           under &quot;Background runs&quot; here. Runs go one at a time; days the server has kept are quick, a day it has not comes from Dhan once.
         </Text>
         <Text style={{ fontSize: 12 }}>
-          <Text strong style={{ fontSize: 12 }}>{settings.underlying}</Text> · {days} trading day{days === 1 ? '' : 's'} ({runRange(settings.from, settings.to)}) · {ruleSummary}
+          <Text strong style={{ fontSize: 12 }}>{settings.underlying}{settings.tradeIn ? ` → traded in ${settings.tradeIn}` : ''}</Text> · {days} trading day{days === 1 ? '' : 's'} ({runRange(settings.from, settings.to)}) · {ruleSummary}
         </Text>
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>

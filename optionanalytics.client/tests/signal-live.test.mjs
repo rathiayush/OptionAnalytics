@@ -126,7 +126,10 @@ test('the texts: an entry (and "seen late" after a restart), an exit with its re
 })
 
 // The loop against a fake server, as the server runs it.
-async function runLoop(nowIso, { strategies, runOk = true }) {
+// SENSEX's day for a strategy trading in it: the synthetic day, its premiums half as high again.
+const sensexRun = { ...run, underlying: 'SENSEX', optionExpiry: '2026-10-08', cePoints: run.cePoints.map((p) => ({ ...p, price: p.price * 1.5 })), pePoints: run.pePoints.map((p) => ({ ...p, price: p.price * 1.5 })) }
+
+async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true }) {
   const asked = []
   const posted = []
   const server = createServer((req, res) => {
@@ -139,6 +142,7 @@ async function runLoop(nowIso, { strategies, runOk = true }) {
       if (url.pathname === '/api/signal-strategies/live') return json(200, { today: DATE, strategies })
       if (url.pathname.startsWith('/api/signal-strategies/live/')) { posted.push({ path: url.pathname, body: JSON.parse(body) }); return json(200, {}) }
       if (url.pathname === '/api/oi-replay/NIFTY/run') return runOk ? json(200, { ...run, optionExpiry: '2026-10-06' }) : json(503, { error: 'busy' })
+      if (url.pathname === '/api/oi-replay/SENSEX/run') return sensexOk ? json(200, sensexRun) : json(503, { error: 'busy' })
       if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, { success: false })
       return json(404, { error: 'not mocked' })
     })
@@ -199,4 +203,31 @@ test('the loop: nothing outside the session, nothing with no strategy on Live, a
   const failing = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY], runOk: false })
   assert.equal(failing.posted.length, 0)
   assert.match(failing.log, /NIFTY: today not read \(.*busy.*\) - again in 1 min/)
+})
+
+test('trade in another index live: the signals read on NIFTY today, the trades taken in SENSEX - the texts name it', async () => {
+  const trading = cleanBacktestSettings({ ...SETTINGS, tradeIn: 'SENSEX' })
+  const engine = engineSettings(trading)
+  const nifty = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('15:35') })
+  const sensex = prepareLiveDay(sensexRun, { underlying: 'SENSEX', nowMs: at('15:35') })
+  const live = liveDayEvents(nifty, engine, { name: 'VWAP cross', complete: true, nowMs: at('15:35'), tradeDay: sensex })
+  // The backtest of the day traded in SENSEX: the same trades, each SENSEX's, at NIFTY's signal minutes.
+  assert.deepEqual(live.closed, simulateDay(full, engine, { tradeDay: prepareDay(sensexRun, { underlying: 'SENSEX' }) }).trades)
+  assert.ok(live.closed.length > 0 && live.closed.every((t) => t.tradeIndex === 'SENSEX'))
+  assert.deepEqual(live.closed.map((t) => t.entryTime), fullTrades.map((t) => t.entryTime))
+  assert.match(live.events[0].text, /^🟢 VWAP cross · NIFTY: BUY SENSEX \d+ (CE|PE) @ /)
+  assert.match(dayReportText('VWAP cross', nifty, live), /^📊 VWAP cross · NIFTY → traded in SENSEX · Mon 5 Oct/)
+  assert.match(dayRecord(nifty, live).trades[0].option, /^SENSEX \d+ (CE|PE)$/)
+  // The loop reads SENSEX's day too and posts the SENSEX trades; without SENSEX's day the strategy waits (nothing posted).
+  const strategy = { ...STRATEGY, settings: trading }
+  const noon = await runLoop('2026-10-05T06:30:00Z', { strategies: [strategy] })
+  assert.ok(noon.asked.some((a) => a.path === '/api/oi-replay/SENSEX/run' && /forceLive=true/.test(a.search)))
+  const posted = noon.posted.find((p) => p.path === '/api/signal-strategies/live/events')
+  assert.ok(posted.body.events.length > 0 && posted.body.events.every((e) => /SENSEX/.test(e.text)))
+  const waiting = await runLoop('2026-10-05T06:30:00Z', { strategies: [strategy], sensexOk: false })
+  assert.equal(waiting.posted.length, 0)
+  assert.match(waiting.log, /SENSEX: today not read/)
+  // A NIFTY-only strategy beside it is not held up by SENSEX.
+  const both = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, { ...strategy, id: 's2' }], sensexOk: false })
+  assert.deepEqual(both.posted.map((p) => p.body.strategyId), ['s1'])
 })

@@ -977,6 +977,55 @@ test('on the options\' expiry day the Expiry day setting overrides the rule\'s b
   assert.deepEqual([prepareDay({ ...run, optionExpiry: null }).isExpiry, prepareDay({ ...run, optionExpiry: null }).expiry], [false, null])
 })
 
+test('TRADE IN another index: the signals read on this day, the trades taken on the other index\'s day at the signal\'s clock', () => {
+  // NIFTY (the signal day): spot under VWAP until 60 (bearish - the mirror), over it 60 - 119 (bullish - the rule), under from 120.
+  const legs = { ce: { 25000: flat(100) }, pe: { 25000: flat(100) } }
+  const nifty = { ...fakeDay({ legs, spot: (i) => (i >= 60 && i < 120 ? 25000 : 24980) }), isExpiry: false }
+  // SENSEX (the traded day): its own ATM 82000, step 100; the call rising a point a minute, the put flat.
+  const minute = (ms) => Math.round((ms - T915) / MIN)
+  const sensex = ({ times = nifty.t, isExpiry = false } = {}) => {
+    const pack = (f) => { const a = new Float64Array(times.length * 4).fill(NaN); times.forEach((ms, k) => { const v = f(ms); a.set([v, v, v, v], k * 4) }); return a }
+    return {
+      ok: true, date: nifty.date, underlying: 'SENSEX', step: 100, n: times.length, t: [...times], atm: times.map(() => 82000), isExpiry,
+      ce: new Map([[82000, pack((ms) => 300 + minute(ms))]]), pe: new Map([[82000, pack(() => 200)]]),
+    }
+  }
+  const rule = lines([{ id: 'vwap', value: 'above' }], 'buyCE', { mirror: true })
+  const base = { lotSize: 20, lots: 1, timeStopMin: 5, maxTradesPerDay: 5, cooldownMin: 0, charges: false, rule }
+  const own = simulateDay(nifty, base)
+  const cross = simulateDay(nifty, { ...base, tradeIn: 'SENSEX' }, { tradeDay: sensex() })
+  // The same signals (the rule reads NIFTY), the same entry minutes - each trade SENSEX's option, its ATM and premiums.
+  assert.deepEqual(cross.signals.map((x) => [x.time, x.dir, x.taken]), own.signals.map((x) => [x.time, x.dir, x.taken]))
+  assert.deepEqual(cross.trades.map((t) => t.entryTime), own.trades.map((t) => t.entryTime))
+  assert.deepEqual(cross.trades.map((t) => [t.strategy, t.action, t.tradeIndex, t.strike, t.side, t.entry, t.exit, t.points, t.gross]), [
+    ['mirror', 'BUY', 'SENSEX', 82000, 'PE', 200, 200, 0, 0],
+    ['rule', 'BUY', 'SENSEX', 82000, 'CE', 360, 365, 5, 100],                    // 5 points x 1 lot x 20 (SENSEX's lot)
+    ['mirror', 'BUY', 'SENSEX', 82000, 'PE', 200, 200, 0, 0],
+  ])
+  assert.ok(own.trades.every((t) => t.tradeIndex === undefined && t.strike === 25000))
+  assert.match(tradesCsv(cross.trades).split('\n')[2], /,SENSEX 82000 CE,/)
+  // No day of the traded index: every signal skipped for it, no trade.
+  const none = simulateDay(nifty, { ...base, tradeIn: 'SENSEX' })
+  assert.deepEqual(none.trades, [])
+  assert.ok(none.signals.length === own.signals.length && none.signals.every((x) => x.skipped === 'no SENSEX data this day'))
+  assert.deepEqual(simulateDay(nifty, { ...base, tradeIn: 'SENSEX' }, { tradeDay: { ...sensex(), underlying: 'BANKNIFTY' } }).trades, [])   // another index's day is not it
+  // Trading in the day's own index is no trade-in.
+  assert.deepEqual(simulateDay(nifty, { ...base, tradeIn: 'NIFTY' }, { tradeDay: sensex() }).trades, own.trades)
+  // A minute the traded index lacks at the signal: its last premium before it, within 5 minutes - the entry still at the
+  // signal's clock; a longer hole skips the signal.
+  const short = simulateDay(nifty, { ...base, tradeIn: 'SENSEX' }, { tradeDay: sensex({ times: nifty.t.filter((ms) => minute(ms) < 58 || minute(ms) > 61) }) })
+  const entered = short.trades.find((t) => t.strategy === 'rule')
+  assert.deepEqual([entered.entry, entered.entryTime], [357, nifty.t[60]])
+  const hole = simulateDay(nifty, { ...base, tradeIn: 'SENSEX' }, { tradeDay: sensex({ times: nifty.t.filter((ms) => minute(ms) < 54 || minute(ms) > 66) }) })
+  assert.equal(hole.trades.some((t) => t.strategy === 'rule'), false)
+  assert.equal(hole.signals.find((x) => x.strategy === 'rule').skipped, 'no SENSEX minute at the signal')
+  // The expiry day is the TRADED options': SENSEX's expiry with "Don't trade" skips; NIFTY's alone does not.
+  assert.deepEqual(simulateDay(nifty, { ...base, tradeIn: 'SENSEX', expiryDay: 'skip' }, { tradeDay: sensex({ isExpiry: true }) }).trades, [])
+  assert.equal(simulateDay({ ...nifty, isExpiry: true }, { ...base, tradeIn: 'SENSEX', expiryDay: 'skip' }, { tradeDay: sensex() }).trades.length, 3)
+  const sold = simulateDay(nifty, { ...base, tradeIn: 'SENSEX', expiryDay: 'sell' }, { tradeDay: sensex({ isExpiry: true }) }).trades
+  assert.deepEqual(sold.map((t) => [t.action, t.side, t.expiryDay]), [['SELL', 'CE', true], ['SELL', 'PE', true], ['SELL', 'CE', true]])
+})
+
 test('P&L is net of the charges: STT 0.15% of the sell side\'s premium and ₹20 on each order (buy and sell) by default; set on the page; off = gross', () => {
   // A bought call: in at 100, out at the 120 target - 2 lots of 65. Gross 20 x 130 = 2,600.
   const legs = { ce: { 25000: (i) => (i < 20 ? flat(100)() : { o: 100, h: 125, l: 100, c: 120 }) }, pe: { 25000: flat(100) } }

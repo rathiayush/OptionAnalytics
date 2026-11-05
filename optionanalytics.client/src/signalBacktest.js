@@ -1903,6 +1903,18 @@ const barAt = (packed, i) => {
   return Number.isFinite(o) ? { o, h: packed[i * 4 + 1], l: packed[i * 4 + 2], c: packed[i * 4 + 3] } : null
 }
 // The option's close at minute i, else its last within STALE_MINUTES.
+// In a list of times in order: the index of the last at or before `ms` / the first at or after it (-1 when none).
+function lastAtOrBefore(times, ms) {
+  let lo = 0, hi = times.length - 1, at = -1
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (times[mid] <= ms) { at = mid; lo = mid + 1 } else hi = mid - 1 }
+  return at
+}
+function firstAtOrAfter(times, ms) {
+  let lo = 0, hi = times.length - 1, at = -1
+  while (lo <= hi) { const mid = (lo + hi) >> 1; if (times[mid] >= ms) { at = mid; hi = mid - 1 } else lo = mid + 1 }
+  return at
+}
+
 function premiumAt(packed, i) {
   for (let k = i; k >= 0 && k >= i - STALE_MINUTES; k--) {
     const b = barAt(packed, k)
@@ -1983,7 +1995,10 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * `lotSize`, `charges` (on / off) with `sttPct` / `brokeragePerOrder` / `otherPerTrade` (or a `chargesCfg` of them),
  * `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
  * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
- * `lastEntry`. On the options' expiry day (`d.isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
+ * `lastEntry`. `tradeIn` (an index other than the day's) with `{ tradeDay }` (that index's prepared day of the same date):
+ * the signals read on `d`, the trades taken on `tradeDay` at the signal's clock - its ATM, step, premiums and expiry (each
+ * trade carries `tradeIndex`); `lotSize` is the traded index's (engineSettings). On the TRADED options' expiry day
+ * (`isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
  * signal's direction kept: bullish buys the call or sells the put); 'skip' takes no trade that day (its signals are
  * listed, skipped - `expirySkipped`). `maxDayLoss` / `maxDayProfit` (rupees, 0 = off): once the
  * day's net P&L - the closed trades and the open one - reaches either, the open trade exits at it ("Day max loss" / "Day
@@ -1992,7 +2007,7 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * exitReason, points, gross, charges, net, holdMin }`; every signal
  * `{ strategy, time, dir, why, taken, skipped }`.
  */
-export function simulateDay(d, settings = {}) {
+export function simulateDay(d, settings = {}, { tradeDay = null } = {}) {
   const s = { ...BACKTEST_DEFAULTS, ...settings }
   const from = clockMinute(s.entryFrom) ?? 9 * 60 + 30
   const lastEntry = clockMinute(s.lastEntry) ?? 14 * 60 + 45
@@ -2017,9 +2032,23 @@ export function simulateDay(d, settings = {}) {
   // The first candle whose close is in the entry window: a rule already holding then signals on it.
   let openAt = 0
   while (openAt < view.n && istMinute(view.t[openAt]) < from) openAt++
-  // The expiry day's own choice overrides the rule's buy / sell (the signal's direction kept) - or the day is not traded.
-  const expiryMode = d.isExpiry && EXPIRY_MODES.has(s.expiryDay) ? s.expiryDay : null
-  const expirySkipped = Boolean(d.isExpiry) && s.expiryDay === 'skip'
+  // TRADE IN another index (`tradeIn`, asked for - "order punched seeing NIFTY's data but actually to SENSEX"): the
+  // signals are read on `d`, the trades taken on `tradeDay` - that index's ATM at the signal's minute, its step, premiums,
+  // expiry (and, through engineSettings, its lot size). Without its day every signal is skipped.
+  const cross = Boolean(s.tradeIn) && s.tradeIn !== d.underlying
+  const td = cross ? (tradeDay?.ok && tradeDay.underlying === s.tradeIn ? tradeDay : null) : d
+  // The traded day's minute at a signal minute's clock: the last at or before it (a minute it lacks reads the one before,
+  // never one after), within STALE_MINUTES; and back - the signal day's first minute at or after a traded time.
+  const tradeAt = (i) => {
+    if (!cross) return i
+    const j = lastAtOrBefore(td.t, d.t[i])
+    return j >= 0 && d.t[i] - td.t[j] <= STALE_MINUTES * MIN ? j : -1
+  }
+  const signalAt = (j) => (cross ? Math.max(0, firstAtOrAfter(d.t, td.t[j])) : j)
+  // The expiry day's own choice - of the options TRADED - overrides the rule's buy / sell (the signal's direction kept) -
+  // or the day is not traded.
+  const expiryMode = td?.isExpiry && EXPIRY_MODES.has(s.expiryDay) ? s.expiryDay : null
+  const expirySkipped = Boolean(td?.isExpiry) && s.expiryDay === 'skip'
   for (const sig of ruleSignals(view, s.rule, { openAt })) {
     const i = minuteOfSignal(sig.i)
     const { dir, mode: ruleMode } = ACTION[sig.action]
@@ -2029,17 +2058,20 @@ export function simulateDay(d, settings = {}) {
     const minute = istMinute(d.t[i])
     const row = { strategy: sig.side, time: d.t[i], dir, why, taken: false, skipped: null }
     signals.push(row)
+    if (!td) { row.skipped = `no ${s.tradeIn} data this day`; continue }
     if (expirySkipped) { row.skipped = EXPIRY_SKIP_REASON; continue }
     if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
     if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
     if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
     if (dayLimit) { row.skipped = `the day's max ${dayLimit} reached`; continue }
-    const option = optionFor(dir, mode, d.atm[i], d.step, s.moneyness)
+    const j = tradeAt(i)
+    if (j < 0) { row.skipped = `no ${s.tradeIn} minute at the signal`; continue }
+    const option = optionFor(dir, mode, td.atm[j], td.step, s.moneyness)
     const day = dayCfg && { ...dayCfg, realized }
     // No room left under the day's max loss for this trade's own charges (out at its entry would already breach it): the
     // day is done - not a trade that can only exit at once at a loss past the limit.
     if (day?.maxLoss > 0) {
-      const entry = premiumAt((option.side === 'CE' ? d.ce : d.pe).get(option.strike), i)
+      const entry = premiumAt((option.side === 'CE' ? td.ce : td.pe).get(option.strike), j)
       const level = entry > 0 ? dayLevel(option, entry, -day.maxLoss, day) : null
       if (level != null && (option.action === 'SELL' ? level <= entry : level >= entry)) {
         dayLimit = 'loss'
@@ -2047,20 +2079,21 @@ export function simulateDay(d, settings = {}) {
         continue
       }
     }
-    const trade = simulateTrade(d, i, option, { ...s, day })
-    if (!trade) { row.skipped = `no premium for ${option.strike} ${option.side}`; continue }
+    const trade = simulateTrade(td, j, option, { ...s, day })
+    if (!trade) { row.skipped = `no premium for ${cross ? `${s.tradeIn} ` : ''}${option.strike} ${option.side}`; continue }
     row.taken = true
     count++
-    busyUntil = trade.exitIndex + Math.max(0, Math.round(s.cooldownMin))
+    busyUntil = signalAt(trade.exitIndex) + Math.max(0, Math.round(s.cooldownMin))
     const qty = { lots: s.lots, lotSize }
     const money = tradeCharges({ action: option.action, premium: trade.entry, current: trade.exit, ...qty }, rates)
     const gross = trade.points * s.lots * lotSize
     const net = s.charges && money ? money.net : gross
     trades.push({
-      date: d.date, strategy: sig.side, dir, why, ...option, expiryDay: Boolean(d.isExpiry), overridden,
-      entryTime: d.t[trade.entryIndex], exitTime: d.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
+      date: d.date, strategy: sig.side, dir, why, ...option, ...(cross ? { tradeIndex: td.underlying } : {}), expiryDay: Boolean(td.isExpiry), overridden,
+      // Entered at the signal's clock (the traded index's last premium then - a minute it lacks reads the one before).
+      entryTime: d.t[i], exitTime: td.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
       points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net,
-      holdMin: Math.round((d.t[trade.exitIndex] - d.t[trade.entryIndex]) / MIN),
+      holdMin: Math.round((td.t[trade.exitIndex] - d.t[i]) / MIN),
     })
     // The day's limits: reached (by this trade's own stop / target, or at the limit itself) - no more trades today.
     realized += net
@@ -2134,6 +2167,9 @@ export function summarize(trades) {
 }
 
 /** The trades as CSV text (one row a trade). */
+/** A trade's option as the report names it: "25000 CE" - with its index when traded in another (`tradeIndex`): "SENSEX 82000 CE". */
+export const optionName = (t) => `${t.tradeIndex ? `${t.tradeIndex} ` : ''}${t.strike} ${t.side}`
+
 export function tradesCsv(trades) {
   const name = { rule: 'Rule', mirror: 'Mirror' }
   const time = (ms) => hhmm(istMinute(ms))
@@ -2144,7 +2180,7 @@ export function tradesCsv(trades) {
   }
   const head = ['date', 'rule', 'signal', 'action', 'option', 'entry time', 'entry', 'exit time', 'exit', 'exit reason', 'points', 'gross', 'charges', 'net', 'expiry day', 'why']
   const rows = trades.map((t) => [
-    t.date, name[t.strategy] ?? t.strategy, t.dir > 0 ? 'bullish' : 'bearish', t.action, `${t.strike} ${t.side}`, time(t.entryTime), t.entry.toFixed(2),
+    t.date, name[t.strategy] ?? t.strategy, t.dir > 0 ? 'bullish' : 'bearish', t.action, optionName(t), time(t.entryTime), t.entry.toFixed(2),
     time(t.exitTime), t.exit.toFixed(2), t.exitReason, t.points.toFixed(2), t.gross.toFixed(0), t.charges.toFixed(0), t.net.toFixed(0),
     t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', t.why,
   ])
