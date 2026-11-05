@@ -504,7 +504,14 @@ When adding or changing a strategy:
   auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
-  weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
+  weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
+  I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone
+  (<= 768 px) a From and a To picker of ONE month each - the two-month range picker was wider than the screen, its older
+  month ran off the left edge with its ◀ / «, so the dates showing there were that month's and earlier years could not be
+  reached; a From after the To moves the To and the other way round (`withRangeEnd`); wider, the range picker; every one
+  takes a date TYPED as 2025-01-06, 06/01/2025, 6-1-2025, 06.01.2025, 6 Jan 2025… (`DATE_INPUT_FORMATS`), past days only,
+  and QUICK RANGES (`rangePresets` - last 2 weeks / month / 3 / 6 / 12 months, this year, last year - the range picker's
+  presets, a phone's dropdown); a range longer than a background run takes says it runs the latest 300) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
   and the weighted vote were replaced by it on request) - with DROPDOWNS, no typing (asked for): a TREE of GROUPS
   (`rule.tree` - `cleanTree`, `RuleGroup` / `ConditionRow` on the page): each group "Match ALL of these (AND)" or "ANY of
   these (OR)", a NOT tick, its CONDITIONS and its own GROUPS (+ Condition / + Group ( ) - a group inside a group is a pair
