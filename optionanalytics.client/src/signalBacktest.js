@@ -65,9 +65,17 @@ function legsByStrike(points) {
     if (!Number.isFinite(t)) continue
     let m = byStrike.get(p.strike)
     if (!m) byStrike.set(p.strike, m = new Map())
-    m.set(t, { o: p.open > 0 ? p.open : p.price, h: p.high > 0 ? p.high : p.price, l: p.low > 0 ? p.low : p.price, c: p.price, oi: p.openInterest ?? null })
+    m.set(t, { o: p.open > 0 ? p.open : p.price, h: p.high > 0 ? p.high : p.price, l: p.low > 0 ? p.low : p.price, c: p.price, oi: p.openInterest ?? null, v: p.volume > 0 ? p.volume : 0 })
   }
   return byStrike
+}
+
+/** A side's traded volume as one Float64Array per strike: per minute of `times`, 0 where the minute has none (a minute the
+ *  server carried over a gap has 0 too) - each premium's own VWAP (`premiumCandles`). */
+function packVolumes(byStrike, times) {
+  const out = new Map()
+  for (const [strike, minutes] of byStrike) out.set(strike, Float64Array.from(times, (t) => minutes.get(t)?.v ?? 0))
+  return out
 }
 
 /** A side's bars as one Float64Array per strike: [o, h, l, c] per minute of `times`, NaN where the minute has none. */
@@ -120,7 +128,7 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * optionExpiry); `prevProfile` the previous day's volume profile response (`previousProfile` - its levels; its `bars`, the
  * previous session's spot minutes - `previousDayBars` - give the pivot points and the indicators' warm-up). Returns `{ ok:
  * true, date, underlying, step, n, t, spot, price, priceSource, vwap, spotVwap, oi, breaks, hp, walls, gex, straddle, ib,
- * prevVp, prevDay, pivots, atm, ce, pe, ceCum, peCum, netCum, expiry, isExpiry }` - or `{ ok: false, reason }`.
+ * prevVp, prevDay, pivots, atm, ce, pe, ceVol, peVol, ceCum, peCum, netCum, expiry, isExpiry }` - or `{ ok: false, reason }`.
  * `expiry` = the expiry of the options loaded (the run's `optionExpiry` - the weekly, BANKNIFTY's monthly), `isExpiry` =
  * the day IS that expiry (known before the open - the expiry calendar).
  */
@@ -262,7 +270,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
     prevVp: previousProfile(prevProfile, date),
     prevDay, pivots: pivotLevels(prevDay),
-    ce: packBars(ceLegs, t), pe: packBars(peLegs, t),
+    ce: packBars(ceLegs, t), pe: packBars(peLegs, t), ceVol: packVolumes(ceLegs, t), peVol: packVolumes(peLegs, t),
     expiry, isExpiry: expiry === date,
   }
 }
@@ -349,7 +357,7 @@ export function timeframeView(d, tf = 1) {
   const reads = d.oiTf?.[m] ?? { breaks: d.breaks, hp: d.hp, ceCum: d.ceCum, peCum: d.peCum, netCum: d.netCum }
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
-    ...d, tf: m, n: first.length, at: Int32Array.from(last),
+    ...d, tf: m, n: first.length, at: Int32Array.from(last), from: Int32Array.from(first),
     t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
     vwap: pick(d.vwap), spotVwap: pick(d.spotVwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
@@ -436,6 +444,63 @@ export function emaSeries(d, p = 20) {
 export function rsiSeries(d, p = 14) {
   const n = fitPeriod(p, 14)
   return indicatorCache(d, `rsi${n}`, () => { const { warm, closes } = indicatorCloses(d); return rsiOver(closes, n).subarray(warm) })
+}
+
+// ---- An option's premium on its own chart (the ATM strike's CE / PE): its candles, VWAP, EMAs and RSI ----------------
+// The strike's own 1-minute bars in candles of the timeframe read: a candle's OHLC from its minutes (a minute with no bar
+// adds nothing; a candle with none carries the last close), its volume their sum, its VWAP the premium's own from the
+// day's first minute to the candle's last (typical price x volume - the minutes the server carried over a gap have no
+// volume). No warm-up from the day before (its option bars are not loaded): the EMAs / RSI start at the strike's first
+// candle of the day. Each candle from its minutes and those before (no look-ahead).
+
+/** One strike's premium (`side` 'ce' / 'pe') in the candles of `d`: { o, h, l, c, v, vwap } (Float64Arrays, NaN before its
+ *  first bar). */
+export function premiumCandles(d, side, strike) {
+  return indicatorCache(d, `prem|${side}|${strike}`, () => {
+    const n = d.n
+    const out = { o: new Float64Array(n).fill(NaN), h: new Float64Array(n).fill(NaN), l: new Float64Array(n).fill(NaN), c: new Float64Array(n).fill(NaN), v: new Float64Array(n), vwap: new Float64Array(n).fill(NaN) }
+    const packed = (side === 'pe' ? d.pe : d.ce)?.get(strike)
+    if (!packed) return out
+    const vols = (side === 'pe' ? d.peVol : d.ceVol)?.get(strike)
+    const at = d.at, from = d.from
+    let pv = 0, vol = 0, last = NaN, minute = 0
+    for (let k = 0; k < n; k++) {
+      const a = from ? from[k] : k, b = at ? at[k] : k
+      let o = NaN, h = -Infinity, l = Infinity, c = NaN, v = 0
+      // The minutes before this candle's first (a 1-minute day has none) and the candle's own count for the VWAP.
+      for (; minute <= b; minute++) {
+        const bo = packed[minute * 4]
+        if (!Number.isFinite(bo)) continue
+        const bh = packed[minute * 4 + 1], bl = packed[minute * 4 + 2], bc = packed[minute * 4 + 3]
+        const bv = vols?.[minute] ?? 0
+        if (bv > 0) { pv += ((bh + bl + bc) / 3) * bv; vol += bv }
+        if (minute < a) { last = bc; continue }
+        if (!Number.isFinite(o)) o = bo
+        h = Math.max(h, bh); l = Math.min(l, bl); c = bc; v += bv
+      }
+      if (Number.isFinite(c)) { out.o[k] = o; out.h[k] = h; out.l[k] = l; out.c[k] = c; last = c } else if (Number.isFinite(last)) { out.o[k] = out.h[k] = out.l[k] = out.c[k] = last }
+      out.v[k] = v
+      if (vol > 0) out.vwap[k] = pv / vol
+    }
+    return out
+  })
+}
+// An indicator of values that start NaN (a premium before its first bar): worked out from the first finite one on.
+function fromFirst(values, fn) {
+  const start = values.findIndex(Number.isFinite)
+  const out = new Float64Array(values.length).fill(NaN)
+  if (start >= 0) out.set(fn(values.subarray(start)), start)
+  return out
+}
+/** The EMA (`p` candles) of a strike's premium closes, a value a candle of `d`. */
+export function premiumEma(d, side, strike, p = 20) {
+  const n = fitPeriod(p, 20)
+  return indicatorCache(d, `premEma|${side}|${strike}|${n}`, () => fromFirst(premiumCandles(d, side, strike).c, (x) => emaOver(x, n)))
+}
+/** The RSI (`p` candles) of a strike's premium closes, a value a candle of `d`. */
+export function premiumRsi(d, side, strike, p = 14) {
+  const n = fitPeriod(p, 14)
+  return indicatorCache(d, `premRsi|${side}|${strike}|${n}`, () => fromFirst(premiumCandles(d, side, strike).c, (x) => rsiOver(x, n)))
 }
 
 // ---- The rule ---------------------------------------------------------------------------------------------------------
@@ -691,6 +756,105 @@ const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevPro
 // the level on the other side (R1 <-> S1; P stays P).
 const pivotLevel = (key, name, mirror) => ({ ...levelCondition({ id: `pivot${key.toUpperCase()}`, group: 'Pivots', name, short: `pivot ${key.toUpperCase()}`, level: (d) => d.pivots?.[key] }), mirror: `pivot${mirror.toUpperCase()}` })
 
+// The ATM strike's CE / PE premium on its own chart (`premiumCandles`): vs its VWAP, vs an EMA, an EMA crossover, RSI - the
+// strike ATM at the candle (spot's nearest), its own series up to it. The mirror is the other side's same condition (CE
+// over its VWAP <-> PE over its VWAP - the numbers kept), so each option keeps its value.
+const PREMIUM_RSI_LEVEL = (def) => ({ param: { label: 'level', unit: '', default: def, min: 1, max: 99, step: 1 } })
+function premiumConditions(side) {
+  const SIDE = side.toUpperCase()
+  const other = side === 'ce' ? 'Pe' : 'Ce'
+  const id = (kind) => `${side}Prem${kind}`
+  const strikeAt = (d, i) => d.atm?.[i]
+  const name = (what) => `ATM ${SIDE} premium: ${what}`
+  // Above / below a line (by ≥ % of it) and crossed it in the look-back (still past it, by the % now).
+  const versus = (d, i, v, w, p, line) => {
+    const k = strikeAt(d, i)
+    if (!Number.isFinite(k)) return false
+    const c = premiumCandles(d, side, k).c
+    const x = line(k)
+    const gap = (j) => c[j] - x[j]
+    const far = () => Math.abs(gap(i)) >= frac(p) * x[i]
+    switch (v) {
+      case 'above': return gap(i) > 0 && far()
+      case 'below': return gap(i) < 0 && far()
+      case 'crossedAbove': return crossed(gap, i, w, true) && far()
+      case 'crossedBelow': return crossed(gap, i, w, false) && far()
+      default: return false
+    }
+  }
+  const showPrem = (d, i, more) => {
+    const k = strikeAt(d, i)
+    return Number.isFinite(k) ? `${k} ${SIDE} ${fmtP(premiumCandles(d, side, k).c[i])}${more ? ` · ${more(k)}` : ''}` : `${SIDE} —`
+  }
+  return [
+    {
+      id: id('Vwap'), group: 'Options', mirror: `${other.toLowerCase()}PremVwap`, name: name('vs its VWAP'),
+      options: [
+        opt('above', 'Premium above its VWAP', 'above', OVER_WIDE), opt('below', 'Premium below its VWAP', 'below', OVER_WIDE),
+        opt('crossedAbove', 'Crossed above its VWAP', 'crossedAbove', { ...W, ...OVER_WIDE }), opt('crossedBelow', 'Crossed below its VWAP', 'crossedBelow', { ...W, ...OVER_WIDE }),
+      ],
+      test: (d, i, v, w, p) => versus(d, i, v, w, p, (k) => premiumCandles(d, side, k).vwap),
+      show: (d, i) => showPrem(d, i, (k) => `its VWAP ${fmtP(premiumCandles(d, side, k).vwap[i])}`),
+    },
+    {
+      id: id('Ema'), group: 'Options', mirror: `${other.toLowerCase()}PremEma`, name: name('vs an EMA'),
+      options: [
+        opt('above', 'Premium above the EMA', 'above', { ...OVER_WIDE, ...EMA_PERIOD }), opt('below', 'Premium below the EMA', 'below', { ...OVER_WIDE, ...EMA_PERIOD }),
+        opt('crossedAbove', 'Crossed above the EMA', 'crossedAbove', { ...W, ...OVER_WIDE, ...EMA_PERIOD }), opt('crossedBelow', 'Crossed below the EMA', 'crossedBelow', { ...W, ...OVER_WIDE, ...EMA_PERIOD }),
+      ],
+      test: (d, i, v, w, p, p2) => versus(d, i, v, w, p, (k) => premiumEma(d, side, k, fitPeriod(p2, 20))),
+      show: (d, i, l) => showPrem(d, i, (k) => `EMA ${fitPeriod(l?.param2, 20)} ${fmtP(premiumEma(d, side, k, fitPeriod(l?.param2, 20))[i])}`),
+    },
+    {
+      id: id('EmaCross'), group: 'Options', mirror: `${other.toLowerCase()}PremEmaCross`, name: name('EMA crossover'),
+      options: [
+        opt('fastAbove', 'Fast EMA above the slow', 'fastAbove', { ...OVER_WIDE, ...EMA_FAST_SLOW }), opt('fastBelow', 'Fast EMA below the slow', 'fastBelow', { ...OVER_WIDE, ...EMA_FAST_SLOW }),
+        opt('crossedUp', 'Fast crossed above the slow', 'crossedUp', { ...W, ...OVER_WIDE, ...EMA_FAST_SLOW }), opt('crossedDown', 'Fast crossed below the slow', 'crossedDown', { ...W, ...OVER_WIDE, ...EMA_FAST_SLOW }),
+      ],
+      test: (d, i, v, w, p, p2, p3) => {
+        const k = strikeAt(d, i)
+        if (!Number.isFinite(k)) return false
+        const fast = premiumEma(d, side, k, fitPeriod(p2, 9)), slow = premiumEma(d, side, k, fitPeriod(p3, 21))
+        const gap = (j) => fast[j] - slow[j]
+        const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
+        switch (v) {
+          case 'fastAbove': return gap(i) > 0 && far()
+          case 'fastBelow': return gap(i) < 0 && far()
+          case 'crossedUp': return crossed(gap, i, w, true) && far()
+          case 'crossedDown': return crossed(gap, i, w, false) && far()
+          default: return false
+        }
+      },
+      show: (d, i, l) => showPrem(d, i, (k) => {
+        const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
+        return `EMA ${f} ${fmtP(premiumEma(d, side, k, f)[i])} · EMA ${sl} ${fmtP(premiumEma(d, side, k, sl)[i])}`
+      }),
+    },
+    {
+      id: id('Rsi'), group: 'Options', mirror: `${other.toLowerCase()}PremRsi`, name: name('RSI'),
+      options: [
+        opt('above', 'Above the level', 'above', { ...PREMIUM_RSI_LEVEL(60), ...RSI_PERIOD }), opt('below', 'Below the level', 'below', { ...PREMIUM_RSI_LEVEL(40), ...RSI_PERIOD }),
+        opt('crossedAbove', 'Crossed above the level', 'crossedAbove', { ...W, ...PREMIUM_RSI_LEVEL(50), ...RSI_PERIOD }),
+        opt('crossedBelow', 'Crossed below the level', 'crossedBelow', { ...W, ...PREMIUM_RSI_LEVEL(50), ...RSI_PERIOD }),
+      ],
+      test: (d, i, v, w, p, p2) => {
+        const k = strikeAt(d, i)
+        if (!Number.isFinite(k)) return false
+        const r = premiumRsi(d, side, k, p2)
+        const past = (j) => r[j] - p
+        switch (v) {
+          case 'above': return r[i] > p
+          case 'below': return r[i] < p
+          case 'crossedAbove': return crossed(past, i, w, true)
+          case 'crossedBelow': return crossed(past, i, w, false)
+          default: return false
+        }
+      },
+      show: (d, i, l) => showPrem(d, i, (k) => { const n = fitPeriod(l?.param2, 14); return `RSI(${n}) ${fmtP(premiumRsi(d, side, k, n)[i])}` }),
+    },
+  ]
+}
+
 /** The conditions a rule is built from - each with its dropdown's options (`opposite`: the mirror's; `windowed`,
  *  `param` / `param2` / `param3`: what the line takes - `param.mirror`, how the mirror reads the number) and `mirror` (a
  *  condition whose mirror is another one - pivot R1 <-> S1). `test(d, i, value, windowCandles, param, param2, param3)`;
@@ -914,6 +1078,8 @@ export const RULE_CONDITIONS = [
     },
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 20); return `spot ${fmtP(d.spot.c[i])} · EMA ${n} ${fmtP(emaSeries(d, n)[i])}` },
   },
+  ...premiumConditions('ce'),
+  ...premiumConditions('pe'),
   {
     id: 'straddle', group: 'Straddle', name: 'ATM straddle',
     options: [

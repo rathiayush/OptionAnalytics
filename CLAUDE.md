@@ -577,7 +577,15 @@ When adding or changing a strategy:
   the higher one TC: above / inside / below, crossed through TC / BC, narrow / wide by its width in % of P). The previous
   session is the previous-day profile response's own `bars` (`previousDayBars` - its session minutes, of its own day, before
   the day run) - a day whose previous session had no index volume has no profile, so no pivots (the report lists those days,
-  `noPivots`, when the rule reads them) and its RSI / EMAs start at 09:15. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
+  `noPivots`, when the rule reads them) and its RSI / EMAs start at 09:15. OPTION PREMIUM TA (asked for - "TA indicators on
+  ... option prices, like ema crossover or above vwap"): the ATM CE / PE premium on its OWN chart (`premiumConditions` -
+  `cePremVwap` / `cePremEma` / `cePremEmaCross` / `cePremRsi` and the PE's): vs its own VWAP (typical price x the strike's
+  traded volume from 09:15 - `ceVol` / `peVol`, kept by `prepareDay`; a minute the server carried over a gap has 0 volume; no
+  volume = no VWAP, never true), vs an EMA, an EMA crossover, RSI - `premiumCandles` / `premiumEma` / `premiumRsi` over the
+  timeframe's candles (a candle with no bar carries the last close; from the strike's first bar, no warm-up - the day before's
+  option bars are not loaded); the strike is the ATM at the candle (spot's nearest), read on its own series up to it. The
+  mirror is the OTHER SIDE's same condition, value and numbers kept (CE over its VWAP <-> PE over its VWAP - the condition's
+  `mirror`). `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
   "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
@@ -647,7 +655,13 @@ When adding or changing a strategy:
   (on spot the index's own - `spotVwap`, kept in `prepareDay` - none without index volume; on futures the rule's), the EMAs
   and RSI pane (the rule's periods, else 9 / 21 and 14; RSI's lines at the rule's levels) and the pivots / CPR - the engine's
   own series, so it shows what the rule read; the ticks default to what the rule reads (`ruleIndicators`) and are kept once
-  changed (`optionanalytics.signalBacktest.chartShow` / `chartSource`). The page's run has its days already; a BACKGROUND
+  changed (`optionanalytics.signalBacktest.chartShow` / `chartSource`). Asked for next ("time frame option ... and close",
+  "two ema configurable", option prices): its own TIMEFRAME (`chartTimeframe` - "Run's" by default; another one says the
+  rule read the run's), the TWO EMAs set on the chart (`chartEma` - else the rule's periods, else 9 / 21), CLOSE (`chartOpen`
+  - a click on a Day by day / Trades row opens it again; a closed chart loads nothing; on a phone Close is in the controls
+  row - the card's corner can sit under the floating ☰) and "Spot / Futures / OPTION": any strike of the day (`dayOptions`;
+  by default the day's first trade's - `defaultChartOption` - a click on a trade's tag under the chart shows its option) with
+  its own VWAP / EMAs / RSI and only its own trades tagged. The page's run has its days already; a BACKGROUND
   run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
   loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
   `tests/signal-backtest-chart.test.mjs`. A backtest of the rule as set, not a tuning; it places

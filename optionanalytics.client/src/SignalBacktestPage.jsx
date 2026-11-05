@@ -54,11 +54,12 @@ const STORE = {
   rule: 'optionanalytics.signalBacktest.rule',
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
   expiryDay: 'optionanalytics.signalBacktest.expiryDay',
+  chartOpen: 'optionanalytics.signalBacktest.chartOpen',
 }
 const SIDE = { rule: { name: 'Rule', color: '#4096ff' }, mirror: { name: 'Mirror', color: '#fa8c16' }, all: { name: 'Both', color: '#e6e6e6' } }
 const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
 const GROUP_TITLE = {
-  OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Straddle: 'ATM straddle', Profile: "Today's market profile",
+  OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Options: "Option premium - the ATM strike's own chart (VWAP, EMA, RSI)", Straddle: 'ATM straddle', Profile: "Today's market profile",
   PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
 }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
@@ -456,11 +457,13 @@ export default function SignalBacktestPage() {
   // The day chart: the day picked (a click on a day / trade row picks it too) - the page's own days are already loaded, a
   // background run's day is loaded when it is picked.
   const [chartDate, setChartDate] = useState(null)
+  const [chartOpen, setChartOpen] = usePersistedState(STORE.chartOpen, true)
   const chartRef = useRef(null)
   const ownDays = useMemo(() => new Map(run.results.filter((r) => r.day?.ok).map((r) => [r.date, r.day])), [run.results])
   const dayOf = useMemo(() => (viewing ? () => null : (date) => ownDays.get(date) ?? null), [viewing, ownDays])
   const showOnChart = (date) => {
     setChartDate(date)
+    setChartOpen(true)
     chartRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
   const chartLines = useMemo(() => (report?.lines ?? []).map((l) => ({ ...l, color: SIDE[l.id]?.color ?? '#e6e6e6' })), [report])
@@ -701,7 +704,9 @@ export default function SignalBacktestPage() {
                 its VWAP or of the decay-only line. RSI and the EMAs (price vs one, or a fast / slow crossover - their periods on the
                 row) are worked out on the spot candles of the Timeframe, run on from the previous session&apos;s; RSI&apos;s number is
                 its level (the mirror reads it from the other end: above 60 is below 40). The pivot points (P, R1 - R3, S1 - S3) and the
-                CPR are the classic floor pivots of the previous session&apos;s high, low and close (the mirror of R1 is S1). After a run
+                CPR are the classic floor pivots of the previous session&apos;s high, low and close (the mirror of R1 is S1). The ATM CE /
+                PE premium conditions read the ATM strike&apos;s own chart - its premium against its own VWAP (from its traded volume), an
+                EMA, an EMA crossover or RSI, on the Timeframe&apos;s candles from 09:15; the mirror reads the other side&apos;s (CE ↔ PE). After a run
                 the spot chart shows any day with its trades tagged BUY / SELL - click a day or a trade. Run in background hands the same run to the server - now,
                 after the close or at a time - so the browser can be closed; its report waits under Background runs (Open).
               </Text>
@@ -769,7 +774,7 @@ export default function SignalBacktestPage() {
             </Card>
             <BacktestDayChartCard
               report={report} settings={shown.settings} runKey={shown.job?.id ?? 'page'} dayOf={dayOf} loadDay={loadDay}
-              date={chartDate} onDate={setChartDate} cardRef={chartRef}
+              date={chartDate} onDate={setChartDate} open={chartOpen !== false} onOpen={setChartOpen} cardRef={chartRef}
             />
             <Card
               size="small" title={`Trades (${shownTrades.length})`}

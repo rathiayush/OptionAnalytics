@@ -3,8 +3,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
-import { emaSeries, prepareDay, simulateDay, timeframeView } from '../src/signalBacktest.js'
-import { candleStart, dayChartData, defaultChartDay, ruleIndicators, skippedMarkers, tradeMarkers } from '../src/signalBacktestChart.js'
+import { emaSeries, premiumCandles, premiumEma, prepareDay, simulateDay, timeframeView } from '../src/signalBacktest.js'
+import { candleStart, dayChartData, dayOptions, defaultChartDay, defaultChartOption, ruleIndicators, skippedMarkers, tradeMarkers } from '../src/signalBacktestChart.js'
 
 const MIN = 60_000
 const T915 = Date.parse('2026-10-05T09:15:00+05:30')
@@ -70,8 +70,11 @@ test('the indicators a rule reads - its own periods and RSI levels (the mirror\'
   const tree = (lines) => ({ tree: { op: 'and', not: false, items: lines.map((line) => ({ line })) }, action: 'buyCE', mirror: true })
   assert.deepEqual(ruleIndicators(tree([
     { id: 'emaCross', value: 'crossedUp', param2: 5, param3: 13 }, { id: 'emaPrice', value: 'above', param2: 50 }, { id: 'rsi', value: 'above', param: 60, param2: 9 }, { id: 'pivotR1', value: 'above' },
-  ])), { ema: [5, 13, 50], rsi: 9, rsiLevels: [40, 60], pivots: true })
-  assert.deepEqual(ruleIndicators(tree([{ id: 'vwap', value: 'above' }])), { ema: [], rsi: null, rsiLevels: [], pivots: false })
+  ])), { ema: [5, 13, 50], rsi: 9, rsiLevels: [40, 60], pivots: true, premium: false })
+  assert.deepEqual(ruleIndicators(tree([{ id: 'vwap', value: 'above' }])), { ema: [], rsi: null, rsiLevels: [], pivots: false, premium: false })
+  // A premium's: its EMAs and RSI - the mirror reads the other side's at the same level.
+  assert.deepEqual(ruleIndicators(tree([{ id: 'cePremEmaCross', value: 'crossedUp', param2: 7, param3: 30 }, { id: 'pePremRsi', value: 'above', param: 65, param2: 10 }])),
+    { ema: [7, 30], rsi: 10, rsiLevels: [65], pivots: false, premium: true })
   assert.equal(ruleIndicators(tree([{ id: 'cpr', value: 'narrow' }])).pivots, true)
 })
 
@@ -79,4 +82,25 @@ test('the day picked by default: the first with a trade, else the first that ran
   assert.equal(defaultChartDay([{ date: 'a', ok: false, trades: 0 }, { date: 'b', ok: true, trades: 0 }, { date: 'c', ok: true, trades: 2 }]), 'c')
   assert.equal(defaultChartDay([{ date: 'a', ok: false, trades: 0 }, { date: 'b', ok: true, trades: 0 }]), 'b')
   assert.equal(defaultChartDay([]), null)
+})
+
+test('an option\'s chart: the strike\'s premium candles with its own VWAP / EMAs / RSI; the strikes offered, the one opened on', () => {
+  const { run } = syntheticDay()
+  const day = prepareDay({ ...run, cePoints: run.cePoints.map((p) => ({ ...p, volume: 40 })) }, { underlying: 'NIFTY' })
+  const strike = day.atm[0]
+  const chart = dayChartData(day, { timeframe: 5, source: 'option', option: { side: 'ce', strike }, ema: [9], rsi: 14 })
+  const view = timeframeView(day, 5)
+  const p = premiumCandles(view, 'ce', strike)
+  assert.deepEqual(chart.option, { side: 'ce', strike })
+  assert.equal(chart.candles[0].close, p.c[0])
+  assert.equal(chart.vwap.at(-1).value, p.vwap.at(-1))
+  assert.equal(chart.emas[0].points.at(-1).value, premiumEma(view, 'ce', strike, 9).at(-1))
+  assert.ok(chart.rsi.points.length > 0 && chart.pivots === null)
+  // The strikes offered: every strike loaded, CE and PE, the open's ATM first.
+  const offered = dayOptions(day)
+  assert.deepEqual(offered.slice(0, 2).map((o) => o.value), [`ce|${strike}`, `pe|${strike}`])
+  assert.equal(offered.length, day.ce.size + day.pe.size)
+  // Opened on the day's first trade's option, else the ATM call.
+  assert.deepEqual(defaultChartOption(day, [{ side: 'PE', strike: 22800 }]), { side: 'pe', strike: 22800 })
+  assert.deepEqual(defaultChartOption(day, []), { side: 'ce', strike })
 })

@@ -6,8 +6,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  RULE_CONDITIONS, cleanLine, emaOver, emaSeries, lineText, mirrorIsSame, mirrorLines, pivotLevels, prepareDay, previousDayBars, ruleSignals, rsiOver, rsiSeries,
-  simulateDay, timeframeView,
+  RULE_CONDITIONS, cleanLine, emaOver, emaSeries, lineText, mirrorIsSame, mirrorLines, pivotLevels, premiumCandles, premiumEma, premiumRsi, prepareDay, previousDayBars,
+  ruleSignals, rsiOver, rsiSeries, simulateDay, timeframeView,
 } from '../src/signalBacktest.js'
 import { backtestReport, dayOutcome, engineSettings } from '../src/signalBacktestJob.js'
 
@@ -220,4 +220,90 @@ test('the report says which days ran without the previous session (no pivots) wh
   d.atm = d.atm.map(() => 25050)
   const { trades } = simulateDay(d, { ...engine, charges: false })
   assert.equal(trades.length > 0, true)
+})
+
+// The options' legs for fakeDay: { [strike]: (i) => price | null } per side, a flat bar at the price, `vol(i)` its volume.
+function withLegs(d, { ce = {}, pe = {}, vol = () => 100 } = {}) {
+  const pack = (f) => { const a = new Float64Array(d.n * 4).fill(NaN); for (let i = 0; i < d.n; i++) { const p = f(i); if (p != null) a.fill(p, i * 4, i * 4 + 4) } return a }
+  const vols = (f) => Float64Array.from({ length: d.n }, (_, i) => (f(i) != null ? vol(i) : 0))
+  const side = (legs) => new Map(Object.entries(legs).map(([k, f]) => [Number(k), pack(f)]))
+  const sideVol = (legs) => new Map(Object.entries(legs).map(([k, f]) => [Number(k), vols(f)]))
+  return { ...d, ce: side(ce), pe: side(pe), ceVol: sideVol(ce), peVol: sideVol(pe) }
+}
+
+test('an option\'s premium on its own chart: its candles, its own VWAP from the open, NaN before its first bar', () => {
+  // The 25000 CE from minute 3 (none before), 100 then +1 a minute; volume 100, but 300 from minute 10.
+  const d = withLegs(fakeDay({ n: 30 }), { ce: { 25000: (i) => (i < 3 ? null : 100 + i) } , vol: (i) => (i >= 10 ? 300 : 100) })
+  const one = premiumCandles(d, 'ce', 25000)
+  assert.ok(Number.isNaN(one.c[2]) && one.c[3] === 103 && one.c[29] === 129)
+  // VWAP at minute 4: (103 x 100 + 104 x 100) / 200 = 103.5; at 10: (sum 103..109 x 100 + 110 x 300) / 1000.
+  assert.equal(one.vwap[4], 103.5)
+  const sum = [103, 104, 105, 106, 107, 108, 109].reduce((a, x) => a + x * 100, 0) + 110 * 300
+  assert.ok(Math.abs(one.vwap[10] - sum / 1000) < 1e-9)
+  // 5-minute candles: OHLC of the minutes, volume summed; the VWAP at each candle's last minute.
+  const v5 = premiumCandles(timeframeView(d, 5), 'ce', 25000)
+  assert.deepEqual([v5.o[0], v5.h[0], v5.l[0], v5.c[0], v5.v[0]], [103, 104, 103, 104, 200])
+  assert.deepEqual([v5.o[2], v5.c[2], v5.v[2]], [110, 114, 1500])
+  assert.equal(v5.vwap[2], one.vwap[14])
+  // A strike with no bars: nothing; a gap carries the last close.
+  assert.ok(Number.isNaN(premiumCandles(d, 'pe', 25000).c[10]))
+  const gap = withLegs(fakeDay({ n: 30 }), { ce: { 25000: (i) => (i >= 10 && i < 20 ? null : 100 + i) } })
+  assert.equal(premiumCandles(gap, 'ce', 25000).c[15], 109)
+  // EMA / RSI from its first bar on.
+  assert.ok(Number.isNaN(premiumEma(d, 'ce', 25000, 3)[4]) && premiumEma(d, 'ce', 25000, 3)[5] === 104)
+  assert.equal(premiumRsi(d, 'ce', 25000, 3)[6], 100)
+})
+
+test('the ATM CE / PE premium conditions: vs its VWAP, vs an EMA, an EMA crossover, RSI - the ATM strike\'s own chart, both sides', () => {
+  // Spot at 25000 (ATM 25000). The CE falls to 80 by minute 40, then rises; the PE the other way.
+  const ce = (i) => (i < 40 ? 120 - i : 80 + (i - 40) * 1.5)
+  const pe = (i) => (i < 40 ? 80 + i : 120 - (i - 40) * 1.5)
+  const d = withLegs(fakeDay({ n: 120 }), { ce: { 25000: ce }, pe: { 25000: pe } })
+  const c = premiumCandles(d, 'ce', 25000)
+  const over = c.c.findIndex((x, k) => k > 40 && x > c.vwap[k])
+  assert.ok(over > 40 && over < 80, `CE over its VWAP at ${over}`)
+  assert.ok(holds(d, 'cePremVwap', 'below', 30) && !holds(d, 'cePremVwap', 'above', 30))
+  assert.ok(holds(d, 'cePremVwap', 'crossedAbove', over) && !holds(d, 'cePremVwap', 'crossedAbove', over - 1) && !holds(d, 'cePremVwap', 'crossedAbove', over + 5))
+  assert.ok(holds(d, 'cePremVwap', 'above', 110) && holds(d, 'pePremVwap', 'below', 110))
+  // By ≥ % of the VWAP.
+  const pct = ((c.c[110] - c.vwap[110]) / c.vwap[110]) * 100
+  assert.ok(holds(d, 'cePremVwap', 'above', 110, { p: pct - 0.5 }) && !holds(d, 'cePremVwap', 'above', 110, { p: pct + 0.5 }))
+  // EMA crossover of the premium (5 / 13) and premium vs EMA 20.
+  const f = premiumEma(d, 'ce', 25000, 5), sl = premiumEma(d, 'ce', 25000, 13)
+  const cross = f.findIndex((x, k) => k > 40 && x > sl[k])
+  assert.ok(holds(d, 'cePremEmaCross', 'crossedUp', cross, { p2: 5, p3: 13 }) && !holds(d, 'cePremEmaCross', 'crossedUp', cross - 1, { p2: 5, p3: 13 }))
+  assert.ok(holds(d, 'pePremEmaCross', 'crossedDown', cross, { p2: 5, p3: 13 }))
+  assert.ok(holds(d, 'cePremEma', 'above', 110) && !holds(d, 'cePremEma', 'below', 110) && holds(d, 'cePremEma', 'below', 35))
+  // RSI of the premium.
+  assert.ok(holds(d, 'cePremRsi', 'above', 110) && holds(d, 'pePremRsi', 'below', 110) && !holds(d, 'cePremRsi', 'below', 110))
+  // Only the ATM strike's chart: spot moved to 25100 - the 25100 CE (none loaded) is read, not the 25000.
+  const moved = { ...d, atm: d.atm.map((x, i) => (i >= 100 ? 25100 : x)) }
+  assert.ok(!holds(moved, 'cePremVwap', 'above', 110) && holds(moved, 'cePremVwap', 'above', 90))
+  // The mirror: the other side's same condition, its value and numbers kept.
+  const line = cleanLine({ id: 'cePremEmaCross', value: 'crossedUp', param: 1, param2: 5, param3: 13, windowMin: 10 })
+  assert.deepEqual(mirrorLines([line]).map((l) => [l.id, l.value, l.param, l.param2, l.param3, l.windowMin]), [['pePremEmaCross', 'crossedUp', 1, 5, 13, 10]])
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'pePremRsi', value: 'above', param: 60 })]).map((l) => [l.id, l.value, l.param]), [['cePremRsi', 'above', 60]])
+  assert.equal(mirrorIsSame([line]), false)
+  assert.match(lineText(cleanLine({ id: 'cePremVwap', value: 'crossedAbove', param: 2 })), /^ATM CE premium: vs its VWAP: Crossed above its VWAP by ≥ 2% \(last 5 min\)$/)
+  // A rule on it: buy the call when the CE premium crosses over its VWAP; the mirror buys the put on the PE's.
+  const sig = ruleSignals(d, { lines: [{ id: 'cePremVwap', value: 'crossedAbove', param: 0 }], action: 'buyCE', mirror: true })
+  assert.deepEqual(sig.map((x) => [x.i, x.side]).filter(([, side]) => side === 'rule'), [[over, 'rule']])
+  assert.match(sig.find((x) => x.side === 'rule').why, /25000 CE \d+\.\d · its VWAP \d+\.\d/)
+  // No look-ahead: the day cut at minute 70 reads the same up to it.
+  const cut = withLegs(fakeDay({ n: 71 }), { ce: { 25000: ce }, pe: { 25000: pe } })
+  for (const key of ['c', 'vwap']) for (let k = 0; k <= 70; k++) assert.ok(Object.is(premiumCandles(cut, 'ce', 25000)[key][k], c[key][k]), `${key} ${k}`)
+  for (let k = 0; k <= 70; k++) assert.ok(Object.is(premiumEma(cut, 'ce', 25000, 5)[k], f[k]))
+})
+
+test('a run\'s day keeps each strike\'s volume (the premium VWAP) from the OI Replay run', () => {
+  const { run } = syntheticDay()
+  const withVol = { ...run, cePoints: run.cePoints.map((p, k) => ({ ...p, volume: 50 + (k % 7) })) }
+  const day = prepareDay(withVol, { underlying: 'NIFTY' })
+  const strike = day.atm[100]
+  const vols = day.ceVol.get(strike)
+  assert.ok(vols.length === day.n && vols.every((v) => v >= 50))
+  assert.ok(Number.isFinite(premiumCandles(day, 'ce', strike).vwap[100]))
+  // Without volume (the synthetic PE): no VWAP - its VWAP conditions never hold.
+  assert.ok(Number.isNaN(premiumCandles(day, 'pe', strike).vwap[100]))
+  assert.equal(holds(day, 'pePremVwap', 'above', 100) || holds(day, 'pePremVwap', 'below', 100), false)
 })
