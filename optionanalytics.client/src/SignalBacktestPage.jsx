@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined } from '@ant-design/icons'
+import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
@@ -14,6 +14,7 @@ import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, load
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
+import { RULE_TEMPLATES, TEMPLATE_FAMILIES, templateById, templateRow, withTemplate } from './signalTemplates.js'
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
@@ -459,6 +460,50 @@ export default function SignalBacktestPage() {
   // The saved strategies (the server's CSV) and their daily live scan.
   const saved = useSavedStrategies()
   const [saveOpen, setSaveOpen] = useState(false)
+
+  // The 20 TEMPLATES (signalTemplates.js): one loaded puts its rule and its own levels on the page (Undo puts back what was
+  // there); "Compare all 20" runs every one over the days this page has loaded and ranks them - each through the same engine.
+  const [undoTemplate, setUndoTemplate] = useState(null)
+  const applyTemplate = (id, quiet = false) => {
+    const tpl = templateById(id)
+    if (!tpl) return
+    setUndoTemplate({ name: tpl.name, rule: storedRule, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin } })
+    const s = withTemplate(pageSettings, tpl)
+    setStoredRule(s.rule)
+    setTimeframe(s.timeframe); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit)
+    setTrailGap(s.trailGap); setTrailStart(s.trailStart); setTimeStopMin(s.timeStopMin)
+    if (!quiet) message.success(`"${tpl.name}" is on the page - its rule, timeframe and levels. Change anything, then Run.`)
+  }
+  const undoTemplateLoad = () => {
+    if (!undoTemplate) return
+    const { rule: before, levels } = undoTemplate
+    setStoredRule(before)
+    setTimeframe(levels.timeframe); setSlPct(levels.slPct); setTargetPct(levels.targetPct); setLevelUnit(levels.levelUnit)
+    setTrailGap(levels.trailGap); setTrailStart(levels.trailStart); setTimeStopMin(levels.timeStopMin)
+    setUndoTemplate(null)
+  }
+  const phone = useMediaQuery('(max-width: 640px)')
+  const [compare, setCompare] = useState({ status: 'idle', rows: [], done: 0, total: 0, days: 0 })
+  const compareToken = useRef(0)
+  const loadedDays = run.results.filter((r) => r.day?.ok)
+  const compareAll = async () => {
+    const results = loadedDays
+    if (!results.length) return
+    const token = ++compareToken.current
+    const settings = runSettings
+    setCompare({ status: 'running', rows: [], done: 0, total: RULE_TEMPLATES.length, days: results.length, underlying: settings.underlying })
+    const rows = []
+    for (const t of RULE_TEMPLATES) {
+      // One template at a time, the page drawn between them.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      if (compareToken.current !== token) return
+      rows.push(templateRow(results, settings, t))
+      setCompare((c) => ({ ...c, done: rows.length }))
+    }
+    rows.sort((a, b) => b.net - a.net || b.trades - a.trades)
+    setCompare((c) => ({ ...c, status: 'done', rows }))
+  }
+  const closeCompare = () => { compareToken.current++; setCompare({ status: 'idle', rows: [], done: 0, total: 0, days: 0 }) }
   // What the report cards show: the opened background run, else this page's run.
   const shown = useMemo(() => {
     if (viewing) {
@@ -591,6 +636,27 @@ export default function SignalBacktestPage() {
             </Space>
 
             <div className="oa-rule">
+              <Space wrap size={[8, 8]} align="center" style={{ marginBottom: 10, width: '100%' }}>
+                <Text strong>Templates</Text>
+                <Select
+                  size="small" value={null} placeholder={`Load one of ${RULE_TEMPLATES.length} strategies…`} onChange={(id) => applyTemplate(id)}
+                  style={{ width: touch ? 'calc(100vw - 64px)' : 360, maxWidth: '100%' }} popupMatchSelectWidth={touch ? true : 520} showSearch optionFilterProp="label"
+                  classNames={POPUP} aria-label="Load a template"
+                  options={TEMPLATE_FAMILIES.map((f) => ({ label: f.name, options: RULE_TEMPLATES.filter((t) => t.family === f.id).map((t) => ({ value: t.id, label: t.name })) }))}
+                  optionRender={(o) => (
+                    <div style={{ whiteSpace: 'normal', padding: '2px 0' }}>
+                      <div style={{ fontSize: 13 }}>{o.label}</div>
+                      <div style={{ fontSize: 11, opacity: 0.65, lineHeight: 1.35 }}>{templateById(o.value)?.idea}</div>
+                    </div>
+                  )}
+                />
+                {undoTemplate && <Button size="small" onClick={undoTemplateLoad}>Undo &quot;{undoTemplate.name}&quot;</Button>}
+                <Tooltip title={touch ? null : loadedDays.length ? `Run all ${RULE_TEMPLATES.length} over the ${loadedDays.length} days loaded and rank them (each with its own timeframe and levels; lots, charges and limits from the page)` : 'Run the backtest first - the templates are compared on the days it loads'}>
+                  <Button size="small" icon={<TrophyOutlined />} onClick={compareAll} disabled={!loadedDays.length || compare.status === 'running' || running}>
+                    Compare all {RULE_TEMPLATES.length}
+                  </Button>
+                </Tooltip>
+              </Space>
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
                 <Text strong>The rule</Text>
                 <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND), ANY (OR) or IN ORDER (THEN) for each group; a group inside a group is a pair of brackets</Text>
@@ -731,6 +797,70 @@ export default function SignalBacktestPage() {
           </Space>
         </Card>
 
+        {compare.status !== 'idle' && (
+          <Card
+            size="small" title={`${RULE_TEMPLATES.length} templates on the ${compare.days} day${compare.days === 1 ? '' : 's'} loaded${compare.underlying ? ` · ${compare.underlying}` : ''}`}
+            extra={<Button size="small" type="text" icon={<CloseOutlined />} onClick={closeCompare} aria-label="Close the comparison" />}
+          >
+            {compare.status === 'running'
+              ? <Progress percent={Math.round((compare.done / Math.max(1, compare.total)) * 100)} size="small" format={() => `${compare.done} / ${compare.total}`} />
+              : (
+                  <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                    {/* On a phone a block a template (a table there hid the names under its pinned column). */}
+                    {phone ? compare.rows.map((r, k) => (
+                      <div key={r.id} className="oa-template-row">
+                        <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start">
+                          <Space direction="vertical" size={0}>
+                            <Text style={{ fontSize: 13 }}>{k + 1}. {r.name}</Text>
+                            <Text type="secondary" style={{ fontSize: 11 }}>{TEMPLATE_FAMILIES.find((f) => f.id === r.family)?.name} · {r.timeframe}m</Text>
+                          </Space>
+                          <Button size="small" onClick={() => applyTemplate(r.id)}>Load</Button>
+                        </Space>
+                        <Text style={{ fontSize: 12 }}>
+                          <Text strong style={{ color: pnlColor(r.net), fontSize: 12 }}>{rupees(r.net)}</Text> · {r.trades} trades · {num(r.winRate, 0)}% win · PF {r.profitFactor === Infinity ? '∞' : num(r.profitFactor, 2)} · DD {rupees(-r.maxDrawdown)}
+                        </Text>
+                      </div>
+                    )) : (
+                    <Table
+                      size="small" pagination={false} scroll={{ x: 1000 }} dataSource={compare.rows}
+                      columns={[
+                        { title: '#', key: 'rank', width: 40, render: (_, __, k) => k + 1 },
+                        {
+                          title: 'Template', dataIndex: 'name', key: 'name', width: 300, render: (v, r) => (
+                            <Space direction="vertical" size={0}>
+                              <Text style={{ fontSize: 13 }}>{v}</Text>
+                              <Text type="secondary" style={{ fontSize: 11 }}>{TEMPLATE_FAMILIES.find((f) => f.id === r.family)?.name} · {r.timeframe}m</Text>
+                            </Space>
+                          ),
+                        },
+                        { title: 'Trades', dataIndex: 'trades', key: 'trades', width: 70, align: 'right' },
+                        { title: 'Win %', dataIndex: 'winRate', key: 'winRate', width: 70, align: 'right', render: (v) => num(v, 0) },
+                        { title: 'Net P&L', dataIndex: 'net', key: 'net', width: 100, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(v) }}>{rupees(v)}</Text> },
+                        { title: 'Profit factor', dataIndex: 'profitFactor', key: 'pf', width: 90, align: 'right', render: (v) => (v === Infinity ? '∞' : num(v, 2)) },
+                        { title: 'Max drawdown', dataIndex: 'maxDrawdown', key: 'dd', width: 100, align: 'right', render: (v) => rupees(-v) },
+                        { title: 'Per trade', dataIndex: 'expectancy', key: 'exp', width: 90, align: 'right', render: (v) => <span style={{ color: pnlColor(v) }}>{rupees(v)}</span> },
+                        {
+                          title: 'Rule / mirror', key: 'sides', width: 140, align: 'right', render: (_, r) => (
+                            <span><span style={{ color: pnlColor(r.ruleNet) }}>{rupees(r.ruleNet)}</span>{r.mirrorNet != null && <> / <span style={{ color: pnlColor(r.mirrorNet) }}>{rupees(r.mirrorNet)}</span></>}</span>
+                          ),
+                        },
+                        {
+                          title: '', key: 'load', width: 120, fixed: 'right', render: (_, r) => (
+                            <Button size="small" onClick={() => applyTemplate(r.id)}>Load &amp; edit</Button>
+                          ),
+                        },
+                      ]}
+                    />
+                    )}
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Each template with its own timeframe and SL / target / trail; the lots, charges, max trades, cooldown, day limits
+                      and expiry-day choice are the page&apos;s. Ranked by net on these days only - a few days rank luck as much as an
+                      edge: run the best over more days (or in the background) before trusting it. Load &amp; edit puts one on the page.
+                    </Text>
+                  </Space>
+                )}
+          </Card>
+        )}
         {saved.loaded && (
           <SavedStrategiesCard
             strategies={saved.strategies} today={saved.today} liveScan={saved.liveScan} refresh={saved.refresh} pageSettings={pageSettings}

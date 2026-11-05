@@ -685,7 +685,20 @@ When adding or changing a strategy:
   its own VWAP / EMAs / RSI and only its own trades tagged. The page's run has its days already; a BACKGROUND
   run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
   loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
-  `tests/signal-backtest-chart.test.mjs`. A backtest of the rule as set, not a tuning; it places
+  `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
+  add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 20 rules from the page's own conditions in
+  six families (`TEMPLATE_FAMILIES` - in order (THEN), trend, reversal, breakout, options & volatility, premium selling),
+  each read through a different lens (positioning, flow, dealer gamma, volatility, auction structure, momentum, the
+  premiums' own tape), written for the bullish side with the Mirror on, with its `idea` (why) and its own `settings`
+  (timeframe, SL / target, trail / time stop - what it does not name is OFF). The rule card's "Templates" dropdown (grouped,
+  searchable, each with its idea) LOADS one onto the page - its rule and levels (`withTemplate`: the page's index, lots,
+  charges, max trades, cooldown, day limits and expiry-day choice kept) - to run and edit like any rule; "Undo" puts back
+  what was there. "Compare all 20" (`compareTemplates` / `templateRow`) runs every template over the days the PAGE'S run
+  loaded (no load - the prepared days; one template a tick, a progress bar) through the same engine and report, ranked by
+  net (a table; on a phone a block each - a table hid the names under its pinned column), each with Load & edit. They are
+  starting points, not measured edges - the ranking says so. `tests/signal-templates.test.mjs` (every template whole - no
+  condition dropped, its logic read, a side for the mirror, its levels in range; a row = that template's own report).
+  A backtest of the rule as set, not a tuning; it places
   nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every value and number on its case and
   not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).
   A RUN is its days' OUTCOMES put together (`signalBacktestJob.js` - `loadBacktestDay`, `cleanBacktestSettings` (the

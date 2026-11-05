@@ -264,6 +264,8 @@ body {
 /* The rule's logic typed (LogicInput): the label, the box (it takes the room), Apply / Undo on one row. */
 .oa-rule-logic { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-width: 720px; }
 .oa-rule-logic-row { display: flex; align-items: center; gap: 6px; }
+.oa-template-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid #ffffff14; }
+.oa-template-row:last-of-type { border-bottom: none; }
 .oa-rule-logic-row .ant-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; flex: 1; min-width: 0; }
 .oa-rule-logic .oa-rule-logic-choice { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 @media (max-width: 600px) {
