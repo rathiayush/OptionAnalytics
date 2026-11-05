@@ -765,8 +765,28 @@ const pivotLevel = (key, name, mirror) => ({ ...levelCondition({ id: `pivot${key
 // beyond BOTH EMAs, and a close beyond both. A cross must be in the look-back and still hold now; "by ≥ %" of the EMA (the
 // slow one for the crossover's gap, the nearer one for a close beyond both). `mirrored` false: each option is its own
 // mirror (a premium's - its mirror is the other side's same condition).
+// EMA SLOPE (asked for - "ema slope as well just to hide choppy market ... 0 will be ignored"): every EMA option's fourth
+// number - the EMA must have moved at least that % over the last SLOPE_CANDLES candles, UP for an option on the up side
+// (above, crossed up, a whole candle over, reclaimed; the fast over the slow) and DOWN for one on the down side - the slow
+// EMA's for a crossover. 0 (the default) = not read, so a line saved before reads as it did. A flat EMA is a choppy market.
+export const SLOPE_CANDLES = 5
+const EMA_SLOPE = {
+  param4: {
+    label: 'slope ≥', unit: `% / ${SLOPE_CANDLES} candles`, default: 0, min: 0, max: 5, step: 0.01, text: (v) => (v > 0 ? `EMA slope ≥ ${v}% over ${SLOPE_CANDLES} candles` : null),
+    tip: `Skip a choppy market: the EMA (the slow one for a crossover) must have moved at least this % over the last ${SLOPE_CANDLES} candles, up for the up side and down for the down side. 0 = not read.`,
+  },
+}
+const RISING = new Set(['above', 'crossedAbove', 'candleCrossUp', 'wholeAbove', 'reclaimed', 'fastAbove', 'crossedUp', 'crossedUpClose', 'closeAboveBoth'])
+/** Has the EMA `e` moved `pct` % over the SLOPE_CANDLES candles to i - up (`up`) or down? Anything when `pct` is 0. */
+export function emaSlopeHolds(e, i, up, pct) {
+  if (!(pct > 0)) return true
+  const a = e[i - SLOPE_CANDLES], b = e[i]
+  if (!finite(a) || !finite(b) || !(a > 0)) return false
+  const change = ((b - a) / a) * 100
+  return up ? change >= pct - 1e-9 : change <= -pct + 1e-9
+}
 function emaPriceOptions(pct, more, mirrored = true) {
-  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more, ...EMA_SLOPE })
   return [
     o('above', 'Candle closed above the EMA', 'below'), o('below', 'Candle closed below the EMA', 'above'),
     o('crossedAbove', 'Close crossed above the EMA (a close below it, then above)', 'crossedBelow', W),
@@ -779,8 +799,12 @@ function emaPriceOptions(pct, more, mirrored = true) {
     o('lost', 'Crossed up through the EMA, then back down (lost it)', 'reclaimed', W),
   ]
 }
-/** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %")? */
-export function emaPriceHolds(bars, e, i, v, w, p) {
+/** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %", the EMA's slope ≥ `slope` % -
+ *  `emaSlopeHolds`)? */
+export function emaPriceHolds(bars, e, i, v, w, p, slope = 0) {
+  return emaSlopeHolds(e, i, RISING.has(v), slope) && emaPriceReads(bars, e, i, v, w, p)
+}
+function emaPriceReads(bars, e, i, v, w, p) {
   const gap = (k) => bars.c[k] - e[k]
   const far = () => Math.abs(gap(i)) >= frac(p) * e[i]
   const by = frac(p) * e[i]
@@ -806,7 +830,7 @@ export function emaPriceHolds(bars, e, i, v, w, p) {
   }
 }
 function emaCrossOptions(pct, more, { mirrored = true, named = false } = {}) {
-  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more, ...EMA_SLOPE })
   return [
     o('fastAbove', 'Fast EMA above the slow', 'fastBelow'), o('fastBelow', 'Fast EMA below the slow', 'fastAbove'),
     o('crossedUp', `Fast crossed above the slow${named ? ' (bullish crossover)' : ''}`, 'crossedDown', W),
@@ -817,8 +841,12 @@ function emaCrossOptions(pct, more, { mirrored = true, named = false } = {}) {
     o('closeBelowBoth', 'Candle closed below both EMAs', 'closeAboveBoth'),
   ]
 }
-/** Does the crossover of `fast` over `slow` (with `bars`' close) read `v` at candle i (window `w` candles, "by ≥ `p` %")? */
-export function emaCrossHolds(bars, fast, slow, i, v, w, p) {
+/** Does the crossover of `fast` over `slow` (with `bars`' close) read `v` at candle i (window `w` candles, "by ≥ `p` %",
+ *  the SLOW EMA's slope ≥ `slope` %)? */
+export function emaCrossHolds(bars, fast, slow, i, v, w, p, slope = 0) {
+  return emaSlopeHolds(slow, i, RISING.has(v), slope) && emaCrossReads(bars, fast, slow, i, v, w, p)
+}
+function emaCrossReads(bars, fast, slow, i, v, w, p) {
   const gap = (k) => fast[k] - slow[k]
   const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
   const hi = Math.max(fast[i], slow[i]), lo = Math.min(fast[i], slow[i])
@@ -879,18 +907,18 @@ function premiumConditions(side) {
     {
       id: id('Ema'), group: 'Options', mirror: `${other.toLowerCase()}PremEma`, name: name('vs an EMA'),
       options: emaPriceOptions(OVER_WIDE, EMA_PERIOD, false),
-      test: (d, i, v, w, p, p2) => {
+      test: (d, i, v, w, p, p2, p3, p4) => {
         const k = strikeAt(d, i)
-        return Number.isFinite(k) && emaPriceHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 20)), i, v, w, p)
+        return Number.isFinite(k) && emaPriceHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 20)), i, v, w, p, p4)
       },
       show: (d, i, l) => showPrem(d, i, (k) => `EMA ${fitPeriod(l?.param2, 20)} ${fmtP(premiumEma(d, side, k, fitPeriod(l?.param2, 20))[i])}`),
     },
     {
       id: id('EmaCross'), group: 'Options', mirror: `${other.toLowerCase()}PremEmaCross`, name: name('EMA crossover'),
       options: emaCrossOptions(OVER_WIDE, EMA_FAST_SLOW, { mirrored: false }),
-      test: (d, i, v, w, p, p2, p3) => {
+      test: (d, i, v, w, p, p2, p3, p4) => {
         const k = strikeAt(d, i)
-        return Number.isFinite(k) && emaCrossHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 9)), premiumEma(d, side, k, fitPeriod(p3, 21)), i, v, w, p)
+        return Number.isFinite(k) && emaCrossHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 9)), premiumEma(d, side, k, fitPeriod(p3, 21)), i, v, w, p, p4)
       },
       show: (d, i, l) => showPrem(d, i, (k) => {
         const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
@@ -1103,7 +1131,7 @@ export const RULE_CONDITIONS = [
     // crossover with the candle closing beyond both, a close beyond both (`emaCrossHolds`).
     id: 'emaCross', group: 'Indicators', name: 'EMA crossover (spot candles)',
     options: emaCrossOptions(OVER, EMA_FAST_SLOW, { named: true }),
-    test: (d, i, v, w, p, p2, p3) => emaCrossHolds(d.spot, emaSeries(d, fitPeriod(p2, 9)), emaSeries(d, fitPeriod(p3, 21)), i, v, w, p),
+    test: (d, i, v, w, p, p2, p3, p4) => emaCrossHolds(d.spot, emaSeries(d, fitPeriod(p2, 9)), emaSeries(d, fitPeriod(p3, 21)), i, v, w, p, p4),
     show: (d, i, l) => {
       const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
       return `EMA ${f} ${fmtP(emaSeries(d, f)[i])} · EMA ${sl} ${fmtP(emaSeries(d, sl)[i])}`
@@ -1113,7 +1141,7 @@ export const RULE_CONDITIONS = [
     // Spot against one EMA of its candles - at the candle's close (`emaPriceHolds`).
     id: 'emaPrice', group: 'Indicators', name: 'Price vs EMA (spot candles)',
     options: emaPriceOptions(OVER, EMA_PERIOD),
-    test: (d, i, v, w, p, p2) => emaPriceHolds(d.spot, emaSeries(d, fitPeriod(p2, 20)), i, v, w, p),
+    test: (d, i, v, w, p, p2, p3, p4) => emaPriceHolds(d.spot, emaSeries(d, fitPeriod(p2, 20)), i, v, w, p, p4),
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 20); return `spot ${fmtP(d.spot.c[i])} · EMA ${n} ${fmtP(emaSeries(d, n)[i])}` },
   },
   ...premiumConditions('ce'),
@@ -1230,8 +1258,9 @@ export function cleanLine(line) {
     const v = Number(line.param)
     out.param = line.param != null && line.param !== '' && Number.isFinite(v) ? Math.min(o.param.max, Math.max(o.param.min, v)) : o.param.default
   }
-  // A second / third number (a divergence's: how little the line may follow; an EMA crossover's fast and slow periods).
-  for (const key of ['param2', 'param3']) {
+  // A second / third / fourth number (a divergence's: how little the line may follow; an EMA crossover's fast and slow
+  // periods; an EMA's slope).
+  for (const key of ['param2', 'param3', 'param4']) {
     if (!o[key]) continue
     const v = Number(line[key])
     out[key] = line[key] != null && line[key] !== '' && Number.isFinite(v) ? Math.min(o[key].max, Math.max(o[key].min, v)) : o[key].default
@@ -1652,7 +1681,7 @@ export function lineText(line) {
   const c = CONDITION[line.id], o = optionOf(line.id, line.value)
   if (!c || !o) return ''
   const more = (key) => (o[key] && line[key] != null ? (o[key].text ? o[key].text(line[key]) : `${o[key].label} ${line[key]}${o[key].unit}`) : null)
-  const extra = [more('param2'), more('param3')].filter(Boolean).map((x) => `, ${x}`).join('')
+  const extra = [more('param2'), more('param3'), more('param4')].filter(Boolean).map((x) => `, ${x}`).join('')
   const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + extra
   const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
   return `${c.name}: ${o.label}${num}${win}`
@@ -1676,7 +1705,7 @@ export function ruleText(lines, action, logic = '') {
   return `${ACTION[action]?.label ?? action} when ${text}`
 }
 
-const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2, l.param3)
+const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2, l.param3, l.param4)
 
 /**
  * The logic read over a day's `n` candles: (i) => does it hold at candle i. `leaf(no, k)` - line no (1-based) at candle k;

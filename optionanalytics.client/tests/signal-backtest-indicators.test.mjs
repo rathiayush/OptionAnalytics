@@ -17,9 +17,9 @@ const PREV915 = Date.parse('2026-10-03T09:15:00+05:30')
 const cond = (id) => RULE_CONDITIONS.find((c) => c.id === id)
 const option = (id, value) => cond(id).options.find((o) => o.value === value)
 // Condition `id` says `value` at candle i (window w; its numbers, else the option's defaults)?
-const holds = (d, id, value, i, { w = 5, p, p2, p3 } = {}) => {
+const holds = (d, id, value, i, { w = 5, p, p2, p3, p4 } = {}) => {
   const o = option(id, value)
-  return cond(id).test(d, i, value, w, p ?? o.param?.default ?? 0, p2 ?? o.param2?.default, p3 ?? o.param3?.default)
+  return cond(id).test(d, i, value, w, p ?? o.param?.default ?? 0, p2 ?? o.param2?.default, p3 ?? o.param3?.default, p4 ?? o.param4?.default)
 }
 
 // A prepared day built by hand: `n` minutes from 09:15, spot from `spot(i)` (a number = a flat bar).
@@ -387,4 +387,39 @@ test('the candle-close EMA options on the conditions - spot\'s and the ATM premi
   const pUp = pc.c.findIndex((c, k) => k > 40 && c > pe20[k])
   assert.ok(holds(pd, 'cePremEma', 'candleCrossUp', pUp) && !holds(pd, 'cePremEma', 'candleCrossUp', pUp - 1))
   assert.ok(holds(pd, 'cePremEmaCross', 'closeAboveBoth', 110) && !holds(pd, 'cePremEmaCross', 'closeBelowBoth', 110))
+})
+
+test('EMA slope - a flat EMA (a choppy market) skipped: the EMA moved ≥ the % over 5 candles, up for the up side, down for the down; 0 = not read', () => {
+  // An EMA at 100, rising 0.1 a candle from candle 10 (0.5 over 5 candles ≈ 0.5%), then flat from 30.
+  const e = Array.from({ length: 50 }, (_, i) => (i < 10 ? 100 : i < 30 ? 100 + (i - 10) * 0.1 : 102))
+  const c = e.map((x) => x + 1)                                              // closes 1 over it all along
+  const bars = { o: c, h: c, l: c, c }
+  const at = (i, v, slope) => emaPriceHolds(bars, e, i, v, 5, 0, slope)
+  assert.ok(at(8, 'above', 0) && at(40, 'above', 0))                         // 0: not read - as before
+  assert.ok(!at(8, 'above', 0.1) && at(20, 'above', 0.4) && !at(20, 'above', 0.6) && !at(40, 'above', 0.1))   // flat, rising ~0.5%, flat again
+  assert.ok(!at(20, 'below', 0.1))                                           // the down side wants it falling
+  const down = e.map((x) => 200 - x), dc = down.map((x) => x - 1)
+  assert.ok(emaPriceHolds({ o: dc, h: dc, l: dc, c: dc }, down, 20, 'below', 5, 0, 0.4) && !emaPriceHolds({ o: dc, h: dc, l: dc, c: dc }, down, 20, 'below', 5, 0, 0.6))
+  // The crossover reads the SLOW EMA's slope.
+  const fast = e.map((x) => x + 0.5)
+  assert.ok(emaCrossHolds(bars, fast, e, 20, 'fastAbove', 5, 0, 0.4) && !emaCrossHolds(bars, fast, e, 40, 'fastAbove', 5, 0, 0.1) && emaCrossHolds(bars, fast, e, 40, 'fastAbove', 5, 0, 0))
+  // Every EMA option has it (spot and premium), 0 by default; kept by the mirror; in words only when set.
+  for (const id of ['emaPrice', 'emaCross', 'cePremEma', 'cePremEmaCross', 'pePremEma', 'pePremEmaCross']) {
+    for (const o of RULE_CONDITIONS.find((x) => x.id === id).options) assert.equal(o.param4?.default, 0, `${id} ${o.value}`)
+  }
+  const line = cleanLine({ id: 'emaCross', value: 'crossedUp', param4: 0.15 })
+  assert.equal(line.param4, 0.15)
+  assert.equal(cleanLine({ id: 'emaCross', value: 'crossedUp', param4: 99 }).param4, 5)
+  assert.equal(cleanLine({ id: 'emaCross', value: 'crossedUp' }).param4, 0)
+  assert.deepEqual(mirrorLines([line]).map((l) => [l.value, l.param4]), [['crossedDown', 0.15]])
+  assert.match(lineText(line), /EMA slope ≥ 0.15% over 5 candles/)
+  assert.doesNotMatch(lineText(cleanLine({ id: 'emaCross', value: 'crossedUp' })), /slope/)
+  // On a day through the condition: a V day's EMA 20 crossing is flat-ish at the turn - the slope makes it wait.
+  const vee = (i) => (i < 60 ? 25300 - i * 5 : 25000 + (i - 60) * 5)
+  const d = fakeDay({ spot: vee })
+  const ema = emaSeries(d, 20)
+  const up = d.spot.c.findIndex((x, k) => k > 60 && x > ema[k])
+  assert.ok(holds(d, 'emaPrice', 'crossedAbove', up))
+  const rise = ((ema[up] - ema[up - 5]) / ema[up - 5]) * 100
+  assert.ok(!holds(d, 'emaPrice', 'crossedAbove', up, { p4: Math.max(0.01, rise + 0.01) }))
 })

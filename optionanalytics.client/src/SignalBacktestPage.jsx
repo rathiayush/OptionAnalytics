@@ -88,6 +88,7 @@ function editLine(line, change) {
     if (before?.param?.label !== after?.param?.label) delete next.param
     if (before?.param2?.label !== after?.param2?.label) delete next.param2
     if (before?.param3?.label !== after?.param3?.label) delete next.param3
+    if (before?.param4?.label !== after?.param4?.label) delete next.param4
   }
   return cleanLine(next) ?? line
 }
@@ -131,6 +132,14 @@ function ConditionRow({ line, no, onChange, onRemove }) {
           size="small" className="oa-rule-num oa-rule-num--wide" min={o.param3.min} max={o.param3.max} step={o.param3.step} value={line.param3}
           onChange={(v) => onChange(editLine(line, { param3: v ?? o.param3.default }))} addonBefore={o.param3.label} addonAfter={o.param3.unit}
         />
+      )}
+      {o.param4 && (
+        <Tooltip title={o.param4.tip}>
+          <InputNumber
+            size="small" className="oa-rule-num oa-rule-num--slope" min={o.param4.min} max={o.param4.max} step={o.param4.step} value={line.param4}
+            onChange={(v) => onChange(editLine(line, { param4: v ?? o.param4.default }))} addonBefore={o.param4.label} addonAfter={o.param4.unit}
+          />
+        </Tooltip>
       )}
       {o.windowed && (
         <Select size="small" className="oa-rule-win" value={line.windowMin} onChange={(v) => onChange(editLine(line, { windowMin: v }))} options={WINDOW_CHOICES.map((m) => ({ value: m, label: `last ${m} min` }))} />

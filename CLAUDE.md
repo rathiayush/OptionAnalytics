@@ -605,7 +605,12 @@ When adding or changing a strategy:
   the crossover's fast over / under / crossed the slow, the crossover WITH the candle closing beyond BOTH EMAs
   (`crossedUpClose` / `crossedDownClose`) and a close beyond both (`closeAboveBoth` / `closeBelowBoth`); and a cross one way
   THEN BACK in the look-back (`reclaimed` - crossed down through the EMA, then back up, the close still over it; `lost` - the
-  mirror; 60 min is a look-back choice too - `WINDOW_CHOICES`). Spot's mirror is the
+  mirror; 60 min is a look-back choice too - `WINDOW_CHOICES`). EMA SLOPE (asked for - "ema slope ... to hide choppy
+  market ... 0 will be ignored"): every EMA option's FOURTH number (`param4`, `EMA_SLOPE` - `cleanLine` / `lineText` / the
+  row take it): the EMA - the SLOW one for a crossover - moved at least that % over the last `SLOPE_CANDLES` (5) candles of
+  the timeframe (`emaSlopeHolds`), UP for an option on the up side (`RISING`: above, crossed up, a candle crossing up, a
+  whole candle over, reclaimed; the fast over / crossing up the slow, a close above both) and DOWN for the others; 0, the
+  default, is not read (a line saved before reads as it did; its words say nothing of it). The mirror keeps the number.
   other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
