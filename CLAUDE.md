@@ -519,11 +519,23 @@ When adding or changing a strategy:
   (condition numbers, AND / OR / NOT in any case, & | !, brackets) and applied - Apply, Enter or leaving the box - redraws
   the builder (`treeFromLogic`: every condition EXACTLY ONCE - one left out or written twice is an error, never dropped or
   copied; AND and OR SIDE BY SIDE with no brackets are NOT read either way (asked about: "1 OR 2 OR (3 AND 4) is not
-  the same as 1 OR 2 OR 3 AND (4)" - maths reads AND first, a trader often means the other): `mixedLogicReadings` asks
+  the same as 1 OR 2 OR 3 AND (4)" - maths reads AND first, a trader often means the other; THEN beside AND / OR likewise
+  needs brackets): `mixedLogicReadings` asks
   which, and for a plain line of numbers offers its two readings as one-tap buttons - OR first ((1 OR 2 OR 3) AND 4) and
   AND first (1 OR 2 OR (3 AND 4)); brackets at most MAX_GROUP_DEPTH inside each other, measured BEFORE cleanTree, which
   would cut a deeper group off; the conditions keep their settings and are numbered again in the order written). The
-  logic SHOWN always has its brackets, so it can be applied back as it stands. What cannot be read
+  logic SHOWN always has its brackets, so it can be applied back as it stands. IN ORDER (THEN - asked for: "PE crossover
+  CE, then bullish divergence appears and EMA crossed down then came back up"): a group's third choice, `op: 'then'` with its
+  `within` minutes (`THEN_WINDOWS`, 30 by default, 1 - 375 typed - `fitWithin`), written "1 THEN 2 THEN 3 WITHIN 60 MIN"
+  (THEN binds loosest; typed "->" / ">>" too; no WITHIN = 30) and parsed to { op: 'then', items, within }; its connectors are
+  "THEN ↓", not switches (`setConnectorAt` leaves the group alone). The engine reads the logic OVER THE DAY'S CANDLES
+  (`logicAt` - each part's reading at each candle worked out once; AND / OR / NOT at the candle): a chain holds at candle i
+  when its last part holds at i and, back from where that part's current run started, each part before it BECAME true (holds
+  at k, not at k - 1) at or before the part after it, the first of them within the last `within` minutes (in candles of the
+  timeframe) - so a part already true before the window (a state since the morning) did not happen in it, and the order is
+  of the moments each part became true, not of their look-backs; nothing after candle i is read. The mirror keeps the order
+  and the window. `evalLogic` (one moment) reads a chain as all its parts - the engine does not use it for the rule.
+  `tests/signal-backtest-then.test.mjs`. What cannot be read
   says why in red and changes nothing (Undo puts the rule's own back); the box is mounted again (`key` = the logic) when
   the builder changes, so a half-typed line never sits over a rule changed with the dropdowns. Each condition is an indicator (`RULE_CONDITIONS`), what it says (its options), its NUMBER where one makes sense
   (`param` - "by ≥ %" over VWAP / the POC / the straddle's VWAP, the OI lead, "within %" of a wall, spot's move, the
@@ -591,7 +603,9 @@ When adding or changing a strategy:
   (`candleCrossUp` / `Down` - opened on one side, closed on the other, the EMA at that candle's close; in the look-back and
   the close still past it now), a WHOLE candle clear of it (`wholeAbove` - its low over it / `wholeBelow` - its high under);
   the crossover's fast over / under / crossed the slow, the crossover WITH the candle closing beyond BOTH EMAs
-  (`crossedUpClose` / `crossedDownClose`) and a close beyond both (`closeAboveBoth` / `closeBelowBoth`). Spot's mirror is the
+  (`crossedUpClose` / `crossedDownClose`) and a close beyond both (`closeAboveBoth` / `closeBelowBoth`); and a cross one way
+  THEN BACK in the look-back (`reclaimed` - crossed down through the EMA, then back up, the close still over it; `lost` - the
+  mirror; 60 min is a look-back choice too - `WINDOW_CHOICES`). Spot's mirror is the
   other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three

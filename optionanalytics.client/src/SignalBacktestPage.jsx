@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  BACKTEST_DEFAULTS, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, LEVEL_UNITS, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
@@ -142,6 +142,14 @@ function ConditionRow({ line, no, onChange, onRemove }) {
 /** The AND / OR between two items of a group - a tap switches THAT one only (`setConnectorAt`: AND binds tighter, so a
  *  run of AND-ed items gets its own box - the brackets); disabled where that would need a group deeper than allowed. */
 function Connector({ op, tree, path, k, onConnector, touch }) {
+  // In an IN ORDER group every connector is THEN: the order is the point - not a switch.
+  if (op === 'then') {
+    return (
+      <div className="oa-rule-connector">
+        <Text type="secondary" style={{ fontSize: 12, fontWeight: 600, paddingInline: 8 }}>THEN ↓</Text>
+      </div>
+    )
+  }
   const other = op === 'and' ? 'or' : 'and'
   const can = setConnectorAt(tree, path, k, other) !== tree
   const button = (
@@ -192,7 +200,7 @@ function LogicInput({ tree, logic, onApply }) {
           size="small" value={draft ?? logic} status={error ? 'error' : undefined} placeholder="(1 AND 2) OR 3" spellCheck={false} autoComplete="off"
           autoCorrect="off" autoCapitalize="characters" onChange={(e) => { setDraft(e.target.value); setError(null); setChoices([]) }}
           onPressEnter={() => applyText(draft)} onBlur={() => changed && applyText(draft, true)}
-          aria-label="The rule's logic - condition numbers with AND, OR, NOT and brackets"
+          aria-label="The rule's logic - condition numbers with AND, OR, NOT, THEN and brackets"
         />
         <Button size="small" type="primary" disabled={!changed} onMouseDown={(e) => e.preventDefault()} onClick={() => applyText(draft)}>Apply</Button>
         {changed && <Button size="small" onMouseDown={(e) => e.preventDefault()} onClick={clear}>Undo</Button>}
@@ -210,7 +218,7 @@ function LogicInput({ tree, logic, onApply }) {
               )}
             </>
           )
-        : <Text type="secondary" style={{ fontSize: 12 }}>Type the condition numbers with AND, OR, NOT and brackets - e.g. (1 AND 2) OR (3 AND 4) - and Apply: the conditions above follow, numbered in the order written. AND and OR side by side need brackets to say which goes first. Changing the conditions above changes this too.</Text>}
+        : <Text type="secondary" style={{ fontSize: 12 }}>Type the condition numbers with AND, OR, NOT and brackets - e.g. (1 AND 2) OR (3 AND 4) - and Apply: the conditions above follow, numbered in the order written. AND and OR side by side need brackets to say which goes first. THEN puts them in order - 1 THEN 2 THEN 3 WITHIN 60 (each after the one before, the first within the last 60 min). Changing the conditions above changes this too.</Text>}
     </div>
   )
 }
@@ -227,12 +235,18 @@ function RuleGroup({ group, path, tree, numbers, onEdit, onRemove, onConnector, 
         <Tooltip title="NOT: the group holds when what is inside it does NOT.">
           <Checkbox checked={group.not} onChange={(e) => edit((g) => ({ ...g, not: e.target.checked }))}><Text style={{ fontSize: 12 }}>NOT</Text></Checkbox>
         </Tooltip>
-        <Tooltip title={touch ? null : 'Sets EVERY AND / OR in this box at once. To change just one, click the AND / OR between two conditions.'}>
+        <Tooltip title={touch ? null : 'Sets EVERY AND / OR in this box at once (to change just one, click the AND / OR between two conditions). IN ORDER: each one after the one before it, all within the minutes picked.'}>
           <Select
             size="small" value={group.op} onChange={(op) => edit((g) => ({ ...g, op }))} style={{ width: 170 }}
-            options={[{ value: 'and', label: 'ALL of these (AND)' }, { value: 'or', label: 'ANY of these (OR)' }]}
+            options={[{ value: 'and', label: 'ALL of these (AND)' }, { value: 'or', label: 'ANY of these (OR)' }, { value: 'then', label: 'IN ORDER (THEN)' }]}
           />
         </Tooltip>
+        {group.op === 'then' && (
+          <Select
+            size="small" value={group.within ?? DEFAULT_THEN_WINDOW} onChange={(within) => edit((g) => ({ ...g, within }))} style={{ width: 130 }} aria-label="All of them within"
+            options={[...new Set([...THEN_WINDOWS, group.within ?? DEFAULT_THEN_WINDOW])].sort((a, b) => a - b).map((m) => ({ value: m, label: `within ${m} min` }))}
+          />
+        )}
         <Space size={6} wrap className="oa-rule-group-add">
           <Button size="small" icon={<PlusOutlined />} onClick={() => items((list) => [...list, { line: freshLine(nextId(tree)) }])}>Condition</Button>
           {depth < MAX_GROUP_DEPTH && (
@@ -579,7 +593,7 @@ export default function SignalBacktestPage() {
             <div className="oa-rule">
               <Space wrap size={[12, 8]} align="center" style={{ marginBottom: 8 }}>
                 <Text strong>The rule</Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND) or ANY (OR) for each group; a group inside a group is a pair of brackets</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>read at each completed {timeframe}m candle - pick ALL (AND), ANY (OR) or IN ORDER (THEN) for each group; a group inside a group is a pair of brackets</Text>
               </Space>
               <RuleGroup group={rule.tree} path={[]} tree={rule.tree} numbers={numbers} onEdit={editTree} onConnector={setConnector} touch={touch} />
               {hasLines && <LogicInput key={rule.logic} tree={rule.tree} logic={rule.logic} onApply={(tree) => setRule({ tree })} />}
@@ -689,7 +703,10 @@ export default function SignalBacktestPage() {
                 page, with its number (a threshold %) and how far back it looks (crossed, turned, broke, near, a 🎯, spot&apos;s move -
                 &quot;last N min&quot;; a cross / turn / break must still hold now). A group holds when ALL (AND) or ANY (OR) of what is in it
                 holds - NOT turns it round - and a group inside a group is a pair of brackets: (1 AND 2) OR (3 AND (4 AND 5)) is ANY of two
-                ALL groups, the second with a group inside it. The rule signals at a completed candle of the Timeframe (from 09:15) where it
+                ALL groups, the second with a group inside it. IN ORDER (THEN) wants its parts one after another: each becomes true at or
+                after the one before it, the first within the minutes picked, the last still holding - e.g. PE crossed above CE, THEN a
+                bullish divergence, THEN the EMA crossed down and back up; a part that was already true before the window (a state
+                since the morning) did not happen in it - pick its cross / turn. The rule signals at a completed candle of the Timeframe (from 09:15) where it
                 holds - once, when it becomes true (it has to stop holding before it signals again). The Mirror adds the same rule the
                 other way round with the opposite trade. A signal uses only what was known at its candle&apos;s close - the end of its last minute (no look-ahead),
                 and the times shown are that last minute (a 5m candle from 10:30 signals at 10:34). Its trade enters at that minute&apos;s
