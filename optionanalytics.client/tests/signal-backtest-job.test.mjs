@@ -224,3 +224,18 @@ test('the background job writes why when it cannot run', async (t) => {
   assert.equal(result.ok, false)
   assert.match(result.error, /no past weekdays/)
 })
+
+test('a run carries its strategy\'s name: in its settings (one line, at most 80 characters), its report heading and its default name', () => {
+  const named = cleanBacktestSettings({ ...SETTINGS, strategyName: '  Narrow CPR\n trend day  ' })
+  assert.equal(named.strategyName, 'Narrow CPR trend day')
+  assert.equal(cleanBacktestSettings({ ...SETTINGS, strategyName: 'x'.repeat(200) }).strategyName.length, 80)
+  assert.equal(cleanBacktestSettings({ ...SETTINGS, strategyName: 42 }).strategyName, '')
+  assert.equal(cleanBacktestSettings(SETTINGS).strategyName ?? '', '')
+  assert.match(reportHead(named, 4), /^Narrow CPR trend day · NIFTY · 4 days · /)
+  assert.equal(defaultRunName(named), 'Narrow CPR trend day · NIFTY 19 Oct 2026 – 23 Oct 2026')
+  // Without one: as before.
+  assert.equal(defaultRunName({ ...named, strategyName: '' }), 'NIFTY 19 Oct 2026 – 23 Oct 2026 · Buy CE + mirror')
+  assert.doesNotMatch(reportHead({ ...named, strategyName: '' }, 4), /Narrow/)
+  // The engine does not read it.
+  assert.equal('strategyName' in engineSettings(named), false)
+})

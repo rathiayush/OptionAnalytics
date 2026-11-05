@@ -223,8 +223,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   for (const tf of TIMEFRAMES) if (tf > 1) oiTf[tf] = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, tf * 60)
 
   // The OI walls (the spot chart's S-R): the most call OI at or above spot, the most put OI at or below it - the strikes'
-  // latest OI at the end of each minute.
-  const walls = []
+  // latest OI at the end of each minute; with them, the walls since the open (`wallsSinceOpen`).
+  const minuteWalls = []
   {
     const cursors = strikes.map((k) => ({ k, ce: [...(ceLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null }))
     for (let i = 0; i < n; i++) {
@@ -233,9 +233,10 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
         while (c.pi < c.pe.length && c.pe[c.pi][0] <= t[i]) { const v = c.pe[c.pi++][1].oi; if (Number.isFinite(v)) c.peOi = v }
       }
       const { resistance, support } = oiWalls(cursors.map((c) => ({ strike: c.k, ceOi: c.ceOi ?? 0, peOi: c.peOi ?? 0 })), spotBars[i].c)
-      walls.push({ resistance: resistance?.strike ?? null, support: support?.strike ?? null })
+      minuteWalls.push({ resistance: resistance?.strike ?? null, support: support?.strike ?? null, resistanceOi: resistance?.ceOi ?? null, supportOi: support?.peOi ?? null })
     }
   }
+  const walls = wallsSinceOpen(minuteWalls)
 
   // GEX (standard sign) - each minute from readings up to it (gex.js).
   const spotForOptions = spotBars.map((b) => ({ time: b.t, close: b.c }))
@@ -580,6 +581,27 @@ function brokeLevel(c, level, i, w, up, p = 0) {
   const by = frac(p) * Math.abs(v)
   return up ? c[i] > v && c[i] - v >= by : c[i] < v && v - c[i] >= by
 }
+/** The OI walls SINCE THE OPEN at each minute, from minutes 0 - i only (asked for - "highest S-R wall from the morning or
+ *  lowest OI wall"): the HIGHEST resistance and the LOWEST support the walls have been at (`dayHigh` / `dayLow`), and the
+ *  STRONGEST of each - the minute's wall with the most OI so far, call OI for the resistance, put OI for the support
+ *  (`strongR` / `strongS`, a later wall taking over only with more). Each minute's wall gets them, so a timeframe's
+ *  candle (its last minute's wall) holds every minute up to its close. */
+export function wallsSinceOpen(walls) {
+  let dayHigh = null, dayLow = null, strongR = null, strongS = null, strongROi = 0, strongSOi = 0
+  return walls.map((w) => {
+    const r = w?.resistance ?? null, s = w?.support ?? null
+    if (r != null) {
+      if (dayHigh == null || r > dayHigh) dayHigh = r
+      if ((w.resistanceOi ?? 0) > strongROi) { strongR = r; strongROi = w.resistanceOi }
+    }
+    if (s != null) {
+      if (dayLow == null || s < dayLow) dayLow = s
+      if ((w.supportOi ?? 0) > strongSOi) { strongS = s; strongSOi = w.supportOi }
+    }
+    return { ...w, resistance: r, support: s, dayHigh, dayLow, strongR, strongS, strongROi: strongR == null ? null : strongROi, strongSOi: strongS == null ? null : strongSOi }
+  })
+}
+
 // A cumulative line's move over the window against `tolPct` % of its range so far: rising (1) / falling (-1) / stable (0).
 function lineMove(series, i, w, tolPct) {
   const now = series[i], back = series[Math.max(0, i - w)]
@@ -651,6 +673,23 @@ const CUM_LINES = {
 // dipped greater - that is divergence"): over the look-back, price moved >= `param` % one way but the line followed it by
 // less than `param2` % of its own range so far (held, barely moved, or went the other way).
 const DIVERGENCE = { windowed: true, param: pctParam('price ≥', 0.2, 5, 0.05), param2: { ...pctParam('followed <', 10, 100, 1), unit: '% of range' } }
+// The divergence of a line `x` (k -> its value, NaN = none) at i - `bull`: spot fell >= p % over the look-back w, the line
+// moved the way that would confirm it (`follows` x the price's direction) by less than p2 % of its range so far - or the
+// other way; the mirror the same with spot rising. The cumulative Δ lines and OI's PE − CE gaps (since open, total) share it.
+function divergenceHolds(d, x, i, w, follows, bull, p, p2) {
+  const dir = bull ? -1 : 1
+  const back = Math.max(0, i - w)
+  const s0 = d.spot.c[back], s1 = d.spot.c[i]
+  if (!(s0 > 0) || !finite(s1)) return false
+  const moved = ((s1 - s0) / s0) * 100 * dir
+  if (!(moved > 0) || moved < (p > 0 ? p : 0) - 1e-9) return false
+  const l0 = x(back), l1 = x(i)
+  if (!finite(l0) || !finite(l1)) return false
+  let lo = Infinity, hi = -Infinity
+  for (let k = 0; k <= i; k++) { const v = x(k); if (finite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v) } }
+  const followed = hi > lo ? ((follows * dir * (l1 - l0)) / (hi - lo)) * 100 : 0
+  return followed < (Number.isFinite(p2) ? p2 : DIVERGENCE.param2.default)
+}
 function cumCondition(line, group, meaning) {
   const { key, name, follows } = CUM_LINES[line]
   return {
@@ -688,22 +727,9 @@ function cumCondition(line, group, meaning) {
           // With a %: still through the level broken, by that much of its range so far.
           return hits.some((b) => finite(b.level) && (up ? series[i] > b.level : series[i] < b.level) && atLeast(pastPct(x, i, b.level), p))
         }
-        case 'divBull': case 'divBear': {
-          // Over the look-back: spot moved >= p % that way, the line moved the way that would confirm it (PE with price,
-          // CE / Net against it) by less than p2 % of its range so far - or the other way.
-          const dir = v === 'divBull' ? -1 : 1
-          const back = Math.max(0, i - w)
-          const s0 = d.spot.c[back], s1 = d.spot.c[i]
-          if (!(s0 > 0) || !finite(s1)) return false
-          const moved = ((s1 - s0) / s0) * 100 * dir
-          if (!(moved > 0) || moved < (p > 0 ? p : 0) - 1e-9) return false
-          const l0 = series[back], l1 = series[i]
-          if (!finite(l0) || !finite(l1)) return false
-          let lo = Infinity, hi = -Infinity
-          for (let k = 0; k <= i; k++) if (finite(series[k])) { lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k]) }
-          const followed = hi > lo ? ((follows * dir * (l1 - l0)) / (hi - lo)) * 100 : 0
-          return followed < (Number.isFinite(p2) ? p2 : DIVERGENCE.param2.default)
-        }
+        // Over the look-back: spot moved >= p % that way, the line moved the way that would confirm it (PE with price,
+        // CE / Net against it) by less than p2 % of its range so far - or the other way.
+        case 'divBull': case 'divBear': return divergenceHolds(d, x, i, w, follows, v === 'divBull', p, p2)
         default: return false
       }
     },
@@ -765,8 +791,28 @@ const pivotLevel = (key, name, mirror) => ({ ...levelCondition({ id: `pivot${key
 // beyond BOTH EMAs, and a close beyond both. A cross must be in the look-back and still hold now; "by ≥ %" of the EMA (the
 // slow one for the crossover's gap, the nearer one for a close beyond both). `mirrored` false: each option is its own
 // mirror (a premium's - its mirror is the other side's same condition).
+// EMA SLOPE (asked for - "ema slope as well just to hide choppy market ... 0 will be ignored"): every EMA option's fourth
+// number - the EMA must have moved at least that % over the last SLOPE_CANDLES candles, UP for an option on the up side
+// (above, crossed up, a whole candle over, reclaimed; the fast over the slow) and DOWN for one on the down side - the slow
+// EMA's for a crossover. 0 (the default) = not read, so a line saved before reads as it did. A flat EMA is a choppy market.
+export const SLOPE_CANDLES = 5
+const EMA_SLOPE = {
+  param4: {
+    label: 'slope ≥', unit: `% / ${SLOPE_CANDLES} candles`, default: 0, min: 0, max: 5, step: 0.01, text: (v) => (v > 0 ? `EMA slope ≥ ${v}% over ${SLOPE_CANDLES} candles` : null),
+    tip: `Skip a choppy market: the EMA (the slow one for a crossover) must have moved at least this % over the last ${SLOPE_CANDLES} candles, up for the up side and down for the down side. 0 = not read.`,
+  },
+}
+const RISING = new Set(['above', 'crossedAbove', 'candleCrossUp', 'wholeAbove', 'reclaimed', 'fastAbove', 'crossedUp', 'crossedUpClose', 'closeAboveBoth'])
+/** Has the EMA `e` moved `pct` % over the SLOPE_CANDLES candles to i - up (`up`) or down? Anything when `pct` is 0. */
+export function emaSlopeHolds(e, i, up, pct) {
+  if (!(pct > 0)) return true
+  const a = e[i - SLOPE_CANDLES], b = e[i]
+  if (!finite(a) || !finite(b) || !(a > 0)) return false
+  const change = ((b - a) / a) * 100
+  return up ? change >= pct - 1e-9 : change <= -pct + 1e-9
+}
 function emaPriceOptions(pct, more, mirrored = true) {
-  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more, ...EMA_SLOPE })
   return [
     o('above', 'Candle closed above the EMA', 'below'), o('below', 'Candle closed below the EMA', 'above'),
     o('crossedAbove', 'Close crossed above the EMA (a close below it, then above)', 'crossedBelow', W),
@@ -779,8 +825,12 @@ function emaPriceOptions(pct, more, mirrored = true) {
     o('lost', 'Crossed up through the EMA, then back down (lost it)', 'reclaimed', W),
   ]
 }
-/** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %")? */
-export function emaPriceHolds(bars, e, i, v, w, p) {
+/** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %", the EMA's slope ≥ `slope` % -
+ *  `emaSlopeHolds`)? */
+export function emaPriceHolds(bars, e, i, v, w, p, slope = 0) {
+  return emaSlopeHolds(e, i, RISING.has(v), slope) && emaPriceReads(bars, e, i, v, w, p)
+}
+function emaPriceReads(bars, e, i, v, w, p) {
   const gap = (k) => bars.c[k] - e[k]
   const far = () => Math.abs(gap(i)) >= frac(p) * e[i]
   const by = frac(p) * e[i]
@@ -806,7 +856,7 @@ export function emaPriceHolds(bars, e, i, v, w, p) {
   }
 }
 function emaCrossOptions(pct, more, { mirrored = true, named = false } = {}) {
-  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more, ...EMA_SLOPE })
   return [
     o('fastAbove', 'Fast EMA above the slow', 'fastBelow'), o('fastBelow', 'Fast EMA below the slow', 'fastAbove'),
     o('crossedUp', `Fast crossed above the slow${named ? ' (bullish crossover)' : ''}`, 'crossedDown', W),
@@ -817,8 +867,12 @@ function emaCrossOptions(pct, more, { mirrored = true, named = false } = {}) {
     o('closeBelowBoth', 'Candle closed below both EMAs', 'closeAboveBoth'),
   ]
 }
-/** Does the crossover of `fast` over `slow` (with `bars`' close) read `v` at candle i (window `w` candles, "by ≥ `p` %")? */
-export function emaCrossHolds(bars, fast, slow, i, v, w, p) {
+/** Does the crossover of `fast` over `slow` (with `bars`' close) read `v` at candle i (window `w` candles, "by ≥ `p` %",
+ *  the SLOW EMA's slope ≥ `slope` %)? */
+export function emaCrossHolds(bars, fast, slow, i, v, w, p, slope = 0) {
+  return emaSlopeHolds(slow, i, RISING.has(v), slope) && emaCrossReads(bars, fast, slow, i, v, w, p)
+}
+function emaCrossReads(bars, fast, slow, i, v, w, p) {
   const gap = (k) => fast[k] - slow[k]
   const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
   const hi = Math.max(fast[i], slow[i]), lo = Math.min(fast[i], slow[i])
@@ -879,18 +933,18 @@ function premiumConditions(side) {
     {
       id: id('Ema'), group: 'Options', mirror: `${other.toLowerCase()}PremEma`, name: name('vs an EMA'),
       options: emaPriceOptions(OVER_WIDE, EMA_PERIOD, false),
-      test: (d, i, v, w, p, p2) => {
+      test: (d, i, v, w, p, p2, p3, p4) => {
         const k = strikeAt(d, i)
-        return Number.isFinite(k) && emaPriceHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 20)), i, v, w, p)
+        return Number.isFinite(k) && emaPriceHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 20)), i, v, w, p, p4)
       },
       show: (d, i, l) => showPrem(d, i, (k) => `EMA ${fitPeriod(l?.param2, 20)} ${fmtP(premiumEma(d, side, k, fitPeriod(l?.param2, 20))[i])}`),
     },
     {
       id: id('EmaCross'), group: 'Options', mirror: `${other.toLowerCase()}PremEmaCross`, name: name('EMA crossover'),
       options: emaCrossOptions(OVER_WIDE, EMA_FAST_SLOW, { mirrored: false }),
-      test: (d, i, v, w, p, p2, p3) => {
+      test: (d, i, v, w, p, p2, p3, p4) => {
         const k = strikeAt(d, i)
-        return Number.isFinite(k) && emaCrossHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 9)), premiumEma(d, side, k, fitPeriod(p3, 21)), i, v, w, p)
+        return Number.isFinite(k) && emaCrossHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 9)), premiumEma(d, side, k, fitPeriod(p3, 21)), i, v, w, p, p4)
       },
       show: (d, i, l) => showPrem(d, i, (k) => {
         const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
@@ -934,6 +988,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...LEAD }),
       opt('peFlip', 'CE ahead since the morning, then PE crossed above', 'ceFlip', { ...W, ...LEAD, ...HELD }),
       opt('ceFlip', 'PE ahead since the morning, then CE crossed above', 'peFlip', { ...W, ...LEAD, ...HELD }),
+      // PE − CE added follows price when the OI confirms it (puts written into a rise, calls into a fall).
+      opt('divBull', 'Bullish divergence: price fell, PE − CE added did not fall with it', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, PE − CE added did not rise with it', 'divBull', DIVERGENCE),
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
@@ -945,6 +1002,7 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
@@ -961,6 +1019,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...TOTAL_LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...TOTAL_LEAD }),
       opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
       opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
+      // Total PE − CE follows price when the OI confirms it (puts written into a rise, calls into a fall).
+      opt('divBull', 'Bullish divergence: price fell, total PE − CE did not fall with it', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, total PE − CE did not rise with it', 'divBull', DIVERGENCE),
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
@@ -972,6 +1033,7 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
@@ -996,18 +1058,53 @@ export const RULE_CONDITIONS = [
     options: [
       opt('nearSupport', 'Near the OI support', 'nearResistance', NEAR(0.05)), opt('nearResistance', 'Near the OI resistance', 'nearSupport', NEAR(0.05)),
       opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport', { ...W, ...OVER }), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance', { ...W, ...OVER }),
+      // Since the open (`wallsSinceOpen`): the walls' highest resistance / lowest support, and the strongest (most OI) -
+      // each as it stood at the candle before (a wall moves with spot: past the day's highest resistance, the
+      // resistance is a higher strike).
+      opt('nearDayLow', 'Near the lowest OI support since the morning', 'nearDayHigh', NEAR(0.05)),
+      opt('nearDayHigh', 'Near the highest OI resistance since the morning', 'nearDayLow', NEAR(0.05)),
+      opt('brokeDayHigh', 'Broke above the highest OI resistance since the morning', 'brokeDayLow', { ...W, ...OVER }),
+      opt('brokeDayLow', 'Broke below the lowest OI support since the morning', 'brokeDayHigh', { ...W, ...OVER }),
+      opt('nearStrongSupport', 'Near the strongest OI support since the morning (most put OI)', 'nearStrongResistance', NEAR(0.05)),
+      opt('nearStrongResistance', 'Near the strongest OI resistance since the morning (most call OI)', 'nearStrongSupport', NEAR(0.05)),
+      opt('brokeStrongResistance', 'Broke above the strongest OI resistance since the morning', 'brokeStrongSupport', { ...W, ...OVER }),
+      opt('brokeStrongSupport', 'Broke below the strongest OI support since the morning', 'brokeStrongResistance', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const wall = (k, side) => d.walls[k]?.[side] ?? null
+      const near = (side, below) => inWindow(i, w, (k) => {
+        const x = wall(k - 1, side)
+        return x != null && (below ? d.spot.l[k] <= x * (1 + p / 100) : d.spot.h[k] >= x * (1 - p / 100))
+      }) >= 0
       switch (v) {
-        case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s * (1 + p / 100) }) >= 0
-        case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r * (1 - p / 100) }) >= 0
+        case 'nearSupport': return near('support', true)
+        case 'nearResistance': return near('resistance', false)
         case 'brokeResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'resistance'), i, w, true, p)
         case 'brokeSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'support'), i, w, false, p)
+        case 'nearDayLow': return near('dayLow', true)
+        case 'nearDayHigh': return near('dayHigh', false)
+        case 'brokeDayHigh': return brokeLevel(d.spot.c, (k) => wall(k, 'dayHigh'), i, w, true, p)
+        case 'brokeDayLow': return brokeLevel(d.spot.c, (k) => wall(k, 'dayLow'), i, w, false, p)
+        case 'nearStrongSupport': return near('strongS', true)
+        case 'nearStrongResistance': return near('strongR', false)
+        case 'brokeStrongResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'strongR'), i, w, true, p)
+        case 'brokeStrongSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'strongS'), i, w, false, p)
         default: return false
       }
     },
-    show: (d, i) => `OI support ${d.walls[i]?.support ?? '—'} · resistance ${d.walls[i]?.resistance ?? '—'}`,
+    show: (d, i, line) => {
+      const now = d.walls[i]
+      const text = `OI support ${now?.support ?? '—'} · resistance ${now?.resistance ?? '—'}`
+      const v = line?.value ?? ''
+      // The levels since the open as the test read them - at the candle before.
+      const before = d.walls[Math.max(0, i - 1)]
+      if (/Day/.test(v)) return `${text} · since the morning: lowest support ${before?.dayLow ?? '—'}, highest resistance ${before?.dayHigh ?? '—'}`
+      if (/Strong/.test(v)) {
+        const oi = (x) => (finite(x) ? ` (${fmtLakh(x)})` : '')
+        return `${text} · strongest since the morning: support ${before?.strongS ?? '—'}${oi(before?.strongSOi)}, resistance ${before?.strongR ?? '—'}${oi(before?.strongROi)}`
+      }
+      return text
+    },
   },
   {
     id: 'gexRegime', group: 'GEX', name: 'GEX regime',
@@ -1103,7 +1200,7 @@ export const RULE_CONDITIONS = [
     // crossover with the candle closing beyond both, a close beyond both (`emaCrossHolds`).
     id: 'emaCross', group: 'Indicators', name: 'EMA crossover (spot candles)',
     options: emaCrossOptions(OVER, EMA_FAST_SLOW, { named: true }),
-    test: (d, i, v, w, p, p2, p3) => emaCrossHolds(d.spot, emaSeries(d, fitPeriod(p2, 9)), emaSeries(d, fitPeriod(p3, 21)), i, v, w, p),
+    test: (d, i, v, w, p, p2, p3, p4) => emaCrossHolds(d.spot, emaSeries(d, fitPeriod(p2, 9)), emaSeries(d, fitPeriod(p3, 21)), i, v, w, p, p4),
     show: (d, i, l) => {
       const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
       return `EMA ${f} ${fmtP(emaSeries(d, f)[i])} · EMA ${sl} ${fmtP(emaSeries(d, sl)[i])}`
@@ -1113,7 +1210,7 @@ export const RULE_CONDITIONS = [
     // Spot against one EMA of its candles - at the candle's close (`emaPriceHolds`).
     id: 'emaPrice', group: 'Indicators', name: 'Price vs EMA (spot candles)',
     options: emaPriceOptions(OVER, EMA_PERIOD),
-    test: (d, i, v, w, p, p2) => emaPriceHolds(d.spot, emaSeries(d, fitPeriod(p2, 20)), i, v, w, p),
+    test: (d, i, v, w, p, p2, p3, p4) => emaPriceHolds(d.spot, emaSeries(d, fitPeriod(p2, 20)), i, v, w, p, p4),
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 20); return `spot ${fmtP(d.spot.c[i])} · EMA ${n} ${fmtP(emaSeries(d, n)[i])}` },
   },
   ...premiumConditions('ce'),
@@ -1230,8 +1327,9 @@ export function cleanLine(line) {
     const v = Number(line.param)
     out.param = line.param != null && line.param !== '' && Number.isFinite(v) ? Math.min(o.param.max, Math.max(o.param.min, v)) : o.param.default
   }
-  // A second / third number (a divergence's: how little the line may follow; an EMA crossover's fast and slow periods).
-  for (const key of ['param2', 'param3']) {
+  // A second / third / fourth number (a divergence's: how little the line may follow; an EMA crossover's fast and slow
+  // periods; an EMA's slope).
+  for (const key of ['param2', 'param3', 'param4']) {
     if (!o[key]) continue
     const v = Number(line[key])
     out[key] = line[key] != null && line[key] !== '' && Number.isFinite(v) ? Math.min(o[key].max, Math.max(o[key].min, v)) : o[key].default
@@ -1652,7 +1750,7 @@ export function lineText(line) {
   const c = CONDITION[line.id], o = optionOf(line.id, line.value)
   if (!c || !o) return ''
   const more = (key) => (o[key] && line[key] != null ? (o[key].text ? o[key].text(line[key]) : `${o[key].label} ${line[key]}${o[key].unit}`) : null)
-  const extra = [more('param2'), more('param3')].filter(Boolean).map((x) => `, ${x}`).join('')
+  const extra = [more('param2'), more('param3'), more('param4')].filter(Boolean).map((x) => `, ${x}`).join('')
   const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + extra
   const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
   return `${c.name}: ${o.label}${num}${win}`
@@ -1676,7 +1774,7 @@ export function ruleText(lines, action, logic = '') {
   return `${ACTION[action]?.label ?? action} when ${text}`
 }
 
-const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2, l.param3)
+const lineHolds = (d, i, l) => CONDITION[l.id].test(d, i, l.value, span(d, l.windowMin ?? DEFAULT_WINDOW), l.param ?? 0, l.param2, l.param3, l.param4)
 
 /**
  * The logic read over a day's `n` candles: (i) => does it hold at candle i. `leaf(no, k)` - line no (1-based) at candle k;

@@ -566,8 +566,15 @@ When adding or changing a strategy:
   >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or
   went the other way; "followed" is the line's direction when OI confirms the move (`CUM_LINES.follows`: PE moves WITH
   price - unwound into a fall; CE and Net against it - calls written into a fall); the mirror swaps bullish / bearish with
-  the same numbers. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
-  as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
+  the same numbers. OI SINCE OPEN and TOTAL OI CE vs PE take the same divergence (asked for - "add this bullish div signal
+  in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
+  which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all five
+  lines. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from
+  morning or lowest OI wall": near / broke above the HIGHEST resistance and near / broke below the LOWEST support the walls
+  have been at since the open, and near / broke the STRONGEST of each - the minute's wall with the most call / put OI so
+  far, a later one taking over only with more; `wallsSinceOpen`, each minute's wall from minutes 0 - i, read at the candle
+  before - a wall moves with spot, so past the day's highest resistance the resistance is a higher strike), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
   ATM straddle (vs its VWAP and the decay-only line, crossed), the Initial Balance (after 10:15), and VOLUME PROFILE
   LEVELS - YESTERDAY'S, not today's developing ones (asked for; `levelCondition`): the PREVIOUS DAY's POC / HVN / LVN /
@@ -605,8 +612,13 @@ When adding or changing a strategy:
   the crossover's fast over / under / crossed the slow, the crossover WITH the candle closing beyond BOTH EMAs
   (`crossedUpClose` / `crossedDownClose`) and a close beyond both (`closeAboveBoth` / `closeBelowBoth`); and a cross one way
   THEN BACK in the look-back (`reclaimed` - crossed down through the EMA, then back up, the close still over it; `lost` - the
-  mirror; 60 min is a look-back choice too - `WINDOW_CHOICES`). Spot's mirror is the
-  other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
+  mirror; 60 min is a look-back choice too - `WINDOW_CHOICES`). EMA SLOPE (asked for - "ema slope ... to hide choppy
+  market ... 0 will be ignored"): every EMA option's FOURTH number (`param4`, `EMA_SLOPE` - `cleanLine` / `lineText` / the
+  row take it): the EMA - the SLOW one for a crossover - moved at least that % over the last `SLOPE_CANDLES` (5) candles of
+  the timeframe (`emaSlopeHolds`), UP for an option on the up side (`RISING`: above, crossed up, a candle crossing up, a
+  whole candle over, reclaimed; the fast over / crossing up the slow, a close above both) and DOWN for the others; 0, the
+  default, is not read (a line saved before reads as it did; its words say nothing of it). The mirror keeps the number.
+  Spot's mirror is the other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
   "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
@@ -698,6 +710,13 @@ When adding or changing a strategy:
   net (a table; on a phone a block each - a table hid the names under its pinned column), each with Load & edit. They are
   starting points, not measured edges - the ranking says so. `tests/signal-templates.test.mjs` (every template whole - no
   condition dropped, its logic read, a side for the mirror, its levels in range; a row = that template's own report).
+  STRATEGY NAME (asked for - "add strategy name ... to runs"): the rule card's "Strategy name" box
+  (`optionanalytics.signalBacktest.strategyName`) - filled by a template loaded (its name; Undo puts the old one back), a
+  saved strategy loaded (its own name) or a background run's Use settings (its settings' name), or typed - is the settings'
+  `strategyName` (`cleanBacktestSettings` / `strategyName`: one line, at most 80 characters, '' = none; the engine does not
+  read it): the report heading starts with it (`reportHead`), a background run's default name is "name · index · days"
+  (`defaultRunName` - so the server's Telegram at its end names it), the Background runs list says "Strategy: X" under a run
+  named otherwise, and Save strategy offers it as the name.
   A backtest of the rule as set, not a tuning; it places
   nothing and feeds no strategy or alert (`tests/signal-backtest.test.mjs` - every value and number on its case and
   not without it, all of them together, the mirror, and the features of a day cut part way equal the whole day's up to the cut).

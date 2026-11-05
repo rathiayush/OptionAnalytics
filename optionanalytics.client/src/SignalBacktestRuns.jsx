@@ -123,6 +123,10 @@ function RunCell({ job: j, me }) {
   return (
     <Space direction="vertical" size={0}>
       <Text strong style={{ fontSize: 13 }}>{j.name}</Text>
+      {/* The strategy it ran, when its name is not already the run's name. */}
+      {j.settings?.strategyName && !String(j.name ?? '').includes(j.settings.strategyName) && (
+        <Text style={{ fontSize: 12 }}>Strategy: {j.settings.strategyName}</Text>
+      )}
       <Text type="secondary" style={{ fontSize: 11 }}>
         {j.underlying} · {j.days} day{j.days === 1 ? '' : 's'} · {runRange(j.from, j.to)} · queued {when(j.createdUtc)}
         {j.owner && j.owner.toLowerCase() !== me ? ` · ${j.owner}` : ''}{j.telegram ? ' · Telegram' : ''}
