@@ -265,6 +265,8 @@ body {
 /* The rule's logic typed (LogicInput): the label, the box (it takes the room), Apply / Undo on one row. */
 .oa-rule-logic { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; max-width: 720px; }
 .oa-rule-logic-row { display: flex; align-items: center; gap: 6px; }
+/* The Signal backtest's day pickers: a typed date at 16 px on a phone - iOS zooms in on a smaller box when it is tapped. */
+@media (max-width: 768px) { .oa-date-input input { font-size: 16px !important; } }
 .oa-template-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid #ffffff14; }
 .oa-template-row:last-of-type { border-bottom: none; }
 .oa-rule-logic-row .ant-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; flex: 1; min-width: 0; }

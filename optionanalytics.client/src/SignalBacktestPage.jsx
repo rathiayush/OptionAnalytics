@@ -18,6 +18,7 @@ import { RULE_TEMPLATES, TEMPLATE_FAMILIES, templateById, templateRow, withTempl
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
+import { DATE_INPUT_FORMATS, isPastDay, rangePresets, withRangeEnd } from './backtestDates.js'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
 // ANY, NOT) of conditions (an indicator, what it says, its number and look-back) and of groups (the brackets), the trade it
@@ -346,6 +347,49 @@ function EquityChart({ lines, height = 280 }) {
   return <div ref={ref} style={{ width: '100%', height }} />
 }
 
+// The DAYS to run (`backtestDates.js`): on a wide screen the range picker - two months side by side, with the quick ranges;
+// on a phone, where two months do not fit (the older one ran off the left edge with its ◀ / « - the dates showing there
+// were that month's, and earlier years could not be reached), a From and a To picker of one month each and the quick
+// ranges in a dropdown. Every picker takes a date TYPED in any of DATE_INPUT_FORMATS (2025-01-06, 06/01/2025, 6-1-2025…);
+// « / » and the year in its header go back years.
+function DaysPicker({ range, setRange, disabled }) {
+  const narrow = useMediaQuery('(max-width: 768px)')
+  const today = dayjs().format('YYYY-MM-DD')
+  const presets = useMemo(() => rangePresets(today), [today])
+  const at = (k) => (range?.[k] && dayjs(range[k]).isValid() ? dayjs(range[k]) : null)
+  const common = {
+    size: 'small', allowClear: false, disabled, format: DATE_INPUT_FORMATS, className: 'oa-date-input', showNow: false,
+    disabledDate: (d) => !isPastDay(d, today),
+  }
+  if (!narrow) {
+    return (
+      <DatePicker.RangePicker
+        {...common} value={[at(0), at(1)]} aria-label="Days to run"
+        presets={presets.map((p) => ({ label: p.label, value: [dayjs(p.from), dayjs(p.to)] }))}
+        onChange={(v) => v?.[0] && v?.[1] && setRange([v[0].format('YYYY-MM-DD'), v[1].format('YYYY-MM-DD')])}
+      />
+    )
+  }
+  const pick = (side) => (d) => d && setRange(withRangeEnd(range, side, d.format('YYYY-MM-DD')))
+  return (
+    <Space wrap size={[8, 8]} align="center">
+      <Space size={4} align="center">
+        <Text type="secondary" style={{ fontSize: 12 }}>From</Text>
+        <DatePicker {...common} value={at(0)} onChange={pick('from')} aria-label="From date" style={{ width: 132 }} />
+      </Space>
+      <Space size={4} align="center">
+        <Text type="secondary" style={{ fontSize: 12 }}>To</Text>
+        <DatePicker {...common} value={at(1)} onChange={pick('to')} aria-label="To date" style={{ width: 132 }} />
+      </Space>
+      <Select
+        size="small" value={null} placeholder="Quick range" disabled={disabled} aria-label="Quick range" style={{ width: 150 }}
+        options={presets.map((p) => ({ value: p.key, label: p.label }))}
+        onChange={(key) => { const p = presets.find((x) => x.key === key); if (p) setRange([p.from, p.to]) }}
+      />
+    </Space>
+  )
+}
+
 export default function SignalBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORE.underlying, 'NIFTY')
   const [range, setRange] = usePersistedState(STORE.range, [dayjs().subtract(14, 'day').format('YYYY-MM-DD'), dayjs().subtract(1, 'day').format('YYYY-MM-DD')])
@@ -406,6 +450,8 @@ export default function SignalBacktestPage() {
   const dates = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD')), [range])
   // The same range in the background: up to MAX_BACKGROUND_DAYS (only each day's outcome is kept there).
   const backgroundDays = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD'), MAX_BACKGROUND_DAYS).length, [range])
+  // Every weekday of the range - an earlier year picked can make it longer than either run takes (each the LATEST days).
+  const rangeDays = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD'), Infinity).length, [range])
   const start = async () => {
     abortRef.current?.abort()
     const controller = new AbortController()
@@ -632,16 +678,13 @@ export default function SignalBacktestPage() {
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]} align="center">
               <Segmented size="small" value={index} options={UNDERLYINGS} onChange={setUnderlying} disabled={running} />
-              <DatePicker.RangePicker
-                size="small" allowClear={false} disabled={running}
-                value={[dayjs(range?.[0]), dayjs(range?.[1])]}
-                disabledDate={(d) => !d.isBefore(dayjs(), 'day')}
-                onChange={(v) => v && setRange([v[0].format('YYYY-MM-DD'), v[1].format('YYYY-MM-DD')])}
-              />
+              <DaysPicker range={range} setRange={setRange} disabled={running} />
               <Text type="secondary" style={{ fontSize: 12 }}>
-                {backgroundDays > dates.length
-                  ? `${backgroundDays} weekdays - here the latest ${MAX_BACKTEST_DAYS}; Run in background takes all ${backgroundDays} (up to ${MAX_BACKGROUND_DAYS})`
-                  : `${dates.length} trading day${dates.length === 1 ? '' : 's'} (weekdays; up to ${MAX_BACKTEST_DAYS} here, ${MAX_BACKGROUND_DAYS} in the background)`}
+                {rangeDays > MAX_BACKGROUND_DAYS
+                  ? `${rangeDays} weekdays - here the latest ${MAX_BACKTEST_DAYS}; Run in background the latest ${MAX_BACKGROUND_DAYS}`
+                  : backgroundDays > dates.length
+                    ? `${backgroundDays} weekdays - here the latest ${MAX_BACKTEST_DAYS}; Run in background takes all ${backgroundDays} (up to ${MAX_BACKGROUND_DAYS})`
+                    : `${dates.length} trading day${dates.length === 1 ? '' : 's'} (weekdays; up to ${MAX_BACKTEST_DAYS} here, ${MAX_BACKGROUND_DAYS} in the background)`}
               </Text>
               {running
                 ? <Button size="small" danger icon={<StopOutlined />} onClick={stop}>Stop</Button>
