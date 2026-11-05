@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
-  RULE_CONDITIONS, cleanLine, emaOver, emaSeries, lineText, mirrorIsSame, mirrorLines, pivotLevels, premiumCandles, premiumEma, premiumRsi, prepareDay, previousDayBars,
+  RULE_CONDITIONS, cleanLine, emaCrossHolds, emaOver, emaPriceHolds, emaSeries, lineText, mirrorIsSame, mirrorLines, pivotLevels, premiumCandles, premiumEma, premiumRsi, prepareDay, previousDayBars,
   ruleSignals, rsiOver, rsiSeries, simulateDay, timeframeView,
 } from '../src/signalBacktest.js'
 import { backtestReport, dayOutcome, engineSettings } from '../src/signalBacktestJob.js'
@@ -306,4 +306,85 @@ test('a run\'s day keeps each strike\'s volume (the premium VWAP) from the OI Re
   // Without volume (the synthetic PE): no VWAP - its VWAP conditions never hold.
   assert.ok(Number.isNaN(premiumCandles(day, 'pe', strike).vwap[100]))
   assert.equal(holds(day, 'pePremVwap', 'above', 100) || holds(day, 'pePremVwap', 'below', 100), false)
+})
+
+test('EMA at the candle\'s close: closed above / below, the close crossing, a candle crossing it, a whole candle clear of it', () => {
+  // Candles by hand against an EMA at 100: [open, high, low, close].
+  const make = (rows) => ({ o: rows.map((r) => r[0]), h: rows.map((r) => r[1]), l: rows.map((r) => r[2]), c: rows.map((r) => r[3]) })
+  const e = Float64Array.from({ length: 6 }, () => 100)
+  const bars = make([[95, 97, 94, 96], [96, 98, 95, 97], [98, 104, 97, 103], [103, 106, 102, 105], [105, 108, 101.5, 107], [107, 109, 99, 98]])
+  //                 0 under          1 under          2 opened under, closed over   3 whole over  4 whole over   5 closed back under
+  const at = (i, v, w = 5, p = 0) => emaPriceHolds(bars, e, i, v, w, p)
+  assert.ok(at(2, 'above') && at(2, 'crossedAbove') && at(2, 'candleCrossUp') && !at(2, 'wholeAbove'))
+  assert.ok(at(3, 'wholeAbove') && at(4, 'wholeAbove') && at(4, 'candleCrossUp'))         // the crossing candle 2 in the window, still over
+  assert.ok(!at(4, 'candleCrossUp', 2))                                                   // not in a 2-candle window
+  assert.ok(!at(5, 'candleCrossUp') && !at(5, 'above') && at(5, 'below'))                 // closed back under: no
+  assert.ok(at(5, 'candleCrossDown') && at(5, 'crossedBelow'))                            // 5 opened over and closed under
+  assert.ok(at(1, 'wholeBelow') && !at(2, 'wholeBelow'))
+  // By ≥ %: the close 3% over now; a whole candle by its low (101.5 = 1.5%).
+  assert.ok(at(2, 'candleCrossUp', 5, 3) && !at(2, 'candleCrossUp', 5, 3.5))
+  assert.ok(at(4, 'wholeAbove', 5, 1.5) && !at(4, 'wholeAbove', 5, 1.6))
+})
+
+test('the EMA crossover at the candle\'s close: the crossover with the close beyond BOTH EMAs, a close beyond both', () => {
+  const make = (c) => ({ o: c, h: c, l: c, c })
+  const fast = Float64Array.from([98, 99, 101, 102, 103])
+  const slow = Float64Array.from([100, 100, 100, 100.5, 101])
+  //  the fast crosses the slow at 2; closes: 2 over both, 3 between them (under the fast), 4 over both
+  const bars = make([97, 99, 102, 101, 104])
+  const at = (i, v, w = 5, p = 0) => emaCrossHolds(bars, fast, slow, i, v, w, p)
+  assert.ok(at(2, 'crossedUp') && at(2, 'crossedUpClose') && at(2, 'closeAboveBoth'))
+  assert.ok(at(3, 'crossedUp') && !at(3, 'crossedUpClose') && !at(3, 'closeAboveBoth'))    // closed under the fast
+  assert.ok(at(4, 'crossedUpClose') && !at(4, 'crossedUpClose', 2))                         // the cross out of a 2-candle window
+  assert.ok(at(0, 'closeBelowBoth') && !at(0, 'crossedDownClose') && at(4, 'fastAbove'))
+  // By ≥ %: a close beyond both by its % of the nearer EMA (104 over 103 = 0.97%).
+  assert.ok(at(4, 'closeAboveBoth', 5, 0.9) && !at(4, 'closeAboveBoth', 5, 1))
+  // The bearish mirror image.
+  const neg = (a) => Float64Array.from(a, (x) => 200 - x)
+  const down = make([...bars.c].map((x) => 200 - x))
+  assert.ok(emaCrossHolds(down, neg(fast), neg(slow), 2, 'crossedDownClose', 5, 0) && !emaCrossHolds(down, neg(fast), neg(slow), 3, 'crossedDownClose', 5, 0))
+  assert.ok(emaCrossHolds(down, neg(fast), neg(slow), 4, 'closeBelowBoth', 5, 0))
+})
+
+test('the candle-close EMA options on the conditions - spot\'s and the ATM premium\'s - and their mirrors', () => {
+  // Candles opening at the previous close: falling 5 a minute for 60 minutes, then rising 5.
+  const vee = (i) => (i < 60 ? 25300 - i * 5 : 25000 + (i - 60) * 5)
+  const bar = (f) => (i) => { const c = f(i), o = i ? f(i - 1) : c; return { o, h: Math.max(o, c) + 1, l: Math.min(o, c) - 1, c } }
+  const d = fakeDay({ spot: bar(vee) })
+  const e = emaSeries(d, 20)
+  const up = d.spot.c.findIndex((c, k) => k > 60 && c > e[k])
+  assert.ok(d.spot.o[up] < e[up], 'the candle that crossed opened under the EMA')
+  // Every candle that opened under the EMA (its value at that candle's close) and closed over it - the EMA rising too, the
+  // next candle can be one as well: the last of them in the window, and the close over the EMA now.
+  const crossing = (k) => d.spot.o[k] < e[k] && d.spot.c[k] > e[k]
+  let last = up
+  while (crossing(last + 1)) last++
+  assert.ok(holds(d, 'emaPrice', 'candleCrossUp', up) && !holds(d, 'emaPrice', 'candleCrossUp', up - 1))
+  assert.ok(holds(d, 'emaPrice', 'candleCrossUp', last + 4) && !holds(d, 'emaPrice', 'candleCrossUp', last + 5))
+  const whole = d.spot.l.findIndex((l, k) => k > 60 && l > e[k])
+  assert.ok(whole >= up && holds(d, 'emaPrice', 'wholeAbove', whole) && !holds(d, 'emaPrice', 'wholeAbove', whole - 1) && holds(d, 'emaPrice', 'wholeBelow', 40))
+  // The bearish side on the mirror image of the day.
+  const hat = fakeDay({ spot: bar((i) => 50000 - vee(i)) })
+  assert.ok(holds(hat, 'emaPrice', 'candleCrossDown', up) && !holds(hat, 'emaPrice', 'candleCrossUp', up))
+  // The crossover with the close beyond both, and a close beyond both.
+  const fast = emaSeries(d, 9), slow = emaSeries(d, 21)
+  const cross = fast.findIndex((x, k) => k > 60 && x > slow[k])
+  assert.equal(holds(d, 'emaCross', 'crossedUpClose', cross), d.spot.c[cross] > Math.max(fast[cross], slow[cross]))
+  assert.ok(holds(d, 'emaCross', 'closeAboveBoth', 200) && holds(d, 'emaCross', 'closeBelowBoth', 50) && holds(hat, 'emaCross', 'closeBelowBoth', 200))
+  // Mirrors: spot's to the other side; a premium's to the other option's same reading.
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'emaPrice', value: 'candleCrossUp', param: 0.1, param2: 50 })]).map((l) => [l.id, l.value, l.param, l.param2]), [['emaPrice', 'candleCrossDown', 0.1, 50]])
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'emaCross', value: 'crossedUpClose', param2: 9, param3: 21 })]).map((l) => [l.value]), [['crossedDownClose']])
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'cePremEma', value: 'wholeAbove', param2: 20 })]).map((l) => [l.id, l.value]), [['pePremEma', 'wholeAbove']])
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'cePremEmaCross', value: 'crossedUpClose' })]).map((l) => [l.id, l.value]), [['pePremEmaCross', 'crossedUpClose']])
+  assert.match(lineText(cleanLine({ id: 'emaPrice', value: 'candleCrossUp', param2: 50, windowMin: 3 })), /^Price vs EMA \(spot candles\): A candle crossed up through the EMA \(opened below, closed above\), EMA 50 \(last 3 min\)$/)
+  // The ATM premium: a CE that falls then rises, on candles opening at the previous close.
+  const prem = (i) => (i < 40 ? 120 - i : 80 + (i - 40) * 1.5)
+  const pd = withLegs(fakeDay({ n: 120 }), { ce: { 25000: prem } })
+  // withLegs makes flat bars: give the CE its open at the previous close.
+  const packed = pd.ce.get(25000)
+  for (let i = 1; i < pd.n; i++) { const o = prem(i - 1), c = prem(i); packed[i * 4] = o; packed[i * 4 + 1] = Math.max(o, c); packed[i * 4 + 2] = Math.min(o, c) }
+  const pe20 = premiumEma(pd, 'ce', 25000, 20), pc = premiumCandles(pd, 'ce', 25000)
+  const pUp = pc.c.findIndex((c, k) => k > 40 && c > pe20[k])
+  assert.ok(holds(pd, 'cePremEma', 'candleCrossUp', pUp) && !holds(pd, 'cePremEma', 'candleCrossUp', pUp - 1))
+  assert.ok(holds(pd, 'cePremEmaCross', 'closeAboveBoth', 110) && !holds(pd, 'cePremEmaCross', 'closeBelowBoth', 110))
 })

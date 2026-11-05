@@ -585,7 +585,14 @@ When adding or changing a strategy:
   timeframe's candles (a candle with no bar carries the last close; from the strike's first bar, no warm-up - the day before's
   option bars are not loaded); the strike is the ATM at the candle (spot's nearest), read on its own series up to it. The
   mirror is the OTHER SIDE's same condition, value and numbers kept (CE over its VWAP <-> PE over its VWAP - the condition's
-  `mirror`). `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
+  `mirror`). EMA AT THE CANDLE'S CLOSE (asked for - "for ema candle close and crossover condition"; spot's and the premiums'
+  EMA conditions share it - `emaPriceOptions` / `emaPriceHolds`, `emaCrossOptions` / `emaCrossHolds`): against one EMA the
+  candle CLOSED above / below it, the CLOSE crossed it (a close on one side, a later close on the other), a CANDLE crossed it
+  (`candleCrossUp` / `Down` - opened on one side, closed on the other, the EMA at that candle's close; in the look-back and
+  the close still past it now), a WHOLE candle clear of it (`wholeAbove` - its low over it / `wholeBelow` - its high under);
+  the crossover's fast over / under / crossed the slow, the crossover WITH the candle closing beyond BOTH EMAs
+  (`crossedUpClose` / `crossedDownClose`) and a close beyond both (`closeAboveBoth` / `closeBelowBoth`). Spot's mirror is the
+  other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
   "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /

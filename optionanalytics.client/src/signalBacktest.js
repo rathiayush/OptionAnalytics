@@ -756,6 +756,74 @@ const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevPro
 // the level on the other side (R1 <-> S1; P stays P).
 const pivotLevel = (key, name, mirror) => ({ ...levelCondition({ id: `pivot${key.toUpperCase()}`, group: 'Pivots', name, short: `pivot ${key.toUpperCase()}`, level: (d) => d.pivots?.[key] }), mirror: `pivot${mirror.toUpperCase()}` })
 
+// The EMA conditions read at the CANDLE'S CLOSE (asked for - "for ema candle close and crossover condition"), spot's and a
+// premium's alike - `bars` { o, h, l, c } the timeframe's candles, the EMAs of their closes. Against ONE EMA: the close
+// above / below it, the CLOSE crossing it (a close on one side, a later close on the other), a CANDLE crossing it (opening
+// on one side and closing on the other) and a WHOLE candle clear of it (its low over it / its high under it). Against TWO
+// (the crossover): the fast over / under the slow, the fast crossing the slow, that crossover with the candle closing
+// beyond BOTH EMAs, and a close beyond both. A cross must be in the look-back and still hold now; "by ≥ %" of the EMA (the
+// slow one for the crossover's gap, the nearer one for a close beyond both). `mirrored` false: each option is its own
+// mirror (a premium's - its mirror is the other side's same condition).
+function emaPriceOptions(pct, more, mirrored = true) {
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  return [
+    o('above', 'Candle closed above the EMA', 'below'), o('below', 'Candle closed below the EMA', 'above'),
+    o('crossedAbove', 'Close crossed above the EMA (a close below it, then above)', 'crossedBelow', W),
+    o('crossedBelow', 'Close crossed below the EMA (a close above it, then below)', 'crossedAbove', W),
+    o('candleCrossUp', 'A candle crossed up through the EMA (opened below, closed above)', 'candleCrossDown', W),
+    o('candleCrossDown', 'A candle crossed down through the EMA (opened above, closed below)', 'candleCrossUp', W),
+    o('wholeAbove', 'Whole candle above the EMA (its low over it)', 'wholeBelow'),
+    o('wholeBelow', 'Whole candle below the EMA (its high under it)', 'wholeAbove'),
+  ]
+}
+/** Does `bars` read `v` against the EMA `e` at candle i (window `w` candles, "by ≥ `p` %")? */
+export function emaPriceHolds(bars, e, i, v, w, p) {
+  const gap = (k) => bars.c[k] - e[k]
+  const far = () => Math.abs(gap(i)) >= frac(p) * e[i]
+  const by = frac(p) * e[i]
+  switch (v) {
+    case 'above': return gap(i) > 0 && far()
+    case 'below': return gap(i) < 0 && far()
+    case 'crossedAbove': return crossed(gap, i, w, true) && far()
+    case 'crossedBelow': return crossed(gap, i, w, false) && far()
+    case 'candleCrossUp': return gap(i) > 0 && far() && inWindow(i, w, (k) => bars.o[k] < e[k] && bars.c[k] > e[k]) >= 0
+    case 'candleCrossDown': return gap(i) < 0 && far() && inWindow(i, w, (k) => bars.o[k] > e[k] && bars.c[k] < e[k]) >= 0
+    case 'wholeAbove': return bars.l[i] > e[i] && bars.l[i] - e[i] >= by
+    case 'wholeBelow': return bars.h[i] < e[i] && e[i] - bars.h[i] >= by
+    default: return false
+  }
+}
+function emaCrossOptions(pct, more, { mirrored = true, named = false } = {}) {
+  const o = (value, label, opposite, extra = {}) => opt(value, label, mirrored ? opposite : value, { ...pct, ...extra, ...more })
+  return [
+    o('fastAbove', 'Fast EMA above the slow', 'fastBelow'), o('fastBelow', 'Fast EMA below the slow', 'fastAbove'),
+    o('crossedUp', `Fast crossed above the slow${named ? ' (bullish crossover)' : ''}`, 'crossedDown', W),
+    o('crossedDown', `Fast crossed below the slow${named ? ' (bearish crossover)' : ''}`, 'crossedUp', W),
+    o('crossedUpClose', 'Fast crossed above the slow, the candle closed above both', 'crossedDownClose', W),
+    o('crossedDownClose', 'Fast crossed below the slow, the candle closed below both', 'crossedUpClose', W),
+    o('closeAboveBoth', 'Candle closed above both EMAs', 'closeBelowBoth'),
+    o('closeBelowBoth', 'Candle closed below both EMAs', 'closeAboveBoth'),
+  ]
+}
+/** Does the crossover of `fast` over `slow` (with `bars`' close) read `v` at candle i (window `w` candles, "by ≥ `p` %")? */
+export function emaCrossHolds(bars, fast, slow, i, v, w, p) {
+  const gap = (k) => fast[k] - slow[k]
+  const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
+  const hi = Math.max(fast[i], slow[i]), lo = Math.min(fast[i], slow[i])
+  const c = bars.c[i]
+  switch (v) {
+    case 'fastAbove': return gap(i) > 0 && far()
+    case 'fastBelow': return gap(i) < 0 && far()
+    case 'crossedUp': return crossed(gap, i, w, true) && far()
+    case 'crossedDown': return crossed(gap, i, w, false) && far()
+    case 'crossedUpClose': return crossed(gap, i, w, true) && far() && c > hi
+    case 'crossedDownClose': return crossed(gap, i, w, false) && far() && c < lo
+    case 'closeAboveBoth': return c > hi && c - hi >= frac(p) * hi
+    case 'closeBelowBoth': return c < lo && lo - c >= frac(p) * lo
+    default: return false
+  }
+}
+
 // The ATM strike's CE / PE premium on its own chart (`premiumCandles`): vs its VWAP, vs an EMA, an EMA crossover, RSI - the
 // strike ATM at the candle (spot's nearest), its own series up to it. The mirror is the other side's same condition (CE
 // over its VWAP <-> PE over its VWAP - the numbers kept), so each option keeps its value.
@@ -798,32 +866,19 @@ function premiumConditions(side) {
     },
     {
       id: id('Ema'), group: 'Options', mirror: `${other.toLowerCase()}PremEma`, name: name('vs an EMA'),
-      options: [
-        opt('above', 'Premium above the EMA', 'above', { ...OVER_WIDE, ...EMA_PERIOD }), opt('below', 'Premium below the EMA', 'below', { ...OVER_WIDE, ...EMA_PERIOD }),
-        opt('crossedAbove', 'Crossed above the EMA', 'crossedAbove', { ...W, ...OVER_WIDE, ...EMA_PERIOD }), opt('crossedBelow', 'Crossed below the EMA', 'crossedBelow', { ...W, ...OVER_WIDE, ...EMA_PERIOD }),
-      ],
-      test: (d, i, v, w, p, p2) => versus(d, i, v, w, p, (k) => premiumEma(d, side, k, fitPeriod(p2, 20))),
+      options: emaPriceOptions(OVER_WIDE, EMA_PERIOD, false),
+      test: (d, i, v, w, p, p2) => {
+        const k = strikeAt(d, i)
+        return Number.isFinite(k) && emaPriceHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 20)), i, v, w, p)
+      },
       show: (d, i, l) => showPrem(d, i, (k) => `EMA ${fitPeriod(l?.param2, 20)} ${fmtP(premiumEma(d, side, k, fitPeriod(l?.param2, 20))[i])}`),
     },
     {
       id: id('EmaCross'), group: 'Options', mirror: `${other.toLowerCase()}PremEmaCross`, name: name('EMA crossover'),
-      options: [
-        opt('fastAbove', 'Fast EMA above the slow', 'fastAbove', { ...OVER_WIDE, ...EMA_FAST_SLOW }), opt('fastBelow', 'Fast EMA below the slow', 'fastBelow', { ...OVER_WIDE, ...EMA_FAST_SLOW }),
-        opt('crossedUp', 'Fast crossed above the slow', 'crossedUp', { ...W, ...OVER_WIDE, ...EMA_FAST_SLOW }), opt('crossedDown', 'Fast crossed below the slow', 'crossedDown', { ...W, ...OVER_WIDE, ...EMA_FAST_SLOW }),
-      ],
+      options: emaCrossOptions(OVER_WIDE, EMA_FAST_SLOW, { mirrored: false }),
       test: (d, i, v, w, p, p2, p3) => {
         const k = strikeAt(d, i)
-        if (!Number.isFinite(k)) return false
-        const fast = premiumEma(d, side, k, fitPeriod(p2, 9)), slow = premiumEma(d, side, k, fitPeriod(p3, 21))
-        const gap = (j) => fast[j] - slow[j]
-        const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
-        switch (v) {
-          case 'fastAbove': return gap(i) > 0 && far()
-          case 'fastBelow': return gap(i) < 0 && far()
-          case 'crossedUp': return crossed(gap, i, w, true) && far()
-          case 'crossedDown': return crossed(gap, i, w, false) && far()
-          default: return false
-        }
+        return Number.isFinite(k) && emaCrossHolds(premiumCandles(d, side, k), premiumEma(d, side, k, fitPeriod(p2, 9)), premiumEma(d, side, k, fitPeriod(p3, 21)), i, v, w, p)
       },
       show: (d, i, l) => showPrem(d, i, (k) => {
         const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
@@ -1032,50 +1087,21 @@ export const RULE_CONDITIONS = [
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 14); return `RSI(${n}) ${fmtP(rsiSeries(d, n)[i])}` },
   },
   {
-    // Two EMAs of the spot candles: the fast over / under the slow, or crossed it in the look-back (and still there), by
-    // at least the % of the slow one now.
+    // Two EMAs of the spot candles: the fast over / under the slow, crossed in the look-back (and still there), the
+    // crossover with the candle closing beyond both, a close beyond both (`emaCrossHolds`).
     id: 'emaCross', group: 'Indicators', name: 'EMA crossover (spot candles)',
-    options: [
-      opt('fastAbove', 'Fast EMA above the slow', 'fastBelow', { ...OVER, ...EMA_FAST_SLOW }), opt('fastBelow', 'Fast EMA below the slow', 'fastAbove', { ...OVER, ...EMA_FAST_SLOW }),
-      opt('crossedUp', 'Fast crossed above the slow (bullish crossover)', 'crossedDown', { ...W, ...OVER, ...EMA_FAST_SLOW }),
-      opt('crossedDown', 'Fast crossed below the slow (bearish crossover)', 'crossedUp', { ...W, ...OVER, ...EMA_FAST_SLOW }),
-    ],
-    test: (d, i, v, w, p, p2, p3) => {
-      const fast = emaSeries(d, fitPeriod(p2, 9)), slow = emaSeries(d, fitPeriod(p3, 21))
-      const gap = (k) => fast[k] - slow[k]
-      const far = () => Math.abs(gap(i)) >= frac(p) * slow[i]
-      switch (v) {
-        case 'fastAbove': return gap(i) > 0 && far()
-        case 'fastBelow': return gap(i) < 0 && far()
-        case 'crossedUp': return crossed(gap, i, w, true) && far()
-        case 'crossedDown': return crossed(gap, i, w, false) && far()
-        default: return false
-      }
-    },
+    options: emaCrossOptions(OVER, EMA_FAST_SLOW, { named: true }),
+    test: (d, i, v, w, p, p2, p3) => emaCrossHolds(d.spot, emaSeries(d, fitPeriod(p2, 9)), emaSeries(d, fitPeriod(p3, 21)), i, v, w, p),
     show: (d, i, l) => {
       const f = fitPeriod(l?.param2, 9), sl = fitPeriod(l?.param3, 21)
       return `EMA ${f} ${fmtP(emaSeries(d, f)[i])} · EMA ${sl} ${fmtP(emaSeries(d, sl)[i])}`
     },
   },
   {
-    // Spot against one EMA of its candles: above / below by at least the % of the EMA, or crossed it in the look-back.
+    // Spot against one EMA of its candles - at the candle's close (`emaPriceHolds`).
     id: 'emaPrice', group: 'Indicators', name: 'Price vs EMA (spot candles)',
-    options: [
-      opt('above', 'Price above the EMA', 'below', { ...OVER, ...EMA_PERIOD }), opt('below', 'Price below the EMA', 'above', { ...OVER, ...EMA_PERIOD }),
-      opt('crossedAbove', 'Crossed above the EMA', 'crossedBelow', { ...W, ...OVER, ...EMA_PERIOD }), opt('crossedBelow', 'Crossed below the EMA', 'crossedAbove', { ...W, ...OVER, ...EMA_PERIOD }),
-    ],
-    test: (d, i, v, w, p, p2) => {
-      const e = emaSeries(d, fitPeriod(p2, 20))
-      const gap = (k) => d.spot.c[k] - e[k]
-      const far = () => Math.abs(gap(i)) >= frac(p) * e[i]
-      switch (v) {
-        case 'above': return gap(i) > 0 && far()
-        case 'below': return gap(i) < 0 && far()
-        case 'crossedAbove': return crossed(gap, i, w, true) && far()
-        case 'crossedBelow': return crossed(gap, i, w, false) && far()
-        default: return false
-      }
-    },
+    options: emaPriceOptions(OVER, EMA_PERIOD),
+    test: (d, i, v, w, p, p2) => emaPriceHolds(d.spot, emaSeries(d, fitPeriod(p2, 20)), i, v, w, p),
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 20); return `spot ${fmtP(d.spot.c[i])} · EMA ${n} ${fmtP(emaSeries(d, n)[i])}` },
   },
   ...premiumConditions('ce'),
