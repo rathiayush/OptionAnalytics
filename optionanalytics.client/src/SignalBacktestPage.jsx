@@ -419,6 +419,8 @@ export default function SignalBacktestPage() {
   // On the options' expiry day: as the rule, or always buy / always sell (overriding the rule's buy / sell there).
   const [storedExpiryDay, setExpiryDay] = usePersistedState(STORE.expiryDay, BACKTEST_DEFAULTS.expiryDay)
   const expiryDay = EXPIRY_DAY_CHOICES.some((c) => c.value === storedExpiryDay) ? storedExpiryDay : BACKTEST_DEFAULTS.expiryDay
+  // The expiry day's choice in words, after the rule in the Save / Run in background dialogs.
+  const expiryNote = expiryDay === 'skip' ? ' · not traded on expiry day' : expiryDay !== 'rule' ? ` · on expiry day: ${expiryDay} options` : ''
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
   // The strategy's NAME (asked for - "add strategy name ... to runs"): a template's or a saved strategy's when one is
   // loaded, or typed - carried by the run's settings into its report heading, a background run's name and the list.
@@ -631,7 +633,7 @@ export default function SignalBacktestPage() {
       title: 'Day', dataIndex: 'date', key: 'date', fixed: 'left', width: 150, render: (v, r) => (
         <Space size={4} wrap>
           {dayjs(v).format('ddd D MMM')}
-          {r.expiry && <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag>}
+          {r.expiry && <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>{r.expirySkipped ? 'expiry · not traded' : 'expiry'}</Tag>}
           {r.limit && <Tag color={r.limit === 'loss' ? 'red' : 'green'} style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>max {r.limit}</Tag>}
         </Space>
       ),
@@ -765,7 +767,7 @@ export default function SignalBacktestPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Strike</Text>
                 <Select size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} options={[{ value: 0, label: 'ATM' }, { value: 1, label: '1 ITM' }, { value: -1, label: '1 OTM' }]} />
               </Space>
-              <Tooltip title="On the options' expiry day (the weekly's - BANKNIFTY's monthly): trade as the rule says, or always BUY or always SELL options - overriding the rule's Buy / Sell that day. The signal's direction is kept: a bullish signal buys the call or sells the put, a bearish one buys the put or sells the call. The SL, target and trail are the same.">
+              <Tooltip title="On the options' expiry day (the weekly's - BANKNIFTY's monthly): trade as the rule says, always BUY or always SELL options - overriding the rule's Buy / Sell that day (the signal's direction kept: a bullish signal buys the call or sells the put, a bearish one buys the put or sells the call; the same SL, target and trail) - or DON'T TRADE that day at all (its signals are listed, none taken).">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Expiry day</Text>
                   <Select size="small" value={expiryDay} onChange={setExpiryDay} style={{ width: 120 }} options={EXPIRY_DAY_CHOICES} />
@@ -1008,14 +1010,14 @@ export default function SignalBacktestPage() {
       </Space>
       {saveOpen && (
         <SaveStrategyModal
-          settings={pageSettings} ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '')}
+          settings={pageSettings} ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + expiryNote}
           onClose={() => setSaveOpen(false)} onSaved={() => { setSaveOpen(false); saved.refresh() }}
         />
       )}
       {bgOpen && (
         <RunInBackgroundModal
           settings={pageSettings} days={backgroundDays} telegram={bgTelegram} setTelegram={setBgTelegram}
-          ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + (expiryDay !== 'rule' ? ` · on expiry day: ${expiryDay} options` : '')}
+          ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + expiryNote}
           onClose={() => setBgOpen(false)} onQueued={() => { setBgOpen(false); refreshJobs() }}
         />
       )}

@@ -639,9 +639,12 @@ When adding or changing a strategy:
   "Then": Buy CE / Buy PE / Sell PE / Sell CE (`RULE_ACTIONS`). EXPIRY DAY (asked for - "that setting will override"):
   on the options' expiry day (`prepareDay`'s `isExpiry` = the day is the run's `optionExpiry` - the weekly, BANKNIFTY's
   monthly; known before the open) the "Expiry day" choice (`expiryDay`, `EXPIRY_DAY_CHOICES`: As the rule (default) / Buy
-  options / Sell options, `optionanalytics.signalBacktest.expiryDay`) OVERRIDES the rule's buy / sell - the signal's
+  options / Sell options / Don't trade, `optionanalytics.signalBacktest.expiryDay`) OVERRIDES the rule's buy / sell - the signal's
   direction kept (bullish buys the call or sells the put; the mirror's bearish one the put / the call), the same SL /
-  target / trail; other days as the rule. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
+  target / trail - or, "Don't trade" (`skip`, asked for - "give option to trade on expiry or do not trade"), takes NO trade
+  that day: its signals are listed, each skipped "expiry day - not traded" (`EXPIRY_SKIP_REASON`, the chart's grey dots),
+  `simulateDay`'s `expirySkipped`, the day table's tag "expiry · not traded", the heading's "expiry day: not traded", the
+  live scan sends nothing that day and its report says so; other days as the rule. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
   and day tables, the CSV's "expiry day" column, its `why` starting "Expiry day - selling instead"); the report heading
   names it; a background run takes it with the rest of the settings. MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no

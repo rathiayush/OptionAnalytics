@@ -44,6 +44,22 @@ function pageReport(settings) {
   return { engine, days, ...simulateRun(days, engine) }
 }
 
+test('expiry day not traded: the expiry days\' rows say so with no trade on them - another day as the rule', () => {
+  const skip = { ...SETTINGS, expiryDay: 'skip' }
+  const { engine, days } = pageReport(skip)
+  // The synthetic days are all their options' expiry; 22 Oct made an ordinary day - it trades as with "As the rule".
+  const mixed = days.map((d) => (d.date === '2026-10-22' ? { ...d, isExpiry: false } : d))
+  const report = backtestReport(mixed.map((d, k) => dayOutcome(DATES[k], d, engine)), skip)
+  const asRule = backtestReport(mixed.map((d, k) => dayOutcome(DATES[k], d, engineSettings(SETTINGS))), SETTINGS)
+  assert.deepEqual(report.dayRows.map((r) => [r.date, r.expiry, r.expirySkipped, r.trades]), [
+    ['2026-10-19', true, true, 0], ['2026-10-20', true, true, 0], [HOLIDAY, false, false, 0],
+    ['2026-10-22', false, false, asRule.dayRows[3].trades], ['2026-10-23', true, true, 0],
+  ])
+  assert.ok(asRule.dayRows[3].trades > 0)
+  assert.deepEqual(report.trades, asRule.trades.filter((t) => t.date === '2026-10-22'))
+  assert.ok(asRule.dayRows.every((r) => !r.expirySkipped))
+})
+
 test('a run is its days\' outcomes: the same trades, signals and numbers simulateRun / summarize give', () => {
   for (const mirror of [true, false]) {
     const settings = { ...SETTINGS, rule: { ...SETTINGS.rule, mirror } }
@@ -118,6 +134,9 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.equal(engineSettings(cleanBacktestSettings({ expiryDay: 'sell' })).expiryDay, 'sell')   // what the engine (and a background run) reads
   assert.equal(SETTINGS.expiryDay, 'rule')
   assert.equal(reportHead({ ...SETTINGS, expiryDay: 'sell' }, 4), 'NIFTY · 4 days · 19 Oct 2026 – 23 Oct 2026 · 1m candles · SL 30% · target 50% · trail 10% · expiry day: sell · net of STT 0.15% + ₹20 an order')
+  // "Don't trade" on the expiry day: kept, named in the heading.
+  assert.equal(cleanBacktestSettings({ expiryDay: 'skip' }).expiryDay, 'skip')
+  assert.match(reportHead({ ...SETTINGS, expiryDay: 'skip' }, 4), / · trail 10% · expiry day: not traded · net of /)
   // The day's max loss / profit: off (0) by default, held to 0 - ₹1 crore, read by the engine, named in the heading.
   assert.deepEqual([SETTINGS.maxDayLoss, SETTINGS.maxDayProfit], [0, 0])
   const limits = cleanBacktestSettings({ maxDayLoss: '5000', maxDayProfit: 2e8 })

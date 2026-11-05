@@ -173,7 +173,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
     <Space direction="vertical" size={0} style={{ maxWidth: '100%' }}>
       <Text strong style={{ fontSize: 13 }}>{s.name}</Text>
       <Text type="secondary" style={{ fontSize: 11 }}>
-        {s.underlying} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
+        {s.underlying} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
       </Text>
       <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: ruleOf(s) }}>{ruleOf(s)}</Text>
     </Space>

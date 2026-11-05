@@ -1869,20 +1869,23 @@ export const BACKTEST_DEFAULTS = {
   // The DAY's limits in rupees (0 = off): once the day's P&L - the trades closed today and the one open, net of charges -
   // reaches -maxDayLoss or +maxDayProfit, the open trade exits there and no trade is taken the rest of the day.
   maxDayLoss: 0, maxDayProfit: 0,
-  // On the options' EXPIRY DAY: trade as the rule says ('rule'), or always BUY / always SELL ('buy' / 'sell') - the
-  // signal's direction kept (a bullish one buys the call or sells the put).
+  // On the options' EXPIRY DAY: trade as the rule says ('rule'), always BUY / always SELL ('buy' / 'sell') - the
+  // signal's direction kept (a bullish one buys the call or sells the put) - or not at all ('skip').
   expiryDay: 'rule',
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
 }
 
-/** What to do on the options' expiry day (`expiryDay`) - overriding the rule's buy / sell there, the direction kept. */
+/** What to do on the options' expiry day (`expiryDay`) - overriding the rule's buy / sell there, the direction kept - or
+ *  DON'T TRADE it (asked for - "give option to trade on expiry or do not trade"): its signals listed, none taken. */
 export const EXPIRY_DAY_CHOICES = [
   { value: 'rule', label: 'As the rule' },
   { value: 'buy', label: 'Buy options' },
   { value: 'sell', label: 'Sell options' },
+  { value: 'skip', label: "Don't trade" },
 ]
+export const EXPIRY_SKIP_REASON = "expiry day - not traded (the Expiry day setting)"
 const EXPIRY_MODES = new Set(['buy', 'sell'])
 
 /** The option a signal trades: BUY the call (put) for a bullish (bearish) signal, or SELL the put (call). `moneyness`:
@@ -1981,9 +1984,10 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * `timeframe` - the candles the rule reads, `timeframeView`). One trade at a time (the rule and
  * its mirror together), `cooldownMin` after an exit, at most `maxTradesPerDay`, entries only from `entryFrom` to
  * `lastEntry`. On the options' expiry day (`d.isExpiry`) `expiryDay` 'buy' / 'sell' overrides the rule's buy / sell (the
- * signal's direction kept: bullish buys the call or sells the put). `maxDayLoss` / `maxDayProfit` (rupees, 0 = off): once the
+ * signal's direction kept: bullish buys the call or sells the put); 'skip' takes no trade that day (its signals are
+ * listed, skipped - `expirySkipped`). `maxDayLoss` / `maxDayProfit` (rupees, 0 = off): once the
  * day's net P&L - the closed trades and the open one - reaches either, the open trade exits at it ("Day max loss" / "Day
- * max profit") and every later signal is skipped. Returns `{ trades, signals, dayLimit }` ('loss' | 'profit' | null) - every trade `{ date,
+ * max profit") and every later signal is skipped. Returns `{ trades, signals, dayLimit, expirySkipped }` (dayLimit 'loss' | 'profit' | null) - every trade `{ date,
  * strategy ('rule' | 'mirror'), dir, why, side, strike, action, expiryDay, overridden, entryTime, exitTime, entry, exit,
  * exitReason, points, gross, charges, net, holdMin }`; every signal
  * `{ strategy, time, dir, why, taken, skipped }`.
@@ -2013,8 +2017,9 @@ export function simulateDay(d, settings = {}) {
   // The first candle whose close is in the entry window: a rule already holding then signals on it.
   let openAt = 0
   while (openAt < view.n && istMinute(view.t[openAt]) < from) openAt++
-  // The expiry day's own choice overrides the rule's buy / sell (the signal's direction kept).
+  // The expiry day's own choice overrides the rule's buy / sell (the signal's direction kept) - or the day is not traded.
   const expiryMode = d.isExpiry && EXPIRY_MODES.has(s.expiryDay) ? s.expiryDay : null
+  const expirySkipped = Boolean(d.isExpiry) && s.expiryDay === 'skip'
   for (const sig of ruleSignals(view, s.rule, { openAt })) {
     const i = minuteOfSignal(sig.i)
     const { dir, mode: ruleMode } = ACTION[sig.action]
@@ -2024,6 +2029,7 @@ export function simulateDay(d, settings = {}) {
     const minute = istMinute(d.t[i])
     const row = { strategy: sig.side, time: d.t[i], dir, why, taken: false, skipped: null }
     signals.push(row)
+    if (expirySkipped) { row.skipped = EXPIRY_SKIP_REASON; continue }
     if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
     if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
     if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
@@ -2061,7 +2067,7 @@ export function simulateDay(d, settings = {}) {
     if (s.maxDayLoss > 0 && realized <= -s.maxDayLoss + 0.01) dayLimit = 'loss'
     else if (s.maxDayProfit > 0 && realized >= s.maxDayProfit - 0.01) dayLimit = 'profit'
   }
-  return { trades, signals, dayLimit }
+  return { trades, signals, dayLimit, expirySkipped }
 }
 
 /** The whole run, day by day in date order: { trades, signals }. */

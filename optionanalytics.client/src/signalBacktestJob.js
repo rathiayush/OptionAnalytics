@@ -113,9 +113,10 @@ export function engineSettings(s) {
  *  engineSettings(...). Only the outcome is kept, not the day. */
 export function dayOutcome(date, day, engine) {
   if (!day?.ok) return { date, ok: false, reason: day?.reason ?? 'not loaded', trades: [], signals: { rule: 0, mirror: 0 } }
-  const { trades, signals, dayLimit } = simulateDay(day, engine)
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine)
   return {
-    date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), limit: dayLimit ?? null, trades,
+    date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
+    limit: dayLimit ?? null, trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
 }
@@ -144,7 +145,10 @@ export function backtestReport(outcomes, settings) {
   }))
   const all = { key: 'all', id: 'all', name: SIDE_NAMES.all, what: 'the rule and its mirror together', signals: count('rule') + count('mirror'), ...summarize(trades) }
   const dayRows = days.map((o) => {
-    const row = { key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, expiry: Boolean(o.expiry), limit: o.limit ?? null, trades: o.trades.length, net: netOf(o.trades) }
+    const row = {
+      key: o.date, date: o.date, ok: o.ok, reason: o.ok ? null : o.reason, expiry: Boolean(o.expiry), expirySkipped: Boolean(o.expirySkipped),
+      limit: o.limit ?? null, trades: o.trades.length, net: netOf(o.trades),
+    }
     for (const id of sides) row[id] = netOf(o.trades.filter((t) => t.strategy === id))
     return row
   })
@@ -180,7 +184,7 @@ export function reportHead(s, okDays) {
   const unit = s.levelUnit === 'pts' ? ' pts' : '%'
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
-  const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : ''
+  const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
   return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
