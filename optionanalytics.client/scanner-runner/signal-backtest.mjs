@@ -46,10 +46,13 @@ async function main() {
     return { trades, net: Math.round(net) }
   }
   // A day is replayed as soon as it is loaded and only its outcome kept - 60 prepared days are not held at once.
+  // Trading in another index: that index's day of the same date too (the trades are taken in it); a day either failed on
+  // the way is tried once more.
   const runDay = async (date) => {
     const day = await loadBacktestDay(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS })
-    outcomes.set(date, dayOutcome(date, day, engine))
-    return day
+    const tradeDay = settings.tradeIn && day.ok ? await loadBacktestDay(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
+    outcomes.set(date, dayOutcome(date, day, engine, tradeDay))
+    return { retry: Boolean(day.retry || tradeDay?.retry) }
   }
   const again = []
   for (let k = 0; k < dates.length; k++) {

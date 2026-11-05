@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
+  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, indexLevels, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
+  withIndexLevels,
 } from '../src/signalBacktestJob.js'
 
 const { run } = syntheticDay()
@@ -100,7 +101,7 @@ test('a run is its days\' outcomes: the same trades, signals and numbers simulat
 test('the settings are held to the page\'s ranges, the rule through its tree', () => {
   const s = cleanBacktestSettings({
     underlying: 'FINNIFTY', from: '2026-13-01', to: '2026-10-23', slPct: 5000, targetPct: -3, levelUnit: 'x', trailGap: '12', lots: 2.6, maxTradesPerDay: 0,
-    cooldownMin: 500, timeStopMin: null, charges: 'yes', timeframe: 7, moneyness: 4, rule: { lines: [{ id: 'vwap', value: 'above' }, { id: 'nope', value: 'x' }], action: 'sellPE', mirror: false },
+    cooldownMin: 500, timeStopMin: null, charges: 'yes', timeframe: 7, moneyness: 6, rule: { lines: [{ id: 'vwap', value: 'above' }, { id: 'nope', value: 'x' }], action: 'sellPE', mirror: false },
   })
   assert.equal(s.underlying, 'NIFTY')
   assert.equal(s.from, null)
@@ -115,7 +116,11 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.equal(s.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   assert.equal(s.charges, BACKTEST_DEFAULTS.charges)
   assert.equal(s.timeframe, BACKTEST_DEFAULTS.timeframe)
-  assert.equal(s.moneyness, 1)
+  assert.equal(s.moneyness, 4)                         // ATM, 1 - 4 ITM / OTM: 6 held to 4 ITM
+  assert.deepEqual([-7, -2.6, 3].map((m) => cleanBacktestSettings({ moneyness: m }).moneyness), [-4, -3, 3])
+  // Cost SL: off by default, read on spot or the premium; anything else off. Named in the heading with the strike.
+  assert.deepEqual(['spot', 'premium', 'yes', undefined].map((c) => cleanBacktestSettings({ costSl: c }).costSl), ['spot', 'premium', '', ''])
+  assert.match(reportHead({ ...SETTINGS, costSl: 'spot', moneyness: -2 }, 4), / · 1m candles · 2 OTM · SL 30% · target 50% · trail 10% · cost SL \(spot\) · net of /)
   assert.deepEqual(s.rule, { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 0 } }] }, action: 'sellPE', mirror: false })
   assert.equal(cleanBacktestSettings({ levelUnit: 'pts', slPct: 9000 }).slPct, 5000)
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
@@ -226,6 +231,80 @@ test('the background job, as the server runs it, writes the report the page woul
   assert.equal(progress.at(-1).trades, page.trades.length)
 })
 
+// The same day as SENSEX's - its premiums half as high again, so a trade taken in it differs from NIFTY's.
+const sensexFor = (date) => {
+  const r = runFor(date)
+  const priced = (p) => ({ ...p, price: p.price * 1.5 })
+  return { ...r, underlying: 'SENSEX', cePoints: r.cePoints.map(priced), pePoints: r.pePoints.map(priced) }
+}
+
+test('trade in another index: the settings, the traded lot size, the heading; a day without the traded index\'s does not run', () => {
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'SENSEX' }).tradeIn, 'SENSEX')
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'NIFTY' }).tradeIn, '')        // its own index = no trade-in
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY', tradeIn: 'FTSE' }).tradeIn, '')
+  assert.equal(cleanBacktestSettings({ underlying: 'NIFTY' }).tradeIn, '')
+  assert.equal(SETTINGS.tradeIn, '')
+  assert.deepEqual([engineSettings(SETTINGS).lotSize, engineSettings({ ...SETTINGS, tradeIn: 'SENSEX' }).lotSize, engineSettings({ ...SETTINGS, tradeIn: 'BANKNIFTY' }).lotSize], [65, 20, 30])
+  assert.match(reportHead({ ...SETTINGS, tradeIn: 'SENSEX' }, 4), /^NIFTY signals → traded in SENSEX · 4 days · /)
+  const day = prepareDay(runFor('2026-10-19'), { underlying: 'NIFTY', prevProfile: PREV })
+  const engine = engineSettings({ ...SETTINGS, tradeIn: 'SENSEX' })
+  assert.deepEqual(dayOutcome('2026-10-19', day, engine, { ok: false, reason: 'holiday' }), { date: '2026-10-19', ok: false, reason: 'SENSEX: holiday', trades: [], signals: { rule: 0, mirror: 0 } })
+  const traded = dayOutcome('2026-10-19', day, engine, prepareDay(sensexFor('2026-10-19'), { underlying: 'SENSEX', prevProfile: PREV }))
+  assert.ok(traded.ok && traded.trades.length > 0)
+  assert.ok(traded.trades.every((t) => t.tradeIndex === 'SENSEX' && Math.abs(t.gross - t.points * 20) < 1e-6))
+  // The signals are NIFTY's: the same as trading in NIFTY itself, the trades' minutes too.
+  const own = dayOutcome('2026-10-19', day, engineSettings(SETTINGS))
+  assert.deepEqual(traded.signals, own.signals)
+  assert.deepEqual(traded.trades.map((t) => t.entryTime), own.trades.map((t) => t.entryTime))
+  assert.notDeepEqual(traded.trades.map((t) => t.entry), own.trades.map((t) => t.entry))
+})
+
+test('trade in another index in the background: each day loads that index\'s day too - the page\'s report', async (t) => {
+  const asked = []
+  let failOnce = true
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const date = url.searchParams.get('date')
+    asked.push({ path: url.pathname, date })
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, PREV)
+    if (url.pathname === '/api/oi-replay/NIFTY/run') return json(200, date === HOLIDAY ? { success: false, error: 'holiday' } : runFor(date))
+    if (url.pathname === '/api/oi-replay/SENSEX/run') {
+      if (date === '2026-10-20' && failOnce) { failOnce = false; return json(503, { error: 'busy' }) }
+      return json(200, sensexFor(date))
+    }
+    return json(404, { error: 'not mocked' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json')
+  const settings = { ...SETTINGS, tradeIn: 'SENSEX' }
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
+      env: { ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26', BACKTEST_JOB: JSON.stringify(settings) },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    })
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  assert.equal(code, 0)
+  const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
+  // The page's report for the same days: NIFTY's days, each with SENSEX's of the same date.
+  const engine = engineSettings(settings)
+  const outcomes = DATES.map((date) => {
+    if (date === HOLIDAY) return dayOutcome(date, { ok: false, date, reason: 'holiday' }, engine)
+    return dayOutcome(date, prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV }), engine, prepareDay(sensexFor(date), { underlying: 'SENSEX', prevProfile: PREV }))
+  })
+  const page = JSON.parse(JSON.stringify(backtestReport(outcomes, settings), reportReplacer), reportReviver)
+  assert.deepEqual(result.report, page)
+  assert.ok(page.trades.length > 3 && page.trades.every((t) => t.tradeIndex === 'SENSEX'))
+  // SENSEX asked for every day NIFTY ran (not the holiday), the one that failed on the way once more.
+  const sensexRuns = (date) => asked.filter((a) => a.path === '/api/oi-replay/SENSEX/run' && a.date === date).length
+  assert.deepEqual(DATES.map(sensexRuns), [1, 2, 0, 1, 1])
+})
+
 test('the background job writes why when it cannot run', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
   t.after(() => rmSync(dir, { recursive: true, force: true }))
@@ -257,4 +336,23 @@ test('a run carries its strategy\'s name: in its settings (one line, at most 80 
   assert.doesNotMatch(reportHead({ ...named, strategyName: '' }, 4), /Narrow/)
   // The engine does not read it.
   assert.equal('strategyName' in engineSettings(named), false)
+})
+
+test('SL / target / trail kept per index: each index its own once set, the old levels until then, held to their ranges', () => {
+  const old = { slPct: 25, targetPct: 40, levelUnit: 'pct', trailGap: 0, trailStart: 0 }
+  // Nothing set: every index reads the old levels.
+  assert.deepEqual(indexLevels({}, 'SENSEX', old), old)
+  assert.deepEqual(indexLevels(null, 'NIFTY', {}), { slPct: BACKTEST_DEFAULTS.slPct, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pct', trailGap: 0, trailStart: 0 })
+  // SENSEX's SL in points: SENSEX keeps its whole set from then on (the rest as they were); NIFTY still the old.
+  let by = withIndexLevels({}, 'SENSEX', { levelUnit: 'pts', slPct: 40 }, old)
+  assert.deepEqual(indexLevels(by, 'SENSEX', old), { slPct: 40, targetPct: 40, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.deepEqual(indexLevels(by, 'NIFTY', old), old)
+  by = withIndexLevels(by, 'NIFTY', { targetPct: 80 }, old)
+  assert.deepEqual([indexLevels(by, 'NIFTY', old).targetPct, indexLevels(by, 'SENSEX', old).targetPct], [80, 40])
+  // A change of the old levels later does not move an index that has its own.
+  assert.equal(indexLevels(by, 'SENSEX', { ...old, slPct: 10 }).slPct, 40)
+  assert.equal(indexLevels(by, 'BANKNIFTY', { ...old, slPct: 10 }).slPct, 10)
+  // Held to the ranges: % at most 1000, points 5000; junk = the default.
+  assert.deepEqual(indexLevels({ NIFTY: { slPct: 9000, targetPct: 'x', levelUnit: 'pts' } }, 'NIFTY'), { slPct: 5000, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.equal(indexLevels({ NIFTY: 'junk' }, 'NIFTY', old).slPct, 25)
 })

@@ -36,6 +36,8 @@ test('the trades tagged: BUY / SELL at the entry candle (bullish under it, up; b
     { time: T915 + 50 * MIN, dir: 1, taken: false },
   ]
   assert.deepEqual(skippedMarkers(signals, trades, 5).map((x) => [x.time, x.position]), [[T915 + 30 * MIN, 'aboveBar'], [T915 + 50 * MIN, 'belowBar']])
+  // A trade taken in another index names it.
+  assert.equal(tradeMarkers([{ ...trades[0], tradeIndex: 'SENSEX', strike: 82000 }], 5)[0].text, 'BUY SENSEX 82000 CE')
 })
 
 test('what the chart draws of a day: its timeframe\'s candles, the VWAP of the price shown, the rule\'s EMAs / RSI, the pivots', () => {

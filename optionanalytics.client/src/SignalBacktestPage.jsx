@@ -7,10 +7,10 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
-  BACKTEST_DEFAULTS, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, LEVEL_UNITS, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  mirrorIsSame, mirrorLines, normalizeRule, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  mirrorIsSame, mirrorLines, normalizeRule, optionName, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
-import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportHead } from './signalBacktestJob.js'
+import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, indexLevels, loadBacktestDay, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
@@ -35,6 +35,9 @@ const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const LOAD_TIMEOUT_MS = 240_000
 const STORE = {
   underlying: 'optionanalytics.signalBacktest.underlying',
+  tradeIn: 'optionanalytics.signalBacktest.tradeIn',
+  levelsByIndex: 'optionanalytics.signalBacktest.levelsByIndex',
+  costSl: 'optionanalytics.signalBacktest.costSl',
   range: 'optionanalytics.signalBacktest.range',
   moneyness: 'optionanalytics.signalBacktest.moneyness',
   slPct: 'optionanalytics.signalBacktest.slPct',
@@ -394,14 +397,16 @@ export default function SignalBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORE.underlying, 'NIFTY')
   const [range, setRange] = usePersistedState(STORE.range, [dayjs().subtract(14, 'day').format('YYYY-MM-DD'), dayjs().subtract(1, 'day').format('YYYY-MM-DD')])
   const [moneyness, setMoneyness] = usePersistedState(STORE.moneyness, BACKTEST_DEFAULTS.moneyness)
-  const [slPct, setSlPct] = usePersistedState(STORE.slPct, BACKTEST_DEFAULTS.slPct)
-  const [targetPct, setTargetPct] = usePersistedState(STORE.targetPct, BACKTEST_DEFAULTS.targetPct)
-  const [storedUnit, setLevelUnit] = usePersistedState(STORE.levelUnit, BACKTEST_DEFAULTS.levelUnit)
-  const levelUnit = LEVEL_UNITS.includes(storedUnit) ? storedUnit : BACKTEST_DEFAULTS.levelUnit
-  const [trailGap, setTrailGap] = usePersistedState(STORE.trailGap, BACKTEST_DEFAULTS.trailGap)
-  const [trailStart, setTrailStart] = usePersistedState(STORE.trailStart, BACKTEST_DEFAULTS.trailStart)
-  const unitText = levelUnit === 'pts' ? ' pts' : '%'
-  const unitMax = levelUnit === 'pts' ? 5000 : 1000
+  // The page's levels from before they were kept per index - what an index with none of its own yet starts from.
+  const [legacySl] = usePersistedState(STORE.slPct, BACKTEST_DEFAULTS.slPct)
+  const [legacyTarget] = usePersistedState(STORE.targetPct, BACKTEST_DEFAULTS.targetPct)
+  const [legacyUnit] = usePersistedState(STORE.levelUnit, BACKTEST_DEFAULTS.levelUnit)
+  const [legacyTrailGap] = usePersistedState(STORE.trailGap, BACKTEST_DEFAULTS.trailGap)
+  const [legacyTrailStart] = usePersistedState(STORE.trailStart, BACKTEST_DEFAULTS.trailStart)
+  const [levelsByIndex, setLevelsByIndex] = usePersistedState(STORE.levelsByIndex, {})
+  // COST SL once in profit ('' off, 'spot' / 'premium' - what "back at the entry" is read on).
+  const [storedCostSl, setCostSl] = usePersistedState(STORE.costSl, BACKTEST_DEFAULTS.costSl)
+  const costSl = COST_SL_CHOICES.includes(storedCostSl) ? storedCostSl : ''
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   const [maxTradesPerDay, setMaxTradesPerDay] = usePersistedState(STORE.maxTradesPerDay, BACKTEST_DEFAULTS.maxTradesPerDay)
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
@@ -441,10 +446,27 @@ export default function SignalBacktestPage() {
   const mirrorSame = hasLines && mirrorIsSame(rule.lines)
   const mirrorOn = rule.mirror && !mirrorSame
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
-  const lotSize = PAPER_TRADE_LOT_SIZE[index] ?? 1
+  // TRADE IN another index (asked for - "order punched seeing NIFTY's data but actually to SENSEX"): the rule reads the
+  // index above, the trades are taken in this one's options ('' = the same index).
+  const [storedTradeIn, setTradeIn] = usePersistedState(STORE.tradeIn, '')
+  const tradeIn = UNDERLYINGS.includes(storedTradeIn) && storedTradeIn !== index ? storedTradeIn : ''
+  const lotSize = PAPER_TRADE_LOT_SIZE[tradeIn || index] ?? 1
+  // SL / target / trail and their unit are kept PER INDEX (asked for - "different sl target for each index") - the TRADED
+  // index's (a premium's size differs from one index to the next); an index with none of its own starts from the old ones.
+  const levelIndex = tradeIn || index
+  const legacyLevels = { slPct: legacySl, targetPct: legacyTarget, levelUnit: legacyUnit, trailGap: legacyTrailGap, trailStart: legacyTrailStart }
+  const { slPct, targetPct, levelUnit, trailGap, trailStart } = indexLevels(levelsByIndex, levelIndex, legacyLevels)
+  const setLevelsFor = (idx, patch) => setLevelsByIndex((m) => withIndexLevels(m, idx, patch, legacyLevels))
+  const setSlPct = (v) => setLevelsFor(levelIndex, { slPct: v })
+  const setTargetPct = (v) => setLevelsFor(levelIndex, { targetPct: v })
+  const setLevelUnit = (v) => setLevelsFor(levelIndex, { levelUnit: v })
+  const setTrailGap = (v) => setLevelsFor(levelIndex, { trailGap: v })
+  const setTrailStart = (v) => setLevelsFor(levelIndex, { trailStart: v })
+  const unitText = levelUnit === 'pts' ? ' pts' : '%'
+  const unitMax = levelUnit === 'pts' ? 5000 : 1000
 
   // The run: the days asked for, each loaded and prepared in turn.
-  const [run, setRun] = useState({ status: 'idle', underlying: null, dates: [], done: 0, current: null, results: [] })
+  const [run, setRun] = useState({ status: 'idle', underlying: null, tradeIn: '', dates: [], done: 0, current: null, results: [] })
   const abortRef = useRef(null)
   // A background run opened on the page (its report shown instead of the page's run) and the trades table's filter.
   const [viewing, setViewing] = useState(null)
@@ -459,15 +481,18 @@ export default function SignalBacktestPage() {
     const controller = new AbortController()
     abortRef.current = controller
     const u = index
+    const ti = tradeIn
     const list = dates
     setViewing(null)
-    setRun({ status: 'running', underlying: u, dates: list, done: 0, current: list[0] ?? null, results: [] })
+    setRun({ status: 'running', underlying: u, tradeIn: ti, dates: list, done: 0, current: list[0] ?? null, results: [] })
     const results = []
     for (let k = 0; k < list.length; k++) {
       setRun((r) => ({ ...r, current: list[k], done: k }))
       try {
+        // The signal index's day - and, trading in another, that index's day of the same date (where the trades are taken).
         const { day, cached } = await loadDay(u, list[k], controller.signal)
-        results.push({ date: list[k], day, cached: Boolean(cached) })
+        const trade = ti && day?.ok ? await loadDay(ti, list[k], controller.signal) : null
+        results.push({ date: list[k], day, tradeDay: trade?.day ?? null, cached: Boolean(cached) })
       } catch {
         setRun((r) => ({ ...r, status: 'stopped', current: null, results: [...results] }))
         return
@@ -481,15 +506,17 @@ export default function SignalBacktestPage() {
 
   // The settings as set - held to their ranges exactly as a background run holds them (cleanBacktestSettings).
   const pageSettings = useMemo(() => cleanBacktestSettings({
-    underlying: index, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
+    underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, strategyName: strategyNameText,
-  }), [index, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
+    timeframe, expiryDay, costSl, strategyName: strategyNameText,
+  }), [index, tradeIn, costSl, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay, strategyNameText])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
-  const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index }), [pageSettings, run.underlying, index])
+  // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
+  const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index, tradeIn: run.underlying ? run.tradeIn ?? '' : tradeIn }),
+    [pageSettings, run.underlying, run.tradeIn, index, tradeIn])
   const engine = useMemo(() => engineSettings(runSettings), [runSettings])
-  const outcomes = useMemo(() => run.results.map((r) => dayOutcome(r.date, r.day, engine)), [run.results, engine])
+  const outcomes = useMemo(() => run.results.map((r) => dayOutcome(r.date, r.day, engine, r.tradeDay)), [run.results, engine])
   const localReport = useMemo(() => backtestReport(outcomes, engine), [outcomes, engine])
 
   // The background runs (the server's queue) and the one opened here, if any - its report is shown instead of the page's.
@@ -510,9 +537,12 @@ export default function SignalBacktestPage() {
     const s = cleanBacktestSettings(job.settings)
     setStrategyName(name ?? '')
     setUnderlying(s.underlying)
+    setTradeIn(s.tradeIn ?? '')
     if (s.from && s.to) setRange([s.from, s.to])
     setStoredRule(s.rule)
-    setMoneyness(s.moneyness); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit); setTrailGap(s.trailGap); setTrailStart(s.trailStart)
+    // Its levels are the levels of ITS traded index.
+    setMoneyness(s.moneyness); setCostSl(s.costSl)
+    setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart })
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
     setSttPct(s.sttPct); setBrokeragePerOrder(s.brokeragePerOrder); setOtherPerTrade(s.otherPerTrade)
@@ -584,6 +614,9 @@ export default function SignalBacktestPage() {
   const chartRef = useRef(null)
   const ownDays = useMemo(() => new Map(run.results.filter((r) => r.day?.ok).map((r) => [r.date, r.day])), [run.results])
   const dayOf = useMemo(() => (viewing ? () => null : (date) => ownDays.get(date) ?? null), [viewing, ownDays])
+  // The trade-in index's days of the page's run (where its trades were taken - the chart shows them).
+  const ownTradeDays = useMemo(() => new Map(run.results.filter((r) => r.tradeDay?.ok).map((r) => [r.date, r.tradeDay])), [run.results])
+  const tradeDayOf = useMemo(() => (viewing ? () => null : (date) => ownTradeDays.get(date) ?? null), [viewing, ownTradeDays])
   const showOnChart = (date) => {
     setChartDate(date)
     setChartOpen(true)
@@ -651,7 +684,7 @@ export default function SignalBacktestPage() {
     {
       title: 'Trade', key: 'trade', width: 150, render: (_, t) => (
         <Space size={4}>
-          <Text>{t.action} {t.strike} {t.side}</Text>
+          <Text>{t.action} {optionName(t)}</Text>
           {t.overridden && <Tooltip title="Expiry day: the Expiry day setting overrode the rule's buy / sell (the signal's direction kept)."><Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '16px', paddingInline: 4 }}>expiry</Tag></Tooltip>}
         </Space>
       ),
@@ -680,6 +713,13 @@ export default function SignalBacktestPage() {
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]} align="center">
               <Segmented size="small" value={index} options={UNDERLYINGS} onChange={setUnderlying} disabled={running} />
+              <Space size={4}>
+                <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Trade in</Text>
+                <Select
+                  size="small" value={tradeIn} onChange={setTradeIn} disabled={running} style={{ width: 150 }} aria-label="Trade in"
+                  options={[{ value: '', label: `${index} (same)` }, ...UNDERLYINGS.filter((u) => u !== index).map((u) => ({ value: u, label: `${u} options` }))]}
+                />
+              </Space>
               <DaysPicker range={range} setRange={setRange} disabled={running} />
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {rangeDays > MAX_BACKGROUND_DAYS
@@ -695,6 +735,17 @@ export default function SignalBacktestPage() {
                 <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(true)} disabled={!backgroundDays || !hasLines}>Run in background</Button>
               </Tooltip>
             </Space>
+            {tradeIn && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                The rule reads <Text strong style={{ fontSize: 12 }}>{index}</Text>; every trade is taken in <Text strong style={{ fontSize: 12 }}>{tradeIn}</Text> options
+                - {tradeIn}&apos;s ATM at the signal&apos;s minute, its premiums, its lot ({PAPER_TRADE_LOT_SIZE[tradeIn]}) and its expiry. Each day loads both indices.
+              </Text>
+            )}
+            {run.underlying && !viewing && (run.underlying !== index || (run.tradeIn ?? '') !== tradeIn) && (
+              <Text type="warning" style={{ fontSize: 12 }}>
+                The report below is the last run&apos;s - {run.underlying}{run.tradeIn ? ` signals traded in ${run.tradeIn}` : ''}. Run again for {index}{tradeIn ? ` traded in ${tradeIn}` : ''}.
+              </Text>
+            )}
 
             <div className="oa-rule">
               <Space wrap size={[8, 8]} align="center" style={{ marginBottom: 10, width: '100%' }}>
@@ -765,7 +816,10 @@ export default function SignalBacktestPage() {
               </Tooltip>
               <Space size={4}>
                 <Text type="secondary" style={{ fontSize: 12 }}>Strike</Text>
-                <Select size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} options={[{ value: 0, label: 'ATM' }, { value: 1, label: '1 ITM' }, { value: -1, label: '1 OTM' }]} />
+                <Select
+                  size="small" value={moneyness} onChange={setMoneyness} style={{ width: 100 }} aria-label="Strike"
+                  options={MONEYNESS_CHOICES.map((m) => ({ value: m, label: m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}` }))}
+                />
               </Space>
               <Tooltip title="On the options' expiry day (the weekly's - BANKNIFTY's monthly): trade as the rule says, always BUY or always SELL options - overriding the rule's Buy / Sell that day (the signal's direction kept: a bullish signal buys the call or sells the put, a bearish one buys the put or sells the call; the same SL, target and trail) - or DON'T TRADE that day at all (its signals are listed, none taken).">
                 <Space size={4}>
@@ -773,21 +827,32 @@ export default function SignalBacktestPage() {
                   <Select size="small" value={expiryDay} onChange={setExpiryDay} style={{ width: 120 }} options={EXPIRY_DAY_CHOICES} />
                 </Space>
               </Tooltip>
-              <Tooltip title="Stop-loss, target and trailing stop in % of the entry premium, or in premium points.">
-                <Segmented size="small" value={levelUnit} onChange={setLevelUnit} options={[{ value: 'pct', label: '% premium' }, { value: 'pts', label: 'Points' }]} />
+              <Tooltip title={`Stop-loss, target and trailing stop in % of the entry premium, or in premium points - kept for each index: these are ${levelIndex}'s (the index traded); pick another index and its own come up.`}>
+                <Space size={4}>
+                  <Tag color="blue" style={{ margin: 0 }}>{levelIndex} levels</Tag>
+                  <Segmented size="small" value={levelUnit} onChange={setLevelUnit} options={[{ value: 'pct', label: '% premium' }, { value: 'pts', label: 'Points' }]} />
+                </Space>
               </Tooltip>
               <Tooltip title="Bought: out when the premium FALLS this much below the entry. Sold: out when it RISES this much above it. 0 = no stop-loss.">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>SL</Text><InputNumber size="small" min={0} max={unitMax} value={slPct} onChange={(v) => setSlPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} /></Space>
+                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>SL</Text><InputNumber size="small" min={0} max={unitMax} value={slPct} onChange={(v) => setSlPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} aria-label="Stop-loss" /></Space>
               </Tooltip>
               <Tooltip title="Bought: out when the premium RISES this much. Sold: out when it FALLS this much (the decay kept). 0 = no target.">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Target</Text><InputNumber size="small" min={0} max={unitMax} value={targetPct} onChange={(v) => setTargetPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} /></Space>
+                <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Target</Text><InputNumber size="small" min={0} max={unitMax} value={targetPct} onChange={(v) => setTargetPct(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} aria-label="Target" /></Space>
               </Tooltip>
               <Tooltip title="Trailing stop: this far behind the best premium reached (a bought option's highest, a sold one's lowest), once the trade is 'after +' in profit (0 = from the entry). It moves after each completed 1-minute bar and only tightens; the tighter of it and the SL is the stop. 0 = no trailing.">
-                <Space size={4}>
+                <Space size={4} wrap>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Trail</Text>
                   <InputNumber size="small" min={0} max={unitMax} value={trailGap} onChange={(v) => setTrailGap(v ?? 0)} addonAfter={unitText.trim()} style={{ width: 110 }} />
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>after +</Text>
                   <InputNumber size="small" min={0} max={unitMax} value={trailStart} onChange={(v) => setTrailStart(v ?? 0)} addonAfter={unitText.trim()} disabled={!(trailGap > 0)} style={{ width: 110 }} />
+                </Space>
+              </Tooltip>
+              <Tooltip title="Once the trade is in profit - a completed 1-minute bar CLOSED past the entry, on spot (the traded index's: up for a bought call / sold put, down for a bought put / sold call) or on the premium - it is out at cost: on spot when spot comes back to its level at the entry (at the option's price that minute), on the premium at the entry premium (the tighter stop wins).">
+                <Space size={4} wrap>
+                  <Checkbox checked={Boolean(costSl)} onChange={(e) => setCostSl(e.target.checked ? 'spot' : '')}>
+                    <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Cost SL once in profit</Text>
+                  </Checkbox>
+                  {costSl && <Segmented size="small" value={costSl} onChange={setCostSl} options={[{ value: 'spot', label: 'Spot back' }, { value: 'premium', label: 'Premium back' }]} />}
                 </Space>
               </Tooltip>
               <Tooltip title="Out at the bar's close this many minutes after the entry (0 = off). Every trade is out by 15:10 anyway.">
@@ -986,7 +1051,7 @@ export default function SignalBacktestPage() {
               />
             </Card>
             <BacktestDayChartCard
-              report={report} settings={shown.settings} runKey={shown.job?.id ?? 'page'} dayOf={dayOf} loadDay={loadDay}
+              report={report} settings={shown.settings} runKey={shown.job?.id ?? 'page'} dayOf={dayOf} tradeDayOf={tradeDayOf} loadDay={loadDay}
               date={chartDate} onDate={setChartDate} open={chartOpen !== false} onOpen={setChartOpen} cardRef={chartRef}
             />
             <Card

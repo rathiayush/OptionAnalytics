@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { CandlestickSeries, CrosshairMode, LineSeries, LineStyle, createSeriesMarkers } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, useMediaQuery, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
-import { TIMEFRAMES, istMinute, simulateDay } from './signalBacktest.js'
+import { TIMEFRAMES, istMinute, optionName, simulateDay } from './signalBacktest.js'
 import { engineSettings } from './signalBacktestJob.js'
 import { dayChartData, dayOptions, defaultChartDay, defaultChartOption, ruleIndicators, skippedMarkers, tradeMarkers } from './signalBacktestChart.js'
 import { FoldText } from './FoldText.jsx'
@@ -88,13 +88,36 @@ function DayChart({ data, markers, show, rsiLevels, height }) {
   return <div ref={ref} style={{ width: '100%' }} />
 }
 
+// One index's day for the chart: the page's own (already loaded), else loaded now - a background run's, only while the chart
+// is shown (`key` null = not wanted). Retry asks again after a failure.
+function useChartDay(key, own, load) {
+  const [loaded, setLoaded] = useState({ key: null, retry: 0, status: 'idle', day: null, error: null })
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    if (!key || own) return undefined
+    // Loading until its answer is in (`loaded.key` is still another day's - or this day's last failure, until Retry).
+    const controller = new AbortController()
+    load(controller.signal)
+      .then(({ day }) => setLoaded({ key, retry, status: day?.ok ? 'done' : 'failed', day: day?.ok ? day : null, error: day?.ok ? null : day?.reason ?? 'not loaded' }))
+      .catch((err) => { if (!controller.signal.aborted) setLoaded({ key, retry, status: 'failed', day: null, error: String(err?.message ?? err) }) })
+    return () => controller.abort()
+    // `load` is made afresh each render - the key names what it loads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key, own, retry])
+  if (!key) return { day: null, status: 'idle', error: null, retry: () => {} }
+  const day = own ?? (loaded.key === key ? loaded.day : null)   // a retry keeps nothing to show - the last try failed
+  const status = own ? 'done' : loaded.key === key && loaded.retry === retry ? loaded.status : 'loading'
+  return { day, status, error: loaded.key === key ? loaded.error : null, retry: () => setRetry((n) => n + 1) }
+}
+
 /**
  * The card. `report` / `settings` - what the report cards show (the page's run, or an opened background run); `dayOf(date)`
- * - the page's own prepared day for `date` (null for a background run's), `loadDay(underlying, date, signal)` - loads one
+ * - the page's own prepared day for `date` (null for a background run's), `tradeDayOf(date)` - the same for the trade-in
+ * index (`settings.tradeIn` - the trades were taken in it, so the chart shows it by default), `loadDay(underlying, date, signal)` - loads one
  * (the page's loader: kept for the tab's life); `date` / `onDate` - the day picked (a click on a day or a trade row picks
  * it too); `open` / `onOpen` - shown or closed (a row click shows it again).
  */
-export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay, date, onDate, open = true, onOpen, cardRef }) {
+export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDayOf, loadDay, date, onDate, open = true, onOpen, cardRef }) {
   const narrow = useMediaQuery('(max-width: 768px)')
   const [storedShow, setStoredShow] = usePersistedState(STORE.show, null)
   const [storedSource, setSource] = usePersistedState(STORE.source, 'spot')
@@ -110,30 +133,29 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
   const picked = days.some((r) => r.date === date) ? date : defaultChartDay(report?.dayRows)
   const at = days.findIndex((r) => r.date === picked)
 
-  // The day: the page's own (already loaded), else loaded now - a background run's (only while the chart is shown).
-  const own = picked ? dayOf?.(picked) ?? null : null
-  const [loaded, setLoaded] = useState({ key: null, retry: 0, status: 'idle', day: null, error: null })
-  const [retry, setRetry] = useState(0)
-  const key = picked && open ? `${runKey}|${settings.underlying}|${picked}` : null
-  useEffect(() => {
-    if (!key || own) return undefined
-    // Loading until its answer is in (`loaded.key` is still another day's - or this day's last failure, until Retry).
-    const controller = new AbortController()
-    loadDay(settings.underlying, picked, controller.signal)
-      .then(({ day }) => setLoaded({ key, retry, status: day?.ok ? 'done' : 'failed', day: day?.ok ? day : null, error: day?.ok ? null : day?.reason ?? 'not loaded' }))
-      .catch((err) => { if (!controller.signal.aborted) setLoaded({ key, retry, status: 'failed', day: null, error: String(err?.message ?? err) }) })
-    return () => controller.abort()
-  }, [key, own, retry, loadDay, picked, settings.underlying])
-  const day = own ?? (loaded.key === key ? loaded.day : null)   // a retry keeps nothing to show - the last try failed
-  const status = own ? 'done' : loaded.key === key && loaded.retry === retry ? loaded.status : 'loading'
+  // The days: the signal index's (the rule read it) and, trading in another, that index's (the trades were taken in it).
+  const tradeIn = settings.tradeIn || ''
+  const signalDay = useChartDay(picked && open ? `${runKey}|${settings.underlying}|${picked}` : null, picked ? dayOf?.(picked) ?? null : null,
+    (signal) => loadDay(settings.underlying, picked, signal))
+  const tradeDayL = useChartDay(picked && open && tradeIn ? `${runKey}|${tradeIn}|${picked}` : null, picked && tradeIn ? tradeDayOf?.(picked) ?? null : null,
+    (signal) => loadDay(tradeIn, picked, signal))
+  const day = signalDay.day
+  const tradeDay = tradeIn ? tradeDayL.day : day
 
   const trades = useMemo(() => (report?.trades ?? []).filter((t) => t.date === picked).sort((a, b) => a.entryTime - b.entryTime), [report, picked])
-  // What the candles are of: spot, the futures (when the day has them) or an option's premium (a strike picked - by
+  // What the candles are of: spot - the TRADED index's (the signal index's is "signal" when trading in another) - the
+  // signal index's futures (when the day has them) or an option's premium (of the traded index - a strike picked, by
   // default the day's first trade's, else the ATM call at the open).
-  const source = storedSource === 'futures' && day?.priceSource === 'futures' ? 'futures' : storedSource === 'option' ? 'option' : 'spot'
-  const options = useMemo(() => dayOptions(day), [day])
+  const source = storedSource === 'futures' && day?.priceSource === 'futures' ? 'futures'
+    : storedSource === 'option' ? 'option' : storedSource === 'signal' && tradeIn ? 'signal' : 'spot'
+  const chartDay = source === 'spot' || source === 'option' ? tradeDay : day
+  const status = [signalDay.status, tradeIn ? tradeDayL.status : 'done'].includes('failed') ? 'failed'
+    : [signalDay.status, tradeIn ? tradeDayL.status : 'done'].includes('loading') ? 'loading' : 'done'
+  const failure = signalDay.status === 'failed' ? `${settings.underlying}: ${signalDay.error}` : tradeDayL.status === 'failed' ? `${tradeIn}: ${tradeDayL.error}` : null
+  const retryLoad = () => { if (signalDay.status === 'failed') signalDay.retry(); if (tradeDayL.status === 'failed') tradeDayL.retry() }
+  const options = useMemo(() => dayOptions(tradeDay), [tradeDay])
   const [optionPick, setOptionPick] = useState({ day: null, value: null })
-  const fallbackOption = defaultChartOption(day, trades)
+  const fallbackOption = defaultChartOption(tradeDay, trades)
   const optionValue = optionPick.day === picked && options.some((o) => o.value === optionPick.value)
     ? optionPick.value : fallbackOption ? `${fallbackOption.side}|${fallbackOption.strike}` : null
   const option = options.find((o) => o.value === optionValue) ?? null
@@ -150,14 +172,15 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
   const rsiPeriod = used.rsi ?? 14
   const optionKey = source === 'option' && option ? option.value : ''
   const data = useMemo(() => {
-    if (!day) return null
+    if (!chartDay) return null
     const [side, strike] = optionKey ? optionKey.split('|') : []
-    return dayChartData(day, { timeframe: tf, source, ema: emaKey.split('|').map(Number), rsi: rsiPeriod, option: optionKey ? { side, strike: Number(strike) } : null })
-  }, [day, tf, source, emaKey, rsiPeriod, optionKey])
+    return dayChartData(chartDay, { timeframe: tf, source: source === 'signal' ? 'spot' : source, ema: emaKey.split('|').map(Number), rsi: rsiPeriod, option: optionKey ? { side, strike: Number(strike) } : null })
+  }, [chartDay, tf, source, emaKey, rsiPeriod, optionKey])
   // On an option's chart only its own trades are tagged.
   const tagged = useMemo(() => (source === 'option' && option ? trades.filter((t) => t.strike === option.strike && t.side === option.side.toUpperCase()) : trades), [source, option, trades])
   // The signals not taken: the day run again with the run's own settings (the same engine) - its trades are the report's.
-  const signals = useMemo(() => (day && show.has('skipped') ? simulateDay(day, engineSettings(settings)).signals : []), [day, settings, show])
+  const signals = useMemo(() => (day && show.has('skipped') && (!tradeIn || tradeDay) ? simulateDay(day, engineSettings(settings), { tradeDay }).signals : []),
+    [day, tradeDay, tradeIn, settings, show])
   const markers = useMemo(() => [
     ...tradeMarkers(tagged, tf, { up: UP_COLOR, down: DOWN_COLOR }),
     ...(show.has('skipped') && source !== 'option' ? skippedMarkers(signals, trades, tf) : []),
@@ -166,11 +189,14 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
 
   if (!days.length) return null
   const row = days[at]
-  const what = source === 'futures' ? 'Futures' : source === 'option' && option ? `${option.strike} ${option.side.toUpperCase()}` : 'Spot'
+  const traded = tradeIn || settings.underlying
+  const what = source === 'futures' ? (tradeIn ? `${settings.underlying} futures` : 'Futures')
+    : source === 'option' && option ? `${tradeIn ? `${tradeIn} ` : ''}${option.strike} ${option.side.toUpperCase()}`
+      : source === 'signal' ? `${settings.underlying} spot` : tradeIn ? `${tradeIn} spot` : 'Spot'
   const title = (
     <Space size={6} wrap>
       <span>{what} chart - the trades tagged</span>
-      <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{settings.underlying} · {tf}m candles</Text>
+      <Text type="secondary" style={{ fontSize: 12, fontWeight: 400 }}>{tradeIn ? `signals ${settings.underlying} → traded ${tradeIn}` : settings.underlying} · {tf}m candles</Text>
     </Space>
   )
   const closeButton = (
@@ -206,7 +232,9 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
           <Space size={6} wrap>
             <Segmented
               size="small" value={source} onChange={setSource}
-              options={[{ value: 'spot', label: 'Spot' }, ...(day?.priceSource === 'futures' ? [{ value: 'futures', label: 'Futures' }] : []), { value: 'option', label: 'Option' }]}
+              options={tradeIn
+                ? [{ value: 'spot', label: `${tradeIn}` }, { value: 'signal', label: `${settings.underlying} (signal)` }, ...(day?.priceSource === 'futures' ? [{ value: 'futures', label: `${settings.underlying} fut` }] : []), { value: 'option', label: 'Option' }]
+                : [{ value: 'spot', label: 'Spot' }, ...(day?.priceSource === 'futures' ? [{ value: 'futures', label: 'Futures' }] : []), { value: 'option', label: 'Option' }]}
             />
             {source === 'option' && (
               <Select
@@ -232,8 +260,8 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
           {status === 'loading' && <Spin size="small"><div style={{ padding: 24, textAlign: 'center' }}><Text type="secondary">Loading {dayjs(picked).format('D MMM')}…</Text></div></Spin>}
           {status === 'failed' && (
             <Alert
-              type="warning" showIcon message={`${dayjs(picked).format('D MMM')} could not be loaded: ${loaded.error}`}
-              action={<Button size="small" icon={<ReloadOutlined />} onClick={() => setRetry((n) => n + 1)}>Retry</Button>}
+              type="warning" showIcon message={`${dayjs(picked).format('D MMM')} could not be loaded - ${failure}`}
+              action={<Button size="small" icon={<ReloadOutlined />} onClick={retryLoad}>Retry</Button>}
             />
           )}
           {data && data.candles.length > 0 && <DayChart data={data} markers={markers} show={show} rsiLevels={used.rsiLevels} height={narrow ? 340 : 440} />}
@@ -244,9 +272,10 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
               <span><span style={{ color: UP_COLOR }}>●</span> / <span style={{ color: DOWN_COLOR }}>●</span> exit, its net</span>
               {show.has('skipped') && source !== 'option' && <span><span style={{ color: '#8c8c8c' }}>●</span> a signal not taken{notTaken.length ? ` (${notTaken.length})` : ''}</span>}
               {tf !== runTf && <Tag style={NOTE_TAG}>the rule read {runTf}m candles - the indicators here are on {tf}m</Tag>}
-              {source === 'spot' && show.has('vwap') && !data.vwap.length && <Tag style={NOTE_TAG}>no spot VWAP this day (the index had no volume){day.priceSource === 'futures' ? ' - Futures has the rule\'s' : ''}</Tag>}
+              {tradeIn && (source === 'spot' || source === 'option') && <Tag style={NOTE_TAG}>the rule read {settings.underlying} - this is {traded}, where the trades were taken</Tag>}
+              {(source === 'spot' || source === 'signal') && show.has('vwap') && !data.vwap.length && <Tag style={NOTE_TAG}>no spot VWAP this day (the index had no volume){day?.priceSource === 'futures' && (!tradeIn || source === 'signal') ? ' - Futures has the rule\'s' : ''}</Tag>}
               {source === 'option' && show.has('vwap') && !data.vwap.length && <Tag style={NOTE_TAG}>no traded volume for this option - no VWAP</Tag>}
-              {show.has('pivots') && !data.pivots && source === 'spot' && <Tag style={NOTE_TAG}>no pivots - no previous session loaded</Tag>}
+              {show.has('pivots') && !data.pivots && (source === 'spot' || source === 'signal') && <Tag style={NOTE_TAG}>no pivots - no previous session loaded</Tag>}
             </Space>
           )}
           {trades.length > 0 && (
@@ -257,7 +286,7 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, loadDay,
                     color={t.dir > 0 ? 'green' : 'red'} style={{ margin: '0 6px 0 0', cursor: 'pointer' }} title="Show this option's chart"
                     onClick={() => { setSource('option'); setOptionPick({ day: picked, value: `${t.side === 'PE' ? 'pe' : 'ce'}|${t.strike}` }) }}
                   >
-                    {t.action} {t.strike} {t.side}
+                    {t.action} {optionName(t)}
                   </Tag>
                   {clock(t.entryTime)} @ {t.entry.toFixed(2)} → {clock(t.exitTime)} @ {t.exit.toFixed(2)} · {t.exitReason} · <Text strong style={{ color: pnlColor(t.net), fontSize: 12 }}>{rupees(t.net)}</Text>
                   {t.strategy === 'mirror' && <Text type="secondary" style={{ fontSize: 12 }}> · mirror</Text>}

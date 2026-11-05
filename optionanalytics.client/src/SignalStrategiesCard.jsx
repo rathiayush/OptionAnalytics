@@ -42,7 +42,7 @@ export function SaveStrategyModal({ settings, ruleSummary, onClose, onSaved }) {
   return (
     <Modal open title="Save strategy" onCancel={onClose} onOk={save} okText="Save" confirmLoading={busy} okButtonProps={{ disabled: !name.trim() }} destroyOnHidden>
       <Space direction="vertical" size={12} style={{ width: '100%' }}>
-        <Text style={{ fontSize: 12 }}><Text strong style={{ fontSize: 12 }}>{settings.underlying}</Text> · {ruleSummary}</Text>
+        <Text style={{ fontSize: 12 }}><Text strong style={{ fontSize: 12 }}>{settings.underlying}{settings.tradeIn ? ` → traded in ${settings.tradeIn}` : ''}</Text> · {ruleSummary}</Text>
         <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Name</Text>
           <Input value={name} maxLength={80} onChange={(e) => setName(e.target.value)} />
@@ -173,7 +173,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
     <Space direction="vertical" size={0} style={{ maxWidth: '100%' }}>
       <Text strong style={{ fontSize: 13 }}>{s.name}</Text>
       <Text type="secondary" style={{ fontSize: 11 }}>
-        {s.underlying} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
+        {s.underlying}{s.settings?.tradeIn && s.settings.tradeIn !== s.underlying ? ` → traded in ${s.settings.tradeIn}` : ''} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
       </Text>
       <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: ruleOf(s) }}>{ruleOf(s)}</Text>
     </Space>

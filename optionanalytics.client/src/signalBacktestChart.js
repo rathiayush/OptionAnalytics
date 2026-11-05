@@ -4,7 +4,7 @@
 // a grey dot for each signal that was not taken. The lines are the engine's own - the VWAP, the EMAs and RSI of the spot
 // candles (`emaSeries` / `rsiSeries`), the previous session's pivot points and CPR - so the chart shows what the rule read.
 // Pure functions: `tests/signal-backtest-chart.test.mjs`.
-import { emaSeries, istMinute, normalizeRule, premiumCandles, premiumEma, premiumRsi, rsiSeries, timeframeView } from './signalBacktest.js'
+import { emaSeries, istMinute, normalizeRule, optionName, premiumCandles, premiumEma, premiumRsi, rsiSeries, timeframeView } from './signalBacktest.js'
 
 const MIN = 60_000
 const SESSION_FIRST = 9 * 60 + 15
@@ -90,7 +90,7 @@ export function tradeMarkers(trades, tf = 1, { up = '#26a69a', down = '#ef5350' 
   const out = []
   for (const t of trades ?? []) {
     const bull = t.dir > 0
-    out.push({ time: candleStart(t.entryTime, tf), position: bull ? 'belowBar' : 'aboveBar', shape: bull ? 'arrowUp' : 'arrowDown', color: bull ? up : down, text: `${t.action} ${t.strike} ${t.side}` })
+    out.push({ time: candleStart(t.entryTime, tf), position: bull ? 'belowBar' : 'aboveBar', shape: bull ? 'arrowUp' : 'arrowDown', color: bull ? up : down, text: `${t.action} ${optionName(t)}` })
     out.push({ time: candleStart(t.exitTime, tf), position: bull ? 'aboveBar' : 'belowBar', shape: 'circle', color: t.net >= 0 ? up : down, text: `Exit ${rupee(t.net)}` })
   }
   return out.sort((a, b) => a.time - b.time)

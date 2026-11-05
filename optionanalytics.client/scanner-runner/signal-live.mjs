@@ -66,23 +66,35 @@ async function round(nowMs) {
   const complete = ist.minute >= REPORT_FROM_MINUTE
   const byIndex = new Map()
   for (const s of list) byIndex.set(s.clean.underlying, [...(byIndex.get(s.clean.underlying) ?? []), s])
+  // Today's day of every index wanted - each strategy's own and, one trading in another (`tradeIn`), that one - read once.
+  const wanted = new Set()
   for (const [u, strategies] of byIndex) {
-    if ((backoff.get(u)?.until ?? 0) > nowMs) continue
     if (complete && strategies.every((s) => s.reported)) continue
-    let day
+    wanted.add(u)
+    for (const s of strategies) if (s.clean.tradeIn) wanted.add(s.clean.tradeIn)
+  }
+  const days = new Map()
+  for (const u of wanted) {
+    if ((backoff.get(u)?.until ?? 0) > nowMs) continue
     try {
       const [run, prev] = await Promise.all([api(liveRunUrl(u, date)), prevProfile(u, date)])
       if (!run?.success) throw new Error(run?.error ?? 'no data for today')
-      day = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs })
+      const day = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs })
+      backoff.delete(u)
+      if (day.ok && day.date === date) days.set(u, day)
     } catch (err) {
       failed(u, err.message)
-      continue
     }
-    backoff.delete(u)
-    if (!day.ok || day.date !== date) continue
+  }
+  for (const [u, strategies] of byIndex) {
+    const day = days.get(u)
+    if (!day || (complete && strategies.every((s) => s.reported))) continue
     for (const s of strategies) {
+      // Trading in another index: its day too - not read this round, the strategy waits for the next.
+      const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
+      if (s.clean.tradeIn && !tradeDay) continue
       try {
-        const result = liveDayEvents(day, engineSettings(s.clean), { name: s.name, complete, nowMs })
+        const result = liveDayEvents(day, engineSettings(s.clean), { name: s.name, complete, nowMs, tradeDay })
         const sent = new Set(s.sent ?? [])
         const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text }) => ({ key, kind, text }))
         if (fresh.length) await api('/api/signal-strategies/live/events', { method: 'POST', body: { strategyId: s.id, date, events: fresh } })

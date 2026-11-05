@@ -165,11 +165,11 @@ export function withTemplate(pageSettings, tpl) {
   return cleanBacktestSettings({ ...pageSettings, ...LEVELS, ...tpl.settings, rule: { ...tpl.rule, tree: normalizeRule(tpl.rule).tree } })
 }
 
-/** One template over the days loaded (`results` - the page's [{ date, day }]): its row - the report's "both" numbers,
- *  and the rule's and the mirror's own net. */
+/** One template over the days loaded (`results` - the page's [{ date, day, tradeDay }] - `tradeDay` the trade-in index's,
+ *  when the page trades in another): its row - the report's "both" numbers, and the rule's and the mirror's own net. */
 export function templateRow(results, pageSettings, tpl) {
   const engine = engineSettings(withTemplate(pageSettings, tpl))
-  const outcomes = (results ?? []).map((r) => dayOutcome(r.date, r.day, engine))
+  const outcomes = (results ?? []).map((r) => dayOutcome(r.date, r.day, engine, r.tradeDay ?? null))
   const report = backtestReport(outcomes, engine)
   const side = (id) => report.rows.find((r) => r.id === id) ?? null
   const all = report.all
