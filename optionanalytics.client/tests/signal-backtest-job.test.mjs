@@ -121,6 +121,10 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   // Cost SL: off by default, read on spot or the premium; anything else off. Named in the heading with the strike.
   assert.deepEqual(['spot', 'premium', 'yes', undefined].map((c) => cleanBacktestSettings({ costSl: c }).costSl), ['spot', 'premium', '', ''])
   assert.match(reportHead({ ...SETTINGS, costSl: 'spot', moneyness: -2 }, 4), / · 1m candles · 2 OTM · SL 30% · target 50% · trail 10% · cost SL \(spot\) · net of /)
+  // Its "after +": held to 0 - 5000, named with its unit (spot points; the premium's in the levels' unit).
+  assert.deepEqual([20, -3, 9999, 'x'].map((v) => cleanBacktestSettings({ costAfter: v }).costAfter), [20, 0, 5000, 0])
+  assert.match(reportHead({ ...SETTINGS, costSl: 'spot', costAfter: 20 }, 4), / · cost SL \(spot after \+20 pts\) · /)
+  assert.match(reportHead({ ...SETTINGS, costSl: 'premium', costAfter: 15 }, 4), / · cost SL \(premium after \+15%\) · /)
   assert.deepEqual(s.rule, { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 0 } }] }, action: 'sellPE', mirror: false })
   assert.equal(cleanBacktestSettings({ levelUnit: 'pts', slPct: 9000 }).slPct, 5000)
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
@@ -339,13 +343,16 @@ test('a run carries its strategy\'s name: in its settings (one line, at most 80 
 })
 
 test('SL / target / trail kept per index: each index its own once set, the old levels until then, held to their ranges', () => {
-  const old = { slPct: 25, targetPct: 40, levelUnit: 'pct', trailGap: 0, trailStart: 0 }
+  const old = { slPct: 25, targetPct: 40, levelUnit: 'pct', trailGap: 0, trailStart: 0, costAfter: 0 }
   // Nothing set: every index reads the old levels.
   assert.deepEqual(indexLevels({}, 'SENSEX', old), old)
-  assert.deepEqual(indexLevels(null, 'NIFTY', {}), { slPct: BACKTEST_DEFAULTS.slPct, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pct', trailGap: 0, trailStart: 0 })
+  assert.deepEqual(indexLevels(null, 'NIFTY', {}), { slPct: BACKTEST_DEFAULTS.slPct, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pct', trailGap: 0, trailStart: 0, costAfter: 0 })
   // SENSEX's SL in points: SENSEX keeps its whole set from then on (the rest as they were); NIFTY still the old.
   let by = withIndexLevels({}, 'SENSEX', { levelUnit: 'pts', slPct: 40 }, old)
-  assert.deepEqual(indexLevels(by, 'SENSEX', old), { slPct: 40, targetPct: 40, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.deepEqual(indexLevels(by, 'SENSEX', old), { slPct: 40, targetPct: 40, levelUnit: 'pts', trailGap: 0, trailStart: 0, costAfter: 0 })
+  // The Cost SL's "after +" is the index's too (spot points differ per index).
+  by = withIndexLevels(by, 'SENSEX', { costAfter: 60 }, old)
+  assert.deepEqual([indexLevels(by, 'SENSEX', old).costAfter, indexLevels(by, 'NIFTY', old).costAfter], [60, 0])
   assert.deepEqual(indexLevels(by, 'NIFTY', old), old)
   by = withIndexLevels(by, 'NIFTY', { targetPct: 80 }, old)
   assert.deepEqual([indexLevels(by, 'NIFTY', old).targetPct, indexLevels(by, 'SENSEX', old).targetPct], [80, 40])
@@ -353,6 +360,6 @@ test('SL / target / trail kept per index: each index its own once set, the old l
   assert.equal(indexLevels(by, 'SENSEX', { ...old, slPct: 10 }).slPct, 40)
   assert.equal(indexLevels(by, 'BANKNIFTY', { ...old, slPct: 10 }).slPct, 10)
   // Held to the ranges: % at most 1000, points 5000; junk = the default.
-  assert.deepEqual(indexLevels({ NIFTY: { slPct: 9000, targetPct: 'x', levelUnit: 'pts' } }, 'NIFTY'), { slPct: 5000, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.deepEqual(indexLevels({ NIFTY: { slPct: 9000, targetPct: 'x', levelUnit: 'pts', costAfter: -5 } }, 'NIFTY'), { slPct: 5000, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pts', trailGap: 0, trailStart: 0, costAfter: 0 })
   assert.equal(indexLevels({ NIFTY: 'junk' }, 'NIFTY', old).slPct, 25)
 })

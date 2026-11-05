@@ -1876,6 +1876,9 @@ export const BACKTEST_DEFAULTS = {
   // favour, out when spot comes back to that level; 'premium' - once a bar closed with the premium past the entry, the
   // entry premium is a stop (out at cost).
   costSl: '',
+  // ...and how far in profit a bar must CLOSE before it arms (asked for - "cost SL should happen after certain points,
+  // otherwise it will enter and just exit"): spot points on 'spot', the premium in `levelUnit` on 'premium'; 0 = any profit.
+  costAfter: 0,
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
@@ -1956,10 +1959,10 @@ export function dayLevel(option, entry, amount, { realized = 0, qty, stt = 0, fl
  * high, a sold one's lowest low), once the trade is `trailStart` in profit; it moves after each completed bar - a bar is
  * judged with the trail it had before it - and only tightens; the tighter of it and the fixed stop is the stop. COST SL
  * (`costSl`, asked for - "once in profit a cost SL ... from the point where I entered spot, if price returns to the same
- * level"): 'spot' / 'premium' - armed after a bar closed in profit, then out when spot is back at the entry's spot / at
- * the entry premium.
+ * level"): 'spot' / 'premium' - armed after a bar closed in profit by at least `costAfter` (spot points / the premium in
+ * `levelUnit`; 0 = any profit), then out when spot is back at the entry's spot / at the entry premium.
  */
-export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '' }) {
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '', costAfter = 0 }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
@@ -1979,6 +1982,9 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
   const bullish = (option.side === 'CE') === !short
   const entrySpot = d.spot?.c?.[i]
   const costOn = costSl === 'premium' || (costSl === 'spot' && Number.isFinite(entrySpot))
+  // How far past the entry a bar must close to arm it: spot points, or the premium's (in levelUnit, as the SL); 0 = any.
+  const costNeed = costSl === 'spot' ? Math.max(0, Number(costAfter) || 0) : size(costAfter)
+  const inProfitBy = (move) => move > 0 && move >= costNeed - 1e-9
   let costArmed = false
   let last = entry, exit = null, best = entry, trail = null
   for (let j = i + 1; j < d.n; j++) {
@@ -2004,7 +2010,7 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
       else if (take != null && (short ? b.l <= take : b.h >= take)) exit = { j, price: take, reason: takeName }
       // After the bar: in profit at its close - the cost stop is armed from the next bar.
       if (costOn && !costArmed && !exit) {
-        costArmed = costSl === 'spot' ? (bullish ? d.spot.c[j] > entrySpot : d.spot.c[j] < entrySpot) : (short ? b.c < entry : b.c > entry)
+        costArmed = inProfitBy(costSl === 'spot' ? (bullish ? d.spot.c[j] - entrySpot : entrySpot - d.spot.c[j]) : (short ? entry - b.c : b.c - entry))
       }
       last = b.c
       // After the bar: the best premium so far and the trail from it (never looser than the one it had).
