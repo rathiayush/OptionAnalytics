@@ -223,8 +223,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   for (const tf of TIMEFRAMES) if (tf > 1) oiTf[tf] = oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, tf * 60)
 
   // The OI walls (the spot chart's S-R): the most call OI at or above spot, the most put OI at or below it - the strikes'
-  // latest OI at the end of each minute.
-  const walls = []
+  // latest OI at the end of each minute; with them, the walls since the open (`wallsSinceOpen`).
+  const minuteWalls = []
   {
     const cursors = strikes.map((k) => ({ k, ce: [...(ceLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null }))
     for (let i = 0; i < n; i++) {
@@ -233,9 +233,10 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
         while (c.pi < c.pe.length && c.pe[c.pi][0] <= t[i]) { const v = c.pe[c.pi++][1].oi; if (Number.isFinite(v)) c.peOi = v }
       }
       const { resistance, support } = oiWalls(cursors.map((c) => ({ strike: c.k, ceOi: c.ceOi ?? 0, peOi: c.peOi ?? 0 })), spotBars[i].c)
-      walls.push({ resistance: resistance?.strike ?? null, support: support?.strike ?? null })
+      minuteWalls.push({ resistance: resistance?.strike ?? null, support: support?.strike ?? null, resistanceOi: resistance?.ceOi ?? null, supportOi: support?.peOi ?? null })
     }
   }
+  const walls = wallsSinceOpen(minuteWalls)
 
   // GEX (standard sign) - each minute from readings up to it (gex.js).
   const spotForOptions = spotBars.map((b) => ({ time: b.t, close: b.c }))
@@ -580,6 +581,27 @@ function brokeLevel(c, level, i, w, up, p = 0) {
   const by = frac(p) * Math.abs(v)
   return up ? c[i] > v && c[i] - v >= by : c[i] < v && v - c[i] >= by
 }
+/** The OI walls SINCE THE OPEN at each minute, from minutes 0 - i only (asked for - "highest S-R wall from the morning or
+ *  lowest OI wall"): the HIGHEST resistance and the LOWEST support the walls have been at (`dayHigh` / `dayLow`), and the
+ *  STRONGEST of each - the minute's wall with the most OI so far, call OI for the resistance, put OI for the support
+ *  (`strongR` / `strongS`, a later wall taking over only with more). Each minute's wall gets them, so a timeframe's
+ *  candle (its last minute's wall) holds every minute up to its close. */
+export function wallsSinceOpen(walls) {
+  let dayHigh = null, dayLow = null, strongR = null, strongS = null, strongROi = 0, strongSOi = 0
+  return walls.map((w) => {
+    const r = w?.resistance ?? null, s = w?.support ?? null
+    if (r != null) {
+      if (dayHigh == null || r > dayHigh) dayHigh = r
+      if ((w.resistanceOi ?? 0) > strongROi) { strongR = r; strongROi = w.resistanceOi }
+    }
+    if (s != null) {
+      if (dayLow == null || s < dayLow) dayLow = s
+      if ((w.supportOi ?? 0) > strongSOi) { strongS = s; strongSOi = w.supportOi }
+    }
+    return { ...w, resistance: r, support: s, dayHigh, dayLow, strongR, strongS, strongROi: strongR == null ? null : strongROi, strongSOi: strongS == null ? null : strongSOi }
+  })
+}
+
 // A cumulative line's move over the window against `tolPct` % of its range so far: rising (1) / falling (-1) / stable (0).
 function lineMove(series, i, w, tolPct) {
   const now = series[i], back = series[Math.max(0, i - w)]
@@ -1036,18 +1058,53 @@ export const RULE_CONDITIONS = [
     options: [
       opt('nearSupport', 'Near the OI support', 'nearResistance', NEAR(0.05)), opt('nearResistance', 'Near the OI resistance', 'nearSupport', NEAR(0.05)),
       opt('brokeResistance', 'Broke above the OI resistance', 'brokeSupport', { ...W, ...OVER }), opt('brokeSupport', 'Broke below the OI support', 'brokeResistance', { ...W, ...OVER }),
+      // Since the open (`wallsSinceOpen`): the walls' highest resistance / lowest support, and the strongest (most OI) -
+      // each as it stood at the candle before (a wall moves with spot: past the day's highest resistance, the
+      // resistance is a higher strike).
+      opt('nearDayLow', 'Near the lowest OI support since the morning', 'nearDayHigh', NEAR(0.05)),
+      opt('nearDayHigh', 'Near the highest OI resistance since the morning', 'nearDayLow', NEAR(0.05)),
+      opt('brokeDayHigh', 'Broke above the highest OI resistance since the morning', 'brokeDayLow', { ...W, ...OVER }),
+      opt('brokeDayLow', 'Broke below the lowest OI support since the morning', 'brokeDayHigh', { ...W, ...OVER }),
+      opt('nearStrongSupport', 'Near the strongest OI support since the morning (most put OI)', 'nearStrongResistance', NEAR(0.05)),
+      opt('nearStrongResistance', 'Near the strongest OI resistance since the morning (most call OI)', 'nearStrongSupport', NEAR(0.05)),
+      opt('brokeStrongResistance', 'Broke above the strongest OI resistance since the morning', 'brokeStrongSupport', { ...W, ...OVER }),
+      opt('brokeStrongSupport', 'Broke below the strongest OI support since the morning', 'brokeStrongResistance', { ...W, ...OVER }),
     ],
     test: (d, i, v, w, p) => {
       const wall = (k, side) => d.walls[k]?.[side] ?? null
+      const near = (side, below) => inWindow(i, w, (k) => {
+        const x = wall(k - 1, side)
+        return x != null && (below ? d.spot.l[k] <= x * (1 + p / 100) : d.spot.h[k] >= x * (1 - p / 100))
+      }) >= 0
       switch (v) {
-        case 'nearSupport': return inWindow(i, w, (k) => { const s = wall(k - 1, 'support'); return s != null && d.spot.l[k] <= s * (1 + p / 100) }) >= 0
-        case 'nearResistance': return inWindow(i, w, (k) => { const r = wall(k - 1, 'resistance'); return r != null && d.spot.h[k] >= r * (1 - p / 100) }) >= 0
+        case 'nearSupport': return near('support', true)
+        case 'nearResistance': return near('resistance', false)
         case 'brokeResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'resistance'), i, w, true, p)
         case 'brokeSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'support'), i, w, false, p)
+        case 'nearDayLow': return near('dayLow', true)
+        case 'nearDayHigh': return near('dayHigh', false)
+        case 'brokeDayHigh': return brokeLevel(d.spot.c, (k) => wall(k, 'dayHigh'), i, w, true, p)
+        case 'brokeDayLow': return brokeLevel(d.spot.c, (k) => wall(k, 'dayLow'), i, w, false, p)
+        case 'nearStrongSupport': return near('strongS', true)
+        case 'nearStrongResistance': return near('strongR', false)
+        case 'brokeStrongResistance': return brokeLevel(d.spot.c, (k) => wall(k, 'strongR'), i, w, true, p)
+        case 'brokeStrongSupport': return brokeLevel(d.spot.c, (k) => wall(k, 'strongS'), i, w, false, p)
         default: return false
       }
     },
-    show: (d, i) => `OI support ${d.walls[i]?.support ?? '—'} · resistance ${d.walls[i]?.resistance ?? '—'}`,
+    show: (d, i, line) => {
+      const now = d.walls[i]
+      const text = `OI support ${now?.support ?? '—'} · resistance ${now?.resistance ?? '—'}`
+      const v = line?.value ?? ''
+      // The levels since the open as the test read them - at the candle before.
+      const before = d.walls[Math.max(0, i - 1)]
+      if (/Day/.test(v)) return `${text} · since the morning: lowest support ${before?.dayLow ?? '—'}, highest resistance ${before?.dayHigh ?? '—'}`
+      if (/Strong/.test(v)) {
+        const oi = (x) => (finite(x) ? ` (${fmtLakh(x)})` : '')
+        return `${text} · strongest since the morning: support ${before?.strongS ?? '—'}${oi(before?.strongSOi)}, resistance ${before?.strongR ?? '—'}${oi(before?.strongROi)}`
+      }
+      return text
+    },
   },
   {
     id: 'gexRegime', group: 'GEX', name: 'GEX regime',

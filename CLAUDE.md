@@ -570,7 +570,11 @@ When adding or changing a strategy:
   in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
   which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all five
   lines. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
-  as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
+  as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from
+  morning or lowest OI wall": near / broke above the HIGHEST resistance and near / broke below the LOWEST support the walls
+  have been at since the open, and near / broke the STRONGEST of each - the minute's wall with the most call / put OI so
+  far, a later one taking over only with more; `wallsSinceOpen`, each minute's wall from minutes 0 - i, read at the candle
+  before - a wall moves with spot, so past the day's highest resistance the resistance is a higher strike), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
   ATM straddle (vs its VWAP and the decay-only line, crossed), the Initial Balance (after 10:15), and VOLUME PROFILE
   LEVELS - YESTERDAY'S, not today's developing ones (asked for; `levelCondition`): the PREVIOUS DAY's POC / HVN / LVN /

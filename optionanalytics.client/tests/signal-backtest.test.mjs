@@ -8,7 +8,7 @@ import { day as syntheticDay } from './synthetic-day.mjs'
 import {
   BACKTEST_DEFAULTS, DEFAULT_WINDOW, dayLevel, MAX_GROUP_DEPTH, MAX_LOGIC_LENGTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, cleanLine, cleanTree, evalLogic, istMinute, lineText, logicText,
   logicWithoutLine, mirrorIsSame, mirrorLines, normalizeRule, optionFor, parseLogic, prepareDay, ruleFromTree, ruleLogic, ruleSignals, ruleText, setConnectorAt, treeFromLogic, treeFromRule, mixedLogicReadings,
-  simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv,
+  simulateDay, simulateRun, simulateTrade, summarize, timeframeView, tradesCsv, wallsSinceOpen,
 } from '../src/signalBacktest.js'
 import { tradeCharges } from '../src/tradeCharges.js'
 
@@ -41,7 +41,7 @@ function fakeDay({ n = 360, spot = () => 25000, price = null, vwap = () => 24990
     ok: true, date: '2026-10-05', underlying: 'NIFTY', step: 50, n, t, atm: bar((i) => Math.round(sp(i).c / 50) * 50),
     spot: { o: bar((i) => sp(i).o), h: bar((i) => sp(i).h), l: bar((i) => sp(i).l), c: bar((i) => sp(i).c) },
     price: { o: bar((i) => pr(i).o), h: bar((i) => pr(i).h), l: bar((i) => pr(i).l), c: bar((i) => pr(i).c) },
-    vwap: bar(vwap), oi: bar(oi), tot: bar(tot), walls: bar(walls), gex: bar(gex), straddle: bar(straddle),
+    vwap: bar(vwap), oi: bar(oi), tot: bar(tot), walls: wallsSinceOpen(bar(walls)), gex: bar(gex), straddle: bar(straddle),
     ceCum: bar(ceCum), peCum: bar(peCum), netCum: bar(netCum),
     ib, breaks, hp, straddleWidth, prevVp, priceSource: 'futures', ce: side('ce'), pe: side('pe'),
   }
@@ -294,6 +294,85 @@ test('🎯 within the window; OI walls: near the support / resistance, a break t
   const through = (i) => flat(i < 60 ? 25050 : i < 70 ? 25120 : 25080)()
   assert.ok(holds(fakeDay({ walls, spot: through }), 'oiWalls', 'brokeResistance', 62))
   assert.ok(!holds(fakeDay({ walls, spot: through }), 'oiWalls', 'brokeResistance', 70))   // back under it: failed
+})
+
+test('OI walls since the morning: the highest resistance, the lowest support and the strongest of each, minute by minute', () => {
+  // 0 - 29: R 25100 (50L call OI), S 24900 (60L put OI); 30 - 59: R 25000 (80L), S 24800 (40L); 60 on: R 25050 (30L), S 24850 (30L).
+  const raw = (i) => (i < 30 ? { resistance: 25100, resistanceOi: 50e5, support: 24900, supportOi: 60e5 }
+    : i < 60 ? { resistance: 25000, resistanceOi: 80e5, support: 24800, supportOi: 40e5 }
+      : { resistance: 25050, resistanceOi: 30e5, support: 24850, supportOi: 30e5 })
+  const all = wallsSinceOpen(Array.from({ length: 120 }, (_, i) => raw(i)))
+  const at = (i) => { const w = all[i]; return [w.dayHigh, w.dayLow, w.strongR, w.strongS] }
+  assert.deepEqual(at(10), [25100, 24900, 25100, 24900])
+  assert.deepEqual(at(40), [25100, 24800, 25000, 24900])          // the 80L call wall the strongest; 60L put wall still the strongest
+  assert.deepEqual(at(80), [25100, 24800, 25000, 24900])
+  assert.deepEqual([all[40].strongROi, all[40].strongSOi], [80e5, 60e5])
+  assert.deepEqual([all[80].resistance, all[80].support], [25050, 24850])   // the minute's own walls kept
+  // Nothing after a minute counts: the day cut at 35 reads 0 - 35 the same.
+  assert.deepEqual(wallsSinceOpen(Array.from({ length: 36 }, (_, i) => raw(i))), all.slice(0, 36))
+  // A minute with no wall leaves the levels as they were; none yet = none.
+  const gaps = wallsSinceOpen([{ resistance: null, support: null }, { resistance: 25100, resistanceOi: 1, support: null }, {}])
+  assert.deepEqual(gaps.map((w) => [w.dayHigh, w.dayLow, w.strongR, w.strongS]), [[null, null, null, null], [25100, null, 25100, null], [25100, null, 25100, null]])
+
+  const day = (spot) => fakeDay({ walls: raw, spot })
+  // BROKE ABOVE THE HIGHEST RESISTANCE (25100) - not the minute's resistance (25050) alone.
+  const over = (i) => flat(i < 80 ? 25000 : i < 90 ? 25120 : 25080)()
+  assert.ok(holds(day(over), 'oiWalls', 'brokeDayHigh', 82))
+  assert.ok(!holds(day(over), 'oiWalls', 'brokeDayHigh', 92, 15))                 // back under it: failed
+  assert.ok(holds(day(over), 'oiWalls', 'brokeDayHigh', 82, 5, 0.05) && !holds(day(over), 'oiWalls', 'brokeDayHigh', 82, 5, 0.1))   // 20 over 25100
+  const minuteOnly = (i) => flat(i < 80 ? 25000 : 25070)()
+  assert.ok(holds(day(minuteOnly), 'oiWalls', 'brokeResistance', 82) && !holds(day(minuteOnly), 'oiWalls', 'brokeDayHigh', 82))
+  // BROKE BELOW THE LOWEST SUPPORT (24800 from 30) - under the minute's support (24850) is not it.
+  const under = (i) => flat(i < 80 ? 24900 : 24790)()
+  assert.ok(holds(day(under), 'oiWalls', 'brokeDayLow', 82) && holds(day(under), 'oiWalls', 'brokeSupport', 82))
+  const minuteSupportOnly = (i) => flat(i < 80 ? 24900 : 24830)()
+  assert.ok(holds(day(minuteSupportOnly), 'oiWalls', 'brokeSupport', 82) && !holds(day(minuteSupportOnly), 'oiWalls', 'brokeDayLow', 82))
+  // NEAR the day's highest resistance / lowest support (within 0.05%).
+  const poke = (bar) => (i) => (i === 70 ? bar : flat(24950)())
+  assert.ok(holds(day(poke({ o: 24950, h: 25090, l: 24950, c: 24950 })), 'oiWalls', 'nearDayHigh', 72))            // 10 under 25100
+  assert.ok(!holds(day(poke({ o: 24950, h: 25080, l: 24950, c: 24950 })), 'oiWalls', 'nearDayHigh', 72))           // 20 under: no
+  assert.ok(holds(day(poke({ o: 24950, h: 25080, l: 24950, c: 24950 })), 'oiWalls', 'nearResistance', 72))        // the minute's 25050: yes
+  assert.ok(holds(day(poke({ o: 24950, h: 24950, l: 24805, c: 24950 })), 'oiWalls', 'nearDayLow', 72))
+  assert.ok(!holds(day(poke({ o: 24950, h: 24950, l: 24830, c: 24950 })), 'oiWalls', 'nearDayLow', 72) && holds(day(poke({ o: 24950, h: 24950, l: 24830, c: 24950 })), 'oiWalls', 'nearSupport', 72))
+  assert.ok(!holds(day(poke({ o: 24950, h: 25090, l: 24950, c: 24950 })), 'oiWalls', 'nearDayHigh', 80))            // out of the look-back
+  // THE STRONGEST: the 80L call wall at 25000, the 60L put wall at 24900 - neither the minute's walls nor the day's edges.
+  assert.ok(holds(day(poke({ o: 24950, h: 24995, l: 24950, c: 24950 })), 'oiWalls', 'nearStrongResistance', 72))
+  assert.ok(holds(day(poke({ o: 24950, h: 24950, l: 24910, c: 24950 })), 'oiWalls', 'nearStrongSupport', 72))
+  assert.ok(!holds(day(poke({ o: 24950, h: 24950, l: 24930, c: 24950 })), 'oiWalls', 'nearStrongSupport', 72))
+  const strongUp = (i) => flat(i < 70 ? 24950 : 25020)()
+  assert.ok(holds(day(strongUp), 'oiWalls', 'brokeStrongResistance', 72))
+  assert.ok(!holds(day(strongUp), 'oiWalls', 'brokeResistance', 72) && !holds(day(strongUp), 'oiWalls', 'brokeDayHigh', 72))
+  const strongDown = (i) => flat(i < 70 ? 24950 : 24880)()
+  assert.ok(holds(day(strongDown), 'oiWalls', 'brokeStrongSupport', 72) && !holds(day(strongDown), 'oiWalls', 'brokeSupport', 72))
+  // The mirror: highest resistance <-> lowest support, strongest <-> strongest, the number kept; the reading names the levels.
+  const pairs = [['nearDayLow', 'nearDayHigh'], ['brokeDayHigh', 'brokeDayLow'], ['nearStrongSupport', 'nearStrongResistance'], ['brokeStrongResistance', 'brokeStrongSupport']]
+  for (const [a, b] of pairs) {
+    assert.deepEqual(mirrorLines([cleanLine({ id: 'oiWalls', value: a, param: 0.1 })]).map((l) => [l.value, l.param]), [[b, 0.1]])
+    assert.deepEqual(mirrorLines([cleanLine({ id: 'oiWalls', value: b, param: 0.1 })]).map((l) => [l.value, l.param]), [[a, 0.1]])
+  }
+  assert.match(lineText({ id: 'oiWalls', value: 'brokeDayHigh', param: 0, windowMin: 5 }), /Broke above the highest OI resistance since the morning \(last 5 min\)$/)
+  const shown = cond('oiWalls').show(day(over), 82, { value: 'brokeDayHigh' })
+  assert.match(shown, /since the morning: lowest support 24800, highest resistance 25100/)
+  assert.match(cond('oiWalls').show(day(over), 82, { value: 'brokeStrongResistance' }), /strongest since the morning: support 24900 \(60\.0L\), resistance 25000 \(80\.0L\)/)
+  // In a rule: it signals on the break.
+  const signals = ruleSignals(day(over), lines([cleanLine({ id: 'oiWalls', value: 'brokeDayHigh', windowMin: 5 })], 'buyCE'))
+  assert.equal(signals[0].i, 80)
+})
+
+test('a prepared day\'s OI walls carry the levels since the morning - each minute from the minutes up to it; a candle its last minute\'s', () => {
+  const { run } = syntheticDay()
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  let high = null, low = null
+  for (let i = 0; i < d.n; i++) {
+    const w = d.walls[i]
+    if (w.resistance != null) high = high == null ? w.resistance : Math.max(high, w.resistance)
+    if (w.support != null) low = low == null ? w.support : Math.min(low, w.support)
+    assert.deepEqual([w.dayHigh, w.dayLow], [high, low], `minute ${i}`)
+    assert.ok(w.strongR == null || w.strongROi >= (w.resistanceOi ?? 0))
+  }
+  assert.ok(high != null && low != null)
+  const view = timeframeView(d, 5)
+  for (let k = 0; k < view.n; k++) assert.equal(view.walls[k], d.walls[view.at[k]])
 })
 
 test('GEX: the regime and its turn; near the put / call wall within 0.15%; a break of a wall', () => {
