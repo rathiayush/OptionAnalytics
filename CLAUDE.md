@@ -566,7 +566,10 @@ When adding or changing a strategy:
   >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or
   went the other way; "followed" is the line's direction when OI confirms the move (`CUM_LINES.follows`: PE moves WITH
   price - unwound into a fall; CE and Net against it - calls written into a fall); the mirror swaps bullish / bearish with
-  the same numbers. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  the same numbers. OI SINCE OPEN and TOTAL OI CE vs PE take the same divergence (asked for - "add this bullish div signal
+  in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
+  which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all five
+  lines. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
   as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through), GEX regime (long / short gamma,
   turned) and walls (near the put / call wall, broke through), price vs VWAP (above / below / crossed), spot's move, the
   ATM straddle (vs its VWAP and the decay-only line, crossed), the Initial Balance (after 10:15), and VOLUME PROFILE

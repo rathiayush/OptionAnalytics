@@ -614,6 +614,42 @@ test('cumulative Δ divergence: price moved >= A % over the look-back but the li
   assert.ok(signals[0].i > 30 && signals[0].i <= 60)
 })
 
+test('OI divergence - OI since open and Total OI: price moved >= A % but PE − CE followed by less than B % of its range', () => {
+  // Spot as the cumulative Δ's: down 0.4% from 30 to 60, up 0.8% from 60 to 100.
+  const spot = (i) => (i < 30 ? 25000 : i < 60 ? 25000 - (i - 30) * (100 / 30) : i < 100 ? 24900 + (i - 60) * 5 : 25100)
+  // PE − CE (lakh): 0 at the open up to 20 by 10 (its range 20), then as given from 30.
+  const gapAt = (g) => (i) => (i < 10 ? i * 2 : i < 30 ? 20 : g(i)) * 1e5
+  const sinceOpen = (g) => fakeDay({ spot, oi: (i) => ({ ce: 1e6, pe: 1e6 + gapAt(g)(i) }) })
+  const total = (g) => fakeDay({ spot, tot: (i) => ({ ce: 4e7, pe: 4e7 + gapAt(g)(i) }) })
+  const holds = (d, id, value, i, w, a, b) => cond(id).test(d, i, value, w, a, b)
+  for (const [id, day] of [['oiOpen', sinceOpen], ['totalOi', total]]) {
+    // PE − CE held while price fell 0.4% (30 -> 60): bullish divergence - not by 0.5%, not where price did not fall.
+    const held = day(() => 20)
+    assert.ok(holds(held, id, 'divBull', 60, 30, 0.3, 10), `${id} held`)
+    assert.ok(!holds(held, id, 'divBull', 60, 30, 0.5, 10), `${id} price fell only 0.4%`)
+    assert.ok(!holds(held, id, 'divBull', 25, 20, 0.3, 10), `${id} price did not fall`)
+    // It fell with price (calls written into the fall): 6 of its range 20 = 30% - followed at 10%, a divergence at 40%.
+    const followed = day((i) => (i <= 60 ? 20 - (i - 30) / 5 : 14))
+    assert.ok(!holds(followed, id, 'divBull', 60, 30, 0.3, 10) && holds(followed, id, 'divBull', 60, 30, 0.3, 40), `${id} followed`)
+    // It rose while price fell (puts written into the fall): a divergence too.
+    assert.ok(holds(day((i) => (i <= 60 ? 20 + (i - 30) / 3 : 30)), id, 'divBull', 60, 30, 0.3, 10), `${id} against`)
+    // Bearish: price rose 0.8% (60 -> 100) with it held - and it rising with price (puts written) is none.
+    assert.ok(holds(held, id, 'divBear', 100, 40, 0.5, 10), `${id} bearish`)
+    assert.ok(!holds(day((i) => (i <= 60 ? 20 : i < 100 ? 20 + (i - 60) / 2 : 40)), id, 'divBear', 100, 40, 0.5, 10), `${id} rose with price`)
+    assert.ok(!holds(held, id, 'divBull', 100, 40, 0.5, 10), `${id} price rose: no bullish one`)
+    // In a rule: both numbers kept, the mirror the bearish one with the same numbers; it signals in the fall.
+    const line = cleanLine({ id, value: 'divBull', windowMin: 30, param: 0.3, param2: 10 })
+    assert.deepEqual(line, { id, value: 'divBull', join: 'and', param: 0.3, param2: 10, windowMin: 30 })
+    assert.deepEqual(mirrorLines([line]).map((l) => [l.value, l.param, l.param2, l.windowMin]), [['divBear', 0.3, 10, 30]])
+    assert.match(lineText(line), /Bullish divergence: price fell, .*PE − CE.* did not fall with it price ≥ 0\.3%, followed < 10% of range \(last 30 min\)$/)
+    const signals = ruleSignals(held, lines([line], 'buyCE'))
+    assert.equal(signals[0].side, 'rule')
+    assert.ok(signals[0].i > 30 && signals[0].i <= 60, `${id} signal at ${signals[0].i}`)
+  }
+  // Total OI with no reading (a day before the totals load) is never a divergence.
+  assert.ok(!holds(fakeDay({ spot, tot: () => ({ ce: 0, pe: 0 }) }), 'totalOi', 'divBull', 60, 30, 0.3, 10))
+})
+
 test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
   const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
   const five = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow'), L('nearAbove')].map((x, k) => (k === 4 ? { line: { id: 'prevPoc', value: 'above', join: 'and', param: 0 } } : x)) }

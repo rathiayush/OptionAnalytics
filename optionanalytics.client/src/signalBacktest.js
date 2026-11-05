@@ -651,6 +651,23 @@ const CUM_LINES = {
 // dipped greater - that is divergence"): over the look-back, price moved >= `param` % one way but the line followed it by
 // less than `param2` % of its own range so far (held, barely moved, or went the other way).
 const DIVERGENCE = { windowed: true, param: pctParam('price ≥', 0.2, 5, 0.05), param2: { ...pctParam('followed <', 10, 100, 1), unit: '% of range' } }
+// The divergence of a line `x` (k -> its value, NaN = none) at i - `bull`: spot fell >= p % over the look-back w, the line
+// moved the way that would confirm it (`follows` x the price's direction) by less than p2 % of its range so far - or the
+// other way; the mirror the same with spot rising. The cumulative Δ lines and OI's PE − CE gaps (since open, total) share it.
+function divergenceHolds(d, x, i, w, follows, bull, p, p2) {
+  const dir = bull ? -1 : 1
+  const back = Math.max(0, i - w)
+  const s0 = d.spot.c[back], s1 = d.spot.c[i]
+  if (!(s0 > 0) || !finite(s1)) return false
+  const moved = ((s1 - s0) / s0) * 100 * dir
+  if (!(moved > 0) || moved < (p > 0 ? p : 0) - 1e-9) return false
+  const l0 = x(back), l1 = x(i)
+  if (!finite(l0) || !finite(l1)) return false
+  let lo = Infinity, hi = -Infinity
+  for (let k = 0; k <= i; k++) { const v = x(k); if (finite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v) } }
+  const followed = hi > lo ? ((follows * dir * (l1 - l0)) / (hi - lo)) * 100 : 0
+  return followed < (Number.isFinite(p2) ? p2 : DIVERGENCE.param2.default)
+}
 function cumCondition(line, group, meaning) {
   const { key, name, follows } = CUM_LINES[line]
   return {
@@ -688,22 +705,9 @@ function cumCondition(line, group, meaning) {
           // With a %: still through the level broken, by that much of its range so far.
           return hits.some((b) => finite(b.level) && (up ? series[i] > b.level : series[i] < b.level) && atLeast(pastPct(x, i, b.level), p))
         }
-        case 'divBull': case 'divBear': {
-          // Over the look-back: spot moved >= p % that way, the line moved the way that would confirm it (PE with price,
-          // CE / Net against it) by less than p2 % of its range so far - or the other way.
-          const dir = v === 'divBull' ? -1 : 1
-          const back = Math.max(0, i - w)
-          const s0 = d.spot.c[back], s1 = d.spot.c[i]
-          if (!(s0 > 0) || !finite(s1)) return false
-          const moved = ((s1 - s0) / s0) * 100 * dir
-          if (!(moved > 0) || moved < (p > 0 ? p : 0) - 1e-9) return false
-          const l0 = series[back], l1 = series[i]
-          if (!finite(l0) || !finite(l1)) return false
-          let lo = Infinity, hi = -Infinity
-          for (let k = 0; k <= i; k++) if (finite(series[k])) { lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k]) }
-          const followed = hi > lo ? ((follows * dir * (l1 - l0)) / (hi - lo)) * 100 : 0
-          return followed < (Number.isFinite(p2) ? p2 : DIVERGENCE.param2.default)
-        }
+        // Over the look-back: spot moved >= p % that way, the line moved the way that would confirm it (PE with price,
+        // CE / Net against it) by less than p2 % of its range so far - or the other way.
+        case 'divBull': case 'divBear': return divergenceHolds(d, x, i, w, follows, v === 'divBull', p, p2)
         default: return false
       }
     },
@@ -962,6 +966,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...LEAD }),
       opt('peFlip', 'CE ahead since the morning, then PE crossed above', 'ceFlip', { ...W, ...LEAD, ...HELD }),
       opt('ceFlip', 'PE ahead since the morning, then CE crossed above', 'peFlip', { ...W, ...LEAD, ...HELD }),
+      // PE − CE added follows price when the OI confirms it (puts written into a rise, calls into a fall).
+      opt('divBull', 'Bullish divergence: price fell, PE − CE added did not fall with it', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, PE − CE added did not rise with it', 'divBull', DIVERGENCE),
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
@@ -973,6 +980,7 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
@@ -989,6 +997,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...TOTAL_LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...TOTAL_LEAD }),
       opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
       opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
+      // Total PE − CE follows price when the OI confirms it (puts written into a rise, calls into a fall).
+      opt('divBull', 'Bullish divergence: price fell, total PE − CE did not fall with it', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, total PE − CE did not rise with it', 'divBull', DIVERGENCE),
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
@@ -1000,6 +1011,7 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
