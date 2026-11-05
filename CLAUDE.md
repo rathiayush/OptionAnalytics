@@ -657,7 +657,20 @@ When adding or changing a strategy:
   read once a round; a strategy whose traded index was not read waits for the next round, the others go on). The day chart
   shows the TRADED index by default ("SENSEX" / "NIFTY (signal)" / the signal's futures / Option - the traded index's
   strikes), saying the rule read the other; a page run's report is of ITS indices (a change waits for the next run - the
-  page says so). `tests/signal-backtest.test.mjs` / `-job` / `signal-live.test.mjs`. The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
+  page says so). `tests/signal-backtest.test.mjs` / `-job` / `signal-live.test.mjs`. STRIKE: ATM or 1 - 4 in / out of the
+  money (`moneyness` -4 - 4, `MONEYNESS_CHOICES`; asked for - "add OTM 2 3 4 and ITM 2 3 4"; a call's ITM below spot, a
+  put's above - `optionFor`). COST SL ONCE IN PROFIT (asked for - "once in profit have cost SL ... from the point where I
+  entered spot, if price returns to the same level"; the page's checkbox, `costSl` '' / 'spot' / 'premium',
+  `COST_SL_CHOICES`, `optionanalytics.signalBacktest.costSl`): in `simulateTrade` it is ARMED after a completed 1-minute bar
+  CLOSED in profit - spot (the TRADED index's) past its close at the entry the trade's way (a bought call / sold put up, a
+  bought put / sold call down), or the premium past the entry - and from the NEXT bar: 'spot' = out when spot is back at
+  the entry's spot (the option's close of that minute, its open when spot opened through; after the premium's own stops,
+  before the target), 'premium' = the entry premium is a stop (the tighter of it, the SL and the trail stops, "Cost SL").
+  PER-INDEX LEVELS (asked for - "different sl target for each index"): the page keeps the SL, target, trail and their unit
+  for EACH index (`optionanalytics.signalBacktest.levelsByIndex`, `indexLevels` / `withIndexLevels` in
+  `signalBacktestJob.js`) - the TRADED index's (Trade in, else the index) are on the page, tagged "<INDEX> levels"; an
+  index with none of its own reads the old single keys until it is changed (then it keeps its whole set); a run, saved
+  strategy or background run still carries the one set it ran with (Use settings / Load put them on ITS traded index). The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades
   and day tables, the CSV's "expiry day" column, its `why` starting "Expiry day - selling instead"); the report heading
   names it; a background run takes it with the rest of the settings. MIRROR (on by default): every line's `opposite` value
   (above <-> below, support <-> resistance, rising <-> falling; GEX regime, the straddle, "inside" and "stable" have no

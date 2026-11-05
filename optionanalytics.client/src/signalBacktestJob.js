@@ -6,7 +6,7 @@
 // A run = its days' OUTCOMES put together: each day is replayed through the rule on its own (simulateDay - the days are
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
-  BACKTEST_DEFAULTS, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText,
   simulateDay, summarize,
 } from './signalBacktest.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
@@ -62,7 +62,7 @@ const held = (v, min, max, fallback) => {
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, tradeIn (another index the trades are taken in - '' = the same), from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
  * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, maxDayLoss,
- * maxDayProfit, timeframe, expiryDay, strategyName }. The rule goes through its tree, as
+ * maxDayProfit, timeframe, expiryDay, costSl, strategyName }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -77,7 +77,8 @@ export function cleanBacktestSettings(s = {}) {
     from: isDate(s?.from) ? s.from : null,
     to: isDate(s?.to) ? s.to : null,
     rule: { tree: saved.tree, action: saved.action, mirror: saved.mirror },
-    moneyness: Math.round(held(s?.moneyness, -1, 1, d.moneyness)),
+    moneyness: Math.round(held(s?.moneyness, -4, 4, d.moneyness)),   // ATM, 1 - 4 in (+) / out of (-) the money
+    costSl: COST_SL_CHOICES.includes(s?.costSl) ? s.costSl : d.costSl,
     slPct: held(s?.slPct, 0, max, d.slPct),
     targetPct: held(s?.targetPct, 0, max, d.targetPct),
     levelUnit,
@@ -97,6 +98,26 @@ export function cleanBacktestSettings(s = {}) {
     expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
     strategyName: strategyName(s?.strategyName),
   }
+}
+
+/** The levels kept PER INDEX on the page (asked for - "different sl target for each index"): the SL, target, trail and
+ *  their unit of `index` (the traded one) - its own, else `fallback` (the page's levels from before), held to the page's
+ *  ranges. */
+export function indexLevels(byIndex, index, fallback = {}) {
+  const d = BACKTEST_DEFAULTS
+  const own = byIndex && typeof byIndex === 'object' && byIndex[index] && typeof byIndex[index] === 'object' ? byIndex[index] : {}
+  const v = { ...fallback, ...own }
+  const levelUnit = LEVEL_UNITS.includes(v.levelUnit) ? v.levelUnit : d.levelUnit
+  const max = levelUnit === 'pts' ? 5000 : 1000
+  return {
+    slPct: held(v.slPct, 0, max, d.slPct), targetPct: held(v.targetPct, 0, max, d.targetPct), levelUnit,
+    trailGap: held(v.trailGap, 0, max, d.trailGap), trailStart: held(v.trailStart, 0, max, d.trailStart),
+  }
+}
+/** `byIndex` with `index`'s levels changed by `patch` - the index's whole set kept from then on (the others it had from
+ *  `fallback` with it), every other index untouched. */
+export function withIndexLevels(byIndex, index, patch, fallback = {}) {
+  return { ...(byIndex && typeof byIndex === 'object' ? byIndex : {}), [index]: indexLevels({ [index]: { ...indexLevels(byIndex, index, fallback), ...patch } }, index) }
 }
 
 /** A strategy's name as the runs carry it (asked for - "add strategy name ... to runs"): one line, trimmed, at most 80
@@ -190,9 +211,11 @@ export function reportHead(s, okDays) {
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
+  const cost = s.costSl ? ` · cost SL (${s.costSl})` : ''
+  const strike = s.moneyness ? ` · ${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */

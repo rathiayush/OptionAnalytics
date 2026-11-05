@@ -1872,10 +1872,19 @@ export const BACKTEST_DEFAULTS = {
   // On the options' EXPIRY DAY: trade as the rule says ('rule'), always BUY / always SELL ('buy' / 'sell') - the
   // signal's direction kept (a bullish one buys the call or sells the put) - or not at all ('skip').
   expiryDay: 'rule',
+  // COST SL once in profit ('' = off): 'spot' - once a completed bar closed with spot past the entry's spot in the trade's
+  // favour, out when spot comes back to that level; 'premium' - once a bar closed with the premium past the entry, the
+  // entry premium is a stop (out at cost).
+  costSl: '',
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
 }
+
+/** The Cost SL choices (`costSl`): off, read on spot, read on the premium. */
+export const COST_SL_CHOICES = ['', 'spot', 'premium']
+/** The strikes a trade can take (`moneyness`): ATM, 1 - 4 in the money (+), 1 - 4 out of it (-). */
+export const MONEYNESS_CHOICES = [0, 1, 2, 3, 4, -1, -2, -3, -4]
 
 /** What to do on the options' expiry day (`expiryDay`) - overriding the rule's buy / sell there, the direction kept - or
  *  DON'T TRADE it (asked for - "give option to trade on expiry or do not trade"): its signals listed, none taken. */
@@ -1945,9 +1954,12 @@ export function dayLevel(option, entry, amount, { realized = 0, qty, stt = 0, fl
  * 0 = none. The stop before the target in the same bar; a bar opening through the stop fills at its open. The TRAILING
  * stop (the paper panel's - `optionTrailLevel`): `trailGap` behind the best premium reached (a bought option's highest
  * high, a sold one's lowest low), once the trade is `trailStart` in profit; it moves after each completed bar - a bar is
- * judged with the trail it had before it - and only tightens; the tighter of it and the fixed stop is the stop.
+ * judged with the trail it had before it - and only tightens; the tighter of it and the fixed stop is the stop. COST SL
+ * (`costSl`, asked for - "once in profit a cost SL ... from the point where I entered spot, if price returns to the same
+ * level"): 'spot' / 'premium' - armed after a bar closed in profit, then out when spot is back at the entry's spot / at
+ * the entry premium.
  */
-export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null }) {
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '' }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
@@ -1960,6 +1972,14 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
   const dayLoss = day?.maxLoss > 0 ? dayLevel(option, entry, -day.maxLoss, day) : null
   const dayProfit = day?.maxProfit > 0 ? dayLevel(option, entry, day.maxProfit, day) : null
   const off = clockMinute(squareOff) ?? 15 * 60 + 10
+  // COST SL once in profit (`costSl`): armed after a completed bar CLOSED in profit - on spot (past the spot at the entry,
+  // the trade's way: a bought call / sold put up, a bought put / sold call down) or on the premium (past the entry) - and
+  // from the next bar on: spot back at the entry's spot = out (the option's close of that minute, its open when spot opened
+  // through), or the entry premium a stop (out at cost, the tighter stop wins).
+  const bullish = (option.side === 'CE') === !short
+  const entrySpot = d.spot?.c?.[i]
+  const costOn = costSl === 'premium' || (costSl === 'spot' && Number.isFinite(entrySpot))
+  let costArmed = false
   let last = entry, exit = null, best = entry, trail = null
   for (let j = i + 1; j < d.n; j++) {
     const b = barAt(packed, j)
@@ -1968,14 +1988,24 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
       let stop = tighterStop(option.action, fixed, trail)
       const trailing = stop != null && trail != null && stop === trail && stop !== fixed
       let name = trailing ? 'Trailing stop' : 'Stop'
+      // Cost on the premium: the entry premium a stop once armed, when it is the tighter one.
+      if (costArmed && costSl === 'premium' && (stop == null || (short ? entry < stop : entry > stop))) { stop = entry; name = 'Cost SL' }
       // The day's max loss is a stop too - the tighter one stops the trade.
       if (dayLoss != null && (stop == null || (short ? dayLoss < stop : dayLoss > stop))) { stop = dayLoss; name = 'Day max loss' }
       // The day's max profit is a target too - the nearer one takes it.
       let take = target, takeName = 'Target'
       if (dayProfit != null && (take == null || (short ? dayProfit > take : dayProfit < take))) { take = dayProfit; takeName = 'Day max profit' }
+      // Cost on spot: spot back at the entry's level this minute (after the premium's own stops, before the target).
+      const spotBack = costArmed && costSl === 'spot' && (bullish ? d.spot.l[j] <= entrySpot : d.spot.h[j] >= entrySpot)
+      const spotOpenedBack = spotBack && (bullish ? d.spot.o[j] <= entrySpot : d.spot.o[j] >= entrySpot)
       if (stop != null && (short ? b.o >= stop : b.o <= stop)) exit = { j, price: b.o, reason: `${name} (opened through it)` }
       else if (stop != null && (short ? b.h >= stop : b.l <= stop)) exit = { j, price: stop, reason: name }
+      else if (spotBack) exit = { j, price: spotOpenedBack ? b.o : b.c, reason: `Cost SL (spot back at ${entrySpot.toFixed(2)})` }
       else if (take != null && (short ? b.l <= take : b.h >= take)) exit = { j, price: take, reason: takeName }
+      // After the bar: in profit at its close - the cost stop is armed from the next bar.
+      if (costOn && !costArmed && !exit) {
+        costArmed = costSl === 'spot' ? (bullish ? d.spot.c[j] > entrySpot : d.spot.c[j] < entrySpot) : (short ? b.c < entry : b.c > entry)
+      }
       last = b.c
       // After the bar: the best premium so far and the trail from it (never looser than the one it had).
       best = short ? Math.min(best, b.l) : Math.max(best, b.h)

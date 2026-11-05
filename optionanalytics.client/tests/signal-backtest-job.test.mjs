@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
+  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, indexLevels, loadBacktestDay, reportHead, reportReplacer, reportReviver, runRange,
+  withIndexLevels,
 } from '../src/signalBacktestJob.js'
 
 const { run } = syntheticDay()
@@ -100,7 +101,7 @@ test('a run is its days\' outcomes: the same trades, signals and numbers simulat
 test('the settings are held to the page\'s ranges, the rule through its tree', () => {
   const s = cleanBacktestSettings({
     underlying: 'FINNIFTY', from: '2026-13-01', to: '2026-10-23', slPct: 5000, targetPct: -3, levelUnit: 'x', trailGap: '12', lots: 2.6, maxTradesPerDay: 0,
-    cooldownMin: 500, timeStopMin: null, charges: 'yes', timeframe: 7, moneyness: 4, rule: { lines: [{ id: 'vwap', value: 'above' }, { id: 'nope', value: 'x' }], action: 'sellPE', mirror: false },
+    cooldownMin: 500, timeStopMin: null, charges: 'yes', timeframe: 7, moneyness: 6, rule: { lines: [{ id: 'vwap', value: 'above' }, { id: 'nope', value: 'x' }], action: 'sellPE', mirror: false },
   })
   assert.equal(s.underlying, 'NIFTY')
   assert.equal(s.from, null)
@@ -115,7 +116,11 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.equal(s.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   assert.equal(s.charges, BACKTEST_DEFAULTS.charges)
   assert.equal(s.timeframe, BACKTEST_DEFAULTS.timeframe)
-  assert.equal(s.moneyness, 1)
+  assert.equal(s.moneyness, 4)                         // ATM, 1 - 4 ITM / OTM: 6 held to 4 ITM
+  assert.deepEqual([-7, -2.6, 3].map((m) => cleanBacktestSettings({ moneyness: m }).moneyness), [-4, -3, 3])
+  // Cost SL: off by default, read on spot or the premium; anything else off. Named in the heading with the strike.
+  assert.deepEqual(['spot', 'premium', 'yes', undefined].map((c) => cleanBacktestSettings({ costSl: c }).costSl), ['spot', 'premium', '', ''])
+  assert.match(reportHead({ ...SETTINGS, costSl: 'spot', moneyness: -2 }, 4), / · 1m candles · 2 OTM · SL 30% · target 50% · trail 10% · cost SL \(spot\) · net of /)
   assert.deepEqual(s.rule, { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'above', join: 'and', param: 0 } }] }, action: 'sellPE', mirror: false })
   assert.equal(cleanBacktestSettings({ levelUnit: 'pts', slPct: 9000 }).slPct, 5000)
   assert.deepEqual(engineSettings(cleanBacktestSettings({ underlying: 'SENSEX' })).lotSize, 20)
@@ -331,4 +336,23 @@ test('a run carries its strategy\'s name: in its settings (one line, at most 80 
   assert.doesNotMatch(reportHead({ ...named, strategyName: '' }, 4), /Narrow/)
   // The engine does not read it.
   assert.equal('strategyName' in engineSettings(named), false)
+})
+
+test('SL / target / trail kept per index: each index its own once set, the old levels until then, held to their ranges', () => {
+  const old = { slPct: 25, targetPct: 40, levelUnit: 'pct', trailGap: 0, trailStart: 0 }
+  // Nothing set: every index reads the old levels.
+  assert.deepEqual(indexLevels({}, 'SENSEX', old), old)
+  assert.deepEqual(indexLevels(null, 'NIFTY', {}), { slPct: BACKTEST_DEFAULTS.slPct, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pct', trailGap: 0, trailStart: 0 })
+  // SENSEX's SL in points: SENSEX keeps its whole set from then on (the rest as they were); NIFTY still the old.
+  let by = withIndexLevels({}, 'SENSEX', { levelUnit: 'pts', slPct: 40 }, old)
+  assert.deepEqual(indexLevels(by, 'SENSEX', old), { slPct: 40, targetPct: 40, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.deepEqual(indexLevels(by, 'NIFTY', old), old)
+  by = withIndexLevels(by, 'NIFTY', { targetPct: 80 }, old)
+  assert.deepEqual([indexLevels(by, 'NIFTY', old).targetPct, indexLevels(by, 'SENSEX', old).targetPct], [80, 40])
+  // A change of the old levels later does not move an index that has its own.
+  assert.equal(indexLevels(by, 'SENSEX', { ...old, slPct: 10 }).slPct, 40)
+  assert.equal(indexLevels(by, 'BANKNIFTY', { ...old, slPct: 10 }).slPct, 10)
+  // Held to the ranges: % at most 1000, points 5000; junk = the default.
+  assert.deepEqual(indexLevels({ NIFTY: { slPct: 9000, targetPct: 'x', levelUnit: 'pts' } }, 'NIFTY'), { slPct: 5000, targetPct: BACKTEST_DEFAULTS.targetPct, levelUnit: 'pts', trailGap: 0, trailStart: 0 })
+  assert.equal(indexLevels({ NIFTY: 'junk' }, 'NIFTY', old).slPct, 25)
 })

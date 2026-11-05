@@ -977,6 +977,56 @@ test('on the options\' expiry day the Expiry day setting overrides the rule\'s b
   assert.deepEqual([prepareDay({ ...run, optionExpiry: null }).isExpiry, prepareDay({ ...run, optionExpiry: null }).expiry], [false, null])
 })
 
+test('strikes 1 - 4 in / out of the money: a call\'s ITM below spot, a put\'s above', () => {
+  assert.deepEqual([0, 1, 2, 3, 4, -1, -2, -3, -4].map((m) => optionFor(1, 'buy', 25000, 50, m).strike), [25000, 24950, 24900, 24850, 24800, 25050, 25100, 25150, 25200])
+  assert.deepEqual([2, -3].map((m) => optionFor(-1, 'buy', 25000, 50, m)), [{ side: 'PE', strike: 25100, action: 'BUY' }, { side: 'PE', strike: 24850, action: 'BUY' }])
+  assert.deepEqual(optionFor(1, 'sell', 82000, 100, -4), { side: 'PE', strike: 81600, action: 'SELL' })   // sell 4 OTM put
+})
+
+test('COST SL once in profit: armed after a bar closed in profit; on spot - out when spot is back at the entry\'s spot; on the premium - out at cost', () => {
+  const bar = (o, h, l, c) => ({ o, h, l, c })
+  // Spot 25000 at the entry (minute 10); up to 25010 (11 - 19, closes above - in profit), back to 24990 at minute 20.
+  const spot = (i) => (i <= 10 ? 25000 : i < 20 ? 25010 : 24990)
+  const premium = (i) => { const p = 100 + (spot(i) - 25000) / 2; return bar(p, p, p, p) }      // the call follows spot
+  const day = (over = {}) => fakeDay({ spot: over.spot ?? spot, legs: { ce: { 25000: over.ce ?? premium }, pe: { 25000: over.pe ?? premium } } })
+  const call = { side: 'CE', strike: 25000, action: 'BUY' }
+  const base = { slPct: 0, targetPct: 0 }
+  // Off: no cost exit - the 15:10 square-off.
+  assert.match(simulateTrade(day(), 10, call, base).exitReason, /square-off/)
+  // On spot: out at minute 20, the option's close then.
+  const out = simulateTrade(day(), 10, call, { ...base, costSl: 'spot' })
+  assert.deepEqual([out.exitIndex, out.exit, out.exitReason], [20, 95, 'Cost SL (spot back at 25000.00)'])
+  // Spot OPENING back through the level: the option's open of that minute.
+  const gap = day({ spot: (i) => (i === 20 ? bar(24995, 24998, 24985, 24990) : spot(i)), ce: (i) => (i === 20 ? bar(97, 98, 94, 95) : premium(i)) })
+  assert.deepEqual([simulateTrade(gap, 10, call, { ...base, costSl: 'spot' }).exit], [97])
+  // Never closed in profit (only a wick above): not armed - spot back at the entry does nothing.
+  const wick = day({ spot: (i) => (i > 10 && i < 20 ? bar(24998, 25012, 24996, 24999) : i <= 10 ? 25000 : 24990) })
+  assert.match(simulateTrade(wick, 10, call, { ...base, costSl: 'spot' }).exitReason, /square-off/)
+  // Armed by a bar's close, out from the NEXT bar: a fall in the arming bar itself does not count.
+  const sameBar = day({ spot: (i) => (i <= 10 ? 25000 : i === 11 ? bar(25000, 25010, 24990, 25005) : 25005) })
+  assert.match(simulateTrade(sameBar, 10, call, { ...base, costSl: 'spot' }).exitReason, /square-off/)
+  // The bearish side: a bought put is in profit as spot FALLS, out when spot rises back to the entry; a sold put is bullish.
+  const down = day({ spot: (i) => (i <= 10 ? 25000 : i < 20 ? 24990 : 25010) })
+  assert.equal(simulateTrade(down, 10, { side: 'PE', strike: 25000, action: 'BUY' }, { ...base, costSl: 'spot' }).exitIndex, 20)
+  assert.equal(simulateTrade(day(), 10, { side: 'PE', strike: 25000, action: 'SELL' }, { ...base, costSl: 'spot' }).exitIndex, 20)
+  // On the premium: armed once a bar closed over the entry (100); then out AT 100 when it comes back - before the target.
+  const prem = (i) => (i <= 10 ? bar(100, 100, 100, 100) : i < 20 ? bar(108, 110, 106, 108) : i === 20 ? bar(104, 112, 99, 101) : bar(101, 101, 101, 101))
+  const atCost = simulateTrade(day({ ce: prem }), 10, call, { ...base, targetPct: 11, costSl: 'premium' })
+  assert.deepEqual([atCost.exitIndex, atCost.exit, atCost.exitReason], [20, 100, 'Cost SL'])
+  const opened = simulateTrade(day({ ce: (i) => (i === 20 ? bar(98, 99, 97, 98) : prem(i)) }), 10, call, { ...base, costSl: 'premium' })
+  assert.deepEqual([opened.exit, opened.exitReason], [98, 'Cost SL (opened through it)'])
+  // The tighter stop wins: a trail at 105 (5 behind the best, 110) is over the cost - bar 20 opens through IT, at 104.
+  const trailed = simulateTrade(day({ ce: prem }), 10, call, { ...base, trailGap: 5, levelUnit: 'pts', costSl: 'premium' })
+  assert.deepEqual([trailed.exit, trailed.exitReason], [104, 'Trailing stop (opened through it)'])
+  // Through simulateDay: the setting reaches every trade.
+  const rule = lines([{ id: 'vwap', value: 'above' }], 'buyCE')
+  // Over VWAP (24990) from minute 20 at 25000 - the entry; 25010 from 31 (in profit); back to 24990 at 40.
+  const path = (i) => (i < 20 ? 24980 : i <= 30 ? 25000 : i < 40 ? 25010 : 24990)
+  const sig = fakeDay({ legs: { ce: { 25000: (i) => { const p = 100 + (path(i) - 25000) / 2; return bar(p, p, p, p) } } }, spot: path, vwap: () => 24990 })
+  const traded = simulateDay(sig, { lotSize: 65, rule, slPct: 0, targetPct: 0, costSl: 'spot', timeStopMin: 0, maxTradesPerDay: 1 }).trades
+  assert.deepEqual(traded.map((t) => [istMinute(t.entryTime) - (9 * 60 + 15), istMinute(t.exitTime) - (9 * 60 + 15), t.exitReason]), [[20, 40, 'Cost SL (spot back at 25000.00)']])
+})
+
 test('TRADE IN another index: the signals read on this day, the trades taken on the other index\'s day at the signal\'s clock', () => {
   // NIFTY (the signal day): spot under VWAP until 60 (bearish - the mirror), over it 60 - 119 (bullish - the rule), under from 120.
   const legs = { ce: { 25000: flat(100) }, pe: { 25000: flat(100) } }
