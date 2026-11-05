@@ -62,7 +62,7 @@ const held = (v, min, max, fallback) => {
  * A run's settings made whole and held to the page's ranges - what the page sends to the background and what the job
  * reads: { underlying, tradeIn (another index the trades are taken in - '' = the same), from, to, rule: { tree, action, mirror }, moneyness, slPct, targetPct, levelUnit, trailGap,
  * trailStart, timeStopMin, maxTradesPerDay, cooldownMin, lots, charges, sttPct, brokeragePerOrder, otherPerTrade, maxDayLoss,
- * maxDayProfit, timeframe, expiryDay, costSl, strategyName }. The rule goes through its tree, as
+ * maxDayProfit, timeframe, expiryDay, costSl, costAfter, strategyName }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
 export function cleanBacktestSettings(s = {}) {
@@ -79,6 +79,7 @@ export function cleanBacktestSettings(s = {}) {
     rule: { tree: saved.tree, action: saved.action, mirror: saved.mirror },
     moneyness: Math.round(held(s?.moneyness, -4, 4, d.moneyness)),   // ATM, 1 - 4 in (+) / out of (-) the money
     costSl: COST_SL_CHOICES.includes(s?.costSl) ? s.costSl : d.costSl,
+    costAfter: held(s?.costAfter, 0, 5000, d.costAfter),
     slPct: held(s?.slPct, 0, max, d.slPct),
     targetPct: held(s?.targetPct, 0, max, d.targetPct),
     levelUnit,
@@ -100,9 +101,9 @@ export function cleanBacktestSettings(s = {}) {
   }
 }
 
-/** The levels kept PER INDEX on the page (asked for - "different sl target for each index"): the SL, target, trail and
- *  their unit of `index` (the traded one) - its own, else `fallback` (the page's levels from before), held to the page's
- *  ranges. */
+/** The levels kept PER INDEX on the page (asked for - "different sl target for each index"): the SL, target, trail, the
+ *  Cost SL's "after +" (`costAfter` - spot points differ per index too) and their unit of `index` (the traded one) - its
+ *  own, else `fallback` (the page's levels from before), held to the page's ranges. */
 export function indexLevels(byIndex, index, fallback = {}) {
   const d = BACKTEST_DEFAULTS
   const own = byIndex && typeof byIndex === 'object' && byIndex[index] && typeof byIndex[index] === 'object' ? byIndex[index] : {}
@@ -112,6 +113,7 @@ export function indexLevels(byIndex, index, fallback = {}) {
   return {
     slPct: held(v.slPct, 0, max, d.slPct), targetPct: held(v.targetPct, 0, max, d.targetPct), levelUnit,
     trailGap: held(v.trailGap, 0, max, d.trailGap), trailStart: held(v.trailStart, 0, max, d.trailStart),
+    costAfter: held(v.costAfter, 0, 5000, d.costAfter),
   }
 }
 /** `byIndex` with `index`'s levels changed by `patch` - the index's whole set kept from then on (the others it had from
@@ -211,7 +213,7 @@ export function reportHead(s, okDays) {
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
-  const cost = s.costSl ? ` · cost SL (${s.costSl})` : ''
+  const cost = s.costSl ? ` · cost SL (${s.costSl}${s.costAfter > 0 ? ` after +${s.costAfter}${s.costSl === 'spot' ? ' pts' : unit}` : ''})` : ''
   const strike = s.moneyness ? ` · ${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)

@@ -1018,6 +1018,15 @@ test('COST SL once in profit: armed after a bar closed in profit; on spot - out 
   // The tighter stop wins: a trail at 105 (5 behind the best, 110) is over the cost - bar 20 opens through IT, at 104.
   const trailed = simulateTrade(day({ ce: prem }), 10, call, { ...base, trailGap: 5, levelUnit: 'pts', costSl: 'premium' })
   assert.deepEqual([trailed.exit, trailed.exitReason], [104, 'Trailing stop (opened through it)'])
+  // "AFTER +" (costAfter): armed only once a bar CLOSED that far in profit. Spot closed 10 over the entry (25010): after +10
+  // arms (out at 20); after +15 does not - the trade runs on.
+  assert.equal(simulateTrade(day(), 10, call, { ...base, costSl: 'spot', costAfter: 10 }).exitIndex, 20)
+  assert.match(simulateTrade(day(), 10, call, { ...base, costSl: 'spot', costAfter: 15 }).exitReason, /square-off/)
+  // On the premium, in the levels' unit: closes at 108 over a 100 entry = +8 pts / +8%; after +5 arms, after +10 does not.
+  assert.equal(simulateTrade(day({ ce: prem }), 10, call, { ...base, costSl: 'premium', costAfter: 5, levelUnit: 'pts' }).exitReason, 'Cost SL')
+  assert.match(simulateTrade(day({ ce: prem }), 10, call, { ...base, costSl: 'premium', costAfter: 10, levelUnit: 'pts' }).exitReason, /square-off/)
+  assert.equal(simulateTrade(day({ ce: prem }), 10, call, { ...base, costSl: 'premium', costAfter: 8, levelUnit: 'pct' }).exitReason, 'Cost SL')
+  assert.match(simulateTrade(day({ ce: prem }), 10, call, { ...base, costSl: 'premium', costAfter: 9, levelUnit: 'pct' }).exitReason, /square-off/)
   // Through simulateDay: the setting reaches every trade.
   const rule = lines([{ id: 'vwap', value: 'above' }], 'buyCE')
   // Over VWAP (24990) from minute 20 at 25000 - the entry; 25010 from 31 (in profit); back to 24990 at 40.

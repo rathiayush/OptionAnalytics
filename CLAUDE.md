@@ -662,12 +662,14 @@ When adding or changing a strategy:
   put's above - `optionFor`). COST SL ONCE IN PROFIT (asked for - "once in profit have cost SL ... from the point where I
   entered spot, if price returns to the same level"; the page's checkbox, `costSl` '' / 'spot' / 'premium',
   `COST_SL_CHOICES`, `optionanalytics.signalBacktest.costSl`): in `simulateTrade` it is ARMED after a completed 1-minute bar
-  CLOSED in profit - spot (the TRADED index's) past its close at the entry the trade's way (a bought call / sold put up, a
-  bought put / sold call down), or the premium past the entry - and from the NEXT bar: 'spot' = out when spot is back at
+  CLOSED in profit BY AT LEAST "after +" (`costAfter`, asked for - "cost SL should happen after certain points, otherwise
+  it will enter and just exit ... configurable": spot points on Spot, the premium in the levels' unit on Premium; 0 = any
+  profit; kept PER INDEX with the levels) - spot (the TRADED index's) past its close at the entry the trade's way (a bought
+  call / sold put up, a bought put / sold call down), or the premium past the entry - and from the NEXT bar: 'spot' = out when spot is back at
   the entry's spot (the option's close of that minute, its open when spot opened through; after the premium's own stops,
   before the target), 'premium' = the entry premium is a stop (the tighter of it, the SL and the trail stops, "Cost SL").
   PER-INDEX LEVELS (asked for - "different sl target for each index"): the page keeps the SL, target, trail and their unit
-  for EACH index (`optionanalytics.signalBacktest.levelsByIndex`, `indexLevels` / `withIndexLevels` in
+  (and the Cost SL's "after +") for EACH index (`optionanalytics.signalBacktest.levelsByIndex`, `indexLevels` / `withIndexLevels` in
   `signalBacktestJob.js`) - the TRADED index's (Trade in, else the index) are on the page, tagged "<INDEX> levels"; an
   index with none of its own reads the old single keys until it is changed (then it keeps its whole set); a run, saved
   strategy or background run still carries the one set it ran with (Use settings / Load put them on ITS traded index). The trade is marked (`expiryDay`, `overridden` - an "expiry" tag in the trades

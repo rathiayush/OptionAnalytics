@@ -455,13 +455,14 @@ export default function SignalBacktestPage() {
   // index's (a premium's size differs from one index to the next); an index with none of its own starts from the old ones.
   const levelIndex = tradeIn || index
   const legacyLevels = { slPct: legacySl, targetPct: legacyTarget, levelUnit: legacyUnit, trailGap: legacyTrailGap, trailStart: legacyTrailStart }
-  const { slPct, targetPct, levelUnit, trailGap, trailStart } = indexLevels(levelsByIndex, levelIndex, legacyLevels)
+  const { slPct, targetPct, levelUnit, trailGap, trailStart, costAfter } = indexLevels(levelsByIndex, levelIndex, legacyLevels)
   const setLevelsFor = (idx, patch) => setLevelsByIndex((m) => withIndexLevels(m, idx, patch, legacyLevels))
   const setSlPct = (v) => setLevelsFor(levelIndex, { slPct: v })
   const setTargetPct = (v) => setLevelsFor(levelIndex, { targetPct: v })
   const setLevelUnit = (v) => setLevelsFor(levelIndex, { levelUnit: v })
   const setTrailGap = (v) => setLevelsFor(levelIndex, { trailGap: v })
   const setTrailStart = (v) => setLevelsFor(levelIndex, { trailStart: v })
+  const setCostAfter = (v) => setLevelsFor(levelIndex, { costAfter: v })
   const unitText = levelUnit === 'pts' ? ' pts' : '%'
   const unitMax = levelUnit === 'pts' ? 5000 : 1000
 
@@ -508,8 +509,8 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, costSl, strategyName: strategyNameText,
-  }), [index, tradeIn, costSl, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
+    timeframe, expiryDay, costSl, costAfter, strategyName: strategyNameText,
+  }), [index, tradeIn, costSl, costAfter, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay, strategyNameText])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
@@ -542,7 +543,7 @@ export default function SignalBacktestPage() {
     setStoredRule(s.rule)
     // Its levels are the levels of ITS traded index.
     setMoneyness(s.moneyness); setCostSl(s.costSl)
-    setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart })
+    setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart, costAfter: s.costAfter })
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
     setSttPct(s.sttPct); setBrokeragePerOrder(s.brokeragePerOrder); setOtherPerTrade(s.otherPerTrade)
@@ -847,12 +848,21 @@ export default function SignalBacktestPage() {
                   <InputNumber size="small" min={0} max={unitMax} value={trailStart} onChange={(v) => setTrailStart(v ?? 0)} addonAfter={unitText.trim()} disabled={!(trailGap > 0)} style={{ width: 110 }} />
                 </Space>
               </Tooltip>
-              <Tooltip title="Once the trade is in profit - a completed 1-minute bar CLOSED past the entry, on spot (the traded index's: up for a bought call / sold put, down for a bought put / sold call) or on the premium - it is out at cost: on spot when spot comes back to its level at the entry (at the option's price that minute), on the premium at the entry premium (the tighter stop wins).">
+              <Tooltip title={`Once the trade is in profit by at least "after +" - a completed 1-minute bar CLOSED that far past the entry, on spot (the traded index's spot points: up for a bought call / sold put, down for a bought put / sold call) or on the premium (in ${unitText.trim()}) - it is out at cost: on spot when spot comes back to its level at the entry (at the option's price that minute), on the premium at the entry premium (the tighter stop wins). 0 = any profit, so a trade can be out at cost a minute later. Kept for each index (${levelIndex}'s here).`}>
                 <Space size={4} wrap>
                   <Checkbox checked={Boolean(costSl)} onChange={(e) => setCostSl(e.target.checked ? 'spot' : '')}>
                     <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Cost SL once in profit</Text>
                   </Checkbox>
                   {costSl && <Segmented size="small" value={costSl} onChange={setCostSl} options={[{ value: 'spot', label: 'Spot back' }, { value: 'premium', label: 'Premium back' }]} />}
+                  {costSl && (
+                    <Space size={4}>
+                      <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>after +</Text>
+                      <InputNumber
+                        size="small" min={0} max={costSl === 'spot' ? 5000 : unitMax} value={costAfter} onChange={(v) => setCostAfter(v ?? 0)}
+                        addonAfter={costSl === 'spot' ? 'spot pts' : unitText.trim()} style={{ width: 140 }} aria-label="Cost SL after"
+                      />
+                    </Space>
+                  )}
                 </Space>
               </Tooltip>
               <Tooltip title="Out at the bar's close this many minutes after the entry (0 = off). Every trade is out by 15:10 anyway.">
