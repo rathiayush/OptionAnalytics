@@ -100,6 +100,16 @@ test('when the session is over every trade is closed - the day\'s report and its
   // A day with no trade says so.
   const quiet = liveDayEvents(day, engineSettings(cleanBacktestSettings({ ...SETTINGS, rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'ib', value: 'inside' } }] }, action: 'buyCE', mirror: false }, maxTradesPerDay: 1 })), { complete: true })
   assert.match(dayReportText('Quiet', day, { ...quiet, closed: [], trades: [], signals: 0, summary: { ...quiet.summary, trades: 0 } }), /No trades today\./)
+  // A strategy set NOT to trade the expiry day: nothing sent on it, its report says why (not "no trades" / "not taken").
+  const expiry = { ...day, isExpiry: true }
+  const skipped = liveDayEvents(expiry, engineSettings(cleanBacktestSettings({ ...SETTINGS, expiryDay: 'skip' })), { complete: true, nowMs: at('15:35') })
+  assert.deepEqual([skipped.trades.length, skipped.events.length, skipped.expirySkipped], [0, 0, true])
+  assert.ok(skipped.signals > 0)
+  const skipText = dayReportText('VWAP cross', expiry, skipped)
+  assert.match(skipText, new RegExp(`\nExpiry day - not traded \\(the strategy's Expiry day setting\\); ${skipped.signals} signals? not taken\\.$`))
+  assert.doesNotMatch(skipText, /No trades today|more signal/)
+  // The same strategy on a day that is not the expiry trades as before.
+  assert.deepEqual(liveDayEvents(day, engineSettings(cleanBacktestSettings({ ...SETTINGS, expiryDay: 'skip' })), { complete: true, nowMs: at('15:35') }).closed, fullTrades)
 })
 
 test('the texts: an entry (and "seen late" after a restart), an exit with its result', () => {

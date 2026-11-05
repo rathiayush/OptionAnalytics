@@ -958,6 +958,14 @@ test('on the options\' expiry day the Expiry day setting overrides the rule\'s b
   assert.deepEqual(what(trades(day(true), sell, 'sell')), [['mirror', 'SELL', 'CE', false], ['rule', 'SELL', 'PE', false], ['mirror', 'SELL', 'CE', false]])
   // An unknown choice is "as the rule".
   assert.deepEqual(what(trades(day(true), buy, 'maybe')), what(asRule))
+  // "Don't trade": the expiry day takes no trade - its signals listed, each skipped for it; any other day as the rule.
+  const skip = simulateDay(day(true), { ...base, rule: buy, expiryDay: 'skip' })
+  assert.deepEqual(skip.trades, [])
+  assert.equal(skip.expirySkipped, true)
+  assert.ok(skip.signals.length >= 3 && skip.signals.every((x) => !x.taken && /^expiry day - not traded/.test(x.skipped)))
+  assert.deepEqual(trades(day(false), buy, 'skip'), asRule)
+  assert.equal(simulateDay(day(false), { ...base, rule: buy, expiryDay: 'skip' }).expirySkipped, false)
+  assert.equal(simulateDay(day(true), { ...base, rule: buy, expiryDay: 'rule' }).expirySkipped, false)
   // The CSV says which trades were the expiry day's and overridden.
   const csv = tradesCsv(sold).split('\n')
   assert.match(csv[0], /,net,expiry day,why$/)
