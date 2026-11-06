@@ -4,7 +4,8 @@
 // live feed), cut to the completed minutes and prepared as the Signal backtest prepares a past day; each strategy's day so
 // far (signalLive.js - its own settings, the backtest's trades): its entries and exits go to the server, which keeps them
 // (CSV) and sends the new ones to Telegram once (by key). From 15:31 the day's report: the closed trades and the numbers
-// (CSV) and, if asked, Telegram - once. Paper only: it places nothing and changes no setting.
+// (CSV) and, if asked, Telegram - once. It places nothing and changes no setting: each event carries its trade (liveTrade)
+// and the SERVER places / closes a real Dhan order only for a strategy an admin armed with "Live orders" (SignalLiveOrders).
 //
 // Environment (from the server):
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
@@ -96,7 +97,7 @@ async function round(nowMs) {
       try {
         const result = liveDayEvents(day, engineSettings(s.clean), { name: s.name, complete, nowMs, tradeDay })
         const sent = new Set(s.sent ?? [])
-        const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text }) => ({ key, kind, text }))
+        const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text, trade }) => ({ key, kind, text, trade }))
         if (fresh.length) await api('/api/signal-strategies/live/events', { method: 'POST', body: { strategyId: s.id, date, events: fresh } })
         if (complete && !s.reported) {
           await api('/api/signal-strategies/live/day', { method: 'POST', body: { strategyId: s.id, date, ...dayRecord(day, result), text: dayReportText(s.name, day, result) } })

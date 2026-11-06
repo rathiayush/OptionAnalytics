@@ -5,7 +5,7 @@
 // what a backtest of that day says later. What has happened so far is a list of EVENTS, each with its own key so it is
 // sent once: a trade's ENTRY, and its EXIT once it has one (a trade the data ran out on before the session is over is
 // still OPEN - no exit yet). Once the session is over the day's REPORT: the closed trades and their numbers.
-import { istMinute, optionName, prepareDay, simulateDay, summarize } from './signalBacktest.js'
+import { BACKTEST_DEFAULTS, istMinute, optionName, prepareDay, simulateDay, summarize } from './signalBacktest.js'
 import { runUrl } from './signalBacktestJob.js'
 
 const MIN_MS = 60_000
@@ -62,8 +62,28 @@ export function exitText(name, underlying, t) {
 }
 
 /**
+ * The trade behind an event, for the server's LIVE ORDERS (SignalLiveOrders - only for a strategy an admin armed; the scan
+ * itself places nothing): its `key` (date|rule-or-mirror|entry ms - the same for its entry and exit), the TRADED index
+ * (Trade in), the options' `expiry` (that index's day's - the series the backtest read), strike, CE / PE, BUY / SELL, the
+ * entry premium and time (ms, the signal minute's start), and the strategy's own stop-loss / target as premium POINTS from
+ * that entry (`levelUnit` % of it or points; 0 = none - the server then uses the Trade settings'), and an exit's reason.
+ */
+export function liveTrade(t, day, engine, { tradeDay = null, exit = false } = {}) {
+  const s = { ...BACKTEST_DEFAULTS, ...engine }
+  const traded = t.tradeIndex && tradeDay ? tradeDay : day
+  const points = (v) => (v > 0 ? r2(s.levelUnit === 'pts' ? v : (t.entry * v) / 100) : 0)
+  return {
+    key: `${day.date}|${t.strategy}|${t.entryTime}`, underlying: t.tradeIndex || day.underlying, expiry: traded?.expiry ?? null,
+    strike: t.strike, side: t.side, action: t.action, entry: r2(t.entry), entryTime: t.entryTime,
+    stopLossPoints: points(s.slPct), targetPoints: points(s.targetPct), strategy: t.strategy,
+    ...(exit ? { exitReason: t.exitReason } : {}),
+  }
+}
+
+/**
  * What a strategy's day has come to so far: `trades` (the backtest's - `simulateDay`), `events` - each trade's ENTRY and,
- * once it has one, its EXIT, keyed `date|rule-or-mirror|entry time|entry-or-exit` so each is sent once - the trades
+ * once it has one, its EXIT, keyed `date|rule-or-mirror|entry time|entry-or-exit` so each is sent once, each with its
+ * `trade` (liveTrade - what a live order needs) - the trades
  * `closed` and still `open`, and the closed ones' `summary`. `complete`: the session is over - a trade the data ran out on
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
@@ -74,8 +94,8 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
   for (const t of trades) {
     const key = `${day.date}|${t.strategy}|${t.entryTime}`
     const late = nowMs != null && nowMs - (t.entryTime + MIN_MS) > 3 * MIN_MS
-    events.push({ key: `${key}|entry`, kind: 'entry', at: t.entryTime, text: entryText(name, day.underlying, t, { late }) })
-    if (!isOpen(t)) events.push({ key: `${key}|exit`, kind: 'exit', at: t.exitTime, text: exitText(name, day.underlying, t) })
+    events.push({ key: `${key}|entry`, kind: 'entry', at: t.entryTime, text: entryText(name, day.underlying, t, { late }), trade: liveTrade(t, day, engine, { tradeDay }) })
+    if (!isOpen(t)) events.push({ key: `${key}|exit`, kind: 'exit', at: t.exitTime, text: exitText(name, day.underlying, t), trade: liveTrade(t, day, engine, { tradeDay, exit: true }) })
   }
   events.sort((a, b) => a.at - b.at || (a.kind === b.kind ? 0 : a.kind === 'entry' ? -1 : 1))
   const closed = trades.filter((t) => !isOpen(t))

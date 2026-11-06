@@ -11,7 +11,9 @@ namespace OptionAnalytics.Server.Controllers;
 /// accounts - each its own strategies, an admin every account's): list, save, change (name, settings, the Live / Alerts /
 /// Daily report switches), remove, and the history the live scan kept (and its CSV files). The live scan
 /// (scanner-runner/signal-live.mjs, the server's Runner key only): the strategies on Live with what is sent today, and
-/// where it posts the day's entries / exits and its report. The External account never reaches any of it.
+/// where it posts the day's entries / exits and its report. LIVE ORDERS: a strategy's "Live orders" switch (real Dhan
+/// orders - SignalLiveOrders) is an admin's only; the entries / exits the live scan posts place / close orders only for a
+/// strategy an admin armed, decided here on the server. The External account never reaches any of it.
 /// </summary>
 [ApiController]
 [Route("api/signal-strategies")]
@@ -20,11 +22,15 @@ public sealed class SignalStrategyController : ControllerBase
     private const string PageRoles = AuthRoles.Admin + "," + AuthRoles.User;
     private readonly SignalStrategyStore _store;
     private readonly SignalLiveHostedService _live;
+    private readonly SignalLiveOrders _orders;
+    private readonly ILogger<SignalStrategyController> _logger;
 
-    public SignalStrategyController(SignalStrategyStore store, SignalLiveHostedService live)
+    public SignalStrategyController(SignalStrategyStore store, SignalLiveHostedService live, SignalLiveOrders orders, ILogger<SignalStrategyController> logger)
     {
         _store = store;
         _live = live;
+        _orders = orders;
+        _logger = logger;
     }
 
     private string? Scope => User.IsInRole(AuthRoles.Admin) ? null : Owner;
@@ -43,7 +49,7 @@ public sealed class SignalStrategyController : ControllerBase
             strategies = _store.List(Scope).Select(s =>
             {
                 var (last, events) = _store.Glance(s.Id, today);
-                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events };
+                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.LiveOrders, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events };
             }),
         };
     }
@@ -52,6 +58,7 @@ public sealed class SignalStrategyController : ControllerBase
     [Authorize(Roles = PageRoles)]
     public IActionResult Create([FromBody] SignalStrategyRequest request)
     {
+        // A new strategy never places live orders (Create ignores the switch) - an admin arms it afterwards.
         var (strategy, error) = _store.Create(Owner, request, DateTimeOffset.UtcNow);
         return strategy is null ? BadRequest(new { error }) : Ok(strategy);
     }
@@ -60,7 +67,10 @@ public sealed class SignalStrategyController : ControllerBase
     [Authorize(Roles = PageRoles)]
     public IActionResult Update(string id, [FromBody] SignalStrategyRequest request)
     {
-        var (strategy, error) = _store.Update(id, Scope, request, DateTimeOffset.UtcNow);
+        if (request?.LiveOrders is not null && !User.IsInRole(AuthRoles.Admin)) return StatusCode(StatusCodes.Status403Forbidden, new { error = "Only an admin can switch live orders." });
+        if (request?.LiveOrders is { } armed)
+            _logger.LogWarning("{User} turned LIVE orders {State} for saved strategy {Id}.", User.Identity?.Name, armed ? "ON" : "off", id);
+        var (strategy, error) = _store.Update(id, Scope, request!, DateTimeOffset.UtcNow);
         return strategy is not null ? Ok(strategy) : error == "No such strategy." ? NotFound(new { error }) : BadRequest(new { error });
     }
 
@@ -115,8 +125,10 @@ public sealed class SignalStrategyController : ControllerBase
     public async Task<IActionResult> LiveEvents([FromBody] LiveEventsRequest request)
     {
         if (request?.StrategyId is not { } id || !IsDate(request.Date)) return BadRequest(new { error = "strategyId and date are needed." });
-        var added = await _store.RecordEventsAsync(id, request.Date!, (request.Events ?? new()).Take(200).ToList(), DateTimeOffset.UtcNow);
-        return Ok(new { added });
+        var (strategy, fresh) = await _store.KeepEventsAsync(id, request.Date!, (request.Events ?? new()).Take(200).ToList(), DateTimeOffset.UtcNow);
+        // Only events new to the store reach the orders - a repeat never places or closes twice.
+        if (strategy is not null && fresh.Count > 0) await _orders.HandleAsync(strategy, request.Date!, fresh, CancellationToken.None);
+        return Ok(new { added = fresh.Count });
     }
 
     public sealed record LiveDayRequest(string? StrategyId, string? Date, JsonObject? Day, JsonArray? Trades, string? Text);

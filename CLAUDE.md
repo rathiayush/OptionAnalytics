@@ -810,6 +810,28 @@ When adding or changing a strategy:
   yesterday's profile is asked once an index a day. The live day equals the backtest of that day up to the clock
   (`tests/signal-live.test.mjs` - read before, during and after each trade; the loop against a fake server: events
   once, the report after the close, nothing outside the session, a failing day backed off).
+  LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
+  "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
+  ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings
+  saved by a non-admin turn it off), OFF by default, turned on through a "Place REAL Dhan orders" confirm on the card
+  (off needs none), and needs Live on. The runner still places nothing and its Runner key still reaches no live-trading
+  endpoint: each event carries its trade (`liveTrade` - key date|rule-or-mirror|entry ms, the TRADED index, the options'
+  expiry from that index's day, strike, CE / PE, BUY / SELL, entry, entry time, the strategy's SL / target as premium
+  POINTS from its entry, an exit's reason) and the SERVER acts on the events NEW to the store only
+  (`KeepEventsAsync` -> `HandleAsync`, so a repeat / retry / restart never places or closes twice), for an armed
+  strategy: ENTRY (the rule's and the mirror's) = `LiveTradingService.PlaceAsync`, a SUPER ORDER (LIMIT at the live ask /
+  bid +- the Trade settings' slippage) of that option, LOTS = the traded index's TRADE SETTINGS lots, legs = the
+  strategy's SL / target points (the Trade settings' where it has none - a super order needs both), no server trail, the
+  server's 15:10 time exit behind it; NOT placed (kept and sent, with why) when seen LATE (over 4 min after its signal
+  minute's start - the scan's "seen late"), its exit came in the same batch, another of its live trades has no exit yet
+  (one at a time), its Max trades a day are placed, it is past 15:10, its option cannot be read, or Dhan / the kill
+  switch refuse. EXIT (the strategy's own - trail, cost SL on spot / premium, time stop, day limits, SL / target, 15:10) =
+  `ExitTradeAsync(entry's order ids, slippage, onlyWithWorkingLegs: true)`: the super order's working legs or a pending
+  entry CANCELLED, then the filled quantity out at a LIMIT (nothing when Dhan's own leg closed it), its time exit
+  cleared; done for an order already placed even after the switch is turned off; a failed exit goes to the time-exit loop
+  at once (every 10 s, 30 tries). Every row in `history/{id}-orders.csv` (Dhan's order ids - an exit closes exactly its
+  entry's orders, after a restart too) and the History's "Live orders" tab; every outcome to Telegram, whatever Alerts
+  says. `SignalLiveOrdersTests.cs` (a fake Dhan behind `ISignalOrderGateway`), `tests/signal-live.test.mjs` (the payload).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
@@ -895,4 +917,5 @@ When adding or changing a strategy:
   (`StrategyTriggerHostedService` - `RunStrategy` / `ReplayForStrategy`, in memory) and their list is
   `GET /api/triggers/strategies` (admin, the Triggers page). The Expired Backtest and Signal backtest pages are separate.
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
-  Live (Dhan) mode; alerts and the default auto trade are paper.
+  Live (Dhan) mode, or a saved Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`);
+  alerts and the default auto trade are paper.

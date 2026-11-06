@@ -366,6 +366,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SignalBacktestJobS
 // SignalStrategyController.
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.SignalStrategyStore>();
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.SignalLiveHostedService>();
+// A saved strategy an admin armed ("Live orders") places / closes REAL Dhan super orders from its live scan's entries /
+// exits - through LiveTradingService (SignalLiveOrders).
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.ISignalOrderGateway, OptionAnalytics.Server.Services.SignalStrategies.LiveTradingOrderGateway>();
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.SignalStrategies.SignalLiveOrders>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.SignalStrategies.SignalLiveHostedService>());
 builder.Services.AddSingleton<DhanTradersControlClient>();
 builder.Services.AddSingleton<KillSwitchService>();
