@@ -15,7 +15,7 @@ import { createStrategy, deleteStrategy, historyCsvUrl, strategyHistory, updateS
 // strategy's own exit (SignalLiveOrders on the server); the History's "Live orders" tab lists each order and why one
 // was not placed.
 
-const { Text } = Typography
+const { Paragraph, Text } = Typography
 const rupees = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}` : '—')
 const pnlColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const num = (v) => (v === '' || v == null ? NaN : Number(v))
@@ -220,14 +220,16 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       </Popconfirm>
     </Space>
   )
+  // A plain block, not a flex Space: the rule's text must be held to the column's width to wrap / cut (in a flex item it
+  // kept its whole length on one line and stretched the column thousands of pixels wide).
   const what = (s) => (
-    <Space direction="vertical" size={0} style={{ maxWidth: '100%' }}>
-      <Space size={6} wrap><Text strong style={{ fontSize: 13 }}>{s.name}</Text>{s.liveOrders && s.live && <Tag color="red" style={{ margin: 0 }}>LIVE orders</Tag>}</Space>
-      <Text type="secondary" style={{ fontSize: 11 }}>
+    <div style={{ minWidth: 0, maxWidth: '100%' }}>
+      <div><Space size={6} wrap><Text strong style={{ fontSize: 13 }}>{s.name}</Text>{s.liveOrders && s.live && <Tag color="red" style={{ margin: 0 }}>LIVE orders</Tag>}</Space></div>
+      <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
         {s.underlying}{s.settings?.tradeIn && s.settings.tradeIn !== s.underlying ? ` → traded in ${s.settings.tradeIn}` : ''} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
       </Text>
-      <Text type="secondary" style={{ fontSize: 11 }} ellipsis={{ tooltip: ruleOf(s) }}>{ruleOf(s)}</Text>
-    </Space>
+      <Paragraph type="secondary" style={{ fontSize: 11, margin: 0 }} ellipsis={{ rows: 2, tooltip: narrow ? false : ruleOf(s) }}>{ruleOf(s)}</Paragraph>
+    </div>
   )
   const anyLive = strategies.some((s) => s.live)
   const title = (
@@ -252,12 +254,15 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   } else {
     body = (
       <Table
-        size="small" rowKey="id" dataSource={strategies} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }} scroll={{ x: 1100 }}
+        size="small" rowKey="id" dataSource={strategies} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
+        // FIXED layout: the columns keep their widths and the strategy takes the rest - with the auto layout a long rule
+        // stretched it and squeezed "Last day" to a letter a line.
+        tableLayout="fixed" scroll={{ x: 1000 }}
         columns={[
           { title: 'Strategy', key: 'what', render: (_, s) => what(s) },
-          { title: 'Live scan', key: 'live', width: 230, render: (_, s) => switches(s) },
-          { title: 'Last day', key: 'last', width: 260, render: (_, s) => <LastDay s={s} today={today} /> },
-          { title: '', key: 'actions', width: 320, render: (_, s) => actions(s) },
+          { title: 'Live scan', key: 'live', width: 210, render: (_, s) => switches(s) },
+          { title: 'Last day', key: 'last', width: 230, render: (_, s) => <LastDay s={s} today={today} /> },
+          { title: '', key: 'actions', width: 300, render: (_, s) => actions(s) },
         ]}
       />
     )
