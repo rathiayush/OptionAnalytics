@@ -97,7 +97,7 @@ async function round(nowMs) {
       try {
         const result = liveDayEvents(day, engineSettings(s.clean), { name: s.name, complete, nowMs, tradeDay })
         const sent = new Set(s.sent ?? [])
-        const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text, trade }) => ({ key, kind, text, trade }))
+        const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text, trade, row }) => ({ key, kind, text, trade, row }))
         if (fresh.length) await api('/api/signal-strategies/live/events', { method: 'POST', body: { strategyId: s.id, date, events: fresh } })
         if (complete && !s.reported) {
           await api('/api/signal-strategies/live/day', { method: 'POST', body: { strategyId: s.id, date, ...dayRecord(day, result), text: dayReportText(s.name, day, result) } })

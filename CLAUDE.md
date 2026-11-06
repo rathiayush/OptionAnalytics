@@ -803,9 +803,14 @@ When adding or changing a strategy:
   OWN settings (`liveDayEvents` = `simulateDay` - the backtest's trades, paper): each trade's ENTRY at once and its EXIT
   once it has one (a trade the data ran out on - "Day end" - before 15:31 is still OPEN), each event keyed
   (date|rule-or-mirror|entry time|entry-or-exit) so the server keeps and sends it ONCE (`{id}-events.csv`; an entry
-  first seen over 3 minutes late - a restart - says "seen late"); from 15:31 the DAY'S REPORT once (`{id}-days.csv` a row
-  a day, `{id}-trades.csv` its closed trades in the backtest CSV's columns - posted again, the day's rows are replaced, the
-  Telegram not resent). Telegram: each entry / exit when Alerts is on, the report when Daily report is on (HTML-escaped).
+  first seen over 3 minutes late - a restart - says "seen late"); the TRADES HISTORY is written AS EACH SIGNAL COMES (asked
+  for - "whenever you give signal it updates history"): every event carries its trade's row (`tradeRow` - the backtest
+  CSV's columns plus `sl` / `target` PRICES from the entry premium, a bought option's stop under it and a sold one's over,
+  '' = none, `status` open / closed and the trade's `key`) and the server (`KeepTradeRows`, in `KeepEventsAsync`) adds an
+  entry's row OPEN and puts its exit's CLOSED row over it, by key - the History's Trades tab ("open" until the exit; a
+  block a trade on a phone) reloads each minute while it is open and the strategy is on Live (a page timer, CSV only);
+  from 15:31 the DAY'S REPORT once (`{id}-days.csv` a row a day, `{id}-trades.csv` the day's final rows put over them -
+  posted again, the day's rows are replaced, the Telegram not resent). Telegram: each entry / exit when Alerts is on, the report when Daily report is on (HTML-escaped).
   An index whose day cannot be read is asked again later, the wait doubling 1 - 30 min (a holiday reads as one);
   yesterday's profile is asked once an index a day. The live day equals the backtest of that day up to the clock
   (`tests/signal-live.test.mjs` - read before, during and after each trade; the loop against a fake server: events
@@ -830,7 +835,13 @@ When adding or changing a strategy:
   entry CANCELLED, then the filled quantity out at a LIMIT (nothing when Dhan's own leg closed it), its time exit
   cleared; done for an order already placed even after the switch is turned off; a failed exit goes to the time-exit loop
   at once (every 10 s, 30 tries). Every row in `history/{id}-orders.csv` (Dhan's order ids - an exit closes exactly its
-  entry's orders, after a restart too) and the History's "Live orders" tab; every outcome to Telegram, whatever Alerts
+  entry's orders, after a restart too; `price` / `sl` / `target` = the entry's LIMIT and its super order's stop-loss /
+  target prices - `ManualOrderResult.Prices`; an exit's `price` = its LIMIT, or the leg's price when Dhan's own leg had
+  closed it - `ManualOrderResult.ExitPrice` / `ClosedBy`, status "closed by Dhan's target"; `reason` = the strategy's exit
+  reason, or why an entry was not placed - asked for: "history about order punched at what time, exit, SL, target price";
+  Dhan's FILL prices come on its own order feed and are not in it) and the History's "Live orders" tab - ONE ROW A TRADE
+  (`orderTrades` in `signalStrategyHistory.js`: punched at, entry, SL, target, exit time / price / why, "open" until it
+  exits; a block a trade on a phone - `tests/signal-strategy-history.test.mjs`); every outcome to Telegram, whatever Alerts
   says. `SignalLiveOrdersTests.cs` (a fake Dhan behind `ISignalOrderGateway`), `tests/signal-live.test.mjs` (the payload).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and

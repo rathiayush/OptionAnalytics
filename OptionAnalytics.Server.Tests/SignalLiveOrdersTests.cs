@@ -42,14 +42,18 @@ public sealed class SignalLiveOrdersTests : IDisposable
         public List<(IReadOnlyList<string> Ids, DateTimeOffset At, string Reason)> TimeExits { get; } = new();
         public List<IReadOnlyList<string>> Cleared { get; } = new();
         public Func<ManualOrderRequest, ManualOrderResult>? OnPlace { get; set; }
-        public ManualOrderResult ExitResult { get; set; } = new(true, "STOP_LOSS_LEG cancelled · TARGET_LEG cancelled · SELL x3 at LIMIT 101.5 to close this trade", new[] { "x1" }, null);
+        public ManualOrderResult ExitResult { get; set; } = new ManualOrderResult(true, "STOP_LOSS_LEG cancelled · TARGET_LEG cancelled · SELL x3 at LIMIT 131.5 to close this trade", new[] { "x1" }, null)
+        {
+            ExitPrice = 131.5m,
+        };
         private int _next = 100;
 
         public Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken)
         {
             Placed.Add(request);
             return Task.FromResult(OnPlace?.Invoke(request)
-                ?? new ManualOrderResult(true, $"{request.Direction} {request.Underlying} {request.Strike}{request.Side} at LIMIT 101", new[] { $"o{_next++}" }, null));
+                ?? new ManualOrderResult(true, $"{request.Direction} {request.Underlying} {request.Strike}{request.Side} at LIMIT 101.5", new[] { $"o{_next++}" },
+                    new ManualOrderPrices(100, 101.5m, 100 + request.TargetPoints, 100 - request.StopLossPoints)));
         }
 
         public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs)
@@ -143,6 +147,8 @@ public sealed class SignalLiveOrdersTests : IDisposable
         var row = Assert.Single(store.Orders(s.Id, Date));
         Assert.Equal(("entry", "placed", "SENSEX 82000 CE", 3), (row.Kind, row.Status, row.Option, row.Lots));
         Assert.Equal(new[] { "o100" }, row.OrderIds);
+        // What was sent: the LIMIT and the super order's stop-loss / target prices.
+        Assert.Equal((101.5m, 69.4m, 190m), (row.Price, row.Sl, row.Target));
         Assert.Contains("LIVE order placed", Assert.Single(telegrams));
 
         // The strategy's exit (its trailing stop): the entry's orders - working legs cancelled, then out - at its slippage.
@@ -153,7 +159,8 @@ public sealed class SignalLiveOrdersTests : IDisposable
         Assert.True(exit.OnlyWithWorkingLegs);                                                          // closed by Dhan's own leg = nothing to do
         Assert.Equal(new[] { "o100" }, Assert.Single(dhan.Cleared));                                    // its 15:10 time exit dropped
         Assert.Equal("exited", store.Orders(s.Id, Date)[1].Status);
-        Assert.Contains("Trailing stop", store.Orders(s.Id, Date)[1].Message);
+        Assert.Equal("Trailing stop", store.Orders(s.Id, Date)[1].Reason);
+        Assert.Equal(131.5m, store.Orders(s.Id, Date)[1].Price);                                       // the exit's LIMIT
         Assert.Contains("LIVE exit", telegrams[1]);
 
         // The same events again (a retry, a restart of the scan): nothing more reaches Dhan.
@@ -163,8 +170,30 @@ public sealed class SignalLiveOrdersTests : IDisposable
         // Even handed to the orders directly, an exit already done is not done twice.
         await orders.HandleAsync(s, Date, new[] { Exit(t) }, CancellationToken.None);
         Assert.Single(dhan.Exits);
-        Assert.StartsWith("timeUtc,date,trade,kind,status,underlying,option,action,lots,orderIds,message", File.ReadAllText(store.HistoryPath(s.Id, "orders")));
+        Assert.StartsWith("timeUtc,date,trade,kind,status,underlying,option,action,lots,price,sl,target,reason,orderIds,message", File.ReadAllText(store.HistoryPath(s.Id, "orders")));
         Assert.Equal(2, store.History(s.Id).Orders.Count);
+    }
+
+    [Fact]
+    public async Task An_exit_after_Dhans_own_leg_closed_it_says_so_at_the_legs_price()
+    {
+        var store = Store();
+        var dhan = new FakeDhan
+        {
+            ExitResult = new ManualOrderResult(true, "o100: already closed on Dhan by its target", Array.Empty<string>(), null) { ExitPrice = 190m, ClosedBy = "target" },
+        };
+        var orders = Orders(store, TradeSettings(), dhan);
+        var s = Strategy(store);
+        var t = Trade();
+        await Post(store, orders, s.Id, Entry(t));
+        await Post(store, orders, s.Id, Exit(t with { ExitReason = "Target" }));
+        var exit = store.Orders(s.Id, Date).Last();
+        Assert.Equal(("closed by Dhan's target", 190m, "Target"), (exit.Status, exit.Price, exit.Reason));
+        // Kept in the CSV with its columns, read back the same after a restart.
+        Assert.StartsWith("timeUtc,date,trade,kind,status,underlying,option,action,lots,price,sl,target,reason,orderIds,message", File.ReadAllText(store.HistoryPath(s.Id, "orders")));
+        var back = Store().Orders(s.Id, Date);
+        Assert.Equal((101.5m, 69.4m, 190m), (back[0].Price, back[0].Sl, back[0].Target));
+        Assert.Equal(190m, back[1].Price);
     }
 
     [Fact]
@@ -217,8 +246,8 @@ public sealed class SignalLiveOrdersTests : IDisposable
         Assert.Empty(dhan.Exits);                                                                      // no live order to close
         var rows = store.Orders(s.Id, Date);
         Assert.Equal(new[] { "skipped", "skipped" }, rows.Select(r => r.Status));
-        Assert.Contains("seen late", rows[0].Message);
-        Assert.Contains("already exited", rows[1].Message);
+        Assert.Contains("seen late", rows[0].Reason);
+        Assert.Contains("already exited", rows[1].Reason);
         Assert.Equal(2, telegrams.Count);
         Assert.All(telegrams, x => Assert.Contains("NOT placed", x));
         // One open: the next entry waits for its exit (the engine trades one at a time).
@@ -228,14 +257,14 @@ public sealed class SignalLiveOrdersTests : IDisposable
         var lateOrders = Orders(store, TradeSettings(), dhan, telegrams, Now.AddMinutes(1));
         await Post(store, lateOrders, s.Id, Entry(second));
         Assert.Single(dhan.Placed);
-        Assert.Contains("has no exit yet", store.Orders(s.Id, Date).Last().Message);
+        Assert.Contains("has no exit yet", store.Orders(s.Id, Date).Last().Reason);
         // Past 15:10: nothing new.
         var evening = Orders(store, TradeSettings(), dhan, telegrams, new DateTimeOffset(2026, 10, 26, 15, 11, 0, TimeSpan.FromHours(5.5)));
         await Post(store, evening, s.Id, Exit(first));
         var after = Trade(entryMs: new DateTimeOffset(2026, 10, 26, 15, 10, 0, TimeSpan.FromHours(5.5)).ToUnixTimeMilliseconds());
         await Post(store, evening, s.Id, Entry(after));
         Assert.Single(dhan.Placed);
-        Assert.Contains("past 15:10", store.Orders(s.Id, Date).Last().Message);
+        Assert.Contains("past 15:10", store.Orders(s.Id, Date).Last().Reason);
     }
 
     [Fact]
@@ -250,7 +279,7 @@ public sealed class SignalLiveOrdersTests : IDisposable
         var b = Trade(entryMs: EntryMs + 60_000);
         await Post(store, Orders(store, TradeSettings(), dhan, now: Now.AddMinutes(1)), s.Id, Entry(b));
         Assert.Single(dhan.Placed);
-        Assert.Contains("1 live trade placed today already", store.Orders(s.Id, Date).Last().Message);
+        Assert.Contains("1 live trade placed today already", store.Orders(s.Id, Date).Last().Reason);
     }
 
     [Fact]
@@ -315,7 +344,7 @@ public sealed class SignalLiveOrdersTests : IDisposable
     }
 
     [Fact]
-    public async Task Only_an_admin_switches_live_orders_and_another_accounts_new_settings_turn_them_off()
+    public void Only_an_admin_switches_live_orders_and_another_accounts_new_settings_turn_them_off()
     {
         var store = Store();
         var mine = store.Create("user@x.com", new SignalStrategyRequest("Mine", Strategy(store, armed: false).Settings, Live: true, LiveOrders: true), Now).Strategy!;

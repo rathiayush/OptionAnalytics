@@ -13,7 +13,9 @@ namespace OptionAnalytics.Server.Services.SignalStrategies;
 /// <item>strategies.csv - one row a strategy: id, name, owner, index, the Live / Alerts / Daily report switches, when it
 /// was made and changed, and its settings (the page's - the rule, levels, timeframe - as one JSON cell);</item>
 /// <item>history/{id}-days.csv - a row a day the live scan reported: trades, wins, net, charges, signals, when reported;</item>
-/// <item>history/{id}-trades.csv - every closed trade of those days (the backtest CSV's columns);</item>
+/// <item>history/{id}-trades.csv - every trade of those days (the backtest CSV's columns, with its stop-loss / target
+/// prices): written AS EACH SIGNAL COMES - an entry adds its row (status "open"), its exit fills it in ("closed") - and the
+/// day's report puts the day's final rows over them;</item>
 /// <item>history/{id}-events.csv - every live entry / exit sent, keyed so each goes out ONCE (a restart sends nothing twice);</item>
 /// <item>history/{id}-orders.csv - the LIVE Dhan orders (SignalLiveOrders) for a strategy an admin armed: each entry placed,
 /// not placed (and why) or skipped, each exit - with Dhan's order ids, so the exit closes exactly the entry's orders.</item>
@@ -29,9 +31,9 @@ public sealed class SignalStrategyStore
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders" };
     public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "limit", "reportedUtc" };
-    public static readonly string[] TradeColumns = { "date", "side", "signal", "action", "option", "entryTime", "entry", "exitTime", "exit", "exitReason", "points", "gross", "charges", "net", "expiryDay", "why" };
+    public static readonly string[] TradeColumns = { "date", "side", "signal", "action", "option", "entryTime", "entry", "sl", "target", "exitTime", "exit", "exitReason", "points", "gross", "charges", "net", "expiryDay", "why", "status", "key" };
     public static readonly string[] EventColumns = { "timeUtc", "date", "kind", "key", "text" };
-    public static readonly string[] OrderColumns = { "timeUtc", "date", "trade", "kind", "status", "underlying", "option", "action", "lots", "orderIds", "message" };
+    public static readonly string[] OrderColumns = { "timeUtc", "date", "trade", "kind", "status", "underlying", "option", "action", "lots", "price", "sl", "target", "reason", "orderIds", "message" };
     public static readonly string[] HistoryKinds = { "days", "trades", "events", "orders" };
 
     private readonly object _lock = new();
@@ -220,10 +222,29 @@ public sealed class SignalStrategyStore
             {
                 ["timeUtc"] = now.ToString("O"), ["date"] = date, ["kind"] = e.Kind, ["key"] = e.Key, ["text"] = e.Text,
             }));
+            KeepTradeRows(id, date, fresh);
         }
         if (strategy.Alerts)
             foreach (var e in fresh) await NotifyAsync(WebUtility.HtmlEncode(e.Text ?? ""));
         return (strategy, fresh);
+    }
+
+    /// <summary>The trades' history as each signal comes (under the lock): an event's `row` (signalLive.js - tradeRow) by its
+    /// trade's key - an entry adds the trade (open) unless it is there, an exit puts the closed trade over it.</summary>
+    private void KeepTradeRows(string id, string date, IReadOnlyList<SignalLiveEvent> fresh)
+    {
+        var withRows = fresh.Where(e => e.Row is not null && Text(e.Row["key"]) is { Length: > 0 }).ToList();
+        if (withRows.Count == 0) return;
+        var rows = CsvTable.Read(HistoryPath(id, "trades")).Select(r => r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase)).ToList();
+        foreach (var e in withRows)
+        {
+            var row = TradeColumns.ToDictionary(c => c, c => (string?)Text(e.Row![c]), StringComparer.OrdinalIgnoreCase);
+            row["date"] = date;
+            var k = rows.FindIndex(r => r.GetValueOrDefault("date") == date && r.GetValueOrDefault("key") == row["key"]);
+            if (k < 0) rows.Add(row);
+            else if (e.Kind == "exit") rows[k] = row;
+        }
+        CsvTable.Write(HistoryPath(id, "trades"), TradeColumns, rows.OrderBy(r => r.GetValueOrDefault("date"), StringComparer.Ordinal));
     }
 
     /// <summary>A strategy's live order rows of a day, in the order they were written.</summary>
@@ -324,8 +345,9 @@ public sealed record SignalStrategy(string Id, string Name, string Owner, string
 public sealed record SignalStrategyRequest(string? Name = null, JsonNode? Settings = null, bool? Live = null, bool? Alerts = null, bool? DailyReport = null,
     bool? LiveOrders = null);
 
-/// <summary>An entry / exit the live scan saw (its key makes it once), with the trade it belongs to.</summary>
-public sealed record SignalLiveEvent(string? Key, string? Kind, string? Text, SignalLiveTrade? Trade = null);
+/// <summary>An entry / exit the live scan saw (its key makes it once), with the trade it belongs to and that trade's
+/// history row as of this event (open at its entry, closed at its exit).</summary>
+public sealed record SignalLiveEvent(string? Key, string? Kind, string? Text, SignalLiveTrade? Trade = null, JsonObject? Row = null);
 
 /// <summary>The trade behind a live event (signalLive.js - liveTrade): its key (date|rule-or-mirror|entry ms, the same for
 /// its entry and its exit), the TRADED index, the options' expiry, strike, CE / PE, BUY / SELL, the entry premium and its
@@ -335,13 +357,25 @@ public sealed record SignalLiveTrade(string? Key, string? Underlying, string? Ex
     decimal? Entry, long? EntryTime, decimal? StopLossPoints, decimal? TargetPoints, string? Strategy = null, string? ExitReason = null);
 
 /// <summary>One line of a strategy's live orders file (history/{id}-orders.csv).</summary>
+/// <summary>One line of a strategy's live orders file (history/{id}-orders.csv): an entry's LIMIT price and its super order's
+/// stop-loss / target prices; an exit's LIMIT price (or the leg's price when Dhan's own leg closed it) and the strategy's
+/// reason; a skipped / refused entry's reason.</summary>
 public sealed record SignalOrderRow(DateTimeOffset TimeUtc, string Date, string Trade, string Kind, string Status, string Underlying, string Option,
     string Action, int Lots, IReadOnlyList<string> OrderIds, string Message)
 {
+    public decimal? Price { get; init; }
+    public decimal? Sl { get; init; }
+    public decimal? Target { get; init; }
+    public string Reason { get; init; } = "";
+
+    private static string? Num(decimal? v) => v?.ToString("0.##", CultureInfo.InvariantCulture);
+    private static decimal? Num(string? v) => decimal.TryParse(v, NumberStyles.Number, CultureInfo.InvariantCulture, out var d) ? d : null;
+
     internal IReadOnlyDictionary<string, string?> ToRow() => new Dictionary<string, string?>
     {
         ["timeUtc"] = TimeUtc.ToString("O"), ["date"] = Date, ["trade"] = Trade, ["kind"] = Kind, ["status"] = Status, ["underlying"] = Underlying,
-        ["option"] = Option, ["action"] = Action, ["lots"] = Lots.ToString(CultureInfo.InvariantCulture), ["orderIds"] = string.Join(' ', OrderIds), ["message"] = Message,
+        ["option"] = Option, ["action"] = Action, ["lots"] = Lots.ToString(CultureInfo.InvariantCulture), ["price"] = Num(Price), ["sl"] = Num(Sl),
+        ["target"] = Num(Target), ["reason"] = Reason, ["orderIds"] = string.Join(' ', OrderIds), ["message"] = Message,
     };
 
     internal static SignalOrderRow From(Dictionary<string, string> r) => new(
@@ -349,7 +383,10 @@ public sealed record SignalOrderRow(DateTimeOffset TimeUtc, string Date, string 
         r.GetValueOrDefault("date") ?? "", r.GetValueOrDefault("trade") ?? "", r.GetValueOrDefault("kind") ?? "", r.GetValueOrDefault("status") ?? "",
         r.GetValueOrDefault("underlying") ?? "", r.GetValueOrDefault("option") ?? "", r.GetValueOrDefault("action") ?? "",
         int.TryParse(r.GetValueOrDefault("lots"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var lots) ? lots : 0,
-        (r.GetValueOrDefault("orderIds") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries), r.GetValueOrDefault("message") ?? "");
+        (r.GetValueOrDefault("orderIds") ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries), r.GetValueOrDefault("message") ?? "")
+    {
+        Price = Num(r.GetValueOrDefault("price")), Sl = Num(r.GetValueOrDefault("sl")), Target = Num(r.GetValueOrDefault("target")), Reason = r.GetValueOrDefault("reason") ?? "",
+    };
 }
 
 public sealed record SignalStrategyHistory(List<Dictionary<string, string>> Days, List<Dictionary<string, string>> Trades, List<Dictionary<string, string>> Events,

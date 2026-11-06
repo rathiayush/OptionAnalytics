@@ -405,6 +405,9 @@ public sealed class LiveTradingPartialExitTests
         var exit = Assert.Single(dhan.Orders.Values);
         Assert.Equal(("SELL", Lot), (exit.Side, exit.Quantity));
         Assert.True(dhan.Requests.IndexOf("DELETE /super/orders/S3/STOP_LOSS_LEG") < dhan.Requests.LastIndexOf("POST /orders"), "legs go before the exit");
+        // The exit's LIMIT is on the result; no leg had closed it.
+        Assert.Equal(exit.Price, result.ExitPrice);
+        Assert.Null(result.ClosedBy);
     }
 
     [Fact]
@@ -550,6 +553,8 @@ public sealed class LiveTradingPartialExitTests
         Assert.Contains("already closed on Dhan by its target", result.Message);
         Assert.DoesNotContain(dhan.Requests, r => r.StartsWith("DELETE"));
         Assert.Empty(dhan.Orders);
+        // What closed it, at the leg's price (the saved strategies' live-orders history keeps it).
+        Assert.Equal(("target", 142m), (result.ClosedBy, result.ExitPrice));
     }
 
     [Fact]

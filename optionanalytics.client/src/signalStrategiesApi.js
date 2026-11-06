@@ -19,8 +19,8 @@ const send = (method, body) => ({ method, headers: { 'Content-Type': 'applicatio
 export const createStrategy = (body) => api(API, send('POST', body))
 export const updateStrategy = (id, body) => api(`${API}/${encodeURIComponent(id)}`, send('PUT', body))
 export const deleteStrategy = (id) => api(`${API}/${encodeURIComponent(id)}`, { method: 'DELETE' })
-/** A strategy's history: { days, trades, events } - the live scan's CSV rows. */
-export const strategyHistory = (id) => api(`${API}/${encodeURIComponent(id)}/history`)
+/** A strategy's history: { days, trades, events, orders } - the live scan's CSV rows (`timer`: a page timer's refresh). */
+export const strategyHistory = (id, timer = false) => api(`${API}/${encodeURIComponent(id)}/history`, timer ? { headers: POLL_HEADERS } : undefined)
 export const historyCsvUrl = (id, kind) => `${API}/${encodeURIComponent(id)}/history/${kind}.csv`
 
 /** The saved strategies ({ today, liveScan, strategies }): listed on opening, then - a page TIMER, with POLL_HEADERS -
