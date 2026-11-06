@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { prepareDay, simulateDay } from '../src/signalBacktest.js'
 import { cleanBacktestSettings, engineSettings } from '../src/signalBacktestJob.js'
-import { completedRun, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
+import { completedRun, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, liveTrade, prepareLiveDay } from '../src/signalLive.js'
 
 const { run } = syntheticDay()          // 2026-10-05, 09:15 - 14:15
 const DATE = '2026-10-05'
@@ -165,6 +165,38 @@ async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true }) {
 
 const STRATEGY = { id: 's1', name: 'VWAP cross', settings: SETTINGS, sent: [], reported: false }
 
+test('each event carries its trade for the server\'s live orders: the traded option, its expiry, the SL / target in points', () => {
+  const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('15:35') })
+  const live = liveDayEvents(day, ENGINE, { name: 'S', complete: true, nowMs: at('15:35') })
+  const t = live.closed[0]
+  const [entry, exit] = live.events.filter((e) => e.trade.key === `${DATE}|${t.strategy}|${t.entryTime}`)
+  assert.equal(entry.kind, 'entry')
+  assert.equal(exit.kind, 'exit')
+  // The entry and the exit name the same trade; the key is the event's own without its "|entry" / "|exit".
+  assert.equal(entry.key, `${entry.trade.key}|entry`)
+  assert.equal(exit.key, `${exit.trade.key}|exit`)
+  assert.deepEqual({ ...exit.trade, exitReason: undefined }, { ...entry.trade, exitReason: undefined })
+  assert.equal(exit.trade.exitReason, t.exitReason)
+  assert.equal(entry.trade.exitReason, undefined)
+  // The option traded and the day's expiry; SL / target = the strategy's % of the entry premium, in points.
+  assert.deepEqual(
+    { underlying: entry.trade.underlying, expiry: entry.trade.expiry, strike: entry.trade.strike, side: entry.trade.side, action: entry.trade.action, entryTime: entry.trade.entryTime, strategy: entry.trade.strategy },
+    { underlying: 'NIFTY', expiry: '2026-10-06', strike: t.strike, side: t.side, action: t.action, entryTime: t.entryTime, strategy: t.strategy },
+  )
+  assert.equal(entry.trade.stopLossPoints, Math.round(t.entry * SETTINGS.slPct) / 100)
+  assert.equal(entry.trade.targetPoints, Math.round(t.entry * SETTINGS.targetPct) / 100)
+  // Points as set; none (0) stays 0 - the server then takes the Trade settings'.
+  const pts = liveTrade(t, day, { ...ENGINE, levelUnit: 'pts', slPct: 12, targetPct: 0 })
+  assert.equal(pts.stopLossPoints, 12)
+  assert.equal(pts.targetPoints, 0)
+  // Mirror trades carry theirs too.
+  assert.ok(live.events.some((e) => e.trade.strategy === 'mirror') || !live.closed.some((x) => x.strategy === 'mirror'))
+  // Traded in SENSEX: SENSEX's option and SENSEX's expiry.
+  const sensex = prepareLiveDay(sensexRun, { underlying: 'SENSEX', nowMs: at('15:35') })
+  const cross = liveDayEvents(day, engineSettings(cleanBacktestSettings({ ...SETTINGS, tradeIn: 'SENSEX' })), { complete: true, nowMs: at('15:35'), tradeDay: sensex })
+  assert.ok(cross.events.length > 0 && cross.events.every((e) => e.trade.underlying === 'SENSEX' && e.trade.expiry === '2026-10-08'))
+})
+
 test('the loop: in the session it posts the day\'s new events - nothing twice - and after the close the report', async () => {
   const noon = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })           // 12:00 IST
   assert.equal(noon.code, 0)
@@ -176,6 +208,8 @@ test('the loop: in the session it posts the day\'s new events - nothing twice - 
   assert.equal(events[0].body.date, DATE)
   const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
   assert.deepEqual(events[0].body.events.map((e) => e.key), liveDayEvents(day, ENGINE).events.map((e) => e.key))
+  // Each posted with its trade - what the server's live orders read.
+  assert.deepEqual(events[0].body.events.map((e) => e.trade), liveDayEvents(day, ENGINE).events.map((e) => e.trade))
   assert.ok(!noon.posted.some((p) => p.path === '/api/signal-strategies/live/day'))           // no report mid-session
   // After the close, with the noon events already sent: only the new ones, and the report.
   const sent = events[0].body.events.map((e) => e.key)

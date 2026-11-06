@@ -9,7 +9,11 @@ import { createStrategy, deleteStrategy, historyCsvUrl, strategyHistory, updateS
 // The Signal backtest's SAVED STRATEGIES on the page: save the rule and its settings by name (on the server, CSV), load one
 // back, update it with the page's settings, remove it - and its daily LIVE scan: "Live" scans it on every trading day on
 // the server (the backtest's own trades, paper), "Alerts" sends each entry / exit to Telegram, "Daily report" the day's
-// trades and P&L after the close; "History" shows what the live scan kept (and its CSV files).
+// trades and P&L after the close; "History" shows what the live scan kept (and its CSV files). "LIVE ORDERS (Dhan)" - an
+// ADMIN's switch, off by default, confirmed (real money): the server places a Dhan super order for each fresh entry of the
+// live scan (the rule's and the mirror's - the traded index's option, the lots on Trade settings) and closes it on the
+// strategy's own exit (SignalLiveOrders on the server); the History's "Live orders" tab lists each order and why one
+// was not placed.
 
 const { Text } = Typography
 const rupees = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}` : '—')
@@ -18,6 +22,9 @@ const num = (v) => (v === '' || v == null ? NaN : Number(v))
 const ACTION_LABEL = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.label]))
 const ruleOf = (s) => { const r = normalizeRule(s.settings?.rule); return ruleText(r.lines, r.action, r.logic) }
 const LIVE_STATE = { running: 'Live scan running', missing: 'Live scan not installed on the server', off: 'Live scan turned off on the server', exited: 'Live scan restarting', failed: 'Live scan failed to start', starting: 'Live scan starting' }
+
+const DANGER = '#cf1322'
+const ORDER_STATUS = { placed: 'green', 'partly placed': 'orange', 'not placed': 'red', skipped: 'default', exited: 'blue', 'exit failed': 'red' }
 
 /** "Save strategy": a name and the live switches for the rule and settings on the page. Mounted on open. */
 export function SaveStrategyModal({ settings, ruleSummary, onClose, onSaved }) {
@@ -84,6 +91,14 @@ const tradeColumns = [
   { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</Text> },
   { title: 'At the signal', dataIndex: 'why', key: 'why', width: 320, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
 ]
+const orderColumns = [
+  { title: 'At', dataIndex: 'timeUtc', key: 'time', width: 110, render: (v) => dayjs(v).format('D MMM HH:mm:ss') },
+  { title: '', dataIndex: 'kind', key: 'kind', width: 60, render: (v) => <Tag color={v === 'entry' ? 'blue' : 'default'} style={{ margin: 0 }}>{v}</Tag> },
+  { title: 'Status', dataIndex: 'status', key: 'status', width: 100, render: (v) => <Tag color={ORDER_STATUS[v] ?? 'default'} style={{ margin: 0 }}>{v}</Tag> },
+  { title: 'Order', key: 'order', width: 190, render: (_, o) => `${o.action} ${o.option}${num(o.lots) > 0 ? ` x${o.lots} lot${o.lots === '1' ? '' : 's'}` : ''}` },
+  { title: 'Dhan orders', dataIndex: 'orderIds', key: 'ids', width: 130, render: (v) => <Text style={{ fontSize: 12 }} copyable={Boolean(v)}>{v || '—'}</Text> },
+  { title: 'Message', dataIndex: 'message', key: 'message', render: (v) => <Text style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{v}</Text> },
+]
 const eventColumns = [
   { title: 'Sent', dataIndex: 'timeUtc', key: 'time', width: 120, render: (v) => dayjs(v).format('D MMM HH:mm') },
   { title: '', dataIndex: 'kind', key: 'kind', width: 70, render: (v) => <Tag color={v === 'entry' ? 'blue' : 'default'} style={{ margin: 0 }}>{v}</Tag> },
@@ -108,7 +123,7 @@ export function StrategyHistoryModal({ strategy, onClose }) {
         {error && <Text type="danger">{error}</Text>}
         <Space wrap size={[12, 6]}>
           <Text>{days.length} day{days.length === 1 ? '' : 's'} scanned live · net <Text strong style={{ color: pnlColor(total) }}>{rupees(total)}</Text></Text>
-          {csv('days', 'Days CSV')}{csv('trades', 'Trades CSV')}{csv('events', 'Alerts CSV')}
+          {csv('days', 'Days CSV')}{csv('trades', 'Trades CSV')}{csv('events', 'Alerts CSV')}{(strategy.liveOrders || history?.orders?.length > 0) && csv('orders', 'Live orders CSV')}
         </Space>
         <Tabs
           size="small"
@@ -116,6 +131,9 @@ export function StrategyHistoryModal({ strategy, onClose }) {
             { key: 'days', label: `Days (${days.length})`, children: <Table size="small" rowKey="date" columns={dayColumns} dataSource={days} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 520 }} loading={!history && !error} /> },
             { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1180 }} /> },
             { key: 'events', label: `Alerts (${history?.events?.length ?? 0})`, children: <Table size="small" rowKey={(e, k) => `${e.key}|${k}`} columns={eventColumns} dataSource={history?.events ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 600 }} /> },
+            ...(strategy.liveOrders || history?.orders?.length > 0
+              ? [{ key: 'orders', label: `Live orders (${history?.orders?.length ?? 0})`, children: <Table size="small" rowKey={(o, k) => `${o.trade}|${o.kind}|${k}`} columns={orderColumns} dataSource={history?.orders ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} /> }]
+              : []),
           ]}
         />
       </Space>
@@ -142,12 +160,32 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   const [busyId, setBusyId] = useState(null)
   const [historyOf, setHistoryOf] = useState(null)
   const me = (auth?.user?.email ?? '').toLowerCase()
+  const isAdmin = auth?.user?.role === 'Admin'
   const act = async (id, fn, done) => {
     setBusyId(id)
     try { await fn(); if (done) message.success(done) } catch (err) { message.error(err.message) } finally { setBusyId(null); refresh() }
   }
   const toggle = (s, key, value) => act(s.id, () => updateStrategy(s.id, { [key]: value }),
     key === 'live' ? (value ? `"${s.name}" is scanned live from the next minute of a trading session.` : `"${s.name}" is no longer scanned live.`) : null)
+  // REAL Dhan orders: an admin's switch only, confirmed - off needs no confirming (an open order is still closed).
+  const setLiveOrders = (s, value) => {
+    if (!value) return act(s.id, () => updateStrategy(s.id, { liveOrders: false }), `"${s.name}" places no new live order - one already open is still closed by its exit.`)
+    const traded = s.settings?.tradeIn && s.settings.tradeIn !== s.underlying ? s.settings.tradeIn : s.underlying
+    const max = s.settings?.maxTradesPerDay ?? 2
+    Modal.confirm({
+      title: `Place REAL Dhan orders for "${s.name}"?`,
+      content: (
+        <Space direction="vertical" size={6} style={{ fontSize: 13 }}>
+          <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: the lots set for {traded} on <b>Trade settings</b>, its stop-loss / target as the legs (Trade settings' where it has none), at the Trade settings' slippage.</span>
+          <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it.</span>
+          <span>At most {max} a day, one at a time; an entry seen over 3 minutes late is not placed. The daily loss kill switch applies.</span>
+        </Space>
+      ),
+      okText: 'Turn on', okButtonProps: { danger: true }, cancelText: 'Keep off',
+      onOk: () => act(s.id, () => updateStrategy(s.id, { liveOrders: true }), `"${s.name}" now places LIVE orders on Dhan from its next entry.`),
+    })
+    return undefined
+  }
   const switches = (s) => (
     <Space direction="vertical" size={2}>
       <Space size={6}><Switch size="small" checked={s.live} loading={busyId === s.id} onChange={(v) => toggle(s, 'live', v)} /><Text style={{ fontSize: 12 }}>Live</Text></Space>
@@ -155,12 +193,25 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
         <Checkbox checked={s.alerts} disabled={!s.live} onChange={(e) => toggle(s, 'alerts', e.target.checked)}><Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Alerts</Text></Checkbox>
         <Checkbox checked={s.dailyReport} disabled={!s.live} onChange={(e) => toggle(s, 'dailyReport', e.target.checked)}><Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Daily report</Text></Checkbox>
       </Space>
+      {isAdmin
+        ? (
+          <Space size={6}>
+            <Switch size="small" checked={Boolean(s.liveOrders)} disabled={!s.live && !s.liveOrders} loading={busyId === s.id} onChange={(v) => setLiveOrders(s, v)}
+              style={s.liveOrders ? { background: DANGER } : undefined} aria-label="Live orders (Dhan)" />
+            <Tooltip title={s.live ? 'Real Dhan orders from this strategy\'s live scan - off by default.' : 'Turn Live on first - the live scan is what places them.'}>
+              <Text style={{ fontSize: 12, whiteSpace: 'nowrap', color: s.liveOrders ? DANGER : undefined, fontWeight: s.liveOrders ? 600 : undefined }}>Live orders (Dhan)</Text>
+            </Tooltip>
+          </Space>
+        )
+        : s.liveOrders && <Tag color="red" style={{ margin: 0, width: 'fit-content' }}>Live orders (Dhan) on</Tag>}
     </Space>
   )
   const actions = (s) => (
     <Space size={4} wrap>
       <Tooltip title="Put this strategy's index, rule and settings on the page."><Button size="small" icon={<UploadOutlined />} onClick={() => onLoad(s)}>Load</Button></Tooltip>
-      <Popconfirm title={`Replace "${s.name}" with the rule and settings on the page now?`} okText="Update" cancelText="No" onConfirm={() => act(s.id, () => updateStrategy(s.id, { settings: pageSettings }), `"${s.name}" updated - the live scan uses it from its next minute.`)}>
+      <Popconfirm title={s.liveOrders
+        ? (isAdmin ? `"${s.name}" places LIVE orders - replace it with the rule and settings on the page now? The new rule trades real money from its next minute.` : `Replace "${s.name}" with the page's rule and settings? Its live orders are turned off (an admin turns them on again).`)
+        : `Replace "${s.name}" with the rule and settings on the page now?`} okText="Update" cancelText="No" onConfirm={() => act(s.id, () => updateStrategy(s.id, { settings: pageSettings }), `"${s.name}" updated - the live scan uses it from its next minute.`)}>
         <Button size="small" icon={<SaveOutlined />}>Update</Button>
       </Popconfirm>
       <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOf(s)}>History</Button>
@@ -171,7 +222,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   )
   const what = (s) => (
     <Space direction="vertical" size={0} style={{ maxWidth: '100%' }}>
-      <Text strong style={{ fontSize: 13 }}>{s.name}</Text>
+      <Space size={6} wrap><Text strong style={{ fontSize: 13 }}>{s.name}</Text>{s.liveOrders && s.live && <Tag color="red" style={{ margin: 0 }}>LIVE orders</Tag>}</Space>
       <Text type="secondary" style={{ fontSize: 11 }}>
         {s.underlying}{s.settings?.tradeIn && s.settings.tradeIn !== s.underlying ? ` → traded in ${s.settings.tradeIn}` : ''} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
       </Text>
