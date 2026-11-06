@@ -1,10 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, Card, Checkbox, Input, Modal, Popconfirm, Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd'
 import { DeleteOutlined, DownloadOutlined, HistoryOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
 import { RULE_ACTIONS, normalizeRule, ruleText } from './signalBacktest.js'
 import { createStrategy, deleteStrategy, historyCsvUrl, strategyHistory, updateStrategy } from './signalStrategiesApi.js'
+import { orderTrades } from './signalStrategyHistory.js'
 
 // The Signal backtest's SAVED STRATEGIES on the page: save the rule and its settings by name (on the server, CSV), load one
 // back, update it with the page's settings, remove it - and its daily LIVE scan: "Live" scans it on every trading day on
@@ -80,24 +81,49 @@ const dayColumns = [
   { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 90, align: 'right', render: (v) => rupees(num(v)) },
   { title: 'Signals', dataIndex: 'signals', key: 'signals', width: 70, align: 'right' },
 ]
+const price = (v) => (Number.isFinite(num(v)) ? num(v).toFixed(2) : '—')
+const OPEN_TAG = <Tag color="processing" style={{ margin: 0 }}>open</Tag>
+// The strategy's trades AS EACH SIGNAL CAME (the server keeps a row at the entry - open - and fills it in at the exit):
+// entry time and premium, its stop-loss and target prices, the exit's time, price and reason, the P&L.
 const tradeColumns = [
-  { title: 'Day', dataIndex: 'date', key: 'date', width: 90, render: (v) => dayjs(v).format('D MMM') },
-  { title: 'Trade', key: 'trade', width: 150, render: (_, t) => `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}` },
-  { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${t.entryTime} · ${t.entry}` },
-  { title: 'Exit', key: 'exit', width: 110, render: (_, t) => `${t.exitTime} · ${t.exit}` },
-  { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 140 },
+  { title: 'Day', dataIndex: 'date', key: 'date', width: 80, render: (v) => dayjs(v).format('D MMM') },
+  { title: 'Trade', key: 'trade', width: 160, render: (_, t) => `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}` },
+  { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${t.entryTime} · ${price(t.entry)}` },
+  { title: 'SL', dataIndex: 'sl', key: 'sl', width: 70, align: 'right', render: price },
+  { title: 'Target', dataIndex: 'target', key: 'target', width: 70, align: 'right', render: price },
+  { title: 'Exit', key: 'exit', width: 110, render: (_, t) => (t.status === 'open' || (!t.exitTime && !t.exit) ? OPEN_TAG : `${t.exitTime} · ${price(t.exit)}`) },
+  { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 130 },
   { title: 'Gross', dataIndex: 'gross', key: 'gross', width: 90, align: 'right', render: (v) => <span style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</span> },
   { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 80, align: 'right', render: (v) => rupees(num(v)) },
   { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</Text> },
   { title: 'At the signal', dataIndex: 'why', key: 'why', width: 320, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
 ]
+// The LIVE Dhan orders, ONE ROW A TRADE (orderTrades): punched when, at what LIMIT, its super order's stop-loss and target,
+// closed when, at what price and why; Dhan's own text on hover.
+const at = (v) => (v ? dayjs(v).format('D MMM HH:mm:ss') : '—')
+const statusTag = (v) => (v ? <Tag color={ORDER_STATUS[v] ?? (v.startsWith('closed by') ? 'blue' : 'default')} style={{ margin: 0 }}>{v}</Tag> : null)
 const orderColumns = [
-  { title: 'At', dataIndex: 'timeUtc', key: 'time', width: 110, render: (v) => dayjs(v).format('D MMM HH:mm:ss') },
-  { title: '', dataIndex: 'kind', key: 'kind', width: 60, render: (v) => <Tag color={v === 'entry' ? 'blue' : 'default'} style={{ margin: 0 }}>{v}</Tag> },
-  { title: 'Status', dataIndex: 'status', key: 'status', width: 100, render: (v) => <Tag color={ORDER_STATUS[v] ?? 'default'} style={{ margin: 0 }}>{v}</Tag> },
-  { title: 'Order', key: 'order', width: 190, render: (_, o) => `${o.action} ${o.option}${num(o.lots) > 0 ? ` x${o.lots} lot${o.lots === '1' ? '' : 's'}` : ''}` },
-  { title: 'Dhan orders', dataIndex: 'orderIds', key: 'ids', width: 130, render: (v) => <Text style={{ fontSize: 12 }} copyable={Boolean(v)}>{v || '—'}</Text> },
-  { title: 'Message', dataIndex: 'message', key: 'message', render: (v) => <Text style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{v}</Text> },
+  {
+    title: 'Trade', key: 'trade', width: 190,
+    render: (_, o) => (
+      <span>{o.action} {o.option}{o.lots > 0 ? ` x${o.lots} lot${o.lots === 1 ? '' : 's'}` : ''}{o.side === 'mirror' ? <Text type="secondary" style={{ fontSize: 11 }}> (mirror)</Text> : null}</span>
+    ),
+  },
+  { title: 'Punched', key: 'placed', width: 150, render: (_, o) => <Space direction="vertical" size={2}><span style={{ whiteSpace: 'nowrap' }}>{at(o.placedAt)}</span>{statusTag(o.status)}</Space> },
+  { title: 'Entry', dataIndex: 'price', key: 'price', width: 75, align: 'right', render: price },
+  { title: 'SL', dataIndex: 'sl', key: 'sl', width: 70, align: 'right', render: price },
+  { title: 'Target', dataIndex: 'target', key: 'target', width: 70, align: 'right', render: price },
+  {
+    title: 'Exit', key: 'exit', width: 160,
+    render: (_, o) => (o.open ? OPEN_TAG : o.exitStatus ? <Space direction="vertical" size={2}><span style={{ whiteSpace: 'nowrap' }}>{at(o.exitAt)}</span>{statusTag(o.exitStatus)}</Space> : '—'),
+  },
+  { title: 'Exit price', dataIndex: 'exitPrice', key: 'exitPrice', width: 80, align: 'right', render: price },
+  { title: 'Why', key: 'why', width: 200, render: (_, o) => <Text style={{ fontSize: 12 }}>{o.exitReason || o.reason || '—'}</Text> },
+  { title: 'Dhan orders', dataIndex: 'orderIds', key: 'ids', width: 110, render: (v) => <Text style={{ fontSize: 12 }} copyable={Boolean(v)}>{v || '—'}</Text> },
+  {
+    title: 'Dhan said', key: 'message', width: 220, ellipsis: { showTitle: false },
+    render: (_, o) => { const m = [o.message, o.exitMessage].filter(Boolean).join(' · '); return m ? <Tooltip title={m}><span style={{ fontSize: 12 }}>{m}</span></Tooltip> : '—' },
+  },
 ]
 const eventColumns = [
   { title: 'Sent', dataIndex: 'timeUtc', key: 'time', width: 120, render: (v) => dayjs(v).format('D MMM HH:mm') },
@@ -106,16 +132,54 @@ const eventColumns = [
 ]
 
 /** What the live scan kept for a strategy: the days, their trades and the entries / exits sent - and the CSV files. */
+// On a phone a block a trade (a table hid the prices off its right edge): what, in / SL / target, out and why.
+const small = { fontSize: 12 }
+function TradeBlocks({ rows }) {
+  if (!rows.length) return <Text type="secondary" style={small}>No trades yet.</Text>
+  return rows.map((t, k) => (
+    <div key={`${t.date}|${t.entryTime}|${t.side}|${k}`} className="oa-bg-run">
+      <Space size={6} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+        <Text strong style={{ fontSize: 13 }}>{dayjs(t.date).format('D MMM')} · {t.action} {t.option}{t.side === 'mirror' ? <Text type="secondary" style={small}> (mirror)</Text> : null}</Text>
+        {t.status === 'open' || (!t.exitTime && !t.exit) ? OPEN_TAG : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>}
+      </Space>
+      <Text style={small}>In {t.entryTime} @ {price(t.entry)} · SL {price(t.sl)} · Target {price(t.target)}</Text>
+      {(t.exitTime || t.exit) && <Text style={small}>Out {t.exitTime} @ {price(t.exit)} · {t.exitReason}{num(t.charges) > 0 ? ` · charges ${rupees(num(t.charges))}` : ''}</Text>}
+    </div>
+  ))
+}
+function OrderBlocks({ rows }) {
+  if (!rows.length) return <Text type="secondary" style={small}>No live orders yet.</Text>
+  return rows.map((o) => (
+    <div key={o.key} className="oa-bg-run">
+      <Space size={6} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+        <Text strong style={{ fontSize: 13 }}>{o.action} {o.option}{o.lots > 0 ? ` x${o.lots}` : ''}{o.side === 'mirror' ? <Text type="secondary" style={small}> (mirror)</Text> : null}</Text>
+        {statusTag(o.status)}
+      </Space>
+      <Text style={small}>Punched {at(o.placedAt)}{o.price != null ? ` @ ${price(o.price)}` : ''}{o.sl != null || o.target != null ? ` · SL ${price(o.sl)} · Target ${price(o.target)}` : ''}</Text>
+      {o.open && <span>{OPEN_TAG}</span>}
+      {o.exitStatus && <Space size={6} wrap><Text style={small}>Out {at(o.exitAt)}{o.exitPrice != null ? ` @ ${price(o.exitPrice)}` : ''}{o.exitReason ? ` · ${o.exitReason}` : ''}</Text>{statusTag(o.exitStatus)}</Space>}
+      {!o.orderIds && o.reason && <Text type="secondary" style={small}>{o.reason}</Text>}
+      {o.orderIds && <Text type="secondary" style={{ fontSize: 11 }} copyable={{ text: o.orderIds }}>Dhan orders {o.orderIds}</Text>}
+    </div>
+  ))
+}
+
 export function StrategyHistoryModal({ strategy, onClose }) {
+  const narrow = useMediaQuery('(max-width: 768px)')
   const [history, setHistory] = useState(null)
   const [error, setError] = useState(null)
+  // Loaded on opening and - while the strategy is scanned live - again each minute (a page TIMER, POLL_HEADERS; the server
+  // reads its CSV files only): the server writes each signal's trade / order the moment it comes, so the tables follow it.
   useEffect(() => {
     let alive = true
-    strategyHistory(strategy.id).then((h) => alive && setHistory(h)).catch((err) => alive && setError(err.message))
-    return () => { alive = false }
-  }, [strategy.id])
+    const load = (timer) => strategyHistory(strategy.id, timer).then((h) => { if (alive) { setHistory(h); setError(null) } }).catch((err) => alive && setError(err.message))
+    load(false)
+    const id = strategy.live ? setInterval(() => { if (document.visibilityState !== 'hidden') load(true) }, 60_000) : null
+    return () => { alive = false; if (id) clearInterval(id) }
+  }, [strategy.id, strategy.live])
   const days = history?.days ?? []
   const total = days.reduce((a, d) => a + (num(d.net) || 0), 0)
+  const liveTrades = useMemo(() => orderTrades(history?.orders), [history])
   const csv = (kind, label) => <Button size="small" icon={<DownloadOutlined />} href={historyCsvUrl(strategy.id, kind)}>{label}</Button>
   return (
     <Modal open title={`History - ${strategy.name}`} onCancel={onClose} footer={null} width={Math.min(1000, typeof window === 'undefined' ? 1000 : window.innerWidth - 16)} destroyOnHidden>
@@ -129,10 +193,10 @@ export function StrategyHistoryModal({ strategy, onClose }) {
           size="small"
           items={[
             { key: 'days', label: `Days (${days.length})`, children: <Table size="small" rowKey="date" columns={dayColumns} dataSource={days} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 520 }} loading={!history && !error} /> },
-            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1180 }} /> },
+            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: narrow ? <TradeBlocks rows={history?.trades ?? []} /> : <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1320 }} /> },
             { key: 'events', label: `Alerts (${history?.events?.length ?? 0})`, children: <Table size="small" rowKey={(e, k) => `${e.key}|${k}`} columns={eventColumns} dataSource={history?.events ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 600 }} /> },
             ...(strategy.liveOrders || history?.orders?.length > 0
-              ? [{ key: 'orders', label: `Live orders (${history?.orders?.length ?? 0})`, children: <Table size="small" rowKey={(o, k) => `${o.trade}|${o.kind}|${k}`} columns={orderColumns} dataSource={history?.orders ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} /> }]
+              ? [{ key: 'orders', label: `Live orders (${liveTrades.length})`, children: narrow ? <OrderBlocks rows={liveTrades} /> : <Table size="small" rowKey="key" columns={orderColumns} dataSource={liveTrades} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1350 }} /> }]
               : []),
           ]}
         />

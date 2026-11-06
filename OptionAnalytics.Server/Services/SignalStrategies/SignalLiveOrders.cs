@@ -137,7 +137,7 @@ public sealed class SignalLiveOrders
             : null;
         if (skip is not null)
         {
-            _store.RecordOrder(strategy.Id, new SignalOrderRow(now, date, t.Key!, "entry", "skipped", underlying, option, action, 0, Array.Empty<string>(), skip));
+            _store.RecordOrder(strategy.Id, new SignalOrderRow(now, date, t.Key!, "entry", "skipped", underlying, option, action, 0, Array.Empty<string>(), "") { Reason = skip });
             await NotifyAsync($"⚪ LIVE order NOT placed · {strategy.Name}: {action} {option} - {skip}");
             return;
         }
@@ -152,7 +152,11 @@ public sealed class SignalLiveOrders
             strategy.Name, action, option, expiry, ts.Lots, stopLoss, target, ts.SlippagePoints, t.Key);
         var result = await _gateway.PlaceAsync(request, cancellationToken);
         var status = result.Success ? "placed" : result.OrderIds.Count > 0 ? "partly placed" : "not placed";
-        _store.RecordOrder(strategy.Id, new SignalOrderRow(UtcNow(), date, t.Key!, "entry", status, underlying, option, action, ts.Lots, result.OrderIds, result.Message));
+        // What was sent: the entry's LIMIT and its super order's stop-loss / target prices (Dhan's fill comes on its own feed).
+        _store.RecordOrder(strategy.Id, new SignalOrderRow(UtcNow(), date, t.Key!, "entry", status, underlying, option, action, ts.Lots, result.OrderIds, result.Message)
+        {
+            Price = result.Prices?.Limit, Sl = result.Prices?.StopLoss, Target = result.Prices?.Target, Reason = result.Success ? "" : result.Message,
+        });
         await NotifyAsync(result.Success
             ? $"🟢 LIVE order placed · {strategy.Name}{Mirror(t)}: {result.Message}"
             : $"⚠️ LIVE order {status.ToUpperInvariant()} · {strategy.Name}{Mirror(t)}: {action} {option} x{ts.Lots} lot{(ts.Lots == 1 ? "" : "s")} - {result.Message}");
@@ -171,7 +175,8 @@ public sealed class SignalLiveOrders
         if (result.Success)
         {
             _gateway.ClearTimeExit(entry.OrderIds);
-            status = "exited";
+            // Closed already by the super order's own leg (Dhan's target / stop-loss, at its price), else out at the LIMIT sent.
+            status = result.ClosedBy is { } leg ? $"closed by Dhan's {leg}" : "exited";
             text = $"🔴 LIVE exit · {strategy.Name}{Mirror(t)}: {entry.Option} ({reason}) - {result.Message}";
         }
         else
@@ -183,7 +188,7 @@ public sealed class SignalLiveOrders
                 + (retry is null ? " - check Dhan." : " - the server tries it again every 10 s; check Dhan.");
         }
         _store.RecordOrder(strategy.Id, new SignalOrderRow(UtcNow(), date, t.Key!, "exit", status, entry.Underlying, entry.Option, entry.Action, entry.Lots, result.OrderIds,
-            $"{reason}: {result.Message}"));
+            result.Message) { Price = result.ExitPrice, Reason = reason });
         await NotifyAsync(text);
     }
 

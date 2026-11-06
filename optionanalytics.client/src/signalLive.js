@@ -81,9 +81,29 @@ export function liveTrade(t, day, engine, { tradeDay = null, exit = false } = {}
 }
 
 /**
+ * A trade's HISTORY ROW (the strategy's Trades CSV - SignalStrategyStore.TradeColumns), as each signal leaves it: OPEN at
+ * its entry (no exit yet), CLOSED at its exit - with its stop-loss and target as PRICES (the strategy's SL / target from
+ * its entry premium: a bought option's stop under it and target over it, a sold one's the other way; '' = none). Sent with
+ * every event, so the history is updated the moment the signal is; the day's report puts the final rows over them.
+ */
+export function tradeRow(t, day, engine, { tradeDay = null, open = false } = {}) {
+  const lt = liveTrade(t, day, engine, { tradeDay })
+  const sell = t.action === 'SELL'
+  const level = (points, up) => (points > 0 ? r2(t.entry + (up ? points : -points)) : '')
+  const base = {
+    date: t.date, side: t.strategy, signal: t.dir > 0 ? 'bullish' : 'bearish', action: t.action, option: optionName(t),
+    entryTime: clock(t.entryTime), entry: r2(t.entry), sl: level(lt.stopLossPoints, sell), target: level(lt.targetPoints, !sell),
+    expiryDay: t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', why: t.why, status: open ? 'open' : 'closed', key: lt.key,
+  }
+  return open
+    ? { ...base, exitTime: '', exit: '', exitReason: '', points: '', gross: '', charges: '', net: '' }
+    : { ...base, exitTime: clock(t.exitTime), exit: r2(t.exit), exitReason: t.exitReason, points: r2(t.points), gross: r2(t.gross), charges: r2(t.charges), net: r2(t.net) }
+}
+
+/**
  * What a strategy's day has come to so far: `trades` (the backtest's - `simulateDay`), `events` - each trade's ENTRY and,
  * once it has one, its EXIT, keyed `date|rule-or-mirror|entry time|entry-or-exit` so each is sent once, each with its
- * `trade` (liveTrade - what a live order needs) - the trades
+ * `trade` (liveTrade - what a live order needs) and its history `row` (tradeRow - open / closed) - the trades
  * `closed` and still `open`, and the closed ones' `summary`. `complete`: the session is over - a trade the data ran out on
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
@@ -94,14 +114,22 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
   for (const t of trades) {
     const key = `${day.date}|${t.strategy}|${t.entryTime}`
     const late = nowMs != null && nowMs - (t.entryTime + MIN_MS) > 3 * MIN_MS
-    events.push({ key: `${key}|entry`, kind: 'entry', at: t.entryTime, text: entryText(name, day.underlying, t, { late }), trade: liveTrade(t, day, engine, { tradeDay }) })
-    if (!isOpen(t)) events.push({ key: `${key}|exit`, kind: 'exit', at: t.exitTime, text: exitText(name, day.underlying, t), trade: liveTrade(t, day, engine, { tradeDay, exit: true }) })
+    events.push({
+      key: `${key}|entry`, kind: 'entry', at: t.entryTime, text: entryText(name, day.underlying, t, { late }),
+      trade: liveTrade(t, day, engine, { tradeDay }), row: tradeRow(t, day, engine, { tradeDay, open: true }),
+    })
+    if (!isOpen(t)) {
+      events.push({
+        key: `${key}|exit`, kind: 'exit', at: t.exitTime, text: exitText(name, day.underlying, t),
+        trade: liveTrade(t, day, engine, { tradeDay, exit: true }), row: tradeRow(t, day, engine, { tradeDay }),
+      })
+    }
   }
   events.sort((a, b) => a.at - b.at || (a.kind === b.kind ? 0 : a.kind === 'entry' ? -1 : 1))
   const closed = trades.filter((t) => !isOpen(t))
   return {
     trades, closed, open: trades.filter(isOpen), events, signals: signals.length, dayLimit: dayLimit ?? null, expirySkipped: Boolean(expirySkipped),
-    tradeIn: engine.tradeIn || '',
+    tradeIn: engine.tradeIn || '', closedRows: closed.map((t) => tradeRow(t, day, engine, { tradeDay })),
     summary: summarize(closed),
   }
 }
@@ -116,11 +144,7 @@ export function dayRecord(day, result) {
       net: r2(s.net), gross: r2(s.gross), charges: r2(s.charges), points: r2(s.points), signals: result.signals,
       limit: result.dayLimit ?? '',
     },
-    trades: result.closed.map((t) => ({
-      date: t.date, side: t.strategy, signal: t.dir > 0 ? 'bullish' : 'bearish', action: t.action, option: optionName(t),
-      entryTime: clock(t.entryTime), entry: r2(t.entry), exitTime: clock(t.exitTime), exit: r2(t.exit), exitReason: t.exitReason,
-      points: r2(t.points), gross: r2(t.gross), charges: r2(t.charges), net: r2(t.net), expiryDay: t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', why: t.why,
-    })),
+    trades: result.closedRows,
   }
 }
 

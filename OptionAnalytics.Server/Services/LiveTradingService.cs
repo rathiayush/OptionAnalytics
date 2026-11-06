@@ -1345,6 +1345,8 @@ public sealed class LiveTradingService : BackgroundService
             long toExit = 0;
             var cancelledEntries = new HashSet<string>();
             var securityId = mine[0].SecurityId;
+            decimal? exitPrice = null;
+            string? closedByLeg = null;
 
             async Task CancelLeg(string orderId, string leg)
             {
@@ -1361,7 +1363,13 @@ public sealed class LiveTradingService : BackgroundService
                 {
                     var closedBy = order.LegDetails.FirstOrDefault(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG"
                         && string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase));
-                    if (closedBy is not null) { messages.Add($"{order.OrderId}: already closed on Dhan by its {(closedBy.LegName == "TARGET_LEG" ? "target" : "stop-loss")}"); continue; }
+                    if (closedBy is not null)
+                    {
+                        closedByLeg ??= closedBy.LegName == "TARGET_LEG" ? "target" : "stop-loss";
+                        exitPrice ??= closedBy.Price;
+                        messages.Add($"{order.OrderId}: already closed on Dhan by its {(closedBy.LegName == "TARGET_LEG" ? "target" : "stop-loss")}");
+                        continue;
+                    }
                     var workingLegs = order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)).ToList();
                     if (onlyWithWorkingLegs && workingLegs.Count == 0) { messages.Add($"{order.OrderId}: no working stop-loss / target - already closed, nothing to do"); continue; }
                     foreach (var leg in workingLegs)
@@ -1405,14 +1413,20 @@ public sealed class LiveTradingService : BackgroundService
                         var (ids, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
                         orderIdsOut.AddRange(ids);
                         if (error is not null) failures.Add(error);
-                        else messages.Add($"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} to close this trade");
+                        else
+                        {
+                            exitPrice = price;
+                            closedByLeg = null;
+                            messages.Add($"{(position.ClosesBySelling ? "SELL" : "BUY")} {position.TradingSymbol} x{quantity} at LIMIT {price:0.##} to close this trade");
+                        }
                     }
                 }
             }
             _logger.LogWarning("Live trade exit for {Orders}: {Messages} {Failures}", string.Join(",", orderIds), string.Join(" · ", messages), string.Join(" · ", failures));
             RequestRefresh();
             var text = string.Join(" · ", failures.Concat(messages));
-            return failures.Count == 0 ? new ManualOrderResult(true, text, orderIdsOut, null) : ManualOrderResult.Fail(text, orderIdsOut);
+            return (failures.Count == 0 ? new ManualOrderResult(true, text, orderIdsOut, null) : ManualOrderResult.Fail(text, orderIdsOut))
+                with { ExitPrice = exitPrice, ClosedBy = closedByLeg };
         }
         finally
         {
@@ -1845,6 +1859,11 @@ public sealed record ManualOrderResult(bool Success, string Message, IReadOnlyLi
     /// <summary>The contract's lot size, for an order placed (or partly placed) - what the caller's P&amp;L
     /// and loss limits must use, not a hard-coded table that NSE's lot-size revisions make stale.</summary>
     public int? LotSize { get; init; }
+
+    /// <summary>ExitTradeAsync: the exit order's LIMIT price - or, when Dhan's own leg had already closed the trade, that
+    /// leg's price (ClosedBy "target" / "stop-loss"). Null when nothing was exited.</summary>
+    public decimal? ExitPrice { get; init; }
+    public string? ClosedBy { get; init; }
 
     public static ManualOrderResult Fail(string message, IReadOnlyList<string>? orderIds = null, ManualOrderPrices? prices = null) =>
         new(false, message, orderIds ?? Array.Empty<string>(), prices);

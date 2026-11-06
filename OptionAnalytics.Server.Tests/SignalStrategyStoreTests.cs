@@ -126,6 +126,43 @@ public sealed class SignalStrategyStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Each_signal_updates_the_trades_history_at_once_open_then_closed_and_the_report_puts_the_final_rows()
+    {
+        var store = Store();
+        var s = store.Create("me@x.com", Request("S"), Now).Strategy!;
+        JsonObject Row(string key, bool open) => new()
+        {
+            ["key"] = key, ["status"] = open ? "open" : "closed", ["side"] = "rule", ["signal"] = "bullish", ["action"] = "BUY", ["option"] = "NIFTY 25000 CE",
+            ["entryTime"] = "10:01", ["entry"] = 100, ["sl"] = 70, ["target"] = 150, ["exitTime"] = open ? "" : "10:31", ["exit"] = open ? "" : 131.5,
+            ["exitReason"] = open ? "" : "Trailing stop", ["net"] = open ? "" : 2300, ["why"] = "Buy CE: a",
+        };
+        var k1 = "2026-10-26|rule|1";
+        // The entry: its row at once, open, with its stop-loss and target.
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k1}|entry", "entry", "in", null, Row(k1, open: true)) }, Now);
+        var t = Assert.Single(store.History(s.Id).Trades);
+        Assert.Equal(("open", "100", "70", "150", ""), (t["status"], t["entry"], t["sl"], t["target"], t["exit"]));
+        // The same entry again changes nothing; its exit fills the row in.
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k1}|entry", "entry", "in", null, Row(k1, open: true)) }, Now);
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k1}|exit", "exit", "out", null, Row(k1, open: false)) }, Now);
+        t = Assert.Single(store.History(s.Id).Trades);
+        Assert.Equal(("closed", "10:31", "131.5", "Trailing stop", "2300"), (t["status"], t["exitTime"], t["exit"], t["exitReason"], t["net"]));
+        // A second trade, entry and exit in one post (after a restart): one row, closed.
+        var k2 = "2026-10-26|mirror|2";
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent>
+        {
+            new($"{k2}|entry", "entry", "in", null, Row(k2, open: true)), new($"{k2}|exit", "exit", "out", null, Row(k2, open: false)),
+        }, Now);
+        Assert.Equal(new[] { "closed", "closed" }, store.History(s.Id).Trades.Select(x => x["status"]));
+        Assert.StartsWith("date,side,signal,action,option,entryTime,entry,sl,target,exitTime,exit,exitReason", File.ReadAllText(store.HistoryPath(s.Id, "trades")));
+        // An event without a row (an older runner) keeps no trade row and breaks nothing.
+        await store.RecordEventsAsync(s.Id, "2026-10-27", new List<SignalLiveEvent> { new("k|entry", "entry", "in") }, Now);
+        Assert.Equal(2, store.History(s.Id).Trades.Count);
+        // The day's report puts its final rows over the day's.
+        await store.RecordDayAsync(s.Id, "2026-10-26", new JsonObject { ["trades"] = 1 }, new JsonArray { Row(k1, open: false) }, "📊", Now);
+        Assert.Equal(k1, Assert.Single(store.History(s.Id).Trades)["key"]);
+    }
+
+    [Fact]
     public async Task The_days_report_is_written_once_and_replaced_when_posted_again()
     {
         var telegrams = new List<string>();
