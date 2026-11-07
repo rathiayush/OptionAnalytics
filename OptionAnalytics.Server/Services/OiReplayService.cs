@@ -496,15 +496,17 @@ public sealed class OiReplayService
     /// ATM-3". So only those are asked (a request for more would only fail, again and again).</summary>
     internal const int OtherExpiryBandSteps = 3;
 
-    /// <summary>TODAY's option band of an expiry OI Replay's live "Σ 3 expiries" adds to the nearest (LIVE ONLY - a past day
-    /// is refused, asking Dhan nothing): the NEXT expiry (`expiryFlag` WEEK / MONTH with `expiryCode` 2 - the live feed's
-    /// N2) or the MONTHLY (MONTH, code 1 - the live feed's MONTH chain). CE and PE points as the run's - the page adds their
-    /// OI to the nearest expiry's (`expirySum.js`) and works out each expiry's own GEX from their premiums (`gex.js`). The
-    /// live feed's own 1-minute bars (ATM±10, LiveOptionLegStore) from the first minute it holds - no Dhan call at all
-    /// when that is the open - and Dhan's backfill (once a day - TodayFetchShare; the monthly's shared with a MONTH run's)
-    /// only for the minutes before it: ATM±10 for the monthly (the nearest of its series), ATM±3 for the next expiry (all
-    /// Dhan's rolling options give for an expiry that is not the nearest - OtherExpiryBandSteps). Every strike read is
-    /// carried on minute by minute within the run's ATM±10 band (CarryForward).</summary>
+    /// <summary>One day's option band of an expiry OI Replay's "Σ 3 expiries" adds to the current one: the NEXT expiry
+    /// (`expiryFlag` WEEK / MONTH with `expiryCode` 2 - the live feed's N2) or the MONTHLY (MONTH, code 1 - the live feed's
+    /// MONTH chain). CE and PE points as the run's - the page adds their OI to the current expiry's (`expirySum.js`) and
+    /// works out each expiry's own GEX from their premiums (`gex.js`). Dhan's rolling options, counted from the day (code 2 =
+    /// the expiry after the one current then): ATM±10 for the monthly (the nearest of its series - the same series a
+    /// Monthly run asks, kept on disk / in the stored database alike), ATM±3 for the next expiry (all Dhan's rolling options
+    /// give for an expiry that is not the nearest - OtherExpiryBandSteps; never the stored database, which keeps the current
+    /// cycle). A PAST day from Dhan once, then the disk cache (DhanDataCache). TODAY the live feed's own 1-minute bars
+    /// (ATM±10, LiveOptionLegStore) from the first minute it holds - no Dhan call at all when that is the open - and Dhan's
+    /// backfill (once a day - TodayFetchShare) only for the minutes before it. Every strike read is carried on minute by
+    /// minute within the run's ATM±10 band (CarryForward).</summary>
     public async Task<OiReplayExpiryBand> ExpiryBandAsync(
         string underlying, DateOnly date, string expiryFlag, int expiryCode, CancellationToken cancellationToken, bool forceLive = false, bool forceFetch = false)
     {
@@ -520,8 +522,11 @@ public sealed class OiReplayService
         var monthly = expiryCode == 1;
         if (!(expiryCode == 2 || (monthly && expiryFlag == "MONTH")))
             return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "The expiries summed are the next one (expiry code 2) and the monthly (MONTH, code 1).");
-        if (date != IstClock.Today())
-            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "The 3-expiry sum is live only - today's day.");
+        forceLive |= forceFetch;
+        // The next expiry is not in the stored database (it keeps the current cycle): Dhan only.
+        if (!monthly && date != IstClock.Today() && !_allowLiveDataFallback && !forceLive && !AlwaysLiveUnderlyings.Contains(underlying))
+            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode,
+                "The next expiry comes from Dhan only (the stored database keeps the current cycle) - live data is off on this server (OiReplay:AllowLiveDataFallback).");
 
         await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
         var instrument = _instrumentMaster.FindSpot(underlying);
@@ -555,7 +560,7 @@ public sealed class OiReplayService
                 await throttle.WaitAsync(cancellationToken);
                 try
                 {
-                    var bars = await GetSeriesAsync(underlying, expiryFlag, token, side, date, ResolveInstrumentAsync, cancellationToken, forceLive: true, backfilledAt.Add, expiryCode);
+                    var bars = await GetSeriesAsync(underlying, expiryFlag, token, side, date, ResolveInstrumentAsync, cancellationToken, forceLive, backfilledAt.Add, expiryCode);
                     return bars.Where(b => b.Strike is not null)
                         .Select(b => new OiReplayPoint(b.Bar.Time, b.Strike!.Value, b.OpenInterest, b.ImpliedVolatility, b.Bar.Close, b.Bar.Open, b.Bar.High, b.Bar.Low, b.Bar.Volume))
                         .ToList();
@@ -596,6 +601,20 @@ public sealed class OiReplayService
                 : $"Dhan sent {answered} of its {asked} series (ATM±{dhanBand}, CE and PE).";
         return new OiReplayExpiryBand(true, null, underlying, date, expiryFlag, expiryCode, liveFlag, ce, pe,
             DhanBandSteps: askDhan ? dhanBand : null, LiveFrom: firstLive, Note: note);
+    }
+
+    /// <summary>The expiries OI Replay's "Σ 3 expiries" reads on `date`: the CURRENT expiry of the series (`expiryFlag` -
+    /// the nearest on or after the day), the NEXT (the one after it) and the MONTHLY (the nearest monthly) - each found by
+    /// `resolve(day, flag)` (OptionExpiryResolver: Dhan's list from today on, the weekday rule checked for holidays before).
+    /// Null where it cannot be worked out. The page leaves the monthly out when it is the current or the next.</summary>
+    internal static async Task<(DateOnly? Current, DateOnly? Next, DateOnly? Monthly)> SummedExpiryDatesAsync(
+        Func<DateOnly, string, Task<DateOnly?>> resolve, DateOnly date, string expiryFlag)
+    {
+        var flag = expiryFlag.ToUpperInvariant();
+        var current = await resolve(date, flag);
+        var next = current is { } c ? await resolve(c.AddDays(1), flag) : null;
+        var monthly = flag == "MONTH" ? current : await resolve(date, "MONTH");
+        return (current, next, monthly);
     }
 
     /// <summary>`points` with a point at every spot minute for every strike within `bandSteps` strikes of that minute's

@@ -108,4 +108,7 @@ test('the controls\' line says what is summed, what is not, and the monthly coun
   const [onlyNext] = summedExpiries(['2026-11-17', '2026-11-24'], '2026-11-24', 'WEEK')
   assert.equal(expirySumText('2026-11-17', [{ ...onlyNext, state: 'error', error: 'Dhan said no' }], { month: '2026-11-24' }),
     'OI = 17 Nov (current) (next not loaded (Dhan said no)) - the monthly (24 Nov) is already the next expiry - counted once')
+  // A past day: the next expiry's ATM±3 is all there is (no live feed).
+  assert.equal(expirySumText('2026-10-06', [{ ...next, expiry: '2026-10-13', state: 'ready', dhanBandSteps: 3 }, { ...month, expiry: '2026-10-27', state: 'ready', dhanBandSteps: 10 }], { month: '2026-10-27', past: true }),
+    'OI = 06 Oct (current) + 13 Oct (next) + 27 Oct (monthly) - the next expiry ATM±3 only (all Dhan gives for an expiry that is not the nearest)')
 })

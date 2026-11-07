@@ -94,9 +94,9 @@ public sealed class OiReplayController : ControllerBase
         }
     }
 
-    /// <summary>TODAY's CE / PE band of the next expiry (`expiryCode` 2 of the series) or the monthly (MONTH, code 1) - see
-    /// OiReplayService.ExpiryBandAsync: what OI Replay's live "Σ 3 expiries" adds to the nearest expiry (live only - a past
-    /// day is refused). Its date is worked out as the run's is - the nearest expiry of the series, then the next after it
+    /// <summary>One day's CE / PE band of the next expiry (`expiryCode` 2 of the series) or the monthly (MONTH, code 1) - see
+    /// OiReplayService.ExpiryBandAsync: what OI Replay's "Σ 3 expiries" adds to the current expiry, on a replayed day or
+    /// today. Its date is worked out as the run's is - the nearest expiry of the series, then the next after it
     /// (OptionExpiryResolver) - for the page's label only; never a reason for the band to fail.</summary>
     [HttpGet("{underlying}/expiry-band")]
     public async Task<ActionResult> ExpiryBand(
@@ -118,6 +118,17 @@ public sealed class OiReplayController : ControllerBase
             expiry = found.Value.Date;
         }
         return Ok(band with { OptionExpiry = expiry });
+    }
+
+    /// <summary>The current, next and monthly expiry of `date` (OiReplayService.SummedExpiryDatesAsync) - which bands OI
+    /// Replay's "Σ 3 expiries" asks for on a replayed day (the monthly left out when it is the current or the next). No
+    /// Dhan call but the expiry check's (a past rule day's spot candles - kept on disk).</summary>
+    [HttpGet("{underlying}/summed-expiries")]
+    public async Task<ActionResult> SummedExpiries(string underlying, [FromQuery] DateOnly date, [FromQuery] string expiryFlag, CancellationToken cancellationToken)
+    {
+        var (current, next, monthly) = await OiReplayService.SummedExpiryDatesAsync(
+            async (day, flag) => (await ExpiryOrNullAsync(underlying, day, flag, cancellationToken))?.Date, date, expiryFlag);
+        return Ok(new { current, next, monthly });
     }
 
     /// <summary>The previous trading day's volume profile (POC/VAH/VAL/HVN/LVN) relative to
