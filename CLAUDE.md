@@ -915,10 +915,23 @@ When adding or changing a strategy:
   cumulative Δ on their range, the OI / GEX walls and net GEX, the straddle vs its VWAP / decay line, price vs VWAP, spot's
   move, the day's range and the IB, yesterday's POC / VAH / VAL, pivot and CPR, RSI / EMAs, time of day, expiry) at the
   close of every candle of the timeframe in the entry window (`dayRows` - each read off the prepared day / `timeframeView`,
-  so known at the candle's close: a day cut part way gives the same features, `tests/feature-finder.test.mjs`), and
-  `LABELS` - what happened AFTER it: spot 15 / 30 / 60 min later (none past the day's end) and an ATM (the page's
-  moneyness) CE / PE BOUGHT there with the page's SL / target / trail / time stop (`simulateTrade` - the backtest's own
-  trade, return % of the entry). `featureReport`: per feature, Spearman's rank correlation with the label picked on the
+  so known at the candle's close: a day cut part way gives the same features, with and without the previous session -
+  `tests/feature-finder.test.mjs`) - and, asked for ("add MACD, RSI, VWAP - all indicators ... capture all the data so we
+  can feed it to machine learning"), the COMMON INDICATORS on the spot candles of the timeframe (`taIndicators.js` -
+  TradingView's built-in definitions: MACD 12 / 26 / 9 line, histogram and its change in % of price, stochastic 14 / 3 /
+  3, CCI 20, Bollinger %B and width (20, 2, population deviation), ATR 14 %, ADX 14 and +DI − −DI, SuperTrend (10, 3)
+  direction and distance, RSI 7, EMA 50 / 200, the candle's body and range), warmed up on the previous session's candles
+  of the same timeframe (`previousDayBars` keeps its highs / lows too) as the rule builder's RSI / EMAs are; price vs VWAP
+  in deviations (`vwapSd` - the futures' volume-weighted), the candle's volume vs the day's average (`price.v`), the
+  basis, the gap, where spot is in yesterday's range, the ATM CE / PE premium's own VWAP and RSI (`premiumCandles` /
+  `premiumRsi`), the straddle's 15-min change, days to expiry and the weekday - 66 in all. Each indicator is held to
+  values worked out by hand (a straight line, a steady trend, a zig-zag) AND to an independent Pine-style reference
+  (`tests/ta-reference.mjs`) on random markets with gaps and flat stretches (`tests/ta-indicators.test.mjs`); the
+  features to the reference on the warmed-up candles. Not in the rule builder (yet) - a reading that holds there is a
+  rule's candidate for when it is. `LABELS` - what happened AFTER it: spot 15 / 30 / 60 min later, its highest / lowest
+  over the next 30 min (none past the day's end), and an ATM (the page's moneyness) CE / PE BOUGHT or SOLD there with the
+  page's SL / target / trail / time stop (`simulateTrade` - the backtest's own trade, return % of the entry, a sale's
+  positive when the premium fell; `optionFor(dir, mode)`). `featureReport`: per feature, Spearman's rank correlation with the label picked on the
   EARLIER days (the first 2/3 of the dates) and on the LATER ones; HOLDS = the same sign and |later| >= `HOLD_IC` (0.05);
   how many later days agree on their own; the later days' top / bottom fifth (win % of the trades, or the average move);
   what holds first. Under 6 days there is no split (a warning); under 10 later days it says "a hint, not proof". "Dataset
@@ -938,6 +951,17 @@ When adding or changing a strategy:
   (`StoredFeatureFinderCard` - the label switch works out nothing again), CSV downloads the table; Telegram "🔬 Feature
   finder done" with the held counts and the best reading for CE / PE buys. `tests/signal-backtest-job.test.mjs` (the job's
   CSV and reports = the page's for the same days), `SignalBacktestJobServiceTests.cs`.
+- RESPONSES ARE COMPRESSED (asked about - "all the data is cached, why is it taking time?"; `HttpCompression`, Brotli /
+  gzip at the fastest level, before the static files): a Signal backtest day (`/api/oi-replay/{u}/run`) is ~2.6 MB of JSON
+  read from the disk cache in ~0.1 s, and was sent whole - a phone downloaded 150 MB+ for a 60-day run. Not compressed:
+  `/hubs` (SignalR) and `/api/auth` (BREACH); zip / gzip / images are not in its types. A new STREAMING answer (server-sent
+  events, a long poll that flushes) must stay out of it - `HttpCompressionTests.cs`. The run endpoint says where the day
+  came from: `X-Dhan-Calls` (0 = the server's disk / memory) and `X-From-Disk` (every load is counted - a `LoadProgress`
+  of its own when the page sent no progress id); the Signal backtest's run and a background run count their days from the
+  server's disk / asked of Dhan / already in the tab (`daySource`, `loadSourceText`) - "60 days loaded in 45 s: 57 from the
+  server's disk, 3 asked of Dhan (the first time - kept on the server now)" - and the runs list says how many days a
+  running job asked of Dhan. The OI break reads are worked out once a completed bucket (`completedBuckets` - the same
+  results, `prepareDay` a little faster on 3 / 5 / 15-minute buckets).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

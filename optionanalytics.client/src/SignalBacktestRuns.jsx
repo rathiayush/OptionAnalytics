@@ -133,18 +133,22 @@ function FeaturesResult({ s }) {
       {(s.rows ?? 0).toLocaleString('en-IN')} candles · {s.okDays ?? 0} days{notRun}
       <br />
       {s.split
-        ? <>Held: <Text strong style={{ fontSize: 12 }}>CE buy {s.held?.ceBuy ?? 0}</Text> · <Text strong style={{ fontSize: 12 }}>PE buy {s.held?.peBuy ?? 0}</Text> · spot 30m {s.held?.fwd30 ?? 0}</>
+        ? <>Held: <Text strong style={{ fontSize: 12 }}>CE buy {s.held?.ceBuy ?? 0}</Text> · <Text strong style={{ fontSize: 12 }}>PE buy {s.held?.peBuy ?? 0}</Text>
+          {s.held?.ceSell != null && <> · CE sell {s.held.ceSell} · PE sell {s.held?.peSell ?? 0}</>} · spot 30m {s.held?.fwd30 ?? 0}</>
         : <Text type="secondary" style={{ fontSize: 12 }}>too few days for the earlier / later check</Text>}
     </Text>
   )
 }
+
+// A running run's days asked of Dhan so far (a day nothing had loaded before - the server keeps it after): why one goes slower.
+const fromDhan = (p) => (p?.sources?.dhan > 0 ? ` · ${p.sources.dhan} day${p.sources.dhan === 1 ? '' : 's'} asked of Dhan (first time)` : '')
 
 function ResultCell({ job }) {
   const s = job.summary
   const p = job.progress
   if (job.kind === 'features') {
     if (job.state === 'done' && s) return <FeaturesResult s={s} />
-    if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {(p.rows ?? 0).toLocaleString('en-IN')} candles · {p.okDays ?? 0} days</Text>
+    if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {(p.rows ?? 0).toLocaleString('en-IN')} candles · {p.okDays ?? 0} days{fromDhan(p)}</Text>
     if (job.state === 'failed') return <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>
     return null
   }
@@ -156,7 +160,7 @@ function ResultCell({ job }) {
       </Text>
     )
   }
-  if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {p.trades ?? 0} trades · {rupees(p.net)}</Text>
+  if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {p.trades ?? 0} trades · {rupees(p.net)}{fromDhan(p)}</Text>
   if (job.state === 'failed') return <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>
   return null
 }

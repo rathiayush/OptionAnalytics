@@ -18,7 +18,7 @@
 
 import { writeFileSync, renameSync } from 'node:fs'
 import { MAX_BACKGROUND_DAYS, backtestDays } from '../src/signalBacktest.js'
-import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
+import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
 import { dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -39,6 +39,18 @@ const write = (body) => {
 }
 const istToday = process.env.BACKTEST_TODAY || new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date())
 let settings = null
+// Where the days came from - the server's disk, or Dhan (a day nothing had loaded before): each date's latest load.
+const sources = new Map()
+const sourceCounts = () => {
+  const out = { disk: 0, dhan: 0 }
+  for (const s of sources.values()) if (s) out[s]++
+  return out
+}
+const load = async (underlying, date, options) => {
+  const day = await loadBacktestDay(underlying, date, options)
+  if (underlying === settings.underlying) sources.set(date, daySource(day))
+  return day
+}
 
 async function main() {
   settings = cleanBacktestSettings(JSON.parse(process.env.BACKTEST_JOB ?? '{}'))
@@ -52,7 +64,7 @@ async function main() {
     let trades = 0
     let net = 0
     for (const o of outcomes.values()) { trades += o.trades.length; net += o.trades.reduce((a, t) => a + t.net, 0) }
-    return { trades, net: Math.round(net) }
+    return { trades, net: Math.round(net), sources: sourceCounts() }
   }
   // A day is replayed as soon as it is loaded and only its outcome kept - 60 prepared days are not held at once.
   // Trading in another index: that index's day of the same date too (the trades are taken in it); a day either failed on
@@ -60,8 +72,8 @@ async function main() {
   const runDay = async (date) => {
     // "Σ 3 expiries": the day's next and monthly expiries summed into its OI reads (loadBacktestDay) - the traded index's
     // day is read for its premiums only.
-    const day = await loadBacktestDay(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
-    const tradeDay = settings.tradeIn && day.ok ? await loadBacktestDay(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
+    const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
+    const tradeDay = settings.tradeIn && day.ok ? await load(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
     outcomes.set(date, dayOutcome(date, day, engine, tradeDay))
     return { retry: Boolean(day.retry || tradeDay?.retry) }
   }
@@ -77,7 +89,7 @@ async function main() {
     await runDay(again[k])
   }
   const report = backtestReport([...outcomes.values()], settings)
-  write({ ok: true, settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), report })
+  write({ ok: true, settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(), report })
   progress({ stage: 'done', done: dates.length, total: dates.length, ...totals() })
 }
 
@@ -90,7 +102,7 @@ async function features(dates) {
   const failed = new Map()
   const count = () => { let n = 0; for (const r of rows.values()) n += r.length; return n }
   const runDay = async (date) => {
-    const day = await loadBacktestDay(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
+    const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
     if (!day.ok) { failed.set(date, day.reason); return { retry: Boolean(day.retry) } }
     failed.delete(date)
     rows.set(date, dayRows(day, engine))
@@ -98,19 +110,19 @@ async function features(dates) {
   }
   const again = []
   for (let k = 0; k < dates.length; k++) {
-    progress({ stage: 'day', day: dates[k], done: k, total: dates.length, rows: count(), okDays: rows.size })
+    progress({ stage: 'day', day: dates[k], done: k, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
     if ((await runDay(dates[k])).retry) again.push(dates[k])
   }
   for (const date of again) {
-    progress({ stage: 'retry', day: date, done: dates.length, total: dates.length, rows: count(), okDays: rows.size })
+    progress({ stage: 'retry', day: date, done: dates.length, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
     await runDay(date)
   }
-  progress({ stage: 'done', done: dates.length, total: dates.length, rows: count(), okDays: rows.size })
+  progress({ stage: 'done', done: dates.length, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
   const table = [...rows.keys()].sort().flatMap((d) => rows.get(d))
   writeFileSync(`${CSV}.tmp`, rowsCsv(table))
   renameSync(`${CSV}.tmp`, CSV)
   write({
-    ok: true, kind: 'features', settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(),
+    ok: true, kind: 'features', settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(),
     features: {
       rows: table.length, okDays: rows.size, timeframe: settings.timeframe,
       failed: dates.filter((d) => failed.has(d)).map((date) => ({ date, reason: failed.get(date) })),

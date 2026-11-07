@@ -54,6 +54,11 @@ public sealed class OiReplayController : ControllerBase
     /// <summary>One full day's worth of spot candles (already aggregated to timeframeMinutes) plus
     /// the same day's CE/PE OI/IV history across the fetched strike band, in one response - the
     /// frontend plays it back candle by candle itself, with no further request per tick.</summary>
+    /// <summary>The answer header of a day's run: how many calls it sent to Dhan (0 = from the server's disk / memory).</summary>
+    public const string DhanCallsHeader = "X-Dhan-Calls";
+    /// <summary>The answer header of a day's run: how many series it read from the disk cache.</summary>
+    public const string FromDiskHeader = "X-From-Disk";
+
     [HttpGet("{underlying}/run")]
     public async Task<ActionResult> Run(
         string underlying,
@@ -76,7 +81,10 @@ public sealed class OiReplayController : ControllerBase
         [FromQuery] string? progressId = null)
     {
         var progress = !string.IsNullOrWhiteSpace(progressId) && progressId.Length <= 64 ? _progress?.Start(progressId) : null;
-        using var recording = LoadProgress.Use(progress);
+        // Every load is counted (a page's own progress panel, else a load of its own nobody reads) so the answer can say
+        // where the day came from - the Signal backtest shows how many of its days Dhan was asked for.
+        var counted = progress ?? new LoadProgress("run");
+        using var recording = LoadProgress.Use(counted);
         if (refresh) _service.RefreshToday(underlying);
         try
         {
@@ -85,6 +93,10 @@ public sealed class OiReplayController : ControllerBase
             var result = await _service.RunAsync(underlying.ToUpperInvariant(), date, timeframeMinutes, expiryFlag.ToUpperInvariant(), cancellationToken, forceLive, forceFetch);
             if (result.Success && await expiry is { } found) result = result with { OptionExpiry = found.Date, OptionExpirySource = found.Source };
             progress?.Finish(result.Success ? null : result.Error);
+            // X-Dhan-Calls: the calls this day needed of Dhan (0 = it all came from the server's disk / memory);
+            // X-From-Disk: the series read from the disk cache.
+            Response.Headers[DhanCallsHeader] = counted.DhanCalls.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            Response.Headers[FromDiskHeader] = counted.ReadFromDisk.ToString(System.Globalization.CultureInfo.InvariantCulture);
             return Ok(result);
         }
         catch (Exception ex)

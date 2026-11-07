@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Progress, Segmented, Space, Table, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Progress, Select, Space, Table, Tag, Typography } from 'antd'
 import { CloseOutlined, CloudServerOutlined, DownloadOutlined } from '@ant-design/icons'
 import { DOWN_COLOR, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -16,13 +16,18 @@ const { Text } = Typography
 // label, and its dataset CSV from the server.
 
 const TARGETS = [
-  { value: 'fwd15', label: 'Spot 15m' },
-  { value: 'fwd30', label: 'Spot 30m' },
-  { value: 'fwd60', label: 'Spot 60m' },
-  { value: 'ceBuy', label: 'CE buy' },
-  { value: 'peBuy', label: 'PE buy' },
+  { value: 'fwd15', label: 'Spot 15 min later' },
+  { value: 'fwd30', label: 'Spot 30 min later' },
+  { value: 'fwd60', label: 'Spot 60 min later' },
+  { value: 'up30', label: 'Spot high in the next 30 min' },
+  { value: 'down30', label: 'Spot low in the next 30 min' },
+  { value: 'ceBuy', label: 'CE bought' },
+  { value: 'peBuy', label: 'PE bought' },
+  { value: 'ceSell', label: 'CE sold' },
+  { value: 'peSell', label: 'PE sold' },
 ]
-const TRADE = new Set(['ceBuy', 'peBuy'])
+// The trade labels - an option bought / sold there: the fifths read as win rates.
+const TRADE = { ceBuy: 'CE buys', peBuy: 'PE buys', ceSell: 'CE sales', peSell: 'PE sales' }
 // Fewer later days than this: the check is a hint (a correlation on 2 - 3 days says little).
 const MIN_LATER_DAYS = 10
 const num = (v, digits = 2) => (Number.isFinite(v) ? v.toFixed(digits) : '—')
@@ -32,15 +37,16 @@ const icColor = (v) => (!Number.isFinite(v) || Math.abs(v) < HOLD_IC ? undefined
 function reading(f, target) {
   if (!f.holds) return null
   const up = f.icLater > 0
-  if (target === 'ceBuy') return up ? 'higher → CE buys did better' : 'lower → CE buys did better'
-  if (target === 'peBuy') return up ? 'higher → PE buys did better' : 'lower → PE buys did better'
+  if (TRADE[target]) return `${up ? 'higher' : 'lower'} → ${TRADE[target]} did better`
+  if (target === 'up30') return up ? 'higher → spot rose further after' : 'lower → spot rose further after'
+  if (target === 'down30') return up ? 'higher → spot fell less after' : 'higher → spot fell further after'
   return up ? 'higher → spot went up after' : 'higher → spot went down after'
 }
 // The top / bottom fifth on the later days: the trades' win rate, or the move's average.
 function fifthsText(f, target) {
   if (!f.fifths) return '—'
   const { high, low } = f.fifths
-  return TRADE.has(target)
+  return TRADE[target]
     ? `top ${num(high.win, 0)}% win · bottom ${num(low.win, 0)}%`
     : `top ${num(high.avg, 3)}% · bottom ${num(low.avg, 3)}%`
 }
@@ -156,10 +162,7 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
     <Space direction="vertical" size={10} style={{ width: '100%' }}>
       <Space wrap size={[8, 6]} align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>What happened after:</Text>
-        {/* Scrolls sideways on a phone rather than running off the card. */}
-        <div style={{ maxWidth: '100%', overflowX: 'auto' }}>
-          <Segmented size="small" value={target} onChange={setTarget} options={TARGETS} />
-        </div>
+        <Select size="small" value={target} onChange={setTarget} options={TARGETS} style={{ width: 230, maxWidth: '100%' }} aria-label="What happened after" />
         <Button size="small" icon={<DownloadOutlined />} onClick={onDownload} loading={downloading} disabled={!rows}>
           Dataset CSV ({rows.toLocaleString('en-IN')} rows)
         </Button>
@@ -208,15 +211,17 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
             { title: 'Earlier days', dataIndex: 'icEarly', key: 'e', width: 95, align: 'right', render: (v) => <span style={{ color: icColor(v) }}>{num(v)}</span> },
             { title: 'Later days', dataIndex: 'icLater', key: 'l', width: 90, align: 'right', render: (v) => <Text strong style={{ color: icColor(v) }}>{num(v)}</Text> },
             { title: 'Later days agreeing', dataIndex: 'dayAgree', key: 'a', width: 120, align: 'right', render: (v, f) => (Number.isFinite(v) ? `${num(v, 0)}% of ${f.days}` : '—') },
-            { title: TRADE.has(target) ? 'Win %: top fifth · bottom fifth (later)' : 'Avg move: top fifth · bottom fifth (later)', key: 'q', width: 260, render: (_, f) => fifthsText(f, target) },
+            { title: TRADE[target] ? 'Win %: top fifth · bottom fifth (later)' : 'Avg move: top fifth · bottom fifth (later)', key: 'q', width: 260, render: (_, f) => fifthsText(f, target) },
             { title: 'Has a reading', dataIndex: 'coverage', key: 'c', width: 100, align: 'right', render: (v) => `${num(v, 0)}%` },
           ]}
         />
       )}
       <FoldText id="signalBacktest.featureFinder" label="how to read this" className="oa-note">
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Every reading the rule builder has, at the close of every candle from the entry window of the days loaded, against
-          what happened AFTER it - spot&apos;s move, or an option bought there with the page&apos;s SL / target / trail
+          Every reading the rule builder has - and the common indicators besides (MACD, stochastic, CCI, Bollinger, ATR, ADX,
+          SuperTrend, RSI 7, EMA 50 / 200, VWAP bands, volume, the basis, the gap, the ATM premiums&apos; own VWAP / RSI) - at the
+          close of every candle from the entry window of the days loaded, against what happened AFTER it: spot&apos;s move, its
+          high / low over the next 30 minutes, or an ATM CE / PE bought OR sold there with the page&apos;s SL / target / trail
           (the backtest&apos;s own trade). The number is the rank correlation: +1 = the higher the reading, the better what
           came next, every time; −1 the opposite; near 0 nothing. It is worked out on the EARLIER days, then checked on the
           LATER ones the first never saw; &quot;holds&quot; = the same sign and at least {HOLD_IC} on the later days. A

@@ -30,6 +30,10 @@ public sealed class LoadProgress
     public string Id { get; }
     public DateTimeOffset StartedUtc { get; } = DateTimeOffset.UtcNow;
     public bool Finished { get { lock (_lock) return _finished; } }
+    /// <summary>The calls this load sent to Dhan so far (0 = everything came from disk / memory).</summary>
+    public int DhanCalls { get { lock (_lock) return _dhanCalls; } }
+    /// <summary>The series this load read from the disk cache so far.</summary>
+    public int ReadFromDisk { get { lock (_lock) return _fromDisk; } }
 
     public sealed record Entry(double At, string Level, string Text);
 

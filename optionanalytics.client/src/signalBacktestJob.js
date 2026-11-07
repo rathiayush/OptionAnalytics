@@ -20,6 +20,19 @@ const GROUP_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c.group]))
 // The day as OI Replay loads it (1-minute, the index's own series - BANKNIFTY's monthly) and the previous trading day's
 // volume profile (spot's POC / VAH / VAL / HVN / LVN - OI Replay's entry chart lines).
 export const seriesFlag = (u) => (u === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
+/** The run's answer header: the calls the day needed of Dhan (0 = the server's disk / memory). */
+export const DHAN_CALLS_HEADER = 'X-Dhan-Calls'
+/** Where a run's days came from, in words: "57 from the server's disk, 3 asked of Dhan (the first time - kept now)". `counts` =
+ *  { disk, dhan, tab } (days read from the server's disk, asked of Dhan, already prepared in this tab). */
+export function loadSourceText({ disk = 0, dhan = 0, tab = 0 } = {}) {
+  const parts = []
+  if (tab) parts.push(`${tab} already in this tab`)
+  if (disk) parts.push(`${disk} from the server's disk`)
+  if (dhan) parts.push(`${dhan} asked of Dhan (the first time - kept on the server now)`)
+  return parts.join(', ')
+}
+/** A loaded day's source for `loadSourceText`: 'dhan' / 'disk' (the server said), else null. */
+export const daySource = (day) => (day?.dhanCalls == null ? null : day.dhanCalls > 0 ? 'dhan' : 'disk')
 export const runUrl = (u, date) => `/api/oi-replay/${u}/run?date=${date}&timeframeMinutes=1&expiryFlag=${seriesFlag(u)}`
 export const prevProfileUrl = (u, date) => `/api/oi-replay/${u}/previous-day-volume-profile?date=${date}`
 // "Σ 3 expiries" (OI Replay's): the day's current / next / monthly expiry, and the band of each one added to the current.
@@ -70,8 +83,12 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
   try {
     const prevPromise = get(prevProfileUrl(underlying, date), { signal: timeout.signal }).then((x) => (x.ok ? x.json() : null)).catch(() => null)
     const r = await get(runUrl(underlying, date), { signal: timeout.signal })
+    // Where the day came from: the calls it needed of Dhan (the server's X-Dhan-Calls - 0 = its disk / memory; null = not
+    // said, an older server).
+    const said = r.headers?.get?.(DHAN_CALLS_HEADER)
+    const dhanCalls = said == null || said === '' || !Number.isFinite(Number(said)) ? null : Number(said)
     const body = await r.json().catch(() => null)
-    if (!r.ok || !body?.success) return { ok: false, date, reason: body?.error ?? `HTTP ${r.status}`, retry: r.status >= 500 || r.status === 429 }
+    if (!r.ok || !body?.success) return { ok: false, date, reason: body?.error ?? `HTTP ${r.status}`, retry: r.status >= 500 || r.status === 429, dhanCalls }
     let summed = null
     if (sumExpiries) {
       const getJson = async (url) => {
@@ -85,7 +102,8 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     await new Promise((resolve) => setTimeout(resolve, 0))
     const day = prepareDay(body, { underlying, prevProfile: await prevPromise, expiryChains: summed?.chains ?? null })
     if (day.ok && summed) day.sumExpiries = summed.expiries
-    return day.ok ? day : { ok: false, date, reason: day.reason, final: true }
+    if (day.ok) day.dhanCalls = dhanCalls
+    return day.ok ? day : { ok: false, date, reason: day.reason, final: true, dhanCalls }
   } catch (err) {
     if (signal?.aborted) throw err
     return { ok: false, date, reason: timeout.signal.aborted ? 'took too long to load' : String(err?.message ?? err), retry: true }

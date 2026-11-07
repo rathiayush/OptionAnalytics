@@ -48,8 +48,12 @@ public sealed class BacktestCachingTests : IDisposable
         var dhan = new FakeDhan(_ => true);
         var service = Service(dhan);
 
-        var first = await service.RunAsync(underlying, day, 1, expiryFlag, CancellationToken.None);
+        // Counted as the run endpoint counts a day (its X-Dhan-Calls / X-From-Disk answer headers).
+        var firstLoad = new LoadProgress("first");
+        OptionAnalytics.Server.Models.OiReplayResult first;
+        using (LoadProgress.Use(firstLoad)) first = await service.RunAsync(underlying, day, 1, expiryFlag, CancellationToken.None);
         var firstProfile = await service.GetPreviousDayVolumeProfileAsync(underlying, day, CancellationToken.None);
+        Assert.Equal(1 + 42 + 1, firstLoad.DhanCalls);
         Assert.True(first.Success, first.Error);
         Assert.True(firstProfile.Success, firstProfile.Error);
         Assert.Equal(375, first.SpotCandlesOneMinute.Count);
@@ -61,7 +65,11 @@ public sealed class BacktestCachingTests : IDisposable
 
         // The same backtest again: everything from disk.
         dhan.Reset();
-        var again = await service.RunAsync(underlying, day, 1, expiryFlag, CancellationToken.None);
+        var againLoad = new LoadProgress("again");
+        OptionAnalytics.Server.Models.OiReplayResult again;
+        using (LoadProgress.Use(againLoad)) again = await service.RunAsync(underlying, day, 1, expiryFlag, CancellationToken.None);
+        Assert.Equal(0, againLoad.DhanCalls);
+        Assert.True(againLoad.ReadFromDisk >= 1 + 42 + 1, $"{againLoad.ReadFromDisk} read from disk");
         var againProfile = await service.GetPreviousDayVolumeProfileAsync(underlying, day, CancellationToken.None);
         Assert.Equal(0, dhan.ChartCalls);
         Assert.True(again.Success);

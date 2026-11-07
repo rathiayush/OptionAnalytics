@@ -39,7 +39,13 @@ public sealed class SignalBacktestJobService : BackgroundService
     public static readonly string[] Kinds = { "backtest", "features" };
     /// <summary>The Feature finder's labels (featureFinder.js LABELS) - each one's report is in a features run's result.</summary>
     internal static readonly (string Key, string Name)[] FeatureTargets =
-        { ("ceBuy", "CE buy"), ("peBuy", "PE buy"), ("fwd15", "spot 15m"), ("fwd30", "spot 30m"), ("fwd60", "spot 60m") };
+    {
+        ("ceBuy", "CE buy"), ("peBuy", "PE buy"), ("ceSell", "CE sell"), ("peSell", "PE sell"),
+        ("fwd15", "spot 15m"), ("fwd30", "spot 30m"), ("fwd60", "spot 60m"), ("up30", "spot high 30m"), ("down30", "spot low 30m"),
+    };
+    // What the Telegram message names: the four trades and spot 30 min later; the best reading of each trade.
+    private static readonly string[] TelegramHeld = { "ceBuy", "peBuy", "ceSell", "peSell", "fwd30" };
+    private static readonly string[] TelegramBest = { "ceBuy", "peBuy", "ceSell", "peSell" };
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = false };
 
@@ -389,8 +395,8 @@ public sealed class SignalBacktestJobService : BackgroundService
             if (s?["split"] is not JsonValue sv || !sv.TryGetValue<bool>(out var split) || !split)
                 return $"{head}\nToo few days for the earlier / later check - open it on the page, download the dataset CSV.";
             int Held(string key) => s?["held"]?[key] is JsonValue v && v.TryGetValue<int>(out var c) ? c : 0;
-            var lines = string.Join(" · ", FeatureTargets.Where(t => t.Key is "ceBuy" or "peBuy" or "fwd30").Select(t => $"{t.Name} {Held(t.Key)}"));
-            var best = FeatureTargets.Where(t => t.Key is "ceBuy" or "peBuy")
+            var lines = string.Join(" · ", FeatureTargets.Where(t => TelegramHeld.Contains(t.Key)).Select(t => $"{t.Name} {Held(t.Key)}"));
+            var best = FeatureTargets.Where(t => TelegramBest.Contains(t.Key))
                 .Select(t => s?["best"]?[t.Key] is JsonValue b && b.TryGetValue<string>(out var bn) ? $"\nBest for {t.Name}: {WebUtility.HtmlEncode(bn)}" : "");
             return $"{head}\nReadings that held on the later days: {lines}{string.Concat(best)}";
         }

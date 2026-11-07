@@ -10,7 +10,7 @@ import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   mirrorIsSame, mirrorLines, normalizeRule, optionName, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
-import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, indexLevels, loadBacktestDay, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
+import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { downloadFeaturesCsv, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
@@ -493,22 +493,27 @@ export default function SignalBacktestPage() {
     const sum = sumExpiries
     const list = dates
     setViewing(null)
-    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, dates: list, done: 0, current: list[0] ?? null, results: [] })
+    // Where the days came from (asked about - "all the data is cached, why is it taking time?"): already prepared in this
+    // tab, from the server's disk, or asked of Dhan - a day nothing has loaded before (the first time only).
+    const startedMs = Date.now()
+    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, dates: list, done: 0, current: list[0] ?? null, results: [], sources: { disk: 0, dhan: 0, tab: 0 } })
     const results = []
     for (let k = 0; k < list.length; k++) {
       setRun((r) => ({ ...r, current: list[k], done: k }))
+      let source = null
       try {
         // The signal index's day - and, trading in another, that index's day of the same date (where the trades are taken).
         const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum })
         const trade = ti && day?.ok ? await loadDay(ti, list[k], controller.signal) : null
         results.push({ date: list[k], day, tradeDay: trade?.day ?? null, cached: Boolean(cached) })
+        source = cached ? 'tab' : daySource(day)
       } catch {
-        setRun((r) => ({ ...r, status: 'stopped', current: null, results: [...results] }))
+        setRun((r) => ({ ...r, status: 'stopped', current: null, results: [...results], seconds: (Date.now() - startedMs) / 1000 }))
         return
       }
-      setRun((r) => ({ ...r, results: [...results] }))
+      setRun((r) => ({ ...r, results: [...results], sources: source ? { ...r.sources, [source]: r.sources[source] + 1 } : r.sources }))
     }
-    setRun((r) => ({ ...r, status: 'done', done: list.length, current: null, results: [...results] }))
+    setRun((r) => ({ ...r, status: 'done', done: list.length, current: null, results: [...results], seconds: (Date.now() - startedMs) / 1000 }))
   }
   const stop = () => abortRef.current?.abort()
   useEffect(() => () => abortRef.current?.abort(), [])
@@ -953,8 +958,14 @@ export default function SignalBacktestPage() {
                 <Progress percent={run.dates.length ? Math.round((run.done / run.dates.length) * 100) : 0} size="small" status={run.status === 'stopped' ? 'exception' : 'active'} />
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   {run.status === 'stopped' ? `Stopped after ${run.results.length} of ${run.dates.length} days.` : `Day ${run.done + 1} of ${run.dates.length}: ${run.current ? dayjs(run.current).format('ddd D MMM') : ''} - a day the server has not kept yet comes from Dhan once (up to a minute or two).`}
+                  {loadSourceText(run.sources) ? ` So far: ${loadSourceText(run.sources)}.` : ''}
                 </Text>
               </Space>
+            )}
+            {run.status === 'done' && run.sources && loadSourceText(run.sources) && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {run.dates.length} day{run.dates.length === 1 ? '' : 's'} loaded in {Math.round(run.seconds ?? 0)} s: {loadSourceText(run.sources)}.
+              </Text>
             )}
             <FoldText id="signalBacktest.how" label="how it works" className="oa-note">
               <Text type="secondary" style={{ fontSize: 12 }}>

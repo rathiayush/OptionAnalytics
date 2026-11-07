@@ -93,6 +93,13 @@ function packBars(byStrike, times) {
   return out
 }
 
+// How many of the totals' buckets are complete at `nowSec` (completedLevelReads reads exactly those).
+function completedBuckets(totals, bucketSeconds, nowSec) {
+  let count = 0
+  for (const t of totals?.buckets ?? []) if (t + bucketSeconds <= nowSec) count++
+  return count
+}
+
 /** The OI totals' cumulative Δ breaks and 🎯 signals on `bucketSeconds` buckets, minute by minute: at the end of each
  *  minute only the buckets completed by then are read, so an event is listed at the minute it became known. Also the
  *  CE / PE / Net cumulative Δ lines at the last completed bucket, each minute. */
@@ -108,9 +115,14 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
   const ceCum = new Float64Array(n).fill(NaN)
   const peCum = new Float64Array(n).fill(NaN)
   const netCum = new Float64Array(n).fill(NaN)
+  // The reads change only when a bucket completes (every minute on 1-minute buckets, every 5th on 5-minute ones): the
+  // same buckets give the same reads, so they are worked out once a bucket - the watches still step every minute.
+  let reads = null
+  let readsOf = -1
   for (let i = 0; i < n; i++) {
     const nowSec = Math.floor(t[i] / 1000) + IST_OFFSET_SECONDS + 60     // the end of minute i
-    const reads = completedLevelReads(oiTotals, bucketSeconds, nowSec)
+    const completed = completedBuckets(oiTotals, bucketSeconds, nowSec)
+    if (completed !== readsOf) { reads = completedLevelReads(oiTotals, bucketSeconds, nowSec); readsOf = completed }
     if (!reads) continue
     ceCum[i] = oiTotals.rows.ceCum.get(reads.last) ?? NaN
     peCum[i] = oiTotals.rows.peCum.get(reads.last) ?? NaN
@@ -178,12 +190,14 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     }
   }
   const vwap = new Float64Array(n).fill(NaN)
+  // With it, its volume-weighted standard deviation (the VWAP bands' - how far price is from VWAP in deviations).
+  const vwapSd = new Float64Array(n).fill(NaN)
   if (useFutures) {
-    let pv = 0, vol = 0
+    let pv = 0, pv2 = 0, vol = 0
     for (let i = 0; i < n; i++) {
       const b = fut.get(t[i])
-      if (b && b.volume > 0) { pv += ((b.high + b.low + b.close) / 3) * b.volume; vol += b.volume }
-      if (vol > 0) vwap[i] = pv / vol
+      if (b && b.volume > 0) { const tp = (b.high + b.low + b.close) / 3; pv += tp * b.volume; pv2 += tp * tp * b.volume; vol += b.volume }
+      if (vol > 0) { vwap[i] = pv / vol; vwapSd[i] = Math.sqrt(Math.max(0, pv2 / vol - vwap[i] * vwap[i])) }
     }
   }
   // The index's own VWAP (the server's, when the index had volume) - the rule's VWAP when the futures do not cover the
@@ -293,8 +307,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   return {
     ok: true, date, underlying: u, step, n, t, atm, oi, tot, atmOi, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
-    price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
-    priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap), spotVwap: Array.from(spotVwap),
+    price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c), v: priceBars.map((b) => b.v) },
+    priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap), vwapSd: Array.from(vwapSd), spotVwap: Array.from(spotVwap),
     straddleWidth: read?.day?.width ?? null,
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
     prevVp: previousProfile(prevProfile, date),
@@ -330,7 +344,8 @@ export function previousDayBars(p, date) {
   if (!bars.length) return null
   let high = -Infinity, low = Infinity
   for (const b of bars) { high = Math.max(high, b.h); low = Math.min(low, b.l) }
-  return { date: day, high, low, close: bars.at(-1).c, t: bars.map((b) => b.t), c: bars.map((b) => b.c) }
+  // Each minute's high / low too (the indicators that read a candle's range - ATR, stochastic, ADX - warm up on them).
+  return { date: day, high, low, close: bars.at(-1).c, t: bars.map((b) => b.t), c: bars.map((b) => b.c), h: bars.map((b) => b.h), l: bars.map((b) => b.l) }
 }
 
 /** The classic (floor) PIVOT POINTS and the CPR from a session's high / low / close - fixed all day, known before the
@@ -376,20 +391,21 @@ export function timeframeView(d, tf = 1) {
   }
   const pick = (list) => last.map((i) => (list ? list[i] : NaN))
   const candles = (ohlc) => {
-    const o = [], h = [], l = [], c = []
+    const o = [], h = [], l = [], c = [], v = []
     for (let k = 0; k < first.length; k++) {
-      let hi = -Infinity, lo = Infinity
-      for (let i = first[k]; i <= last[k]; i++) { hi = Math.max(hi, ohlc.h[i]); lo = Math.min(lo, ohlc.l[i]) }
-      o.push(ohlc.o[first[k]]); h.push(hi); l.push(lo); c.push(ohlc.c[last[k]])
+      let hi = -Infinity, lo = Infinity, vol = 0
+      for (let i = first[k]; i <= last[k]; i++) { hi = Math.max(hi, ohlc.h[i]); lo = Math.min(lo, ohlc.l[i]); vol += ohlc.v?.[i] ?? 0 }
+      o.push(ohlc.o[first[k]]); h.push(hi); l.push(lo); c.push(ohlc.c[last[k]]); v.push(vol)
     }
-    return { o, h, l, c }
+    // A candle's volume: its minutes' (the price series' - the futures', else the index's own).
+    return ohlc.v ? { o, h, l, c, v } : { o, h, l, c }
   }
   const reads = d.oiTf?.[m] ?? { breaks: d.breaks, hp: d.hp, ceCum: d.ceCum, peCum: d.peCum, netCum: d.netCum }
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last), from: Int32Array.from(first),
     t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), atmOi: pick(d.atmOi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
-    vwap: pick(d.vwap), spotVwap: pick(d.spotVwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
+    vwap: pick(d.vwap), vwapSd: pick(d.vwapSd), spotVwap: pick(d.spotVwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
     ib: d.ib ? { ...d.ib, done: candleOf[d.ib.done] } : null,

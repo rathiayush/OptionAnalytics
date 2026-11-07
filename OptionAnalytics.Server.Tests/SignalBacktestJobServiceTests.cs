@@ -311,7 +311,8 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         writeFileSync(process.env.BACKTEST_OUT, JSON.stringify({ ok: true, kind: process.env.BACKTEST_KIND, settings: job, features: {
           rows: 1234, okDays: 4, failed: [{ date: '2026-10-21', reason: 'holiday' }],
           reports: { fwd15: report([]), fwd30: report(['Spot move over 15 min %']), fwd60: report([]),
-                     ceBuy: report(['Spot above the GEX put wall %', 'RSI 14']), peBuy: report(['<RSI>']) } } }))
+                     ceBuy: report(['Spot above the GEX put wall %', 'RSI 14']), peBuy: report(['<RSI>']),
+                     ceSell: report(['MACD histogram (line − signal 9), % of price']), peSell: report([]), up30: report([]), down30: report(['ADX 14 (trend strength)']) } } }))
         """);
 
     [Fact]
@@ -346,8 +347,11 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         var message = Assert.Single(telegrams);
         Assert.Contains("Feature finder done", message);
         Assert.Contains("1234 candles · 4 days · 1 day(s) not run", message);
-        Assert.Contains("CE buy 2 · PE buy 1 · spot 30m 1", message);
+        Assert.Contains("CE buy 2 · PE buy 1 · CE sell 1 · PE sell 0 · spot 30m 1", message);
         Assert.Contains("Best for CE buy: Spot above the GEX put wall %", message);
+        Assert.Contains("Best for CE sell: MACD histogram", message);
+        Assert.DoesNotContain("Best for PE sell", message);                       // none held
+        Assert.Equal(1, sum["held"]!["down30"]!.GetValue<int>());
         Assert.Contains("Best for PE buy: &lt;RSI&gt;", message);             // HTML-escaped
         // Removing the run removes its dataset.
         Assert.True(s.Delete(job.Id, "me@x.com"));

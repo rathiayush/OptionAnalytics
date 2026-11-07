@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, featureRunHead, featureTradeText, indexLevels, loadBacktestDay, monthRows, reportHead,
+  backtestReport, cleanBacktestSettings, dayOutcome, daySource, defaultRunName, engineSettings, featureRunHead, featureTradeText, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead,
   reportReplacer, reportReviver, runRange, withIndexLevels,
 } from '../src/signalBacktestJob.js'
 import { dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
@@ -165,10 +165,22 @@ test('the settings are held to the page\'s ranges, the rule through its tree', (
   assert.deepEqual(JSON.parse(JSON.stringify({ pf: Infinity, w: -Infinity, x: 1 }, reportReplacer), reportReviver), { pf: Infinity, w: -Infinity, x: 1 })
 })
 
+test('where a day came from: the server\'s X-Dhan-Calls - Dhan, its disk, or not said', async () => {
+  const answer = (headers) => async () => ({ ok: true, status: 200, headers: new Headers(headers), json: async () => runFor('2026-10-19') })
+  const fromDhan = await loadBacktestDay('NIFTY', '2026-10-19', { fetch: answer({ 'X-Dhan-Calls': '45' }) })
+  const fromDisk = await loadBacktestDay('NIFTY', '2026-10-19', { fetch: answer({ 'X-Dhan-Calls': '0' }) })
+  const unknown = await loadBacktestDay('NIFTY', '2026-10-19', { fetch: answer({}) })
+  assert.deepEqual([fromDhan.dhanCalls, fromDisk.dhanCalls, unknown.dhanCalls], [45, 0, null])
+  assert.deepEqual([daySource(fromDhan), daySource(fromDisk), daySource(unknown)], ['dhan', 'disk', null])
+  assert.equal(loadSourceText({ disk: 57, dhan: 3 }), "57 from the server's disk, 3 asked of Dhan (the first time - kept on the server now)")
+  assert.equal(loadSourceText({ tab: 4 }), '4 already in this tab')
+  assert.equal(loadSourceText({}), '')
+})
+
 test('a day that cannot be read is final, one that failed on the way is worth one more try', async () => {
   const answer = (status, body) => async () => ({ ok: status < 400, status, json: async () => body })
   const holiday = await loadBacktestDay('NIFTY', HOLIDAY, { fetch: answer(200, { success: false, error: 'No NIFTY spot candles (a holiday?)' }) })
-  assert.deepEqual(holiday, { ok: false, date: HOLIDAY, reason: 'No NIFTY spot candles (a holiday?)', retry: false })
+  assert.deepEqual(holiday, { ok: false, date: HOLIDAY, reason: 'No NIFTY spot candles (a holiday?)', retry: false, dhanCalls: null })
   assert.equal((await loadBacktestDay('NIFTY', HOLIDAY, { fetch: answer(502, null) })).retry, true)
   assert.equal((await loadBacktestDay('NIFTY', HOLIDAY, { fetch: async () => { throw new Error('socket hang up') } })).retry, true)
   const slow = await loadBacktestDay('NIFTY', HOLIDAY, { timeoutMs: 20, fetch: (_url, { signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(new Error('aborted')))) })
@@ -468,6 +480,8 @@ test('the FEATURE FINDER in the background: the page\'s table of the same days a
     if (url.pathname === '/api/oi-replay/NIFTY/run') {
       if (date === HOLIDAY) return json(200, { success: false, error: 'holiday' })
       if (date === '2026-10-14' && failOnce) { failOnce = false; return json(503, { error: 'busy' }) }
+      // Where each day came from, as the server says it: the first week asked of Dhan, the rest from its disk.
+      res.setHeader('X-Dhan-Calls', date < '2026-10-15' ? '45' : '0')
       return json(200, runFor(date))
     }
     return json(404, { error: 'not mocked' })
@@ -507,14 +521,15 @@ test('the FEATURE FINDER in the background: the page\'s table of the same days a
   assert.deepEqual({ ...result.features, reports: null }, { rows: rows.length, okDays: 9, timeframe: 5, failed: [{ date: HOLIDAY, reason: 'holiday' }], reports: null })
   // Every label's report as the page's card works it out - through JSON, as the page reads it back.
   assert.deepEqual(result.features.reports, JSON.parse(JSON.stringify(featureReports(rows))))
-  assert.deepEqual(Object.keys(result.features.reports), ['fwd15', 'fwd30', 'fwd60', 'ceBuy', 'peBuy'])
+  assert.deepEqual(Object.keys(result.features.reports), ['fwd15', 'fwd30', 'fwd60', 'ceBuy', 'peBuy', 'ceSell', 'peSell', 'up30', 'down30'])
   assert.equal(result.features.reports.ceBuy.split, true)
   assert.equal(result.features.reports.ceBuy.laterDays, 3)
   // The day that failed on the way was asked twice, the holiday once; the progress counts the rows.
   const runs = (date) => asked.filter((a) => a.path.endsWith('/run') && a.date === date).length
   assert.deepEqual([runs('2026-10-14'), runs(HOLIDAY), runs('2026-10-12')], [2, 1, 1])
   assert.deepEqual(progress.filter((p) => p.stage === 'retry').map((p) => p.day), ['2026-10-14'])
-  assert.deepEqual(progress.at(-1), { stage: 'done', done: 10, total: 10, rows: rows.length, okDays: 9 })
+  assert.deepEqual(progress.at(-1), { stage: 'done', done: 10, total: 10, rows: rows.length, okDays: 9, sources: { disk: 6, dhan: 3 } })
+  assert.deepEqual(result.sources, { disk: 6, dhan: 3 })     // the holiday said nothing: counted as neither
 })
 
 test('a Feature finder run\'s name and heading: the index, the days, the candles and the option its CE / PE labels buy', () => {

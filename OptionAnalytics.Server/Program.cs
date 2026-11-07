@@ -90,6 +90,8 @@ builder.Services.AddAuthentication(options =>
 
 // Login attempts per client IP: 10 per 5 minutes - the admin account places real orders, so its
 // password must not be guessable by brute force. A rejected attempt gets 429 (LoginPage shows it).
+// Every answer compressed (HttpCompression - a backtest day's 2.6 MB of JSON was sent whole), but the hub and sign-in.
+builder.Services.AddHttpCompression();
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -447,6 +449,7 @@ if (app.Environment.IsDevelopment())
     app.UseCors(DevCorsPolicy);
 }
 
+app.UseHttpCompression();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 

@@ -12,7 +12,8 @@
 // real one, so only what holds on the later days is worth turning into a rule - and that rule then goes through the
 // backtest, with charges, like any other. Pure: no page, no network.
 
-import { emaSeries, istMinute, optionFor, rsiSeries, simulateTrade, timeframeView, clockMinute } from './signalBacktest.js'
+import { clockMinute, emaSeries, istMinute, optionFor, premiumCandles, premiumRsi, rsiSeries, simulateTrade, timeframeView } from './signalBacktest.js'
+import { atr, bollinger, cci, dmi, macd, stochastic, supertrend } from './taIndicators.js'
 
 const MIN = 60_000
 const fin = (v) => Number.isFinite(v)
@@ -28,6 +29,42 @@ function ofRange(series, i) {
 }
 const lead = (ce, pe) => { const size = Math.abs(ce) + Math.abs(pe); return size > 0 ? ((pe - ce) / size) * 100 : NaN }
 const leadOfLower = (ce, pe) => { const lo = Math.min(ce, pe); return ce > 0 && pe > 0 && lo > 0 ? ((pe - ce) / lo) * 100 : NaN }
+
+// The TECHNICAL INDICATORS of the spot candles of the view (taIndicators.js - TradingView's definitions): run on from the
+// previous session's candles of the same timeframe (`prevDay` - its minutes put into candles from 09:15, as the rule
+// builder's RSI / EMAs warm up) when they are loaded, else from the day's first candle. Each worked out once a view; a
+// value at candle k from candles up to k only. `at(name, k)` - the value at the day's candle k (NaN before it has one).
+const SESSION_FIRST = 9 * 60 + 15
+const TA = new WeakMap()
+function ta(d) {
+  let kept = TA.get(d)
+  if (kept) return kept
+  const tf = d.tf ?? 1
+  const ph = [], pl = [], pc = []
+  const prev = d.prevDay
+  if (prev?.t?.length && prev.h?.length === prev.t.length && prev.l?.length === prev.t.length) {
+    let bucket = null
+    prev.t.forEach((ms, k) => {
+      const b = Math.floor((istMinute(ms) - SESSION_FIRST) / tf)
+      if (b !== bucket) { ph.push(prev.h[k]); pl.push(prev.l[k]); pc.push(prev.c[k]); bucket = b; return }
+      const j = pc.length - 1
+      ph[j] = Math.max(ph[j], prev.h[k]); pl[j] = Math.min(pl[j], prev.l[k]); pc[j] = prev.c[k]
+    })
+  }
+  const warm = pc.length
+  const H = Float64Array.from([...ph, ...d.spot.h]), L = Float64Array.from([...pl, ...d.spot.l]), C = Float64Array.from([...pc, ...d.spot.c])
+  const m = macd(C), st = stochastic(H, L, C), bb = bollinger(C), di = dmi(H, L, C), sup = supertrend(H, L, C)
+  const series = {
+    macd: m.macd, macdHist: m.hist, stochK: st.k, stochD: st.d, cci: cci(H, L, C), bbPctB: bb.pctB, bbWidth: bb.width,
+    atr: atr(H, L, C), plusDi: di.plus, minusDi: di.minus, adx: di.adx, stLine: sup.line, stDir: sup.dir,
+  }
+  kept = { at: (name, k) => series[name][warm + k] ?? NaN }
+  TA.set(d, kept)
+  return kept
+}
+const ofPrice = (v, price) => (fin(v) && price > 0 ? (v / price) * 100 : NaN)
+// The ATM strike's premium (`side` 'ce' / 'pe') at candle k: its own candles, VWAP and RSI (the rule builder's premium TA).
+const premium = (d, side, k) => premiumCandles(d, side, d.atm[k])
 
 /** The features: `read(d, i)` - a number known at candle i's close of the prepared day (or its timeframe view) `d`, NaN
  *  when there is none. Positive = the bullish way where a reading has a side (PE over CE, price over a level). */
@@ -75,6 +112,18 @@ export const FEATURES = [
   { key: 'straddleDecay', group: 'Straddle', name: 'ATM straddle vs its decay-only line %', read: (d, i) => pct(d.straddle?.[i]?.value, d.straddle?.[i]?.decay) },
   // Price
   { key: 'vwap', group: 'Price', name: 'Price vs VWAP %', read: (d, i) => pct(d.price?.c?.[i], d.vwap?.[i]) },
+  { key: 'vwapZ', group: 'Price', name: 'Price vs VWAP in standard deviations (the VWAP bands, futures)', read: (d, i) => {
+    const sd = d.vwapSd?.[i]
+    return sd > 0 && fin(d.vwap?.[i]) ? (d.price.c[i] - d.vwap[i]) / sd : NaN
+  } },
+  { key: 'relVolume', group: 'Price', name: "The candle's volume vs the day's average candle so far (futures)", read: (d, i) => {
+    const v = d.price?.v
+    if (!v) return NaN
+    let sum = 0
+    for (let k = 0; k <= i; k++) sum += v[k]
+    return sum > 0 ? v[i] / (sum / (i + 1)) : NaN
+  } },
+  { key: 'basis', group: 'Price', name: 'Futures over spot % (the basis)', read: (d, i) => (d.priceSource === 'futures' ? pct(d.price.c[i], d.spot.c[i]) : NaN) },
   { key: 'move5', group: 'Price', name: 'Spot move over 5 min %', read: (d, i) => (i > 0 ? pct(d.spot.c[i], d.spot.c[back(d, i, 5)]) : NaN) },
   { key: 'move15', group: 'Price', name: 'Spot move over 15 min %', read: (d, i) => (i > 0 ? pct(d.spot.c[i], d.spot.c[back(d, i, 15)]) : NaN) },
   { key: 'move30', group: 'Price', name: 'Spot move over 30 min %', read: (d, i) => (i > 0 ? pct(d.spot.c[i], d.spot.c[back(d, i, 30)]) : NaN) },
@@ -94,23 +143,63 @@ export const FEATURES = [
   { key: 'prevVal', group: 'Profile & pivots', name: "Spot vs yesterday's VAL %", read: (d, i) => pct(d.spot.c[i], d.prevVp?.val) },
   { key: 'pivot', group: 'Profile & pivots', name: 'Spot vs the pivot (P) %', read: (d, i) => pct(d.spot.c[i], d.pivots?.p) },
   { key: 'cprWidth', group: 'Profile & pivots', name: 'CPR width % (narrow = trend day more likely)', read: (d) => (fin(d.pivots?.widthPct) ? d.pivots.widthPct : NaN) },
+  { key: 'gap', group: 'Profile & pivots', name: "Today's open vs yesterday's close % (the gap)", read: (d) => pct(d.spot.o[0], d.prevDay?.close) },
+  { key: 'prevRange', group: 'Profile & pivots', name: "Where spot is in yesterday's range (0 its low - 100 its high)", read: (d, i) => {
+    const p = d.prevDay
+    return p && p.high > p.low ? ((d.spot.c[i] - p.low) / (p.high - p.low)) * 100 : NaN
+  } },
+  // The ATM options' own premiums (the strike nearest spot at the candle)
+  { key: 'cePremVwap', group: 'Options', name: 'ATM CE premium vs its own VWAP %', read: (d, i) => { const p = premium(d, 'ce', i); return pct(p.c[i], p.vwap[i]) } },
+  { key: 'pePremVwap', group: 'Options', name: 'ATM PE premium vs its own VWAP %', read: (d, i) => { const p = premium(d, 'pe', i); return pct(p.c[i], p.vwap[i]) } },
+  { key: 'cePremRsi', group: 'Options', name: 'ATM CE premium RSI 14', read: (d, i) => premiumRsi(d, 'ce', d.atm[i], 14)[i] },
+  { key: 'pePremRsi', group: 'Options', name: 'ATM PE premium RSI 14', read: (d, i) => premiumRsi(d, 'pe', d.atm[i], 14)[i] },
+  { key: 'straddle15', group: 'Options', name: 'ATM straddle: change over 15 min %', read: (d, i) => pct(d.straddle?.[i]?.value, d.straddle?.[back(d, i, 15)]?.value) },
   // TA on the spot candles of the timeframe
   { key: 'rsi', group: 'TA', name: 'RSI 14', read: (d, i) => rsiSeries(d, 14)[i] },
   { key: 'ema9_21', group: 'TA', name: 'EMA 9 over EMA 21 %', read: (d, i) => pct(emaSeries(d, 9)[i], emaSeries(d, 21)[i]) },
   { key: 'ema20', group: 'TA', name: 'Spot vs EMA 20 %', read: (d, i) => pct(d.spot.c[i], emaSeries(d, 20)[i]) },
+  { key: 'ema50', group: 'TA', name: 'Spot vs EMA 50 %', read: (d, i) => pct(d.spot.c[i], emaSeries(d, 50)[i]) },
+  { key: 'ema200', group: 'TA', name: 'Spot vs EMA 200 % (1 / 3-minute candles - needs 200 of them)', read: (d, i) => pct(d.spot.c[i], emaSeries(d, 200)[i]) },
+  { key: 'rsi7', group: 'TA', name: 'RSI 7', read: (d, i) => rsiSeries(d, 7)[i] },
+  { key: 'macd', group: 'TA', name: 'MACD (12, 26) line, % of price', read: (d, i) => ofPrice(ta(d).at('macd', i), d.spot.c[i]) },
+  { key: 'macdHist', group: 'TA', name: 'MACD histogram (line − signal 9), % of price', read: (d, i) => ofPrice(ta(d).at('macdHist', i), d.spot.c[i]) },
+  { key: 'macdHistChange', group: 'TA', name: 'MACD histogram: change from the candle before, % of price', read: (d, i) => ofPrice(ta(d).at('macdHist', i) - ta(d).at('macdHist', i - 1), d.spot.c[i]) },
+  { key: 'stochK', group: 'TA', name: 'Stochastic %K (14, 3)', read: (d, i) => ta(d).at('stochK', i) },
+  { key: 'stochD', group: 'TA', name: 'Stochastic %D (14, 3, 3)', read: (d, i) => ta(d).at('stochD', i) },
+  { key: 'cci', group: 'TA', name: 'CCI 20', read: (d, i) => ta(d).at('cci', i) },
+  { key: 'bbPctB', group: 'TA', name: 'Bollinger %B (20, 2) - 0 lower band, 1 upper', read: (d, i) => ta(d).at('bbPctB', i) },
+  { key: 'bbWidth', group: 'TA', name: 'Bollinger band width % (a squeeze is low)', read: (d, i) => ta(d).at('bbWidth', i) },
+  { key: 'atrPct', group: 'TA', name: 'ATR 14, % of price', read: (d, i) => ofPrice(ta(d).at('atr', i), d.spot.c[i]) },
+  { key: 'adx', group: 'TA', name: 'ADX 14 (trend strength)', read: (d, i) => ta(d).at('adx', i) },
+  { key: 'diSpread', group: 'TA', name: '+DI − −DI (14)', read: (d, i) => ta(d).at('plusDi', i) - ta(d).at('minusDi', i) },
+  { key: 'superTrend', group: 'TA', name: 'SuperTrend (10, 3): +1 up, −1 down', read: (d, i) => ta(d).at('stDir', i) },
+  { key: 'superTrendDist', group: 'TA', name: 'Spot vs the SuperTrend line %', read: (d, i) => pct(d.spot.c[i], ta(d).at('stLine', i)) },
+  { key: 'candleBody', group: 'TA', name: "The candle's body in its range (−1 all red … +1 all green)", read: (d, i) => {
+    const r = d.spot.h[i] - d.spot.l[i]
+    return r > 0 ? (d.spot.c[i] - d.spot.o[i]) / r : 0
+  } },
+  { key: 'candleRange', group: 'TA', name: "The candle's range, % of price", read: (d, i) => ofPrice(d.spot.h[i] - d.spot.l[i], d.spot.c[i]) },
   // When
   { key: 'minute', group: 'When', name: 'Minutes since 09:15', read: (d, i) => istMinute(d.t[i]) - (9 * 60 + 15) },
   { key: 'expiry', group: 'When', name: "Options' expiry day (1 = yes)", read: (d) => (d.isExpiry ? 1 : 0) },
+  { key: 'daysToExpiry', group: 'When', name: "Days to the options' expiry", read: (d) => (d.expiry ? (Date.parse(`${d.expiry}T00:00:00Z`) - Date.parse(`${d.date}T00:00:00Z`)) / 864e5 : NaN) },
+  { key: 'weekday', group: 'When', name: 'Day of the week (1 Monday - 5 Friday)', read: (d) => new Date(`${d.date}T00:00:00Z`).getUTCDay() },
 ]
 
-/** What happened after the candle (`key`, its name; `trade` - an option bought there with the page's levels: its return in
- *  % of the entry premium). */
+/** What happened after the candle (`key`, its name): spot `minutes` later; the highest / lowest spot in the next `extreme`
+ *  minutes (`up` - the high); `trade` - an option BOUGHT or SOLD there with the page's levels (the backtest's own trade,
+ *  `optionFor(dir, mode)` - a sold PE is the bullish sell): its return in % of the entry premium, a sale's positive when the
+ *  premium fell. */
 export const LABELS = [
   { key: 'fwd15', name: 'Spot 15 min later %', minutes: 15 },
   { key: 'fwd30', name: 'Spot 30 min later %', minutes: 30 },
   { key: 'fwd60', name: 'Spot 60 min later %', minutes: 60 },
-  { key: 'ceBuy', name: 'CE bought there (return %)', trade: 1 },
-  { key: 'peBuy', name: 'PE bought there (return %)', trade: -1 },
+  { key: 'ceBuy', name: 'CE bought there (return %)', trade: { dir: 1, mode: 'buy' } },
+  { key: 'peBuy', name: 'PE bought there (return %)', trade: { dir: -1, mode: 'buy' } },
+  { key: 'ceSell', name: 'CE sold there (return %)', trade: { dir: -1, mode: 'sell' } },
+  { key: 'peSell', name: 'PE sold there (return %)', trade: { dir: 1, mode: 'sell' } },
+  { key: 'up30', name: 'Highest spot in the next 30 min %', extreme: 30, up: true },
+  { key: 'down30', name: 'Lowest spot in the next 30 min %', extreme: 30, up: false },
 ]
 
 // Spot `minutes` after minute `m` of the 1-minute day: the close of the last minute at or before that time - NaN when the
@@ -121,6 +210,14 @@ function spotLater(d1, m, minutes) {
   let k = m
   while (k + 1 < d1.n && d1.t[k + 1] <= target) k++
   return d1.spot.c[k]
+}
+// The highest high (`up`) / lowest low of spot over the minutes after `m` up to `minutes` later - NaN when the day ends first.
+function spotExtreme(d1, m, minutes, up) {
+  const target = d1.t[m] + minutes * MIN
+  if (target > d1.t[d1.n - 1]) return NaN
+  let x = up ? -Infinity : Infinity
+  for (let k = m + 1; k < d1.n && d1.t[k] <= target; k++) x = up ? Math.max(x, d1.spot.h[k]) : Math.min(x, d1.spot.l[k])
+  return fin(x) ? x : NaN
 }
 
 /**
@@ -149,7 +246,8 @@ export function dayRows(day, { timeframe = 5, ...levels } = {}) {
     const spot = d1.spot.c[m]
     for (const l of LABELS) {
       if (l.minutes) { row.y[l.key] = pct(spotLater(d1, m, l.minutes), spot); continue }
-      const option = optionFor(l.trade, 'buy', d1.atm[m], d1.step, levels.moneyness ?? 0)
+      if (l.extreme) { row.y[l.key] = pct(spotExtreme(d1, m, l.extreme, l.up), spot); continue }
+      const option = optionFor(l.trade.dir, l.trade.mode, d1.atm[m], d1.step, levels.moneyness ?? 0)
       const t = simulateTrade(d1, m, option, trade)
       row.y[l.key] = t && t.entry > 0 ? (t.points / t.entry) * 100 : NaN
     }

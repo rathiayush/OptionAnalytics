@@ -3,14 +3,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
-import { optionFor, prepareDay, simulateTrade, timeframeView } from '../src/signalBacktest.js'
-import { FEATURES, HOLD_IC, LABELS, dayRows, featureReport, rowsCsv, spearman } from '../src/featureFinder.js'
+import { emaOver, istMinute, optionFor, prepareDay, rsiOver, simulateTrade, timeframeView } from '../src/signalBacktest.js'
+import { FEATURES, HOLD_IC, LABELS, dayRows, featureReport, featureReports, rowsCsv, spearman } from '../src/featureFinder.js'
+import { atr, bollinger, cci, dmi, macd, stochastic, supertrend } from './ta-reference.mjs'
 
 const LEVELS = { slPct: 30, targetPct: 60, levelUnit: 'pct', entryFrom: '09:30', lastEntry: '14:45' }
 const prepared = () => {
   const { run } = syntheticDay()
   return { run, d: prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' }) }
 }
+// The previous session (the profile response's own minutes - the indicators warm up on them, the pivots / gap read them):
+// the synthetic day three days earlier, a little lower.
+const prevProfileOf = (run) => ({
+  success: true, profileDate: '2026-10-02', poc: 22740, vah: 22790, val: 22700, hvn: [22770], lvn: [22720], bins: [],
+  bars: run.spotCandlesOneMinute.map((b) => ({ ...b, time: new Date(Date.parse(b.time) - 3 * 864e5).toISOString(), open: b.open - 40, high: b.high - 40, low: b.low - 40, close: b.close - 40 })),
+})
 
 test('a row a candle in the entry window, every feature and label', () => {
   const { d } = prepared()
@@ -28,19 +35,21 @@ test('a row a candle in the entry window, every feature and label', () => {
   assert.ok(filled.length >= 20, `${filled.length} features read`)
 })
 
-test('NO LOOK-AHEAD: the features of a day cut part way are the whole day\'s up to the cut', () => {
-  const { run, d } = prepared()
+test('NO LOOK-AHEAD: the features of a day cut part way are the whole day\'s up to the cut - with and without the previous session', () => {
+  const { run } = prepared()
+  for (const prevProfile of [null, prevProfileOf(run)]) {
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', prevProfile })
   const cutMinute = 180
   const cut = Date.parse(run.spotCandlesOneMinute[cutMinute].time)
   const keep = (list) => list.filter((p) => Date.parse(p.time) <= cut)
   const part = prepareDay({ ...run, optionExpiry: '2026-10-06', spotCandlesOneMinute: keep(run.spotCandlesOneMinute), futuresBars: keep(run.futuresBars),
-    cePoints: keep(run.cePoints), pePoints: keep(run.pePoints) }, { underlying: 'NIFTY' })
-  for (const tf of [1, 5]) {
+    cePoints: keep(run.cePoints), pePoints: keep(run.pePoints) }, { underlying: 'NIFTY', prevProfile })
+  for (const tf of [1, 5, 15]) {
     const full = dayRows(d, { timeframe: tf, ...LEVELS })
     const cutRows = dayRows(part, { timeframe: tf, ...LEVELS })
     // Every candle that ended by the cut - the last one of the cut day may be a candle still forming at 5 min.
     const done = cutRows.filter((r) => r.time + (tf - 1) * 60_000 < cut)
-    assert.ok(done.length > 20)
+    assert.ok(done.length > (tf === 15 ? 8 : 20), `${tf}m: ${done.length} candles`)
     for (const r of done) {
       const same = full.find((x) => x.time === r.time)
       for (const f of FEATURES) {
@@ -49,6 +58,88 @@ test('NO LOOK-AHEAD: the features of a day cut part way are the whole day\'s up 
       }
     }
   }
+  }
+})
+
+test('the indicators: TradingView\'s, on the spot candles of the timeframe, warmed up on the previous session\'s candles', () => {
+  const { run } = prepared()
+  const prevProfile = prevProfileOf(run)
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', prevProfile })
+  for (const tf of [1, 5]) {
+    const v = timeframeView(d, tf)
+    // The previous session's minutes in candles of the timeframe from 09:15, then the day's - put together by hand here.
+    const prev = []
+    for (const b of prevProfile.bars) {
+      const bucket = Math.floor((istMinute(Date.parse(b.time)) - (9 * 60 + 15)) / tf)
+      const last = prev.at(-1)
+      if (last?.bucket === bucket) { last.h = Math.max(last.h, b.high); last.l = Math.min(last.l, b.low); last.c = b.close } else prev.push({ bucket, h: b.high, l: b.low, c: b.close })
+    }
+    const H = [...prev.map((x) => x.h), ...v.spot.h], L = [...prev.map((x) => x.l), ...v.spot.l], C = [...prev.map((x) => x.c), ...v.spot.c]
+    const w = prev.length
+    const m = macd(C), st = stochastic(H, L, C), bb = bollinger(C), di = dmi(H, L, C), sup = supertrend(H, L, C), at = atr(H, L, C), cc = cci(H, L, C)
+    const rsi7 = rsiOver(Float64Array.from(C), 7), ema50 = emaOver(Float64Array.from(C), 50)
+    const rows = dayRows(d, { timeframe: tf, ...LEVELS })
+    const near = (a, b, what) => assert.ok((Number.isNaN(a) && Number.isNaN(b)) || Math.abs(a - b) < 1e-9 * Math.max(1, Math.abs(b)), `${tf}m ${what}: ${a} vs ${b}`)
+    let checked = 0
+    for (const r of rows) {
+      const k = v.t.indexOf(r.time)
+      const c = v.spot.c[k]
+      near(r.f.macd, (m.macd[w + k] / c) * 100, 'macd')
+      near(r.f.macdHist, (m.hist[w + k] / c) * 100, 'macdHist')
+      near(r.f.macdHistChange, ((m.hist[w + k] - m.hist[w + k - 1]) / c) * 100, 'macdHistChange')
+      near(r.f.stochK, st.k[w + k], 'stochK')
+      near(r.f.stochD, st.d[w + k], 'stochD')
+      near(r.f.cci, cc[w + k], 'cci')
+      near(r.f.bbPctB, bb.pctB[w + k], 'bbPctB')
+      near(r.f.bbWidth, bb.width[w + k], 'bbWidth')
+      near(r.f.atrPct, (at[w + k] / c) * 100, 'atrPct')
+      near(r.f.adx, di.adx[w + k], 'adx')
+      near(r.f.diSpread, di.plus[w + k] - di.minus[w + k], 'diSpread')
+      near(r.f.superTrend, sup.dir[w + k], 'superTrend')
+      near(r.f.superTrendDist, ((c - sup.line[w + k]) / sup.line[w + k]) * 100, 'superTrendDist')
+      near(r.f.rsi7, rsi7[w + k], 'rsi7')
+      near(r.f.ema50, ((c - ema50[w + k]) / ema50[w + k]) * 100, 'ema50')
+      if (Number.isFinite(r.f.macd) && Number.isFinite(r.f.adx) && Number.isFinite(r.f.superTrend)) checked++
+    }
+    // Warmed up on the day before, every one reads from the first row.
+    assert.equal(checked, rows.length, `${tf}m`)
+  }
+})
+
+test('the other new readings: VWAP in deviations, the candle\'s volume, the basis, the gap, yesterday\'s range, the premiums, the days to expiry', () => {
+  const { run } = prepared()
+  const prevProfile = prevProfileOf(run)
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', prevProfile })
+  const rows = dayRows(d, { timeframe: 1, ...LEVELS })
+  const r = rows[40]
+  const m = d.t.indexOf(r.time)
+  // The futures' volume-weighted mean and deviation of the typical price up to the minute.
+  let pv = 0, pv2 = 0, vol = 0
+  for (const b of run.futuresBars) {
+    if (Date.parse(b.time) > d.t[m] || !(b.volume > 0)) continue
+    const tp = (b.high + b.low + b.close) / 3
+    pv += tp * b.volume; pv2 += tp * tp * b.volume; vol += b.volume
+  }
+  const vwap = pv / vol, sd = Math.sqrt(pv2 / vol - vwap * vwap)
+  assert.equal(d.priceSource, 'futures')
+  assert.ok(Math.abs(r.f.vwapZ - (d.price.c[m] - vwap) / sd) < 1e-6, `${r.f.vwapZ}`)
+  const volumes = d.price.v.slice(0, m + 1)
+  assert.ok(Math.abs(r.f.relVolume - d.price.v[m] / (volumes.reduce((a, b) => a + b, 0) / volumes.length)) < 1e-9)
+  assert.ok(Math.abs(r.f.basis - ((d.price.c[m] - d.spot.c[m]) / d.spot.c[m]) * 100) < 1e-9)
+  const prevClose = prevProfile.bars.at(-1).close
+  assert.ok(Math.abs(r.f.gap - ((d.spot.o[0] - prevClose) / prevClose) * 100) < 1e-9)
+  const hi = Math.max(...prevProfile.bars.map((b) => b.high)), lo = Math.min(...prevProfile.bars.map((b) => b.low))
+  assert.ok(Math.abs(r.f.prevRange - ((d.spot.c[m] - lo) / (hi - lo)) * 100) < 1e-9)
+  assert.equal(r.f.daysToExpiry, 1)                         // 5 Oct, options expiring 6 Oct
+  assert.equal(r.f.weekday, 1)                              // a Monday
+  assert.ok(r.f.candleBody >= -1 && r.f.candleBody <= 1)
+  assert.ok(Number.isFinite(r.f.cePremRsi) && Number.isFinite(r.f.straddle15))
+  // The premiums' own VWAP needs the strike's traded volume - the synthetic chain has none: no reading, never a made-up one.
+  assert.ok(rows.every((x) => Number.isNaN(x.f.cePremVwap) && Number.isNaN(x.f.pePremVwap)))
+  // With option volume it reads the strike's own VWAP: the premium's typical price x volume from the day's first minute.
+  const withVolume = prepareDay({ ...run, optionExpiry: '2026-10-06', cePoints: run.cePoints.map((p) => ({ ...p, volume: 10 })) }, { underlying: 'NIFTY', prevProfile })
+  const vr = dayRows(withVolume, { timeframe: 1, ...LEVELS })[40]
+  assert.ok(Number.isFinite(vr.f.cePremVwap) && Number.isNaN(vr.f.pePremVwap))
 })
 
 test('the labels: spot N minutes later, and the backtest\'s own trade bought at the candle', () => {
@@ -61,9 +152,27 @@ test('the labels: spot N minutes later, and the backtest\'s own trade bought at 
   assert.ok(Math.abs(r.y.ceBuy - (ce.points / ce.entry) * 100) < 1e-9)
   const pe = simulateTrade(d, m, optionFor(-1, 'buy', d.atm[m], d.step, 0), { slPct: 30, targetPct: 60, levelUnit: 'pct' })
   assert.ok(Math.abs(r.y.peBuy - (pe.points / pe.entry) * 100) < 1e-9)
+  // SOLD there with the same levels - the backtest's own sell (a sold CE / PE: its return positive when the premium fell).
+  const ceSold = simulateTrade(d, m, optionFor(-1, 'sell', d.atm[m], d.step, 0), { slPct: 30, targetPct: 60, levelUnit: 'pct' })
+  assert.equal(optionFor(-1, 'sell', d.atm[m], d.step, 0).side, 'CE')
+  assert.ok(Math.abs(r.y.ceSell - (ceSold.points / ceSold.entry) * 100) < 1e-9)
+  const peSold = simulateTrade(d, m, optionFor(1, 'sell', d.atm[m], d.step, 0), { slPct: 30, targetPct: 60, levelUnit: 'pct' })
+  assert.ok(Math.abs(r.y.peSell - (peSold.points / peSold.entry) * 100) < 1e-9)
+  // Every row: a buy and a sale of the same option, held to the same exit, are equal and opposite - else a level ended one.
+  const allRows = dayRows(d, { timeframe: 1, slPct: 0, targetPct: 0, entryFrom: '09:30', lastEntry: '14:45' })
+  for (const x of allRows) if (Number.isFinite(x.y.ceBuy)) assert.ok(Math.abs(x.y.ceBuy + x.y.ceSell) < 1e-9)
+  // The highest / lowest spot of the next 30 minutes.
+  let hi = -Infinity, lo = Infinity
+  for (let k = m + 1; k <= m + 30; k++) { hi = Math.max(hi, d.spot.h[k]); lo = Math.min(lo, d.spot.l[k]) }
+  assert.ok(Math.abs(r.y.up30 - ((hi - d.spot.c[m]) / d.spot.c[m]) * 100) < 1e-9)
+  assert.ok(Math.abs(r.y.down30 - ((lo - d.spot.c[m]) / d.spot.c[m]) * 100) < 1e-9)
+  assert.ok(r.y.up30 >= r.y.fwd15 - 1e-9 && r.y.down30 <= r.y.fwd15 + 1e-9)
   // No label from past the day's last minute.
   const late = dayRows(d, { timeframe: 1, ...LEVELS, lastEntry: '15:29' }).at(-1)
   assert.ok(Number.isNaN(late.y.fwd60))
+  assert.ok(Number.isNaN(late.y.up30) && Number.isNaN(late.y.down30))
+  // Every label's report, keyed as LABELS.
+  assert.deepEqual(Object.keys(featureReports(allRows)), LABELS.map((l) => l.key))
 })
 
 test('Spearman: ranks, ties, too few pairs', () => {
