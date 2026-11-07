@@ -17,7 +17,7 @@ const PAGE_NAMES = {
   '/': 'Dashboard', '/backtest': 'Backtrack', '/strike-data': 'Strike Data · Live', '/rolling-strike-data': 'Strike Data · Rolling',
   '/expired-backtest': 'Expired Backtest', '/oi-replay': 'OI Replay', '/order-flow': 'Order Flow', '/live-strike-data': 'Live Strike Data',
   '/triggers': 'Triggers', '/contracts': 'Contracts', '/trade-settings': 'Trade settings', '/strategy-tuning': 'Strategy tuning',
-  '/visitors': 'Visitors', '/login': 'Login screen', '/market-view': 'Market view (External)',
+  '/visitors': 'Visitors', '/cache': 'Cache', '/login': 'Login screen', '/market-view': 'Market view (External)',
 }
 const KIND = {
   page: { label: 'Opened page', color: 'default' },

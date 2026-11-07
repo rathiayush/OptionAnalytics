@@ -5,6 +5,9 @@ import { DOWN_COLOR, POLL_HEADERS, UP_COLOR, usePersistedState } from './shared.
 // The Order Flow page's "Delta rules" card: a day's delta, candle by candle, by each way of inferring a trade's side
 // (OrderFlowEngine.DeltaRules). Dhan's packets carry no side and Dhan does not publish how its own chart gets one, so this
 // is how a rule is chosen: set each column against Dhan's Delta for the same candles. Folded, it asks the server nothing.
+// Dhan's market feed is a SNAPSHOT about once a second, not a packet a trade - the first four columns give each second's
+// whole volume the side of its last trade; "LTQ + book" gives only that last trade (Dhan's Last Traded Quantity) its side
+// and splits the rest of the second by what was taken off each side of the book (OrderFlowEngine.LtqBookDelta).
 
 const { Text } = Typography
 const REFRESH_MS = 30_000
@@ -21,6 +24,7 @@ const COLUMNS = [
   { title: 'Old rule', dataIndex: 'depthBook', key: 'depthBook', width: 90, align: 'right', render: signed },
   { title: 'Own packet', dataIndex: 'ownPacket', key: 'ownPacket', width: 90, align: 'right', render: signed },
   { title: 'Tick rule', dataIndex: 'tickRule', key: 'tickRule', width: 90, align: 'right', render: signed },
+  { title: 'LTQ + book', dataIndex: 'ltqBook', key: 'ltqBook', width: 100, align: 'right', render: signed },
 ]
 
 export function DeltaRulesCard({ underlying, date, expiryQuery, timeframe }) {
@@ -58,11 +62,13 @@ export function DeltaRulesCard({ underlying, date, expiryQuery, timeframe }) {
           <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: 8 }}>
             Dhan&apos;s feed does not say who the aggressor was, so each column infers it differently. Set them against Dhan&apos;s Delta for the same candles:
             the column closest over many candles is the rule to use. In use = the previous packet&apos;s quote · Old rule = the depth sockets&apos; quotes ·
-            Own packet = the book the trade left behind · Tick rule = up from the last price is a buy. — = recorded before this was kept.
+            Own packet = the book the trade left behind · Tick rule = up from the last price is a buy · LTQ + book = Dhan sends a snapshot about once a
+            second, so only the second&apos;s last trade (its LTQ) takes a side and the rest is split by how much was taken off the bids vs the asks.
+            — = recorded before this was kept.
           </Text>
           {error && <Alert type="warning" showIcon message={error} style={{ marginBottom: 8 }} />}
           <Table
-            size="small" rowKey="time" columns={COLUMNS} dataSource={rows ?? []} loading={rows === null && !error} scroll={{ x: 520 }}
+            size="small" rowKey="time" columns={COLUMNS} dataSource={rows ?? []} loading={rows === null && !error} scroll={{ x: 620 }}
             pagination={{ pageSize: 20, hideOnSinglePage: true, showSizeChanger: false }}
           />
         </>

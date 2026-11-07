@@ -852,6 +852,21 @@ When adding or changing a strategy:
   lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
   `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
   reaches the file.
+- The admin CACHE page (`/cache`, `CachePage.jsx`, `cacheBrowser.js`; asked for - "a page to see all the cache files and
+  manage them, I can delete ... delete folder"): the server's DATA CACHES only - data it can always fetch again
+  (`CacheBrowser`, `CacheController` `/api/cache`, Admin only - `ADMIN_ONLY_PATHS`, ExternalAccess denies it by default):
+  the Dhan data cache (`DhanDataCache.Directory` - v1/, nse/, scrip-master/; counted again after a delete - `TrimNow`), the
+  Order Flow days (`OrderFlowDayStore.Root` - a delete drops its read-back copies, `ForgetLoaded`; today's file comes back
+  at the next checkpoint), the Expired Backtest's CSVs (`HistoricalSpotDataStore.Folder`, `ExpiredOptionDataStore.Folder`).
+  Settings, strategies, preferences, logs and the login keys are NOT caches and are not listed. Each cache's size / files /
+  newest / oldest; open it and walk its folders (breadcrumb, Up; each folder with everything under it, counted on request
+  and kept 30 s; what a known folder / file is - an Order Flow contract folder names its contract; Name / Largest / Newest;
+  at most `MaxEntries` 2000 a folder listed); DELETE a file, a folder and everything in it, or everything in a cache (the
+  folder kept) - each confirmed with what it removes; everything in a cache only with `all=true` (a request that lost its
+  path never empties one). Every path is relative to its cache and checked: no "..", nothing absolute or outside the folder,
+  NO SYMLINK FOLLOWED - one on the way is refused, one inside a folder being deleted is removed itself, never what it points
+  at. Each delete is logged with who did it. No timer - loaded on opening, after a delete, by Refresh; a block an entry on
+  a phone (`CacheBrowserTests.cs`, `tests/cache-browser.test.mjs`).
 - ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
   tick's last price, its aggressor side by Lee-Ready: the quote rule against the PREVIOUS MARKET FEED PACKET's best bid / ask
@@ -863,7 +878,20 @@ When adding or changing a strategy:
   no rule is known to equal it: every bar also tallies the other candidate rules (`DeltaRules`, `RuleCount` - depth sockets,
   the trade's own packet, tick rule - kept in the day's file, `/api/order-flow/{u}/delta-rules`), shown on the Order Flow page's
   "Delta rules" card (folded, `OrderFlowDeltaRules.jsx`, Dhan's "K" format) to set against Dhan's candles before changing the
-  rule. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
+  rule. DHAN'S MARKET FEED IS A SNAPSHOT ABOUT ONCE A SECOND, not a packet a trade (Dhan's support page; its API docs say
+  "tick-by-tick event based") - the Full packet carries LTP, LTQ (the LAST trade's quantity only), LTT (whole seconds), ATP
+  (float32 - too coarse to recover a second's average price), the day's volume, the book's total buy / sell QUANTITY (resting
+  orders, never trades - not read as delta), OI and 5 levels; the 20 / 200-level depth feeds (NSE only; 200 = one instrument a
+  socket) carry the book alone, no trades. So one packet's volume is often many trades, at several prices, both ways, and
+  the rule in use gives ALL of it its last trade's side and price. The comparison rule "LTQ + book" (`RuleLtqBook`,
+  `LtqBookDelta` / `BookTaken`, the card's own column; a day saved before it keeps the other three and shows "—"; a minute
+  restored from such a checkpoint and traded on shows none) gives only the last trade (the LTQ, held to the packet's volume)
+  that side and splits the rest of the second by what was TAKEN off each side of the PREVIOUS market feed packet's 5-level
+  book (`_feedBids` / `_feedAsks`, fresh as the quote): ask levels the new best ask moved past plus the drop at it = bought,
+  the bids the mirror = sold (pulled orders count too - an estimate), else by the price's move, else half and half. It is
+  a comparison only - the footprint stays on the rule in use until it is chosen against Dhan's candles. A trade with NO side
+  known yet (before any trade of the engine had one - no quote, an unchanged price) is NEUTRAL: half buy, half sell in the
+  bars, no tape print, no iceberg read (it started as a buy - `_lastSide` was 1). `OrderFlowLtqBookTests.cs`. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
   stale time); the tape and sweeps stay on arrival (they need the milliseconds). A packet behind the last moves neither the
   price the tick rule reads nor the quote. EVERY
   tick (`SpotTick.ReceivedAt`, stamped on the market feed's receive loop) and depth packet (stamped on its socket's loop) goes

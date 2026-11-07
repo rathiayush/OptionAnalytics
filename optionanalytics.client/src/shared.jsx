@@ -2,8 +2,8 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
-  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined, LineChartOutlined,
-  LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
+  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
+  LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
@@ -26,7 +26,7 @@ export function useAuth() {
 // Path keys from NAV_ITEMS below that only an Admin account may see or use - Triggers arms real
 // money, Contracts exposes the raw scrip-master/subscription diagnostic. Kept as one list so
 // NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
-export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/visitors']
+export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/visitors', '/cache']
 
 // SignalR's own withAutomaticReconnect(), with no argument, only retries at [0, 2, 10, 30] seconds
 // (~42s total) before giving up PERMANENTLY - the connection then sits closed until the page is
@@ -1116,6 +1116,7 @@ const NAV_ITEMS = [
   { key: '/trade-settings', label: 'Trade settings', icon: <SettingOutlined /> },
   { key: '/strategy-tuning', label: 'Strategy tuning', icon: <SlidersOutlined /> },
   { key: '/visitors', label: 'Visitors', icon: <TeamOutlined /> },
+  { key: '/cache', label: 'Cache', icon: <DatabaseOutlined /> },
 ]
 
 // The site navigation, shared by EVERY page (each renders <NavBar /> in its own header row).

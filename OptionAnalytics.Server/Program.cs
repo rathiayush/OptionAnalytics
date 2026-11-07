@@ -314,6 +314,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClien
 builder.Services.AddSingleton<DhanTwoHundredDepthClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanTwoHundredDepthClient>());
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowDayStore>();
+// The admin Cache page: the data caches (Dhan cache, Order Flow days, the Expired Backtest's CSVs) listed and deleted -
+// CacheBrowser / CacheController.
+builder.Services.AddSingleton<CacheBrowser>();
 // TrueData (OFF by default): with TrueData:Enabled true an Order Flow day the server did not record is
 // rebuilt from TrueData's tick history; with it false nothing TrueData is registered or called and
 // OrderFlowHistory runs exactly as before (its TrueData step is null). See TrueDataOptions.

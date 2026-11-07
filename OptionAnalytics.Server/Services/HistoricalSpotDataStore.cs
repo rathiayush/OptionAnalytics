@@ -45,6 +45,9 @@ public sealed class HistoricalSpotDataStore
         Directory.CreateDirectory(_directory);
     }
 
+    /// <summary>The folder (the admin Cache page lists it - CacheBrowser).</summary>
+    public string Folder => _directory;
+
     private string CsvPath(string underlying) => Path.Combine(_directory, $"{underlying.ToUpperInvariant()}_spot_1m.csv");
     private string MetaPath(string underlying) => Path.Combine(_directory, $"{underlying.ToUpperInvariant()}_spot_1m.meta.json");
 
