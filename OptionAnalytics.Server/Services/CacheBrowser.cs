@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Text.Json;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Services.OrderFlow;
@@ -19,6 +20,10 @@ namespace OptionAnalytics.Server.Services;
 /// <item>historical / expired-options - the Expired Backtest's spot and option CSVs (HistoricalSpotDataStore,
 /// ExpiredOptionDataStore), fetched again by their prefetch / when needed.</item>
 /// </list>
+/// DOWNLOAD (asked for - "give option to download whole data as zip"): a file as it is, a folder (or a whole cache) as ONE
+/// zip, or every cache in one zip (each its own top folder) - written straight into the response as it is read
+/// (WriteZip - no copy on the server's disk first, a 10 GB cache included); the cache's gzip files are stored as they are
+/// (squeezing gzip again only costs time), the rest deflated; a file being written (.tmp) or gone meanwhile is left out.
 /// Nothing else is listed: settings, saved strategies, preferences, logs and the login keys are not caches. Every path is
 /// RELATIVE to its cache's folder and checked: no "..", nothing absolute, nothing that resolves outside the folder, and no
 /// symlink is followed - one on the way is refused, one inside a folder being deleted is removed itself, never what it
@@ -127,6 +132,59 @@ public sealed class CacheBrowser
         _logger.LogWarning("{Who} deleted {Cache}/{Path}: {Files} file(s), {Bytes} bytes{Failed}.", who, root!.Id, rel.Length == 0 ? "(everything)" : rel,
             tally.Files, tally.Bytes, tally.Failed > 0 ? $", {tally.Failed} could not be deleted ({tally.FirstError})" : "");
         return (new CacheDeleteResult(tally.Files, tally.Bytes, tally.Failed, tally.FirstError), null);
+    }
+
+    /// <summary>What downloading `path` gives: a FILE, sent as it is, or a FOLDER ("" = the whole cache) zipped - with the
+    /// name it is saved under and the folder name inside the zip.</summary>
+    public (CacheDownload? Download, string? Error) Download(string rootId, string? path)
+    {
+        var (root, full, rel, error) = Resolve(rootId, path);
+        if (error is not null) return (null, error);
+        var stamp = Today();
+        if (rel.Length > 0 && File.Exists(full)) return (new CacheDownload(full!, false, Path.GetFileName(full!), "", new FileInfo(full!).Length), null);
+        if (!Directory.Exists(full)) return (null, "Not found - deleted already?");
+        var inside = rel.Length == 0 ? root!.Id : rel.Split('/')[^1];
+        var name = rel.Length == 0 ? $"{root!.Id}-{stamp}.zip" : $"{root!.Id}-{rel.Replace('/', '-')}-{stamp}.zip";
+        return (new CacheDownload(full!, true, name, inside, Totals(full!).Bytes), null);
+    }
+
+    /// <summary>Every cache kept on disk, as (its id, its folder) - for the one zip of everything.</summary>
+    public IReadOnlyList<(string Prefix, string Folder)> AllFolders() =>
+        _roots.Where(r => r.Path is not null && Directory.Exists(r.Path)).Select(r => (r.Id, Path.GetFullPath(r.Path!))).ToList();
+
+    /// <summary>The folders written as ONE zip into <paramref name="output"/> as they are read (nothing kept on the server):
+    /// each file under its folder's prefix, by its path inside the folder; links not followed, a file being written (.tmp)
+    /// or gone meanwhile left out; a gzip / zip file stored as it is, the rest deflated (fastest). Stops at
+    /// <paramref name="cancel"/> (the browser went away). Returns the files and bytes put in.</summary>
+    public (long Files, long Bytes) WriteZip(Stream output, IEnumerable<(string Prefix, string Folder)> folders, CancellationToken cancel = default)
+    {
+        long files = 0, bytes = 0;
+        using var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true);
+        foreach (var (prefix, folder) in folders)
+        {
+            if (!Directory.Exists(folder)) continue;
+            var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
+            foreach (var file in new DirectoryInfo(folder).EnumerateFiles("*", options).OrderBy(f => f.FullName, StringComparer.Ordinal))
+            {
+                cancel.ThrowIfCancellationRequested();
+                if (file.Name.EndsWith(".tmp", StringComparison.Ordinal) || IsLink(file)) continue;
+                FileStream source;
+                try { source = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }       // gone / locked meanwhile
+                using (source)
+                {
+                    var inside = Path.GetRelativePath(folder, file.FullName).Replace(Path.DirectorySeparatorChar, '/');
+                    var stored = file.Name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) || file.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
+                    var entry = zip.CreateEntry(prefix.Length > 0 ? $"{prefix}/{inside}" : inside, stored ? CompressionLevel.NoCompression : CompressionLevel.Fastest);
+                    entry.LastWriteTime = file.LastWriteTime;
+                    using var target = entry.Open();
+                    source.CopyTo(target);
+                    files++;
+                    bytes += source.Length;
+                }
+            }
+        }
+        return (files, bytes);
     }
 
     private static void DeleteTree(string dir, Tally tally, bool removeSelf)
@@ -320,3 +378,7 @@ public sealed record CacheEntry(string Name, string Path, bool Folder, long Byte
 public sealed record CacheListing(string Root, string RootName, string Path, CacheTotals Totals, IReadOnlyList<CacheEntry> Entries, int? Truncated);
 
 public sealed record CacheDeleteResult(long Files, long Bytes, int Failed, string? FirstError);
+
+/// <summary>A download: the file or folder on disk, whether it is zipped, the name it is saved under, the folder name
+/// inside the zip, and its size (before zipping).</summary>
+public sealed record CacheDownload(string FullPath, bool Folder, string FileName, string Prefix, long Bytes);

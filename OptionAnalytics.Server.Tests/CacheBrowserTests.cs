@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Reflection;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
@@ -169,6 +170,91 @@ public sealed class CacheBrowserTests : IDisposable
         Assert.IsType<NotFoundObjectResult>(controller.List("nope", ""));
         Assert.IsType<OkObjectResult>(controller.Delete("dhan", null, all: true));
         Assert.Equal(0L, Browser().Roots()[0].Totals.Files);
+    }
+
+    private static Dictionary<string, (long Length, long Compressed)> Entries(Stream zip)
+    {
+        zip.Position = 0;
+        using var archive = new ZipArchive(zip, ZipArchiveMode.Read, leaveOpen: true);
+        return archive.Entries.ToDictionary(e => e.FullName, e => (e.Length, e.CompressedLength));
+    }
+
+    [Fact]
+    public void A_folder_or_a_cache_downloads_as_one_zip_and_a_file_as_it_is()
+    {
+        var browser = Browser();
+        Write(Dhan, "v1/charts-intraday/days/2026-10/05/2026-10-05-zzz.json.gz.tmp", 9);            // being written - left out
+        File.CreateSymbolicLink(Path.Combine(Dhan, "v1", "sneaky.csv"), Path.Combine(Outside, "precious.csv"));
+        Directory.CreateSymbolicLink(Path.Combine(Dhan, "v1", "sneaky-dir"), Outside);
+
+        // A day's folder: its files under the folder's own name.
+        var (day, _) = browser.Download("dhan", "v1/charts-intraday/days/2026-10/05");
+        // Its size = what the folder holds on disk, as listed (the file being written too); the zip leaves that one out.
+        Assert.Equal((true, "05", "dhan-v1-charts-intraday-days-2026-10-05-2026-11-07.zip", 159L), (day!.Folder, day.Prefix, day.FileName, day.Bytes));
+        using var one = new MemoryStream();
+        var written = browser.WriteZip(one, new[] { (day.Prefix, day.FullPath) });
+        Assert.Equal((2L, 150L), written);
+        Assert.Equal(new[] { "05/2026-10-05-aaa.json.gz", "05/2026-10-05-bbb.json.gz" }, Entries(one).Keys.OrderBy(k => k));
+        // Gzip files are stored as they are; anything else is deflated.
+        Assert.All(Entries(one).Values, e => Assert.Equal(e.Length, e.Compressed));
+
+        // The whole cache: every file by its path inside it - no link followed, nothing outside it, no .tmp.
+        var (whole, _) = browser.Download("dhan", "");
+        Assert.Equal(("dhan", "dhan-2026-11-07.zip"), (whole!.Prefix, whole.FileName));
+        using var all = new MemoryStream();
+        browser.WriteZip(all, new[] { (whole.Prefix, whole.FullPath) });
+        var entries = Entries(all);
+        Assert.Equal(5, entries.Count);
+        Assert.Contains("dhan/scrip-master/api-scrip-master.csv", entries.Keys);
+        Assert.True(entries["dhan/scrip-master/api-scrip-master.csv"].Compressed < 1000);              // a CSV is deflated
+        Assert.DoesNotContain(entries.Keys, k => k.Contains("sneaky") || k.Contains("precious") || k.EndsWith(".tmp"));
+
+        // A file: itself, as it is; not there / outside: refused.
+        var (file, _) = browser.Download("dhan", "scrip-master/api-scrip-master.csv");
+        Assert.Equal((false, "api-scrip-master.csv", 1000L), (file!.Folder, file.FileName, file.Bytes));
+        Assert.StartsWith("Not found", browser.Download("dhan", "v9").Error);
+        Assert.Equal("Not a path inside this cache.", browser.Download("dhan", "../outside").Error);
+        Assert.Contains("link", browser.Download("dhan", "v1/sneaky.csv").Error);
+
+        // Everything: each cache kept on disk as its own top folder (the one not kept here is left out).
+        Assert.Equal(new[] { "dhan", "order-flow" }, browser.AllFolders().Select(f => f.Prefix));
+        using var everything = new MemoryStream();
+        browser.WriteZip(everything, browser.AllFolders());
+        var keys = Entries(everything).Keys.ToList();
+        Assert.Equal(5 + 3, keys.Count);
+        Assert.Contains("order-flow/NIFTY/35001/contract.json", keys);
+        // The browser going away stops it.
+        using var cut = new MemoryStream();
+        Assert.Throws<OperationCanceledException>(() => browser.WriteZip(cut, browser.AllFolders(), new CancellationToken(canceled: true)));
+    }
+
+    [Fact]
+    public async Task The_download_endpoint_streams_the_zip_and_sends_a_file_as_it_is()
+    {
+        var controller = new CacheController(Browser())
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() },
+        };
+        var file = Assert.IsType<PhysicalFileResult>(controller.Download("dhan", "scrip-master/api-scrip-master.csv"));
+        Assert.Equal(("text/csv", "api-scrip-master.csv"), (file.ContentType, file.FileDownloadName));
+        Assert.IsType<NotFoundObjectResult>(controller.Download("dhan", "v9"));
+        Assert.IsType<BadRequestObjectResult>(controller.Download("dhan", "../outside"));
+
+        // A folder: a zip written into the response, named for it.
+        var http = new DefaultHttpContext();
+        using var body = new MemoryStream();
+        http.Response.Body = body;
+        await controller.Download("order-flow", "NIFTY").ExecuteResultAsync(new ActionContext { HttpContext = http });
+        Assert.Equal("application/zip", http.Response.ContentType);
+        Assert.Contains("order-flow-NIFTY-", http.Response.Headers.ContentDisposition.ToString());
+        Assert.Equal(new[] { "NIFTY/35001/2026-10-05.json.gz", "NIFTY/35001/2026-11-07.json.gz", "NIFTY/35001/contract.json" }, Entries(body).Keys.OrderBy(k => k));
+
+        // Everything.
+        var all = new DefaultHttpContext();
+        using var allBody = new MemoryStream();
+        all.Response.Body = allBody;
+        await controller.DownloadEverything().ExecuteResultAsync(new ActionContext { HttpContext = all });
+        Assert.Equal(8, Entries(allBody).Count);
     }
 
     public void Dispose()
