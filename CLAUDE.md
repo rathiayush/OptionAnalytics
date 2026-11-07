@@ -852,6 +852,21 @@ When adding or changing a strategy:
   lookup (`GeoLocator` - DB-IP's free city database kept on this server under `Storage:GeoDbPath`, refreshed monthly by
   `GeoDbUpdater`, so addresses are never sent to any service) and the beacon's rate limit; `VisitorLogTests.cs` checks no address
   reaches the file.
+- The admin CACHE page (`/cache`, `CachePage.jsx`, `cacheBrowser.js`; asked for - "a page to see all the cache files and
+  manage them, I can delete ... delete folder"): the server's DATA CACHES only - data it can always fetch again
+  (`CacheBrowser`, `CacheController` `/api/cache`, Admin only - `ADMIN_ONLY_PATHS`, ExternalAccess denies it by default):
+  the Dhan data cache (`DhanDataCache.Directory` - v1/, nse/, scrip-master/; counted again after a delete - `TrimNow`), the
+  Order Flow days (`OrderFlowDayStore.Root` - a delete drops its read-back copies, `ForgetLoaded`; today's file comes back
+  at the next checkpoint), the Expired Backtest's CSVs (`HistoricalSpotDataStore.Folder`, `ExpiredOptionDataStore.Folder`).
+  Settings, strategies, preferences, logs and the login keys are NOT caches and are not listed. Each cache's size / files /
+  newest / oldest; open it and walk its folders (breadcrumb, Up; each folder with everything under it, counted on request
+  and kept 30 s; what a known folder / file is - an Order Flow contract folder names its contract; Name / Largest / Newest;
+  at most `MaxEntries` 2000 a folder listed); DELETE a file, a folder and everything in it, or everything in a cache (the
+  folder kept) - each confirmed with what it removes; everything in a cache only with `all=true` (a request that lost its
+  path never empties one). Every path is relative to its cache and checked: no "..", nothing absolute or outside the folder,
+  NO SYMLINK FOLLOWED - one on the way is refused, one inside a folder being deleted is removed itself, never what it points
+  at. Each delete is logged with who did it. No timer - loaded on opening, after a delete, by Refresh; a block an entry on
+  a phone (`CacheBrowserTests.cs`, `tests/cache-browser.test.mjs`).
 - ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
   tick's last price, its aggressor side by Lee-Ready: the quote rule against the PREVIOUS MARKET FEED PACKET's best bid / ask

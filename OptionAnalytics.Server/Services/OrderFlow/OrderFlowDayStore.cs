@@ -67,6 +67,13 @@ public sealed class OrderFlowDayStore : IDisposable
     /// <summary>Whether days are kept on disk.</summary>
     public bool OnDisk => _root is not null;
 
+    /// <summary>The folder the days are kept in (null = memory only) - the admin Cache page lists it (CacheBrowser).</summary>
+    public string? Root => _root;
+
+    /// <summary>Drops the days read back from disk (the Cache page deleted files - a day asked again is read again, or not
+    /// found). The days the server holds in memory - today's live engine among them - are untouched.</summary>
+    public void ForgetLoaded() => _loaded.Clear();
+
     private static string Key(string underlying, uint securityId) => $"{underlying.ToUpperInvariant()}:{securityId}";
 
     /// <summary>Keeps a finished day for replay, replacing any held for the same contract and date - in memory and on disk.</summary>

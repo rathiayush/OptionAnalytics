@@ -19,6 +19,7 @@ import TradeSettingsPage from './TradeSettingsPage.jsx'
 import StrategyTuningPage from './StrategyTuningPage.jsx'
 import ExternalPage from './ExternalPage.jsx'
 import VisitorsPage from './VisitorsPage.jsx'
+import CachePage from './CachePage.jsx'
 import { reportVisit, visitPage } from './visits.js'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
@@ -1825,6 +1826,7 @@ export default function App() {
         <Route path="/triggers" element={<RequireAdmin><TriggersPage /></RequireAdmin>} />
         <Route path="/contracts" element={<RequireAdmin><ContractsPage /></RequireAdmin>} />
         <Route path="/visitors" element={<RequireAdmin><VisitorsPage /></RequireAdmin>} />
+        <Route path="/cache" element={<RequireAdmin><CachePage /></RequireAdmin>} />
         <Route path="/trade-settings" element={<TradeSettingsPage />} />
         <Route path="/strategy-tuning" element={<StrategyTuningPage />} />
       </Routes>

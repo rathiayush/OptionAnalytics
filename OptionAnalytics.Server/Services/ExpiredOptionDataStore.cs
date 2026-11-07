@@ -37,6 +37,9 @@ public sealed class ExpiredOptionDataStore
     private readonly string _directory;
     private readonly ILogger<ExpiredOptionDataStore> _logger;
 
+    /// <summary>The folder (the admin Cache page lists it - CacheBrowser).</summary>
+    public string Folder => _directory;
+
     public ExpiredOptionDataStore(IHostEnvironment environment, IConfiguration configuration, ILogger<ExpiredOptionDataStore> logger)
     {
         // Same convention as HistoricalSpotDataStore's own path resolution - Storage:ExpiredOptionDataPath
