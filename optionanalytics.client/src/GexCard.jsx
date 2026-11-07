@@ -355,6 +355,12 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
       <Popover content={HOW_TO_READ} title="How to read GEX" trigger="click" placement="bottomLeft">
         <Button size="small" type="link" style={{ padding: 0 }}>How to read</Button>
       </Popover>
+      {/* OI Replay's live "Σ 3 expiries": the numbers add each expiry's own GEX (gex.js `chains`). */}
+      {now?.expiries > 1 && (
+        <Tooltip title={`Σ 3 expiries is on: ${now.expiries} expiries' GEX added up - the current, the next and the monthly (the monthly once, when it already is the current or next) - each with its own forward, time to expiry and IVs from its own premiums. The forward, ATM and IV shown are the current expiry's.`}>
+          <Tag color="blue" style={{ margin: 0 }}>Σ {now.expiries} expiries</Tag>
+        </Tooltip>
+      )}
     </Space>
   )
 

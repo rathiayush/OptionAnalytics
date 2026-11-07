@@ -10,10 +10,11 @@ using OptionAnalytics.Server.Services;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>
-/// OI Replay's "Σ 3 expiries" (OiReplayService.ExpiryBandAsync): the 2nd and 3rd nearest expiries' option band, through the
-/// REAL service on a fake Dhan. A past day asks Dhan's rolling options for exactly ATM±3 (all it gives for an expiry that is not
-/// the nearest) with that expiry's code, once - then from disk; today the live feed's own N2 / N3 bars are used from the
-/// first minute it holds, Dhan only for the minutes before it (none when the feed holds the day from the open).
+/// OI Replay's live "Σ 3 expiries" (OiReplayService.ExpiryBandAsync): the next expiry's and the monthly's option band, through
+/// the REAL service on a fake Dhan - LIVE ONLY: a past day is refused with no Dhan call. Today the live feed's own N2 / MONTH
+/// bars are used from the first minute it holds; Dhan only for the minutes before it (none when the feed holds the day from the
+/// open) - ATM±3 for the next expiry (all its rolling options give for an expiry that is not the nearest), ATM±10 for the
+/// monthly - once a day.
 /// </summary>
 public sealed class OiReplayExpiryBandTests : IDisposable
 {
@@ -32,16 +33,28 @@ public sealed class OiReplayExpiryBandTests : IDisposable
     }
 
     [Theory]
+    [InlineData("NIFTY", "WEEK", 2)]
+    [InlineData("NIFTY", "MONTH", 1)]
+    [InlineData("BANKNIFTY", "MONTH", 2)]
+    public async Task APastDay_IsRefused_LiveOnly_AskingDhanNothing(string underlying, string expiryFlag, int code)
+    {
+        var dhan = new FakeDhan(50, anyDay: true);
+        var band = await Service(dhan).ExpiryBandAsync(underlying, PastWeekday(10), expiryFlag, code, CancellationToken.None);
+        Assert.False(band.Success);
+        Assert.Contains("live only", band.Error);
+        Assert.Equal(0, dhan.Calls);
+    }
+
+    [Theory]
     [InlineData("NIFTY", "WEEK", 50)]
     [InlineData("BANKNIFTY", "MONTH", 100)]
     [InlineData("SENSEX", "WEEK", 100)]
-    public async Task APastDay_AsksDhanForAtmPlusMinus3_OfThatExpiryCode_Once_ThenFromDisk(string underlying, string expiryFlag, int step)
+    public async Task Today_TheNextExpiry_BeforeTheLiveFeed_IsDhansAtmPlusMinus3_OfCode2_AskedOnce(string underlying, string expiryFlag, int step)
     {
-        var day = PastWeekday(10);
-        var dhan = new FakeDhan(step);
-        var service = Service(dhan);
-
-        var next = await service.ExpiryBandAsync(underlying, day, expiryFlag, 2, CancellationToken.None);
+        var today = IstClock.Today();
+        var dhan = new FakeDhan(step, anyDay: true);
+        var service = Service(dhan, new LiveOptionLegStore());
+        var next = await service.ExpiryBandAsync(underlying, today, expiryFlag, 2, CancellationToken.None, forceLive: true);
         Assert.True(next.Success, next.Error);
         Assert.Equal("N2", next.LiveFlag);
         Assert.Equal(OiReplayService.OtherExpiryBandSteps, next.DhanBandSteps);
@@ -52,38 +65,40 @@ public sealed class OiReplayExpiryBandTests : IDisposable
         Assert.All(dhan.Rolling, r => Assert.Equal(expiryFlag, r.Flag));
         Assert.Equal(new[] { "ATM", "ATM+1", "ATM+2", "ATM+3", "ATM-1", "ATM-2", "ATM-3" },
             dhan.Rolling.Select(r => r.Strike).Distinct().OrderBy(s => s, StringComparer.Ordinal));
-        // Each strike's points at its own price, OI as Dhan sent it - seven strikes a side.
-        Assert.Equal(7, next.CePoints.Select(p => p.Strike).Distinct().Count());
-        Assert.Equal(7, next.PePoints.Select(p => p.Strike).Distinct().Count());
-        var nine15 = new DateTimeOffset(day.ToDateTime(new TimeOnly(9, 15)), IstClock.Offset);
+        var nine15 = new DateTimeOffset(today.ToDateTime(new TimeOnly(9, 15)), IstClock.Offset);
         Assert.Contains(next.CePoints, p => p.Strike == 25000 + 3 * step && p.Time == nine15 && p.OpenInterest == 2000 + 3000);
 
-        // Again, and after a restart: from disk.
+        // Asked again the same day: Dhan's answer is held for the day (TodayFetchShare) - nothing asked.
         dhan.Reset();
-        var again = await Service(dhan).ExpiryBandAsync(underlying, day, expiryFlag, 2, CancellationToken.None);
+        var again = await service.ExpiryBandAsync(underlying, today, expiryFlag, 2, CancellationToken.None, forceLive: true);
         Assert.True(again.Success, again.Error);
         Assert.Empty(dhan.Rolling);
-        Assert.Equal(next.CePoints.Count, again.CePoints.Count);
+    }
 
-        // The one after: code 3, its own series (never the next expiry's kept days).
-        var far = await service.ExpiryBandAsync(underlying, day, expiryFlag, 3, CancellationToken.None);
-        Assert.True(far.Success, far.Error);
-        Assert.Equal("N3", far.LiveFlag);
-        Assert.Equal(14, dhan.Rolling.Count);
-        Assert.All(dhan.Rolling, r => Assert.Equal(3, r.Code));
-        Assert.Contains(far.CePoints, p => p.Strike == 25000 && p.Time == nine15 && p.OpenInterest == 3000);
+    [Fact]
+    public async Task Today_TheMonthly_BeforeTheLiveFeed_IsDhansAtmPlusMinus10_OfTheMonthSeries()
+    {
+        var dhan = new FakeDhan(50, anyDay: true);
+        var band = await Service(dhan, new LiveOptionLegStore()).ExpiryBandAsync("NIFTY", IstClock.Today(), "MONTH", 1, CancellationToken.None, forceLive: true);
+        Assert.True(band.Success, band.Error);
+        Assert.Equal("MONTH", band.LiveFlag);
+        Assert.Equal(10, band.DhanBandSteps);
+        Assert.Equal(42, dhan.Rolling.Count);                      // the nearest monthly: ATM±10, as a Monthly run asks
+        Assert.All(dhan.Rolling, r => Assert.Equal(("MONTH", 1), (r.Flag, r.Code)));
+        Assert.Equal(21, band.CePoints.Select(p => p.Strike).Distinct().Count());
     }
 
     [Theory]
     [InlineData("NIFTY", "WEEK", 1)]
-    [InlineData("NIFTY", "WEEK", 4)]
+    [InlineData("NIFTY", "WEEK", 3)]
+    [InlineData("NIFTY", "MONTH", 3)]
     [InlineData("BANKNIFTY", "WEEK", 2)]
     [InlineData("NIFTY", "N2", 2)]
     [InlineData("FINNIFTY", "WEEK", 2)]
-    public async Task WhatIsNotTheNextOrFarExpiry_IsRefused_AskingDhanNothing(string underlying, string expiryFlag, int code)
+    public async Task WhatIsNotTheNextOrTheMonthlyExpiry_IsRefused_AskingDhanNothing(string underlying, string expiryFlag, int code)
     {
-        var dhan = new FakeDhan(50);
-        var band = await Service(dhan).ExpiryBandAsync(underlying, PastWeekday(10), expiryFlag, code, CancellationToken.None);
+        var dhan = new FakeDhan(50, anyDay: true);
+        var band = await Service(dhan).ExpiryBandAsync(underlying, IstClock.Today(), expiryFlag, code, CancellationToken.None, forceLive: true);
         Assert.False(band.Success);
         Assert.NotNull(band.Error);
         Assert.Equal(0, dhan.Calls);
@@ -104,7 +119,7 @@ public sealed class OiReplayExpiryBandTests : IDisposable
                 legs.Record(Tick("N1", 25000 + k * 50, "CE", open.AddMinutes(i), 1));
             }
         var dhan = new FakeDhan(50, anyDay: true);
-        var band = await Service(dhan, legs).ExpiryBandAsync("NIFTY", today, "WEEK", 2, CancellationToken.None);
+        var band = await Service(dhan, legs).ExpiryBandAsync("NIFTY", today, "WEEK", 2, CancellationToken.None, forceLive: true);
 
         Assert.True(band.Success, band.Error);
         Assert.Empty(dhan.Rolling);                       // no option series asked of Dhan
@@ -116,27 +131,27 @@ public sealed class OiReplayExpiryBandTests : IDisposable
     }
 
     [Fact]
-    public async Task Today_TheLiveFeedFromPartWay_IsUsedFromItsFirstMinute_DhansAtmPlusMinus3_Before()
+    public async Task Today_TheMonthlyLiveFeedFromPartWay_IsUsedFromItsFirstMinute_DhansBefore()
     {
         var today = IstClock.Today();
         var legs = new LiveOptionLegStore();
         var eleven = new DateTimeOffset(today.ToDateTime(new TimeOnly(11, 0)), IstClock.Offset);
         for (var i = 0; i < 10; i++)
             for (var k = -10; k <= 10; k++)
-                legs.Record(Tick("N3", 25000 + k * 50, "CE", eleven.AddMinutes(i), 9000 + i));
+                legs.Record(Tick("MONTH", 25000 + k * 50, "CE", eleven.AddMinutes(i), 9000 + i));
         var dhan = new FakeDhan(50, anyDay: true);
-        var band = await Service(dhan, legs).ExpiryBandAsync("NIFTY", today, "WEEK", 3, CancellationToken.None);
+        var band = await Service(dhan, legs).ExpiryBandAsync("NIFTY", today, "MONTH", 1, CancellationToken.None, forceLive: true);
 
         Assert.True(band.Success, band.Error);
-        Assert.Equal(14, dhan.Rolling.Count);
-        Assert.All(dhan.Rolling, r => Assert.Equal(3, r.Code));
-        Assert.Equal(OiReplayService.OtherExpiryBandSteps, band.DhanBandSteps);
+        Assert.Equal(42, dhan.Rolling.Count);
+        Assert.All(dhan.Rolling, r => Assert.Equal(1, r.Code));
+        Assert.Equal(10, band.DhanBandSteps);
         Assert.Equal(eleven, band.LiveFrom);
-        // Before 11:00 Dhan's (OI 3000 + minute), from 11:00 the feed's (9000 + minute).
+        // Before 11:00 Dhan's (OI 1000 + minute at the ATM), from 11:00 the feed's (9000 + minute).
         var tenThirty = new DateTimeOffset(today.ToDateTime(new TimeOnly(10, 30)), IstClock.Offset);
-        Assert.Contains(band.CePoints, p => p.Time == tenThirty && p.OpenInterest == 3000 + 75);
+        Assert.Contains(band.CePoints, p => p.Time == tenThirty && p.Strike == 25000 && p.OpenInterest == 1000 + 75);
         Assert.Contains(band.CePoints, p => p.Time == eleven.AddMinutes(5) && p.OpenInterest == 9005);
-        Assert.DoesNotContain(band.CePoints, p => p.Time == eleven.AddMinutes(5) && p.OpenInterest == 3000 + 110);
+        Assert.DoesNotContain(band.CePoints, p => p.Time == eleven.AddMinutes(5) && p.Strike == 25000 && p.OpenInterest == 1000 + 110);
     }
 
     [Fact]
@@ -145,10 +160,9 @@ public sealed class OiReplayExpiryBandTests : IDisposable
         Assert.True(OiReplayLiveFeedService.KeepsBars("WEEK"));
         Assert.True(OiReplayLiveFeedService.KeepsBars("MONTH"));
         Assert.True(OiReplayLiveFeedService.KeepsBars("N2"));
-        Assert.True(OiReplayLiveFeedService.KeepsBars("N3"));
         Assert.False(OiReplayLiveFeedService.KeepsBars("N1"));   // = WEEK / MONTH's own contract
-        Assert.False(OiReplayLiveFeedService.KeepsBars("N4"));
-        Assert.Equal(new[] { "N2", "N3" }, OiReplayService.SummedLiveFlags);
+        Assert.False(OiReplayLiveFeedService.KeepsBars("N3"));
+        Assert.Equal(new[] { "N2", "MONTH" }, OiReplayService.SummedLiveFlags);
     }
 
     [Fact]

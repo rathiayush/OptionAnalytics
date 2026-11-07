@@ -337,8 +337,8 @@ public sealed class OiReplayLiveFeedService : BackgroundService
     /// (IST weekdays 09:15 - 15:30 - outside them IV does not move and Dhan answers nothing new) and only while a page is
     /// watching that combo (its "c:" group has a member) - the snapshot only feeds an open page's IV. It used to be asked
     /// for every index and expiry (~18 chains) all day and night, one call every 3.5 s without end.</summary>
-    /// <summary>Whether a chain's legs keep 1-minute bars in LiveOptionLegStore: WEEK / MONTH (today's run) and N2 / N3 (the
-    /// next and far expiries OI Replay's "Σ 3 expiries" adds to the nearest - OiReplayService.SummedLiveFlag).</summary>
+    /// <summary>Whether a chain's legs keep 1-minute bars in LiveOptionLegStore: WEEK / MONTH (today's run - and the monthly
+    /// OI Replay's live "Σ 3 expiries" adds) and N2 (the next expiry it adds - OiReplayService.SummedLiveFlags).</summary>
     internal static bool KeepsBars(string expiryFlag) =>
         expiryFlag is "WEEK" or "MONTH" || Array.IndexOf(OiReplayService.SummedLiveFlags, expiryFlag) >= 0;
 
@@ -576,9 +576,9 @@ public sealed class OiReplayLiveFeedService : BackgroundService
                 _batcher.Accumulate(group, "oiReplayTicks", $"{leg.Strike}:{side}:{minuteKey}", optionTick);
             }
             // Each leg's newest reading, in memory - a page reads an index's current option prices from it, no Dhan call.
-            // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService) and the 2nd / 3rd nearest expiries
-            // (N2 / N3 - the page's "Σ 3 expiries", OiReplayService.ExpiryBandAsync), in the session only; the newest reading
-            // for every leg at any hour.
+            // Bars for the WEEK / MONTH chains (what today's run serves - OiReplayService) and the next expiry (N2 - the
+            // page's live "Σ 3 expiries", OiReplayService.ExpiryBandAsync, with the monthly), in the session only; the
+            // newest reading for every leg at any hour.
             if (tick.LastPrice > 0) _legStore?.Record(optionTick, tick.Volume, keepBars: inSession && KeepsBars(leg.ExpiryFlag));
 
             // The raw per-tick tape, on its own "t:" group, for the Live Strike Data page - its whole

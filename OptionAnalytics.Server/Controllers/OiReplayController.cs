@@ -94,10 +94,10 @@ public sealed class OiReplayController : ControllerBase
         }
     }
 
-    /// <summary>One day's CE / PE band of the 2nd or 3rd nearest expiry (`expiryCode` 2 / 3 of the series - see
-    /// OiReplayService.ExpiryBandAsync): what OI Replay's "Σ 3 expiries" adds to the nearest expiry's OI. Its date is
-    /// worked out as the run's is - the nearest expiry, then the next after it, and so on (OptionExpiryResolver) - for the
-    /// page's label only; never a reason for the band to fail.</summary>
+    /// <summary>TODAY's CE / PE band of the next expiry (`expiryCode` 2 of the series) or the monthly (MONTH, code 1) - see
+    /// OiReplayService.ExpiryBandAsync: what OI Replay's live "Σ 3 expiries" adds to the nearest expiry (live only - a past
+    /// day is refused). Its date is worked out as the run's is - the nearest expiry of the series, then the next after it
+    /// (OptionExpiryResolver) - for the page's label only; never a reason for the band to fail.</summary>
     [HttpGet("{underlying}/expiry-band")]
     public async Task<ActionResult> ExpiryBand(
         string underlying,

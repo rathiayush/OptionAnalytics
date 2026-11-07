@@ -154,11 +154,12 @@ public sealed record OiReplayResult(
             Array.Empty<FuturesBar>(), null, false, null);
 }
 
-/// <summary>One day's option band of the 2nd or 3rd nearest expiry (OiReplayService.ExpiryBandAsync) - the OI OI Replay's
-/// "Σ 3 expiries" adds to the nearest expiry's. LiveFlag = the live feed's chain of it (N2 / N3). DhanBandSteps = the
-/// strikes either side of the ATM asked of Dhan (3 - all its rolling options give for an expiry that is not the nearest),
-/// null when Dhan was not asked (today, the live feed holding the day from the open); LiveFrom = today, the minute from
-/// which the live feed's own bars (ATM±10) are used. OptionExpiry = the expiry's date when it could be worked out.</summary>
+/// <summary>Today's option band of the next or the monthly expiry (OiReplayService.ExpiryBandAsync) - what OI Replay's live
+/// "Σ 3 expiries" adds to the nearest expiry. LiveFlag = the live feed's chain of it (N2 / MONTH). DhanBandSteps = the
+/// strikes either side of the ATM asked of Dhan for the minutes before the live feed's (3 for the next expiry - all its
+/// rolling options give for an expiry that is not the nearest; 10 for the monthly), null when Dhan was not asked (the live
+/// feed holding the day from the open); LiveFrom = the minute from which the live feed's own bars (ATM±10) are used.
+/// OptionExpiry = the expiry's date when it could be worked out.</summary>
 public sealed record OiReplayExpiryBand(
     bool Success,
     string? Error,
@@ -176,5 +177,5 @@ public sealed record OiReplayExpiryBand(
     public DateOnly? OptionExpiry { get; init; }
 
     public static OiReplayExpiryBand Failed(string underlying, DateOnly date, string expiryFlag, int expiryCode, string error) =>
-        new(false, error, underlying, date, expiryFlag, expiryCode, $"N{expiryCode}", Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
+        new(false, error, underlying, date, expiryFlag, expiryCode, expiryCode == 1 ? "MONTH" : "N2", Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
 }
