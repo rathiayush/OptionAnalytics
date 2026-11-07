@@ -33,8 +33,8 @@ public sealed class SignalBacktestJobService : BackgroundService
     public static readonly TimeSpan MaxStartAhead = TimeSpan.FromDays(14);
     public const int MaxSettingsBytes = 64 * 1024;
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
-    /// <summary>MAX_BACKGROUND_DAYS - the job runs the latest 300 weekdays of a longer range.</summary>
-    public const int MaxDays = 300;
+    /// <summary>MAX_BACKGROUND_DAYS - the job runs the latest 1 500 weekdays (about six years) of a longer range.</summary>
+    public const int MaxDays = 1500;
     /// <summary>What a run is: the rule's backtest, or the Feature finder's table and report.</summary>
     public static readonly string[] Kinds = { "backtest", "features" };
     /// <summary>The Feature finder's labels (featureFinder.js LABELS) - each one's report is in a features run's result.</summary>
@@ -345,6 +345,8 @@ public sealed class SignalBacktestJobService : BackgroundService
     internal static JsonNode SummaryOf(JsonNode body)
     {
         double? Num(JsonNode? n) => n is JsonValue v && v.TryGetValue<double>(out var d) && double.IsFinite(d) ? d : null;
+        // A run that stopped asking after days in a row failed on the way says why (the job's `stopped`).
+        var stopped = (body["stopped"] as JsonValue)?.TryGetValue<string>(out var why) == true && why.Length > 0 ? why : null;
         if ((body["kind"] as JsonValue)?.TryGetValue<string>(out var kind) == true && kind == "features")
         {
             var f = body["features"];
@@ -366,6 +368,7 @@ public sealed class SignalBacktestJobService : BackgroundService
                 ["split"] = (reports?["fwd30"]?["split"] as JsonValue)?.TryGetValue<bool>(out var split) == true && split,
                 ["held"] = held,
                 ["best"] = best,
+                ["stopped"] = stopped,
             };
         }
         var report = body["report"];
@@ -377,6 +380,7 @@ public sealed class SignalBacktestJobService : BackgroundService
             ["winRate"] = Num(all?["winRate"]),
             ["okDays"] = Num(report?["okDays"]),
             ["failedDays"] = (double)((report?["failed"] as JsonArray)?.Count ?? 0),
+            ["stopped"] = stopped,
         };
     }
 
@@ -388,24 +392,25 @@ public sealed class SignalBacktestJobService : BackgroundService
         if (job.State != "done") return $"⚠️ <b>{what} failed</b> - {name}\n{WebUtility.HtmlEncode(job.Error ?? "unknown error")}";
         var s = job.Summary;
         double? Num(string key) => s?[key] is JsonValue v && v.TryGetValue<double>(out var d) ? d : null;
+        var stoppedNote = s?["stopped"] is JsonValue sv0 && sv0.TryGetValue<string>(out var stoppedWhy) ? $"\n⛔ Stopped early: {WebUtility.HtmlEncode(stoppedWhy)}" : "";
         if (job.Kind == "features")
         {
             var notRun = Num("failedDays") is > 0 and var nr ? $" · {nr:0} day(s) not run" : "";
             var head = $"🔬 <b>Feature finder done</b> - {name}\n{(Num("rows") ?? 0):0} candles · {(Num("okDays") ?? 0):0} days{notRun}";
             if (s?["split"] is not JsonValue sv || !sv.TryGetValue<bool>(out var split) || !split)
-                return $"{head}\nToo few days for the earlier / later check - open it on the page, download the dataset CSV.";
+                return $"{head}\nToo few days for the earlier / later check - open it on the page, download the dataset CSV.{stoppedNote}";
             int Held(string key) => s?["held"]?[key] is JsonValue v && v.TryGetValue<int>(out var c) ? c : 0;
             var lines = string.Join(" · ", FeatureTargets.Where(t => TelegramHeld.Contains(t.Key)).Select(t => $"{t.Name} {Held(t.Key)}"));
             var best = FeatureTargets.Where(t => TelegramBest.Contains(t.Key))
                 .Select(t => s?["best"]?[t.Key] is JsonValue b && b.TryGetValue<string>(out var bn) ? $"\nBest for {t.Name}: {WebUtility.HtmlEncode(bn)}" : "");
-            return $"{head}\nReadings that held on the later days: {lines}{string.Concat(best)}";
+            return $"{head}\nReadings that held on the later days: {lines}{string.Concat(best)}{stoppedNote}";
         }
         var net = Num("net") ?? 0;
         var india = CultureInfo.GetCultureInfo("en-IN");
         var rupees = $"{(net < 0 ? "−" : "")}₹{Math.Abs(Math.Round(net)).ToString("N0", india)}";
         var win = Num("winRate") is { } w ? $" · {w:0}% win" : "";
         var failed = Num("failedDays") is > 0 and var f ? $" · {f:0} day(s) not run" : "";
-        return $"📊 <b>Signal backtest done</b> - {name}\nNet {rupees} · {(Num("trades") ?? 0):0} trades{win} · {(Num("okDays") ?? 0):0} days{failed}";
+        return $"📊 <b>Signal backtest done</b> - {name}\nNet {rupees} · {(Num("trades") ?? 0):0} trades{win} · {(Num("okDays") ?? 0):0} days{failed}{stoppedNote}";
     }
 
     private async Task NotifyAsync(string text)

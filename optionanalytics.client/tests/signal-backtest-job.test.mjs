@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
-import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
+import { BACKTEST_DEFAULTS, MAX_BACKGROUND_DAYS, backtestDays, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
   backtestReport, cleanBacktestSettings, dayOutcome, daySource, defaultRunName, engineSettings, featureRunHead, featureTradeText, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead,
   reportReplacer, reportReviver, runRange, withIndexLevels,
@@ -499,7 +499,7 @@ test('the FEATURE FINDER in the background: the page\'s table of the same days a
     const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
       env: {
         ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26',
-        BACKTEST_KIND: 'features', BACKTEST_CSV: csv, BACKTEST_JOB: JSON.stringify(settings),
+        BACKTEST_KIND: 'features', BACKTEST_CSV: csv, BACKTEST_JOB: JSON.stringify(settings), BACKTEST_RETRY_PAUSE_MS: '0',
       },
       stdio: ['ignore', 'pipe', 'inherit'],
     })
@@ -524,7 +524,8 @@ test('the FEATURE FINDER in the background: the page\'s table of the same days a
   assert.deepEqual(Object.keys(result.features.reports), ['fwd15', 'fwd30', 'fwd60', 'ceBuy', 'peBuy', 'ceSell', 'peSell', 'up30', 'down30'])
   assert.equal(result.features.reports.ceBuy.split, true)
   assert.equal(result.features.reports.ceBuy.laterDays, 3)
-  // The day that failed on the way was asked twice, the holiday once; the progress counts the rows.
+  // The day that failed on the way was asked twice - at once, so the CSV stays in date order - the holiday once; the
+  // progress counts the rows.
   const runs = (date) => asked.filter((a) => a.path.endsWith('/run') && a.date === date).length
   assert.deepEqual([runs('2026-10-14'), runs(HOLIDAY), runs('2026-10-12')], [2, 1, 1])
   assert.deepEqual(progress.filter((p) => p.stage === 'retry').map((p) => p.day), ['2026-10-14'])
@@ -540,4 +541,75 @@ test('a Feature finder run\'s name and heading: the index, the days, the candles
   const more = { ...s, moneyness: -2, levelUnit: 'pts', trailGap: 10, trailStart: 5, timeStopMin: 30, sumExpiries: true }
   assert.equal(featureTradeText(more), '5m candles · OI Σ 3 expiries · 2 OTM CE / PE bought: SL 30 pts · target 60 pts · trail 10 pts after +5 pts · out after 30 min')
   assert.equal(featureRunHead({ ...s, targetPct: 0 }, 1), 'BANKNIFTY · 1 day · 3 Aug 2026 – 23 Oct 2026 · 5m candles · ATM CE / PE bought: SL 30% · target none')
+})
+
+// The job script run as the server runs it, against `handle` (the fake server's /run answer for a date), for `dates`.
+async function runJob(t, { kind = 'backtest', dates, handle }) {
+  const asked = []
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const date = url.searchParams.get('date')
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, PREV)
+    if (url.pathname === '/api/oi-replay/NIFTY/run') { asked.push(date); const [status, body] = handle(date); return json(status, body) }
+    return json(404, { error: 'not mocked' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json'), csv = join(dir, 'features.csv')
+  const settings = cleanBacktestSettings({ ...SETTINGS, from: dates[0], to: dates.at(-1), timeframe: 5 })
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
+      env: {
+        ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_CSV: csv,
+        BACKTEST_TODAY: '2026-10-26', BACKTEST_KIND: kind, BACKTEST_RETRY_PAUSE_MS: '0', BACKTEST_JOB: JSON.stringify(settings),
+      },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    })
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  return { code, asked, result: JSON.parse(readFileSync(out, 'utf8'), reportReviver), csv: kind === 'features' ? readFileSync(csv, 'utf8') : null }
+}
+
+test('a run whose days keep failing on the way STOPS after 5 in a row - the days after not asked, the result says why', async (t) => {
+  const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23']
+  // The first two days answer; from the third the server is down (503) - except a holiday answered in the middle, which
+  // starts the count again: 14, 15 fail, 16 the holiday, then 19, 20, 21, 22, 23 ... the fifth in a row is 23 Oct.
+  const handle = (date) => (date < '2026-10-14' ? [200, runFor(date)] : date === '2026-10-16' ? [200, { success: false, error: 'holiday' }] : [503, { error: 'busy' }])
+  for (const kind of ['backtest', 'features']) {
+    const { code, asked, result, csv } = await runJob(t, { kind, dates, handle })
+    assert.equal(code, 0)
+    assert.equal(result.ok, true)
+    assert.match(result.stopped, /^5 days in a row failed on the way \(the last: busy\)/)
+    const failed = kind === 'features' ? result.features.failed : result.report.failed
+    assert.deepEqual(failed.map((f) => f.date), dates.slice(2), kind)
+    assert.equal(failed.find((f) => f.date === '2026-10-16').reason, 'holiday')
+    // A backtest tries the failed days again at the end - not once it has stopped; a Feature finder run tries each at once.
+    const times = (date) => asked.filter((d) => d === date).length
+    for (const date of ['2026-10-14', '2026-10-15', '2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23']) {
+      assert.equal(times(date), kind === 'features' ? 2 : 1, `${kind} ${date}`)
+    }
+    if (kind === 'features') {
+      assert.equal(result.features.okDays, 2)
+      assert.equal(csv.trim().split('\n').length - 1, result.features.rows)
+    } else {
+      assert.equal(result.report.okDays, 2)
+    }
+  }
+  // Fewer than 5 in a row: no stop - every day asked, the failed ones tried again.
+  const short = await runJob(t, { dates: dates.slice(0, 6), handle: (date) => (date === '2026-10-14' || date === '2026-10-15' ? [503, { error: 'busy' }] : [200, runFor(date)]) })
+  assert.equal(short.result.stopped, undefined)
+  assert.deepEqual(short.result.report.failed.map((f) => f.date), ['2026-10-14', '2026-10-15'])
+  assert.equal(short.asked.filter((d) => d === '2026-10-14').length, 2)
+})
+
+test('up to 1 500 weekdays in the background, the latest of a longer range', () => {
+  assert.equal(MAX_BACKGROUND_DAYS, 1500)
+  const all = backtestDays('2018-01-01', '2026-10-23', '2026-10-26', MAX_BACKGROUND_DAYS)
+  assert.equal(all.length, 1500)
+  assert.equal(all.at(-1), '2026-10-23')
+  assert.equal(all[0] > '2020-11-01' && all[0] < '2021-01-31', true, all[0])     // about 5.75 years of weekdays
 })

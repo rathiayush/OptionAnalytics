@@ -292,8 +292,9 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         Assert.Equal(("2026-10-19", "2026-10-23"), (plan.From, plan.To));          // swapped into order
         Assert.Equal("BANKNIFTY", plan.Settings["underlying"]!.GetValue<string>());
         Assert.Equal("BANKNIFTY 19 Oct – 23 Oct", plan.Name);
-        Assert.Equal(SignalBacktestJobService.MaxDays, SignalBacktestJobService.Validate(Request(Settings(from: "2024-01-01", to: "2026-10-25")), Now).Plan!.Days);   // the latest 300
-        Assert.Equal(300, SignalBacktestJobService.MaxDays);
+        Assert.Equal(SignalBacktestJobService.MaxDays, SignalBacktestJobService.Validate(Request(Settings(from: "2018-01-01", to: "2026-10-25")), Now).Plan!.Days);   // the latest 1 500
+        Assert.Equal(1500, SignalBacktestJobService.MaxDays);
+        Assert.Equal(735, SignalBacktestJobService.Validate(Request(Settings(from: "2024-01-01", to: "2026-10-25")), Now).Plan!.Days);   // nearly 3 years: all of it
         Assert.Equal(212, SignalBacktestJobService.Validate(Request(Settings(from: "2026-01-01", to: "2026-10-25")), Now).Plan!.Days);   // a range under it: all of it
         Assert.Equal(1, SignalBacktestJobService.Validate(Request(Settings(from: "2026-10-23", to: "2026-10-30")), Now).Plan!.Days);   // before today only
     }
@@ -385,6 +386,28 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         Assert.Equal("backtest", Service(GoodScript()).Get(backtest.Id, null)!.Kind);
         Assert.Contains("backtest or the Feature finder", SignalBacktestJobService.Validate(Request() with { Kind = "tuning" }, Now).Error);
         Assert.Equal("my run", SignalBacktestJobService.Validate(Request() with { Kind = "features" }, Now).Plan!.Name);
+    }
+
+    [Fact]
+    public async Task A_run_that_stopped_asking_says_why_in_its_summary_and_telegram()
+    {
+        var telegrams = new List<string>();
+        var s = Service(Script("""
+            import { writeFileSync } from 'node:fs'
+            writeFileSync(process.env.BACKTEST_OUT, JSON.stringify({ ok: true, settings: JSON.parse(process.env.BACKTEST_JOB),
+              stopped: '5 days in a row failed on the way (the last: HTTP 503 <busy>) - the server or Dhan was not answering, so nothing more was asked',
+              report: { all: { net: -500, trades: 2, winRate: 50 }, okDays: 3, failed: [{ date: '2026-10-22' }, { date: '2026-10-23' }], trades: [] } }))
+            """), telegrams);
+        var job = s.Add("a@x.com", Request(), Now).Job!;
+        s.TryStartNext(Now);
+        var done = await UntilEnded(s, job.Id);
+        Assert.Equal("done", done.State);
+        Assert.StartsWith("5 days in a row failed on the way", done.Summary!["stopped"]!.GetValue<string>());
+        var message = Assert.Single(telegrams);
+        Assert.Contains("⛔ Stopped early: 5 days in a row failed on the way (the last: HTTP 503 &lt;busy&gt;)", message);
+        Assert.Contains("2 day(s) not run", message);
+        // One that ran to the end has none.
+        Assert.Null(SignalBacktestJobService.SummaryOf(JsonNode.Parse("{\"ok\":true,\"report\":{\"all\":{}}}")!)["stopped"]);
     }
 
     [Fact]

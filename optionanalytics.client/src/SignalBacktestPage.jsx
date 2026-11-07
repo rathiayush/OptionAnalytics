@@ -303,6 +303,8 @@ const pnlColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 // The days prepared, for the tab's life (a past day never changes; a failed load is not kept - it is asked again next run).
 const PREPARED = new Map()
 const PREPARED_MAX = 150
+// The day-by-day table's page - a background run's report can hold up to MAX_BACKGROUND_DAYS days.
+const DAY_PAGE = 60
 function remember(key, day) {
   PREPARED.set(key, day)
   while (PREPARED.size > PREPARED_MAX) PREPARED.delete(PREPARED.keys().next().value)
@@ -816,7 +818,7 @@ export default function SignalBacktestPage() {
                   </Button>
                 </Tooltip>
                 <Tooltip title={touch ? null : loadedDays.length ? `Every reading the rule builder has, at every candle of the ${loadedDays.length} days loaded, against what happened after it - which ones told it on the earlier days AND still did on the later ones; the whole table as CSV` : `Run it in the background over the ${backgroundDays} days picked - or run the backtest first to see it here on the days it loads`}>
-                  {/* No days loaded: it runs on the server over the days picked (up to 300). */}
+                  {/* No days loaded: it runs on the server over the days picked (up to MAX_BACKGROUND_DAYS). */}
                   <Button size="small" icon={<ExperimentOutlined />} onClick={() => (loadedDays.length ? setFeaturesOpen(true) : setBgOpen('features'))} disabled={(!loadedDays.length && !backgroundDays) || running}>
                     Feature finder
                   </Button>
@@ -1141,8 +1143,10 @@ export default function SignalBacktestPage() {
               <Table size="small" pagination={false} scroll={{ x: 1100 + 100 * (sides.length > 1 ? sides.length : 0) }} columns={monthColumns} dataSource={months} />
             </Card>
             <Card size="small" title="Day by day">
+              {/* A long run (a background one goes back up to MAX_BACKGROUND_DAYS) in pages - 1 500 rows at once froze a phone. */}
               <Table
-                size="small" pagination={false} scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows}
+                size="small" scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows}
+                pagination={report.dayRows.length > DAY_PAGE ? { pageSize: DAY_PAGE, showSizeChanger: false, size: 'small' } : false}
                 onRow={(r) => ({ onClick: () => r.ok && showOnChart(r.date), style: r.ok ? { cursor: 'pointer' } : undefined })}
               />
             </Card>

@@ -2254,8 +2254,9 @@ export function simulateRun(days, settings = {}) {
 
 export const MAX_BACKTEST_DAYS = 60
 // A run in the BACKGROUND (the server's queue - scanner-runner/signal-backtest.mjs) replays each day and keeps only its
-// outcome, so it can go much further back than the page, which holds every day it loaded.
-export const MAX_BACKGROUND_DAYS = 300
+// outcome (a Feature finder run its rows as columns), so it can go much further back than the page, which holds every day
+// it loaded: 1 500 weekdays, about six years (asked for - "1500 days please, background job can no longer only run on 300").
+export const MAX_BACKGROUND_DAYS = 1500
 
 /** The days a backtest runs: the weekdays from `from` to `to` ('YYYY-MM-DD'), before `today`, at most `max` (the latest
  *  kept). A holiday is in the list - the server says it has no data and the day is shown as not run. */

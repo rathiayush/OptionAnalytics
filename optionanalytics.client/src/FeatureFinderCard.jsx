@@ -12,7 +12,7 @@ const { Text } = Typography
 // every reading the rule builder reads, at every candle of the days the page has loaded, against what happened after it -
 // ranked by how well it told that on the EARLIER days and whether it still did on the LATER days. The table for your own
 // model is one click away (CSV). Nothing is loaded again: the days are the page's run's. A BACKGROUND run of it (the server,
-// up to 300 days - scanner-runner/signal-backtest.mjs) is opened by StoredFeatureFinderCard: the same report, kept for every
+// up to MAX_BACKGROUND_DAYS - scanner-runner/signal-backtest.mjs) is opened by StoredFeatureFinderCard: the same report, kept for every
 // label, and its dataset CSV from the server.
 
 const TARGETS = [
@@ -230,7 +230,7 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
           build it in the rule builder and run it through the backtest with charges. The CSV is the whole table (a row a
           candle, a column a reading and what came next) for a spreadsheet or your own model. The order flow (the
           footprint&apos;s delta, the book heatmap) is not in it: the server keeps those days for 30 days only. Run in the
-          background, it takes up to 300 days - more days, a fairer check.
+          background, it takes up to 1,500 days - more days, a fairer check.
         </Text>
       </FoldText>
     </Space>

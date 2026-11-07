@@ -3,6 +3,7 @@ import { Button, Card, Checkbox, DatePicker, Input, Modal, Popconfirm, Progress,
 import { DeleteOutlined, DownloadOutlined, ExperimentOutlined, FolderOpenOutlined, StopOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
+import { MAX_BACKGROUND_DAYS } from './signalBacktest.js'
 import { defaultRunName, featureTradeText, runRange } from './signalBacktestJob.js'
 import { afterTheClose, cancelRun, deleteRun, downloadFeaturesCsv, queueRun } from './signalBacktestQueue.js'
 
@@ -58,7 +59,7 @@ export function RunInBackgroundModal({ settings, days, ruleSummary, telegram, se
         </div>
         <Text type="secondary" style={{ fontSize: 12 }}>
           {features
-            ? <>The server builds the Feature finder over these days - every reading at every candle against what came next - and keeps its report and the dataset CSV under &quot;Background runs&quot; (Open / CSV). Up to 300 days: more days, a fairer earlier / later check.</>
+            ? <>The server builds the Feature finder over these days - every reading at every candle against what came next - and keeps its report and the dataset CSV under &quot;Background runs&quot; (Open / CSV). Up to {MAX_BACKGROUND_DAYS.toLocaleString('en-IN')} days: more days, a fairer earlier / later check.</>
             : <>The server runs it with the same rule and settings as this page - close the browser or lock the phone. Its report waits under &quot;Background runs&quot; here.</>}
           {' '}Runs go one at a time; days the server has kept are quick, a day it has not comes from Dhan once.
         </Text>
@@ -143,11 +144,14 @@ function FeaturesResult({ s }) {
 // A running run's days asked of Dhan so far (a day nothing had loaded before - the server keeps it after): why one goes slower.
 const fromDhan = (p) => (p?.sources?.dhan > 0 ? ` · ${p.sources.dhan} day${p.sources.dhan === 1 ? '' : 's'} asked of Dhan (first time)` : '')
 
+// A run that stopped asking after days in a row failed on the way (the server or Dhan not answering): why.
+const Stopped = ({ s }) => (s?.stopped ? <Text type="warning" style={{ fontSize: 12, display: 'block' }}>Stopped early: {s.stopped}</Text> : null)
+
 function ResultCell({ job }) {
   const s = job.summary
   const p = job.progress
   if (job.kind === 'features') {
-    if (job.state === 'done' && s) return <FeaturesResult s={s} />
+    if (job.state === 'done' && s) return <><FeaturesResult s={s} /><Stopped s={s} /></>
     if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {(p.rows ?? 0).toLocaleString('en-IN')} candles · {p.okDays ?? 0} days{fromDhan(p)}</Text>
     if (job.state === 'failed') return <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>
     return null
@@ -157,6 +161,7 @@ function ResultCell({ job }) {
       <Text style={{ fontSize: 12 }}>
         <Text strong style={{ color: pnlColor(s.net) }}>{rupees(s.net)}</Text> · {s.trades ?? 0} trades{Number.isFinite(s.winRate) ? ` · ${Math.round(s.winRate)}% win` : ''}
         {s.failedDays > 0 ? <Text type="secondary" style={{ fontSize: 12 }}> · {s.failedDays} day{s.failedDays === 1 ? '' : 's'} not run</Text> : null}
+        <Stopped s={s} />
       </Text>
     )
   }

@@ -256,38 +256,50 @@ export function dayRows(day, { timeframe = 5, ...levels } = {}) {
   return rows
 }
 
-/** Spearman's rank correlation of the pairs (x, y) with both numbers (ties take their average rank); NaN under 10 pairs. */
+/** Spearman's rank correlation of the pairs (x, y) with both numbers (ties take their average rank); NaN under 10 pairs.
+ *  Typed arrays throughout - a background run's later days are 150 000+ pairs a feature. */
 export function spearman(xs, ys) {
-  const pairs = []
-  for (let k = 0; k < xs.length; k++) if (fin(xs[k]) && fin(ys[k])) pairs.push([xs[k], ys[k]])
-  if (pairs.length < 10) return NaN
-  const ranks = (vals) => {
-    const order = vals.map((v, k) => [v, k]).sort((a, b) => a[0] - b[0])
-    const r = new Float64Array(vals.length)
-    for (let s = 0; s < order.length;) {
-      let e = s
-      while (e + 1 < order.length && order[e + 1][0] === order[s][0]) e++
-      const avg = (s + e) / 2 + 1
-      for (let q = s; q <= e; q++) r[order[q][1]] = avg
-      s = e + 1
-    }
-    return r
-  }
-  const rx = ranks(pairs.map((p) => p[0])), ry = ranks(pairs.map((p) => p[1]))
-  const n = pairs.length
+  const X = new Float64Array(xs.length), Y = new Float64Array(xs.length)
+  let n = 0
+  for (let k = 0; k < xs.length; k++) if (fin(xs[k]) && fin(ys[k])) { X[n] = xs[k]; Y[n] = ys[k]; n++ }
+  if (n < 10) return NaN
+  const rx = ranks(X.subarray(0, n)), ry = ranks(Y.subarray(0, n))
   const mean = (n + 1) / 2
   let num = 0, dx = 0, dy = 0
   for (let k = 0; k < n; k++) { const a = rx[k] - mean, b = ry[k] - mean; num += a * b; dx += a * a; dy += b * b }
   return dx > 0 && dy > 0 ? num / Math.sqrt(dx * dy) : 0
 }
+// 1-based ranks, ties their average rank.
+function ranks(vals) {
+  const n = vals.length
+  const order = new Uint32Array(n)
+  for (let k = 0; k < n; k++) order[k] = k
+  order.sort((a, b) => vals[a] - vals[b])
+  const r = new Float64Array(n)
+  for (let s = 0; s < n;) {
+    let e = s
+    while (e + 1 < n && vals[order[e + 1]] === vals[order[s]]) e++
+    const avg = (s + e) / 2 + 1
+    for (let q = s; q <= e; q++) r[order[q]] = avg
+    s = e + 1
+  }
+  return r
+}
 
-// The rows' trades in the top / bottom fifth of a feature: how many, their win rate and average return.
-function fifths(rows, fkey, ykey) {
-  const pairs = rows.map((r) => [r.f[fkey], r.y[ykey]]).filter(([x, y]) => fin(x) && fin(y)).sort((a, b) => a[0] - b[0])
-  if (pairs.length < 25) return null
-  const cut = Math.floor(pairs.length / 5)
-  const stats = (list) => ({ n: list.length, win: (list.filter(([, y]) => y > 0).length / list.length) * 100, avg: list.reduce((a, [, y]) => a + y, 0) / list.length })
-  return { low: stats(pairs.slice(0, cut)), high: stats(pairs.slice(pairs.length - cut)), all: stats(pairs), lowMax: pairs[cut - 1][0], highMin: pairs[pairs.length - cut][0] }
+// The trades in the top / bottom fifth of a feature (`xs` / `ys` - a column each): how many, their win rate and average
+// return - the pairs with both numbers, in a stable sort by the feature.
+function fifths(xs, ys) {
+  const idx = []
+  for (let k = 0; k < xs.length; k++) if (fin(xs[k]) && fin(ys[k])) idx.push(k)
+  if (idx.length < 25) return null
+  idx.sort((a, b) => xs[a] - xs[b])
+  const cut = Math.floor(idx.length / 5)
+  const stats = (list) => {
+    let wins = 0, sum = 0
+    for (const k of list) { if (ys[k] > 0) wins++; sum += ys[k] }
+    return { n: list.length, win: (wins / list.length) * 100, avg: sum / list.length }
+  }
+  return { low: stats(idx.slice(0, cut)), high: stats(idx.slice(idx.length - cut)), all: stats(idx), lowMax: xs[idx[cut - 1]], highMin: xs[idx[idx.length - cut]] }
 }
 
 /** The smallest |correlation| on the later days, with the same sign as on the earlier ones, for a feature to "hold". */
@@ -295,52 +307,97 @@ export const HOLD_IC = 0.05
 /** The later days' share of the days (the rest - the earlier ones - first). */
 export const TEST_SHARE = 1 / 3
 
+/** One day's rows as COLUMNS - { date, n, f: { key: Float64Array }, y: { key: Float64Array } }, in the rows' order: what
+ *  the report reads. A background run keeps only these (8 bytes a number - 1 500 days of 1-minute rows as objects did not
+ *  fit), the page makes them from its rows (`dayTables`). */
+export function dayTable(date, rows) {
+  const col = (pick) => Float64Array.from(rows, pick)
+  return {
+    date, n: rows.length,
+    f: Object.fromEntries(FEATURES.map((f) => [f.key, col((r) => r.f[f.key])])),
+    y: Object.fromEntries(LABELS.map((l) => [l.key, col((r) => r.y[l.key])])),
+  }
+}
+/** Rows (any order of days) as day tables in date order, each day's rows in their order. */
+export function dayTables(rows) {
+  const byDate = new Map()
+  for (const r of rows) {
+    if (!byDate.has(r.date)) byDate.set(r.date, [])
+    byDate.get(r.date).push(r)
+  }
+  return [...byDate.keys()].sort().map((date) => dayTable(date, byDate.get(date)))
+}
+// The days' column `kind` ('f' / 'y') `key`, one after the other.
+function joined(days, kind, key) {
+  let n = 0
+  for (const d of days) n += d.n
+  const out = new Float64Array(n)
+  let at = 0
+  for (const d of days) { out.set(d[kind][key], at); at += d.n }
+  return out
+}
+
 /**
  * The report: for every feature and the label `target`, the correlation on the EARLIER days (the first 2/3 of the dates)
  * and on the LATER ones; it HOLDS when both have the same sign and the later one is at least HOLD_IC; `dayAgree` = the
  * share of the later days whose own correlation has the earlier sign (one big day cannot carry it); `fifths` - the trades'
  * win rate in the feature's top and bottom fifth on the later days (a trade label) or the move's average (a spot label).
  * Sorted: what holds first, by the later correlation's size. With under 6 days there is no honest split - every day is
- * in both, `split: false`.
+ * in both, `split: false`. `featureReport(rows)` = `featureReportOfDays(dayTables(rows))`.
  */
 export function featureReport(rows, target = 'fwd30') {
-  const dates = [...new Set(rows.map((r) => r.date))].sort()
+  return featureReportOfDays(dayTables(rows), target)
+}
+/** The report of day tables in date order (`dayTable`). `cache` - the labels' columns joined once, shared by every label's
+ *  report; a feature's column is joined when it is read and dropped after (1 500 days of 1-minute rows kept them all
+ *  twice over - 800 MB). */
+export function featureReportOfDays(days, target = 'fwd30', cache = new Map()) {
+  const dates = days.map((d) => d.date)
   const split = dates.length >= 6
   const firstLater = split ? dates[Math.floor(dates.length * (1 - TEST_SHARE))] : null
-  const early = split ? rows.filter((r) => r.date < firstLater) : rows
-  const later = split ? rows.filter((r) => r.date >= firstLater) : rows
-  const laterDays = split ? dates.filter((x) => x >= firstLater) : dates
-  // Each later day's rows, grouped once (a background run's 100 later days x 36 features would filter them 3600 times).
-  const byDay = new Map(laterDays.map((day) => [day, []]))
-  for (const r of later) byDay.get(r.date)?.push(r)
+  const earlyDays = split ? days.filter((d) => d.date < firstLater) : days
+  const laterDays = split ? days.filter((d) => d.date >= firstLater) : days
+  const column = (part, list, kind, key) => {
+    const k = `${part}|${kind}|${key}`
+    if (!cache.has(k)) cache.set(k, joined(list, kind, key))
+    return cache.get(k)
+  }
+  const earlyY = column('early', earlyDays, 'y', target), laterY = column('later', laterDays, 'y', target)
   const out = FEATURES.map((f) => {
-    const ic = (list) => spearman(list.map((r) => r.f[f.key]), list.map((r) => r.y[target]))
-    const icEarly = ic(early), icLater = ic(later)
+    const earlyX = joined(earlyDays, 'f', f.key), laterX = joined(laterDays, 'f', f.key)
+    const icEarly = spearman(earlyX, earlyY), icLater = spearman(laterX, laterY)
     let agree = 0, counted = 0
-    for (const day of laterDays) {
-      const own = ic(byDay.get(day))
+    for (const d of laterDays) {
+      const own = spearman(d.f[f.key], d.y[target])
       if (!fin(own) || !fin(icEarly) || own === 0) continue
       counted++
       if (Math.sign(own) === Math.sign(icEarly)) agree++
     }
+    let filled = 0
+    for (let k = 0; k < laterX.length; k++) if (fin(laterX[k])) filled++
     const holds = split && fin(icEarly) && fin(icLater) && Math.sign(icEarly) === Math.sign(icLater) && Math.abs(icLater) >= HOLD_IC
     return {
       key: f.key, group: f.group, name: f.name, icEarly, icLater, holds,
       dayAgree: counted ? (agree / counted) * 100 : NaN, days: counted,
-      fifths: fifths(later, f.key, target),
-      coverage: (later.filter((r) => fin(r.f[f.key])).length / Math.max(1, later.length)) * 100,
+      fifths: fifths(laterX, laterY),
+      coverage: (filled / Math.max(1, laterX.length)) * 100,
     }
   })
   out.sort((a, b) => (b.holds - a.holds) || (Math.abs(b.icLater || 0) - Math.abs(a.icLater || 0)))
   return {
     target, split, days: dates.length, earlyDays: split ? dates.length - laterDays.length : dates.length, laterDays: laterDays.length,
-    firstLater, rows: rows.length, earlyRows: early.length, laterRows: later.length, features: out,
+    firstLater, rows: earlyY.length + (split ? laterY.length : 0), earlyRows: earlyY.length, laterRows: laterY.length, features: out,
   }
 }
 
 /** The report for EVERY label ({ fwd15: featureReport(rows, 'fwd15'), ... }) - what a background Feature finder run keeps,
  *  so its card switches label as the page's does, with nothing worked out again. */
-export const featureReports = (rows) => Object.fromEntries(LABELS.map((l) => [l.key, featureReport(rows, l.key)]))
+export const featureReports = (rows) => featureReportsOfDays(dayTables(rows))
+/** The same from day tables (a background run's), each feature's columns joined once for all the labels. */
+export function featureReportsOfDays(days) {
+  const cache = new Map()
+  return Object.fromEntries(LABELS.map((l) => [l.key, featureReportOfDays(days, l.key, cache)]))
+}
 
 const cell = (v) => {
   if (typeof v === 'number') return fin(v) ? String(Math.round(v * 10000) / 10000) : ''
@@ -352,10 +409,15 @@ const istClock = (ms) => { const m = istMinute(ms); return `${String(Math.floor(
 /** The table as CSV - date, time, every feature (the expiry day one of them), every label - for a spreadsheet or your own
  *  model. One column a name: an `expiry` column of the row's own beside the `expiry` feature came out twice. */
 export function rowsCsv(rows) {
-  const head = ['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)]
-  const lines = [head.join(',')]
-  for (const r of rows) lines.push([r.date, istClock(r.time), ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(','))
-  return `${lines.join('\n')}\n`
+  return `${csvHeader()}${csvLines(rows)}`
+}
+/** The CSV's header line (with its newline). */
+export const csvHeader = () => `${['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(',')}\n`
+/** The CSV's lines for `rows` (each with its newline) - a background run writes a day's at a time. */
+export function csvLines(rows) {
+  let out = ''
+  for (const r of rows) out += `${[r.date, istClock(r.time), ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(',')}\n`
+  return out
 }
 
 /** The features' names, keys first - the CSV's legend. */

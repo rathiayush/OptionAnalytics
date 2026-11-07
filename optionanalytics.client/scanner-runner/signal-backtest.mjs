@@ -4,8 +4,12 @@
 // page's own code (signalBacktestJob.js - the same report the page would show) and the report written to one JSON file.
 // Read-only: it places nothing and changes no setting.
 // A FEATURE FINDER run (BACKTEST_KIND=features) loads the same days and builds the page's Feature finder over them instead
-// (featureFinder.js - dayRows of each day, featureReport for every label): the whole table to BACKTEST_CSV, the reports to
-// the result file - a day at a time too (only its rows kept).
+// (featureFinder.js - dayRows of each day, featureReport for every label): each day's lines written to BACKTEST_CSV as it
+// comes and only its rows as COLUMNS kept (dayTable - 1 500 days of 1-minute rows are ~474 000 rows), the reports to the
+// result file at the end.
+// Up to MAX_BACKGROUND_DAYS (1 500) weekdays. A run whose days keep failing ON THE WAY (a timeout, the network, a server
+// error - the server or Dhan not answering) STOPS after STOP_AFTER of them in a row: the days not asked are listed as not
+// run and the result says why (`stopped`) - never hundreds of days of failing calls.
 //
 // Environment (from the server):
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
@@ -14,12 +18,13 @@
 //   BACKTEST_KIND                 "backtest" (default) or "features"
 //   BACKTEST_CSV                  a features run's dataset file
 //   BACKTEST_TODAY                (tests only) today's IST date - the days run are the weekdays before it
+//   BACKTEST_RETRY_PAUSE_MS       (tests only) the pause before a Feature finder day is tried again (5 s)
 // Progress goes to stdout as lines "PROGRESS {json}".
 
-import { writeFileSync, renameSync } from 'node:fs'
+import { closeSync, openSync, renameSync, writeFileSync, writeSync } from 'node:fs'
 import { MAX_BACKGROUND_DAYS, backtestDays } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
-import { dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
+import { csvHeader, csvLines, dayRows, dayTable, featureReportsOfDays } from '../src/featureFinder.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -28,6 +33,9 @@ const KIND = process.env.BACKTEST_KIND === 'features' ? 'features' : 'backtest'
 const CSV = process.env.BACKTEST_CSV ?? 'signal-backtest-features.csv'
 // A day the server has not kept yet comes from Dhan (spot, 42 option series, futures) at the shared 5 a second - no hurry here.
 const DAY_TIMEOUT_MS = Number(process.env.BACKTEST_DAY_TIMEOUT_MS) || 600_000
+const RETRY_PAUSE_MS = Number.isFinite(Number(process.env.BACKTEST_RETRY_PAUSE_MS)) && process.env.BACKTEST_RETRY_PAUSE_MS !== '' ? Number(process.env.BACKTEST_RETRY_PAUSE_MS) : 5_000
+/** Days in a row that failed on the way before the run stops asking. */
+const STOP_AFTER = 5
 const startedUtc = new Date().toISOString()
 
 const nativeFetch = globalThis.fetch
@@ -51,6 +59,23 @@ const load = async (underlying, date, options) => {
   if (underlying === settings.underlying) sources.set(date, daySource(day))
   return day
 }
+// Days that failed ON THE WAY in a row (`retry` - a timeout, the network, a server error): STOP_AFTER of them stops the run.
+// A day that answered - run, or with no data (a holiday) - starts the count again.
+function newBreaker() {
+  let inRow = 0
+  const b = {
+    stopped: false, why: null, notAsked: null,
+    saw({ retry, reason }) {
+      if (!retry) { inRow = 0; return }
+      if (++inRow < STOP_AFTER) return
+      b.stopped = true
+      b.why = `${STOP_AFTER} days in a row failed on the way (the last: ${reason}) - the server or Dhan was not answering, so nothing more was asked`
+      b.notAsked = `not asked - the run stopped after ${STOP_AFTER} days in a row failed on the way`
+    },
+  }
+  return b
+}
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function main() {
   settings = cleanBacktestSettings(JSON.parse(process.env.BACKTEST_JOB ?? '{}'))
@@ -75,58 +100,75 @@ async function main() {
     const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
     const tradeDay = settings.tradeIn && day.ok ? await load(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
     outcomes.set(date, dayOutcome(date, day, engine, tradeDay))
-    return { retry: Boolean(day.retry || tradeDay?.retry) }
+    return { retry: Boolean(day.retry || tradeDay?.retry), reason: day.ok ? tradeDay?.reason : day.reason }
   }
+  const breaker = newBreaker()
   const again = []
   for (let k = 0; k < dates.length; k++) {
+    if (breaker.stopped) { outcomes.set(dates[k], dayOutcome(dates[k], { ok: false, reason: breaker.notAsked }, engine)); continue }
     progress({ stage: 'day', day: dates[k], done: k, total: dates.length, ...totals() })
     const day = await runDay(dates[k])
+    breaker.saw(day)
     if (day.retry) again.push(dates[k])
   }
-  // One more try for a day that failed on the way (a timeout, a server error) - not for one with no data, and never a loop.
-  for (let k = 0; k < again.length; k++) {
+  // One more try for a day that failed on the way (a timeout, a server error) - not for one with no data, and never a loop;
+  // none once the run has stopped (it would fail the same way).
+  for (let k = 0; k < again.length && !breaker.stopped; k++) {
     progress({ stage: 'retry', day: again[k], done: dates.length, total: dates.length, ...totals() })
     await runDay(again[k])
   }
   const report = backtestReport([...outcomes.values()], settings)
-  write({ ok: true, settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(), report })
+  write({
+    ok: true, settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(), report,
+    ...(breaker.stopped ? { stopped: breaker.why } : {}),
+  })
   progress({ stage: 'done', done: dates.length, total: dates.length, ...totals() })
 }
 
 // The Feature finder over the days: each day's rows (the page's dayRows with the run's timeframe and levels - an ATM / the
-// run's strike CE and PE bought there, its SL / target / trail) as soon as it is loaded, the day itself dropped; a day that
-// failed on the way tried once more. Then the table (in date order) and every label's report.
+// run's strike CE and PE bought and sold there, its SL / target / trail) as soon as it is loaded - its CSV lines written,
+// its rows kept as columns, the day itself dropped. A day that failed on the way is tried once more AT ONCE (after a short
+// pause), so the CSV stays in date order. Then every label's report from the columns.
 async function features(dates) {
   const engine = engineSettings(settings)
-  const rows = new Map()
+  const tables = []
   const failed = new Map()
-  const count = () => { let n = 0; for (const r of rows.values()) n += r.length; return n }
-  const runDay = async (date) => {
-    const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
-    if (!day.ok) { failed.set(date, day.reason); return { retry: Boolean(day.retry) } }
-    failed.delete(date)
-    rows.set(date, dayRows(day, engine))
-    return { retry: false }
+  let rows = 0
+  const breaker = newBreaker()
+  const fd = openSync(`${CSV}.tmp`, 'w')
+  try {
+    writeSync(fd, csvHeader())
+    for (let k = 0; k < dates.length; k++) {
+      const date = dates[k]
+      if (breaker.stopped) { failed.set(date, breaker.notAsked); continue }
+      const at = { done: k, total: dates.length, rows, okDays: tables.length, sources: sourceCounts() }
+      progress({ stage: 'day', day: date, ...at })
+      const options = { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries }
+      let day = await load(settings.underlying, date, options)
+      if (day.retry) {
+        progress({ stage: 'retry', day: date, ...at })
+        await pause(RETRY_PAUSE_MS)
+        day = await load(settings.underlying, date, options)
+      }
+      breaker.saw(day)
+      if (!day.ok) { failed.set(date, day.reason); continue }
+      const list = dayRows(day, engine)
+      writeSync(fd, csvLines(list))
+      tables.push(dayTable(date, list))
+      rows += list.length
+    }
+  } finally {
+    closeSync(fd)
   }
-  const again = []
-  for (let k = 0; k < dates.length; k++) {
-    progress({ stage: 'day', day: dates[k], done: k, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
-    if ((await runDay(dates[k])).retry) again.push(dates[k])
-  }
-  for (const date of again) {
-    progress({ stage: 'retry', day: date, done: dates.length, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
-    await runDay(date)
-  }
-  progress({ stage: 'done', done: dates.length, total: dates.length, rows: count(), okDays: rows.size, sources: sourceCounts() })
-  const table = [...rows.keys()].sort().flatMap((d) => rows.get(d))
-  writeFileSync(`${CSV}.tmp`, rowsCsv(table))
   renameSync(`${CSV}.tmp`, CSV)
+  progress({ stage: 'done', done: dates.length, total: dates.length, rows, okDays: tables.length, sources: sourceCounts() })
   write({
     ok: true, kind: 'features', settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(),
+    ...(breaker.stopped ? { stopped: breaker.why } : {}),
     features: {
-      rows: table.length, okDays: rows.size, timeframe: settings.timeframe,
+      rows, okDays: tables.length, timeframe: settings.timeframe,
       failed: dates.filter((d) => failed.has(d)).map((date) => ({ date, reason: failed.get(date) })),
-      reports: featureReports(table),
+      reports: featureReportsOfDays(tables),
     },
   })
 }

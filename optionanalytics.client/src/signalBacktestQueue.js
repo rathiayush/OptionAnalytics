@@ -26,23 +26,21 @@ export const runResult = (id) => api(`${API}/${encodeURIComponent(id)}/result`)
 /** The file a Feature finder run's dataset is saved as - the page's own card names its CSV the same way. */
 export const featuresFileName = (job) => `features-${job.underlying ?? ''}-${job.settings?.timeframe ?? ''}m-${job.from ?? ''}-${job.to ?? ''}.csv`
 
-/** A finished Feature finder run's dataset CSV, saved by the browser - fetched first, so a failure is said (not a page of
- *  JSON saved as the CSV). */
-export async function downloadFeaturesCsv(job) {
-  const r = await fetch(`${API}/${encodeURIComponent(job.id)}/features.csv`)
-  if (!r.ok) {
-    const text = await r.text().catch(() => '')
-    let reason = text.slice(0, 200)
-    try { reason = JSON.parse(text)?.error ?? reason } catch { /* not JSON */ }
-    throw new Error(reason || `HTTP ${r.status}`)
-  }
-  const blob = await r.blob()
+/** A finished Feature finder run's dataset CSV, saved by the browser STRAIGHT TO DISK - a plain link (the sign-in is a
+ *  cookie), so the browser streams it: 1 500 days of 1-minute rows are ~250 MB, which a phone could not hold in memory
+ *  as a fetched blob. The server sends it compressed and names the file. */
+export function downloadFeaturesCsv(job) {
   const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
+  a.href = featuresCsvUrl(job)
   a.download = featuresFileName(job)
+  a.rel = 'noopener'
+  document.body.appendChild(a)
   a.click()
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+  a.remove()
+  return Promise.resolve()
 }
+/** Where a Feature finder run's dataset is. */
+export const featuresCsvUrl = (job) => `${API}/${encodeURIComponent(job.id)}/features.csv`
 
 /** The next close of the session (15:45 IST today) while the market is open or yet to open today, else null (= now). */
 export function afterTheClose(nowMs = Date.now()) {

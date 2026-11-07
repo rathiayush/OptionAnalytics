@@ -17,6 +17,10 @@ test('the quick ranges: past days only, each ending the day before today; last y
   assert.deepEqual(p.ytd, ['2026-01-01', '2026-11-04'])
   assert.deepEqual(p.ly, ['2025-01-01', '2025-12-31'])
   assert.match(rangePresets('2026-11-05').find((x) => x.key === 'ly').label, /2025/)
+  // The long ones for a background run (up to 1 500 weekdays): 2, 5 and 6 years back.
+  assert.deepEqual(p['2y'], ['2024-11-05', '2026-11-04'])
+  assert.deepEqual(p['5y'], ['2021-11-05', '2026-11-04'])
+  assert.deepEqual(p['6y'], ['2020-11-05', '2026-11-04'])
   // On 1 January "this year" has no past day yet - left out, not an empty range.
   assert.equal(rangePresets('2027-01-01').some((x) => x.key === 'ytd'), false)
   assert.deepEqual(rangePresets('nope'), [])

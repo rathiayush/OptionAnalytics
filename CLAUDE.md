@@ -552,7 +552,7 @@ When adding or changing a strategy:
   reached; a From after the To moves the To and the other way round (`withRangeEnd`); wider, the range picker; every one
   takes a date TYPED as 2025-01-06, 06/01/2025, 6-1-2025, 06.01.2025, 6 Jan 2025… (`DATE_INPUT_FORMATS`), past days only,
   and QUICK RANGES (`rangePresets` - last 2 weeks / month / 3 / 6 / 12 months, this year, last year - the range picker's
-  presets, a phone's dropdown); a range longer than a background run takes says it runs the latest 300) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
+  presets, a phone's dropdown - with the last 2 / 5 / 6 years for a background run); a range longer than a background run takes says it runs the latest 1 500) and BUILD ONE RULE - the only strategy (the 8 fixed strategies
   and the weighted vote were replaced by it on request) - with DROPDOWNS, no typing (asked for): a TREE of GROUPS
   (`rule.tree` - `cleanTree`, `RuleGroup` / `ConditionRow` on the page): each group "Match ALL of these (AND)" or "ANY of
   these (OR)", a NOT tick, its CONDITIONS and its own GROUPS (+ Condition / + Group ( ) - a group inside a group is a pair
@@ -849,9 +849,15 @@ When adding or changing a strategy:
   - the page's do not change it), Use settings puts its settings on the page, Cancel / Stop, Remove. The background run's
   report is the page's for the same days (`tests/signal-backtest-job.test.mjs` - the job script against a fake server;
   `SignalBacktestJobServiceTests.cs` - the queue, the time, one at a time, restart, owners, limits, Telegram). A background
-  run goes up to `MAX_BACKGROUND_DAYS` 300 weekdays (asked for - "I can schedule it for 300 days"; `SignalBacktestJobService.MaxDays`)
-  - it keeps only each day's outcome; the page's own run stays at `MAX_BACKTEST_DAYS` 60 (it holds every day it loaded)
-  and says when the range is longer than that.
+  run goes up to `MAX_BACKGROUND_DAYS` 1 500 weekdays, about six years (asked for - "I can schedule it for 300 days", then
+  "1500 days please"; `SignalBacktestJobService.MaxDays`) - it keeps only each day's outcome; the page's own run stays at
+  `MAX_BACKTEST_DAYS` 60 (it holds every day it loaded) and says when the range is longer than that; the report's Day by
+  day table goes in pages of 60 (`DAY_PAGE`). A run whose days keep failing ON THE WAY (a timeout, the network, a server
+  error - the server or Dhan not answering) STOPS after `STOP_AFTER` (5) in a row - a day that answered (run, or a
+  holiday) starts the count again: the days after are listed as not run ("not asked - ..."), no retry pass, the result's
+  `stopped` says why, and the list, the summary and the Telegram show it ("Stopped early") - never hundreds of days of
+  failing calls (Dhan support flagged loops of failing requests). A day's first load from Dhan is ~45 calls (Dhan's data
+  limit is per day too): 1 500 days nothing has loaded before is a few hours at 5 a second, from disk after.
   SAVED STRATEGIES (asked for - "save strategy ... scanned in live as daily and send daily report to telegram ... store
   history ... all csv no db"): the page's "Save strategy" keeps the rule and EVERY setting on the page by name on the
   server - CSV, no database (`SignalStrategyStore`, `{Storage:ScannerRunnerPath}/signal-strategies/strategies.csv`: id,
@@ -942,11 +948,16 @@ When adding or changing a strategy:
   (`kind` - "backtest", the default, or "features"; `SignalBacktestJobService.Kinds`; a run saved before reads as a
   backtest). The queue dialog's "Backtest the rule / Feature finder" switch picks it; the page's Feature finder button with
   no days loaded, the card's "In the background · N days" and Run in background with no rule open it on Feature finder
-  (it needs no rule). Up to 300 days: the job script (`BACKTEST_KIND=features`) loads each day as a backtest does (Σ 3
-  expiries too; Trade in not used - the CE / PE are the index's own, as on the page), keeps only its `dayRows`, tries a day
-  that failed on the way once more, then writes the whole table to `BACKTEST_CSV` - `{id}.features.csv`, kept and removed
-  with the run, `GET /api/signal-backtest/jobs/{id}/features.csv` (its owner or an admin) - and every label's report
-  (`featureReports`) to the result; no table = the run failed. The list tags it "Feature finder" with its candles, days and
+  (it needs no rule). Up to 1 500 days: the job script (`BACKTEST_KIND=features`) loads each day as a backtest does (Σ 3
+  expiries too; Trade in not used - the CE / PE are the index's own, as on the page), tries a day that failed on the way
+  once more AT ONCE (after `BACKTEST_RETRY_PAUSE_MS`, 5 s - so the file stays in date order), writes each day's lines to
+  `BACKTEST_CSV` as it comes (`csvHeader` / `csvLines`) and keeps only its rows as COLUMNS (`dayTable` - Float64Arrays;
+  1 500 days of 1-minute rows are ~474 000 rows, ~250 MB of CSV, which as row objects did not fit), then every label's
+  report from them (`featureReportsOfDays` - a feature's columns joined when read, the labels' once: ~2.5 min and ~550 MB
+  at that size; `featureReport(rows)` is the same code on `dayTables(rows)`, held identical to the row-based one it
+  replaced on a real 54-day CSV) - `{id}.features.csv`, kept and removed with the run, `GET
+  /api/signal-backtest/jobs/{id}/features.csv` (its owner or an admin; the page's CSV button is a plain link, so the
+  browser saves it straight to disk, never a blob in memory) - and the reports to the result; no table = the run failed. The list tags it "Feature finder" with its candles, days and
   how many readings held for CE buy / PE buy / spot 30m (`SummaryOf`); Open shows its report on the page
   (`StoredFeatureFinderCard` - the label switch works out nothing again), CSV downloads the table; Telegram "🔬 Feature
   finder done" with the held counts and the best reading for CE / PE buys. `tests/signal-backtest-job.test.mjs` (the job's

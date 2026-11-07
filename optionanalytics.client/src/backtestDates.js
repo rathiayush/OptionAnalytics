@@ -25,6 +25,10 @@ export function rangePresets(today) {
     { key: '1y', label: 'Last 12 months', from: iso(t.subtract(1, 'year')), to: iso(end) },
     { key: 'ytd', label: `This year (${t.year()})`, from: `${t.year()}-01-01`, to: iso(end) },
     { key: 'ly', label: `Last year (${lastYear.year()})`, from: `${lastYear.year()}-01-01`, to: `${lastYear.year()}-12-31` },
+    // For a background run (up to 1 500 weekdays - the last 6 years is just over it: the latest 1 500 are run).
+    { key: '2y', label: 'Last 2 years', from: iso(t.subtract(2, 'year')), to: iso(end) },
+    { key: '5y', label: 'Last 5 years', from: iso(t.subtract(5, 'year')), to: iso(end) },
+    { key: '6y', label: 'Last 6 years (background: the latest 1,500 days)', from: iso(t.subtract(6, 'year')), to: iso(end) },
   ].filter((p) => p.from <= p.to)
 }
 
