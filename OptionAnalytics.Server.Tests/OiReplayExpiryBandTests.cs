@@ -10,11 +10,10 @@ using OptionAnalytics.Server.Services;
 namespace OptionAnalytics.Server.Tests;
 
 /// <summary>
-/// OI Replay's live "Σ 3 expiries" (OiReplayService.ExpiryBandAsync): the next expiry's and the monthly's option band, through
-/// the REAL service on a fake Dhan - LIVE ONLY: a past day is refused with no Dhan call. Today the live feed's own N2 / MONTH
-/// bars are used from the first minute it holds; Dhan only for the minutes before it (none when the feed holds the day from the
-/// open) - ATM±3 for the next expiry (all its rolling options give for an expiry that is not the nearest), ATM±10 for the
-/// monthly - once a day.
+/// OI Replay's "Σ 3 expiries" (OiReplayService.ExpiryBandAsync): the next expiry's and the monthly's option band, through the
+/// REAL service on a fake Dhan - ATM±3 for the next expiry (all Dhan's rolling options give for an expiry that is not the
+/// nearest), ATM±10 for the monthly. A past day from Dhan once, then from disk; today the live feed's own N2 / MONTH bars from
+/// the first minute it holds, Dhan only for the minutes before it (none when the feed holds the day from the open), once a day.
 /// </summary>
 public sealed class OiReplayExpiryBandTests : IDisposable
 {
@@ -33,16 +32,71 @@ public sealed class OiReplayExpiryBandTests : IDisposable
     }
 
     [Theory]
-    [InlineData("NIFTY", "WEEK", 2)]
-    [InlineData("NIFTY", "MONTH", 1)]
-    [InlineData("BANKNIFTY", "MONTH", 2)]
-    public async Task APastDay_IsRefused_LiveOnly_AskingDhanNothing(string underlying, string expiryFlag, int code)
+    [InlineData("NIFTY", "WEEK", 50)]
+    [InlineData("BANKNIFTY", "MONTH", 100)]
+    [InlineData("SENSEX", "WEEK", 100)]
+    public async Task APastDay_TheNextExpiry_IsDhansAtmPlusMinus3_OfCode2_Once_ThenFromDisk(string underlying, string expiryFlag, int step)
     {
-        var dhan = new FakeDhan(50, anyDay: true);
-        var band = await Service(dhan).ExpiryBandAsync(underlying, PastWeekday(10), expiryFlag, code, CancellationToken.None);
-        Assert.False(band.Success);
-        Assert.Contains("live only", band.Error);
-        Assert.Equal(0, dhan.Calls);
+        var day = PastWeekday(10);
+        var dhan = new FakeDhan(step);
+        var next = await Service(dhan).ExpiryBandAsync(underlying, day, expiryFlag, 2, CancellationToken.None);
+        Assert.True(next.Success, next.Error);
+        Assert.Equal("N2", next.LiveFlag);
+        Assert.Equal(OiReplayService.OtherExpiryBandSteps, next.DhanBandSteps);
+        Assert.Null(next.LiveFrom);
+        Assert.Equal(14, dhan.Rolling.Count);
+        Assert.All(dhan.Rolling, r => Assert.Equal((expiryFlag, 2), (r.Flag, r.Code)));
+        var nine15 = new DateTimeOffset(day.ToDateTime(new TimeOnly(9, 15)), IstClock.Offset);
+        Assert.Contains(next.CePoints, p => p.Strike == 25000 - 3 * step && p.Time == nine15 && p.OpenInterest == 2000 + 3000);
+
+        // Again, after a restart: from disk, nothing asked.
+        dhan.Reset();
+        var again = await Service(dhan).ExpiryBandAsync(underlying, day, expiryFlag, 2, CancellationToken.None);
+        Assert.True(again.Success, again.Error);
+        Assert.Empty(dhan.Rolling);
+        Assert.Equal(next.CePoints.Count, again.CePoints.Count);
+    }
+
+    [Fact]
+    public async Task APastDay_TheMonthly_IsDhansAtmPlusMinus10_OfTheMonthSeries_Once_ThenFromDisk()
+    {
+        var day = PastWeekday(10);
+        var dhan = new FakeDhan(50);
+        var band = await Service(dhan).ExpiryBandAsync("NIFTY", day, "MONTH", 1, CancellationToken.None);
+        Assert.True(band.Success, band.Error);
+        Assert.Equal("MONTH", band.LiveFlag);
+        Assert.Equal(10, band.DhanBandSteps);
+        Assert.Equal(42, dhan.Rolling.Count);
+        Assert.All(dhan.Rolling, r => Assert.Equal(("MONTH", 1), (r.Flag, r.Code)));
+        dhan.Reset();
+        Assert.True((await Service(dhan).ExpiryBandAsync("NIFTY", day, "MONTH", 1, CancellationToken.None)).Success);
+        Assert.Empty(dhan.Rolling);
+    }
+
+    [Fact]
+    public async Task TheDaysExpiries_Current_Next_AndMonthly()
+    {
+        // NIFTY weeklies on Tuesdays, the monthly the month's last: 3 Nov 2026 (a Tuesday) replayed on Wed 28 Oct.
+        static DateOnly? Rule(DateOnly day, string flag)
+        {
+            var d = day;
+            while (d.DayOfWeek != DayOfWeek.Tuesday) d = d.AddDays(1);
+            if (flag == "WEEK") return d;
+            while (d.AddDays(7).Month == d.Month) d = d.AddDays(7);
+            return d;
+        }
+        var resolve = (DateOnly day, string flag) => Task.FromResult(Rule(day, flag));
+        Assert.Equal((new DateOnly(2026, 11, 3), new DateOnly(2026, 11, 10), new DateOnly(2026, 11, 24)),
+            await OiReplayService.SummedExpiryDatesAsync(resolve, new DateOnly(2026, 10, 28), "WEEK"));
+        // The month's last week: the monthly IS the current expiry (the page then counts it once).
+        Assert.Equal((new DateOnly(2026, 11, 24), new DateOnly(2026, 12, 1), new DateOnly(2026, 11, 24)),
+            await OiReplayService.SummedExpiryDatesAsync(resolve, new DateOnly(2026, 11, 19), "WEEK"));
+        // A Monthly series: the current IS the monthly; the next is the next month's.
+        Assert.Equal((new DateOnly(2026, 11, 24), new DateOnly(2026, 12, 29), new DateOnly(2026, 11, 24)),
+            await OiReplayService.SummedExpiryDatesAsync(resolve, new DateOnly(2026, 11, 2), "month"));
+        // Nothing found: nulls, never a guess.
+        Assert.Equal(((DateOnly?)null, (DateOnly?)null, (DateOnly?)null),
+            await OiReplayService.SummedExpiryDatesAsync((_, _) => Task.FromResult<DateOnly?>(null), new DateOnly(2026, 11, 2), "WEEK"));
     }
 
     [Theory]

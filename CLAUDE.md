@@ -416,12 +416,16 @@ When adding or changing a strategy:
   is priced and exited from ITS OWN index's held day at the replay clock (`chainOfPosition`) whatever the charts show;
   one with none held waits (never the wall clock). Live it is always the index on screen - a live order is never sent
   for another index from here (`tests/trade-index.test.mjs`).
-- OI Replay's "Σ 3 EXPIRIES" - LIVE ONLY (asked for - "cumulative delta combined ... current expiry, current + 1 and the
-  month's last expiry - these 3 sum ... at every component level ... this feature will work only in live"; the checkbox
-  beside the expiry picker, `optionanalytics.oiReplay.sumExpiries`, enabled live on the current expiry N1 only - a past day
-  or another live expiry disables it): the CURRENT expiry + the NEXT (the live feed's N2) + the MONTHLY (its MONTH chain) -
+- OI Replay's "Σ 3 EXPIRIES" (asked for - "cumulative delta combined ... current expiry, current + 1 and the month's last
+  expiry - these 3 sum ... at every component level"; then "check / uncheck ... in replay of a previous day or the current
+  day which is live, and the page reflects it"; the checkbox beside the expiry picker, `optionanalytics.oiReplay.sumExpiries`,
+  ALWAYS clickable - a replayed day (past or today) and live; live it sums on the current expiry N1 only, another live expiry
+  shown alone with a line saying so; UNTICKED THE PAGE IS EXACTLY AS BEFORE - checked card by card against the page before
+  it, and `gexDay` with no `chains` equals the old one minute for minute): the CURRENT expiry + the NEXT (the live feed's N2) + the MONTHLY (its MONTH chain) -
   the monthly only when it is neither of the other two (the month's last weeks; BANKNIFTY lists monthlies only), so no
-  expiry is counted twice (`summedExpiries` in `expirySum.js`). Every OI read - the OI totals' Δ / cumulative Δ, Day OI,
+  expiry is counted twice (`summedExpiries` in `expirySum.js`; live from the listed expiries, a replayed day from ITS current
+  / next / monthly - `GET /api/oi-replay/{u}/summed-expiries?date&expiryFlag`, `OiReplayService.SummedExpiryDatesAsync` on
+  `OptionExpiryResolver`). Every OI read - the OI totals' Δ / cumulative Δ, Day OI,
   Total OI, the heatmap, the walls, Market Read (its OI build-up near ATM too), the ladder, the drill-down, the OI alerts
   and the quick views - reads their OI added at each strike and minute (`sumExpiryOi`, swapped in at `ceByStrike` /
   `peByStrike` - the one place every OI read takes its points from); GEX adds each expiry's OWN (`gexDay`'s `chains`, asked
@@ -435,21 +439,23 @@ When adding or changing a strategy:
   never a later one); one first read at a strike AFTER the current expiry's first reading there counts by its CHANGE from
   that reading (0 before) - in full, its whole OI read as OI added; strikes the current expiry does not have are left out
   (`tests/expiry-sum.test.mjs`, a cut at any clock equals the whole day's up to it). The bands: `GET
-  /api/oi-replay/{u}/expiry-band?date&expiryFlag&expiryCode&forceLive=true` (`OiReplayService.ExpiryBandAsync` - TODAY
-  ONLY, a past day refused with no Dhan call; the next = the series' code 2, the monthly = MONTH code 1; anything else
-  refused), asked once today's run is in and again with each new run: the live feed's own 1-minute bars (ATM±10 -
+  /api/oi-replay/{u}/expiry-band?date&expiryFlag&expiryCode` (`OiReplayService.ExpiryBandAsync`; the next = the series'
+  code 2, the monthly = MONTH code 1 - counted from the day; anything else refused), asked once the day's run is in and
+  again with each new run: a PAST day = Dhan's rolling options once, then the disk cache - ATM±3 for the next expiry (the
+  stored database never - it keeps the current cycle), ATM±10 for the monthly (the series a Monthly run asks, stored
+  database first like it); TODAY (`forceLive`) = the live feed's own 1-minute bars (ATM±10 -
   `LiveOptionLegStore` keeps bars for WEEK, MONTH and N2 - `OiReplayLiveFeedService.KeepsBars`) from the first minute it
   holds (`FirstOptionMinute`), NO Dhan call when that is the open, and Dhan's backfill (once a day, TodayFetchShare - the
   monthly's shared with a Monthly run's) only for the minutes before it: ATM±10 for the monthly (the nearest of its series),
   ATM±3 for the next expiry (`OtherExpiryBandSteps` - Dhan's docs: ATM±10 for the nearest expiry only, ±3 for every other
   contract; a wider request would only fail, again and again); each strike carried on within the run's ATM±10 band
   (`CarryForward`). The page joins "c:{U}:N2" / "c:{U}:MONTH" and folds their ticks into the bands
-  (`handleOiReplayTicks`). A line under the controls says what the OI is the sum of (dates; what is loading; the monthly
-  counted once; the next expiry's ATM±3 before the feed's first minute). The OI alerts read the sum and say "· 3 expiries" -
+  (`handleOiReplayTicks`), live. A line under the controls says what the OI is the sum of (dates; what is loading; the
+  monthly counted once; the next expiry's ATM±3 - a past day's only, today's before the feed's first minute). The OI alerts read the sum and say "· 3 expiries" -
   in the app only, NEVER to Telegram from the page while summing (the server's watch and the Telegram keys are the current
-  expiry's); the watch starts again as each expiry joins. Not in the Signal backtest (past days - live only).
-  `OiReplayExpiryBandTests.cs` (a past day refused; today the feed's bars with no option call, or Dhan's before the feed's
-  first minute - ATM±3 code 2 / ATM±10 MONTH code 1, once a day).
+  expiry's; a replay never sends Telegram anyway); the watch starts again as each expiry joins. Not in the Signal backtest.
+  `OiReplayExpiryBandTests.cs` (a past day asks Dhan once - ATM±3 code 2 / ATM±10 MONTH code 1 - then disk; today the feed's
+  bars with no option call, or Dhan's before the feed's first minute, once a day; the day's current / next / monthly).
 - Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
   page's chain chart): the band follows spot, so a strike that joins it after the open counts from its first reading -
   counted in full, its whole OI showed up as "added since the open" (`tests/chain-oi-totals.test.mjs`). Market Read

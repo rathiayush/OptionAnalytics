@@ -1,5 +1,6 @@
-// OI Replay's LIVE "Σ 3 expiries" (asked for - "cumulative delta combined ... current expiry, current expiry + 1 and the
-// month's last expiry - these 3 sum ... at every component level ... this feature will work only in live"): every OI read
+// OI Replay's "Σ 3 expiries" (asked for - "cumulative delta combined ... current expiry, current expiry + 1 and the month's
+// last expiry - these 3 sum ... at every component level"; then "check / uncheck ... in replay of a previous day or the
+// current day which is live, and the page reflects it"): every OI read
 // on the page - the OI totals' Δ and cumulative Δ, Day OI, Total OI, the heatmap, the walls, Market Read, the ladder, the
 // OI alerts - reads the SUM of the current expiry's OI, the next expiry's and the monthly's at each strike and minute, and
 // GEX adds each expiry's own (gex.js `chains`). The PREMIUMS cannot be added (each expiry has its own price), so a point
@@ -7,11 +8,11 @@
 // CDV stay on it. Pure - the page passes its points, nothing is fetched here.
 import { inMarketSession } from './marketSession.js'
 
-/** The expiries added to the current one, live: the NEXT (the live feed's N2 - the series' expiry code 2) and the MONTHLY
+/** The expiries added to the current one: the NEXT (the live feed's N2 - the series' expiry code 2) and the MONTHLY
  *  (its MONTH chain - the MONTH series' code 1) - the monthly only when it is neither the current nor the next expiry (the
- *  month's last weeks; BANKNIFTY lists monthlies only): an expiry is never counted twice. `listed` = the expiries listed
- *  from today, nearest first (the page's N1, N2 ...); `month` = the monthly's date; `nearestFlag` = the series the current
- *  expiry is read from (WEEK, BANKNIFTY MONTH). */
+ *  month's last weeks; BANKNIFTY lists monthlies only): an expiry is never counted twice. `listed` = the expiries from
+ *  the day on, nearest first (live the page's N1, N2 ...; a replayed day its current and next); `month` = the monthly's date;
+ *  `nearestFlag` = the series the current expiry is read from (WEEK, BANKNIFTY MONTH). */
 export function summedExpiries(listed, month, nearestFlag) {
   const out = []
   if (!listed?.length) return out   // not loaded yet: whether the monthly is the current or the next is not known
@@ -79,7 +80,7 @@ const hhmm = (t) => new Date(t).toLocaleTimeString('en-GB', { hour: '2-digit', m
 /** What the sum holds, for the controls' line: the expiries summed (their dates), what is still loading or missing, the
  *  monthly when it is already the current / next expiry, and the next expiry's ATM±3 before the live feed's own minutes.
  *  `bands` - summedExpiries' entries with { state: 'loading' | 'ready' | 'error', error, dhanBandSteps, liveFrom }. */
-export function expirySumText(currentExpiry, bands, { month = null } = {}) {
+export function expirySumText(currentExpiry, bands, { month = null, past = false } = {}) {
   const parts = [`${dayText(currentExpiry) ?? 'current'} (current)`]
   const missing = []
   for (const b of bands ?? []) {
@@ -91,6 +92,10 @@ export function expirySumText(currentExpiry, bands, { month = null } = {}) {
   const notes = []
   if (month && !(bands ?? []).some((b) => b.key === 'MONTH')) notes.push(`the monthly (${dayText(month)}) is already ${month === currentExpiry ? 'the current' : 'the next'} expiry - counted once`)
   const narrow = (bands ?? []).filter((b) => b.state === 'ready' && b.dhanBandSteps != null && b.dhanBandSteps < 10)
-  for (const b of narrow) notes.push(`the ${b.name} expiry ATM±${b.dhanBandSteps} before ${b.liveFrom ? hhmm(b.liveFrom) : 'the live feed'} (all Dhan gives for it; the live feed's ATM±10 ${b.liveFrom ? 'from then' : 'once it has it'})`)
+  for (const b of narrow) {
+    notes.push(past
+      ? `the ${b.name} expiry ATM±${b.dhanBandSteps} only (all Dhan gives for an expiry that is not the nearest)`
+      : `the ${b.name} expiry ATM±${b.dhanBandSteps} before ${b.liveFrom ? hhmm(b.liveFrom) : 'the live feed'} (all Dhan gives for it; the live feed's ATM±10 ${b.liveFrom ? 'from then' : 'once it has it'})`)
+  }
   return `OI = ${parts.join(' + ')}${missing.length ? ` (${missing.join(', ')})` : ''}${notes.length ? ` - ${notes.join('; ')}` : ''}`
 }
