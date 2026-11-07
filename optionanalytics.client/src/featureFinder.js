@@ -244,11 +244,12 @@ const cell = (v) => {
 }
 const istClock = (ms) => { const m = istMinute(ms); return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}` }
 
-/** The table as CSV - date, time, expiry, every feature, every label - for a spreadsheet or your own model. */
+/** The table as CSV - date, time, every feature (the expiry day one of them), every label - for a spreadsheet or your own
+ *  model. One column a name: an `expiry` column of the row's own beside the `expiry` feature came out twice. */
 export function rowsCsv(rows) {
-  const head = ['date', 'time', 'expiry', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)]
+  const head = ['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)]
   const lines = [head.join(',')]
-  for (const r of rows) lines.push([r.date, istClock(r.time), r.expiry ? 1 : 0, ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(','))
+  for (const r of rows) lines.push([r.date, istClock(r.time), ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(','))
   return `${lines.join('\n')}\n`
 }
 

@@ -117,8 +117,9 @@ test('the CSV: a header of the keys, a row a candle, numbers rounded, cells form
   const { d } = prepared()
   const rows = dayRows(d, { timeframe: 15, ...LEVELS })
   const csv = rowsCsv(rows).trim().split('\n')
-  assert.equal(csv[0], ['date', 'time', 'expiry', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(','))
+  assert.equal(csv[0], ['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(','))
+  assert.equal(new Set(csv[0].split(',')).size, csv[0].split(',').length)                // every column named once
   assert.equal(csv.length, rows.length + 1)
-  assert.match(csv[1], /^2026-10-05,09:(29|30|44|45),0,/)
-  assert.equal(csv[1].split(',').length, 3 + FEATURES.length + LABELS.length)
+  assert.match(csv[1], /^2026-10-05,09:(29|30|44|45),/)
+  assert.equal(csv[1].split(',').length, 2 + FEATURES.length + LABELS.length)
 })
