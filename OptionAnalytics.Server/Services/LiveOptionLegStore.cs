@@ -7,8 +7,9 @@ namespace OptionAnalytics.Server.Services;
 /// Today's live option and futures data as the OI Replay live feed sees it (OiReplayLiveFeedService records every
 /// tick here), kept in memory only - every index the feed tracks, all day, whether or not a page is open:
 ///  - each option leg's newest reading (GET /api/oi-replay/{underlying}/live-legs);
-///  - each leg's 1-minute bars (open / high / low / close, OI, volume from the day's cumulative volume), and the
-///    near futures' bars - so today's OI Replay run is served from here after ONE backfill from Dhan per series per
+///  - each leg's 1-minute bars (open / high / low / close, OI, volume from the day's cumulative volume) of the WEEK / MONTH
+///    chains and of the 2nd and 3rd nearest expiries (N2 / N3 - OI Replay's "Σ 3 expiries", OiReplayService.ExpiryBandAsync),
+///    and the near futures' bars - so today's OI Replay run is served from here after ONE backfill from Dhan per series per
 ///    day (OiReplayService), and switching index on the live page asks Dhan for nothing.
 /// A new IST day starts empty.
 /// </summary>
@@ -36,7 +37,8 @@ public sealed class LiveOptionLegStore
     public void Record(LiveOptionTick tick) => Record(tick, -1, keepBars: true);
 
     /// <summary>A leg's tick - `dayVolume` Dhan's cumulative volume for the day (-1 unknown); `keepBars` false keeps
-    /// only its newest reading (the positional N-expiries - today's run asks for WEEK / MONTH).</summary>
+    /// only its newest reading (the positional N-expiries but N2 / N3 - today's run asks for WEEK / MONTH, the 3-expiry
+    /// sum for N2 / N3).</summary>
     public void Record(LiveOptionTick tick, long dayVolume, bool keepBars)
     {
         _latest[(tick.Underlying, tick.ExpiryFlag, tick.Side, tick.Strike)] = tick;
@@ -89,6 +91,24 @@ public sealed class LiveOptionLegStore
             }
         }
         return points.OrderBy(p => p.Time).ThenBy(p => p.Strike).ToList();
+    }
+
+    /// <summary>The first minute of `day` (IST - today's) any leg of one chain (index + expiry flag) has a bar for - when the
+    /// feed began recording it (the open, or the server's start part way through the day); null when it holds none.</summary>
+    public DateTimeOffset? FirstOptionMinute(string underlying, string expiryFlag, DateOnly day)
+    {
+        long? first = null;
+        lock (_lock)
+        {
+            if (_day != day) return null;
+            foreach (var (key, series) in _options)
+            {
+                if (key.Underlying != underlying.ToUpperInvariant() || key.ExpiryFlag != expiryFlag.ToUpperInvariant() || series.Bars.Count == 0) continue;
+                var minute = series.Bars.Keys.First();
+                if (first is null || minute < first) first = minute;
+            }
+        }
+        return first is { } m ? DateTimeOffset.FromUnixTimeSeconds(m * 60) : null;
     }
 
     /// <summary>Today's 1-minute near-futures bars of `underlying` from the minute of `from` on.</summary>
