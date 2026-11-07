@@ -94,6 +94,32 @@ public sealed class OiReplayController : ControllerBase
         }
     }
 
+    /// <summary>One day's CE / PE band of the 2nd or 3rd nearest expiry (`expiryCode` 2 / 3 of the series - see
+    /// OiReplayService.ExpiryBandAsync): what OI Replay's "Σ 3 expiries" adds to the nearest expiry's OI. Its date is
+    /// worked out as the run's is - the nearest expiry, then the next after it, and so on (OptionExpiryResolver) - for the
+    /// page's label only; never a reason for the band to fail.</summary>
+    [HttpGet("{underlying}/expiry-band")]
+    public async Task<ActionResult> ExpiryBand(
+        string underlying,
+        [FromQuery] DateOnly date,
+        [FromQuery] string expiryFlag,
+        [FromQuery] int expiryCode,
+        CancellationToken cancellationToken,
+        [FromQuery] bool forceLive = false,
+        [FromQuery] bool forceFetch = false)
+    {
+        var band = await _service.ExpiryBandAsync(underlying, date, expiryFlag, expiryCode, cancellationToken, forceLive, forceFetch);
+        if (!band.Success) return Ok(band);
+        DateOnly? expiry = null;
+        for (var code = 1; code <= expiryCode; code++)
+        {
+            var found = await ExpiryOrNullAsync(underlying, expiry?.AddDays(1) ?? date, expiryFlag, cancellationToken);
+            if (found is null) { expiry = null; break; }
+            expiry = found.Value.Date;
+        }
+        return Ok(band with { OptionExpiry = expiry });
+    }
+
     /// <summary>The previous trading day's volume profile (POC/VAH/VAL/HVN/LVN) relative to
     /// `date` - see OiReplayService.GetPreviousDayVolumeProfileAsync's own doc comment for exactly
     /// which day that resolves to and how each level is computed. `date` is whatever day the

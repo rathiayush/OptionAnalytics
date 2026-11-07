@@ -153,3 +153,28 @@ public sealed record OiReplayResult(
         new(false, error, underlying, date, timeframeMinutes, 0, "", 0, Array.Empty<Candle>(), Array.Empty<Candle>(), Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>(),
             Array.Empty<FuturesBar>(), null, false, null);
 }
+
+/// <summary>One day's option band of the 2nd or 3rd nearest expiry (OiReplayService.ExpiryBandAsync) - the OI OI Replay's
+/// "Σ 3 expiries" adds to the nearest expiry's. LiveFlag = the live feed's chain of it (N2 / N3). DhanBandSteps = the
+/// strikes either side of the ATM asked of Dhan (3 - all its rolling options give for an expiry that is not the nearest),
+/// null when Dhan was not asked (today, the live feed holding the day from the open); LiveFrom = today, the minute from
+/// which the live feed's own bars (ATM±10) are used. OptionExpiry = the expiry's date when it could be worked out.</summary>
+public sealed record OiReplayExpiryBand(
+    bool Success,
+    string? Error,
+    string Underlying,
+    DateOnly Date,
+    string ExpiryFlag,
+    int ExpiryCode,
+    string LiveFlag,
+    IReadOnlyList<OiReplayPoint> CePoints,
+    IReadOnlyList<OiReplayPoint> PePoints,
+    int? DhanBandSteps = null,
+    DateTimeOffset? LiveFrom = null,
+    string? Note = null)
+{
+    public DateOnly? OptionExpiry { get; init; }
+
+    public static OiReplayExpiryBand Failed(string underlying, DateOnly date, string expiryFlag, int expiryCode, string error) =>
+        new(false, error, underlying, date, expiryFlag, expiryCode, $"N{expiryCode}", Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
+}

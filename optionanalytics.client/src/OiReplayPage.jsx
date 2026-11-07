@@ -21,6 +21,7 @@ import {
 import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive, mergeLiveFuturesTicks, oiAtCandleCloses } from './futuresLive.js'
+import { SUMMED_EXPIRY_CODES, expirySumText, liveFlagOfCode, sumExpiryOi } from './expirySum.js'
 import { inMarketSession } from './marketSession.js'
 import { atmAtFromBars, atmPeakCells, strikeStep } from './oiHeatmapPeaks.js'
 import { readoutPlacement } from './readoutPlacement.js'
@@ -316,6 +317,9 @@ function latestAtOrBefore(sortedPoints, asOfMs) {
 // history stays at ~375 points per strike, so memory and per-batch work stay flat all day. The newest
 // reading is always what's shown.
 const LIVE_STATUS_INTERVAL_MS = 500
+// Σ 3 expiries (expirySum.js): the live feed's chains of the expiries added to the nearest, and "none loaded yet".
+const SUM_LIVE_FLAGS = SUMMED_EXPIRY_CODES.map(liveFlagOfCode)
+const NO_BANDS = {}
 const LIVE_POINT_SLOT_MS = 60_000
 
 export function mergeLiveOptionTicks(prev, ticks, ivByStrike, slotMs = LIVE_POINT_SLOT_MS) {
@@ -1973,7 +1977,7 @@ export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timef
 // is not covering this index (same keys either way, so a message goes once); a replay never sends Telegram.
 function useOiBreakAlerts({
   underlying, ceByStrike, peByStrike, strikes, atmStrike, timeframeMinutes, live, replayNowSec = null, dayKey, enabled,
-  hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false, types = DEFAULT_ALERT_TYPES, toTelegram = false,
+  hpWindowMinutes = 5, hpAtmShiftPct = 20, serverCovers = false, types = DEFAULT_ALERT_TYPES, toTelegram = false, summed = 0,
 }) {
   // Never for the External account (its Market view shows no pop-ups and sends nothing), whatever a caller passes.
   const external = useAuth()?.user?.role === 'External'
@@ -1990,7 +1994,7 @@ function useOiBreakAlerts({
   useEffect(() => {
     state.current = newOiBreakAlertState()
     replayState.current = newReplayOiBreakAlertState()
-  }, [underlying, dayKey, timeframeMinutes, active, live, hpWindowMinutes, hpAtmShiftPct])
+  }, [underlying, dayKey, timeframeMinutes, active, live, hpWindowMinutes, hpAtmShiftPct, summed])
   const bucketSeconds = timeframeMinutes * 60
   // Only the completed buckets: re-read when one completes (or the data changes), not on every clock tick.
   const nowSec = live ? toChartTime(clock) : replayNowSec
@@ -2006,8 +2010,8 @@ function useOiBreakAlerts({
       peLevels: levels(peByStrike),
     }
   }, [active, ceByStrike, peByStrike, strikes, timeframeMinutes])
-  const latest = useRef({ atmStrike, serverCovers, types, toTelegram })
-  useEffect(() => { latest.current = { atmStrike, serverCovers, types, toTelegram } })
+  const latest = useRef({ atmStrike, serverCovers, types, toTelegram, summed })
+  useEffect(() => { latest.current = { atmStrike, serverCovers, types, toTelegram, summed } })
   useEffect(() => {
     if (!active || !day || boundary == null) return
     const data = { ce: day.ce, pe: day.pe, ceLevels: day.ceLevels, peLevels: day.peLevels, bucketSeconds, nowSec: boundary, atmStrike: latest.current.atmStrike }
@@ -2017,9 +2021,10 @@ function useOiBreakAlerts({
     if (!breaks.length && !signals.length) return
     let cfg = {}
     try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
-    // Telegram only when switched on for these (the app's alerts otherwise), live, and the server is not sending them.
-    const sendTelegram = live && latest.current.toTelegram && cfg.telegram !== false && !latest.current.serverCovers
-    const replayTag = live ? '' : ' · replay'
+    // Telegram only when switched on for these (the app's alerts otherwise), live, and the server is not sending them -
+    // never read off the 3 expiries' sum (the server's watch and the Telegram keys are the nearest expiry's).
+    const sendTelegram = live && latest.current.toTelegram && cfg.telegram !== false && !latest.current.serverCovers && !latest.current.summed
+    const replayTag = `${live ? '' : ' · replay'}${latest.current.summed ? ' · 3 expiries' : ''}`
     for (const b of breaks) {
       const text = breakText(underlying, b, fmtOiNum, istTimeFormatter, timeframeMinutes)
       const bullish = breakMeaning(b.side.key, b.up) > 0
@@ -2039,7 +2044,7 @@ function useOiBreakAlerts({
       if (sendTelegram) telegram(`🎯 ${text}`, highProbabilityAlertKey(underlying, dayKey, timeframeMinutes, key))
       notification.open({
         key: `oi-hp-${dayKey}-${key}`, placement: 'topRight', duration: 0,
-        message: <span style={{ color: hp.bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🎯 High probability {hp.bullish ? 'BULLISH' : 'BEARISH'} · {underlying}{replayTag ? ` · replay ${istTimeFormatter(hp.at)}` : ''}</span>,
+        message: <span style={{ color: hp.bullish ? OI_BULLISH_COLOR : OI_BEARISH_COLOR, fontWeight: 700 }}>🎯 High probability {hp.bullish ? 'BULLISH' : 'BEARISH'} · {underlying}{live ? '' : ` · replay ${istTimeFormatter(hp.at)}`}{latest.current.summed ? ' · 3 expiries' : ''}</span>,
         description: <span style={{ fontSize: 12, whiteSpace: 'pre-line' }}>{text.split('\n').slice(1).join('\n')}</span>,
       })
     }
@@ -3494,6 +3499,10 @@ export default function OiReplayPage() {
   // able to see and pick the EXACT contract removes any need to trust an automatic "nearest"
   // resolution once today is playing live.
   const [liveExpiryFlag, setLiveExpiryFlag] = useState('N1')
+  // "Σ 3 expiries" (expirySum.js - asked for: "cumulative delta combined ... current expiry, + 1 and the last ... these 3
+  // sum ... when ticked everything works on the 3 expiry sum"): every OI read takes the nearest expiry's OI plus the next
+  // two's - on a replayed day, or live on the nearest expiry (N1). The premiums stay the nearest's.
+  const [sumExpiries, setSumExpiries] = usePersistedState('optionanalytics.oiReplay.sumExpiries', false)
   // The full flat list of currently-listed expiry dates backing that picker (index i is always flag
   // "N{i+1}" - see OiReplayController.GetExpiries' own doc comment), plus which of them (if any) is
   // the real calendar date "Weekly"/"Monthly" resolve to, shown as a tag on the matching option.
@@ -4369,14 +4378,58 @@ export default function OiReplayPage() {
     }
     return merged
   }, [result, liveBars, isLive])
-  const ceByStrike = useMemo(
-    () => groupByStrike(isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])),
-    [result, liveCePoints, isLive],
-  )
-  const peByStrike = useMemo(
-    () => groupByStrike(isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])),
-    [result, livePePoints, isLive],
-  )
+  // Σ 3 expiries: the next and the far expiry's bands of the day on screen (GET expiry-band - a past day from Dhan /
+  // the disk cache, ATM±3; today the live feed's own N2 / N3 from the server's memory), asked once the day's run is in
+  // (and again with each new run), then - live - kept up to date by their own ticks ("c:{U}:N2" / "N3"). Every OI read
+  // below (ceByStrike / peByStrike) takes the sum; the option flow and GEX (flowCePoints) stay on the nearest expiry.
+  const sumOn = sumExpiries && Boolean(result?.success) && (!isLive || liveExpiryFlag === 'N1')
+  const sumKey = sumOn ? `${result.underlying}|${result.date}|${result.expiryFlag}` : null
+  const [expiryBands, setExpiryBands] = useState({ key: null, byCode: NO_BANDS })
+  const sumKeyRef = useRef(null)
+  sumKeyRef.current = sumKey
+  useEffect(() => {
+    if (!sumKey) return undefined
+    const [u, day, flag] = sumKey.split('|')
+    const controller = new AbortController()
+    const set = (code, entry) => setExpiryBands((prev) => {
+      if (sumKeyRef.current !== sumKey) return prev
+      const base = prev.key === sumKey ? prev : { key: sumKey, byCode: NO_BANDS }
+      return { key: sumKey, byCode: { ...base.byCode, [code]: entry } }
+    })
+    for (const code of SUMMED_EXPIRY_CODES) {
+      const params = new URLSearchParams({ date: day, expiryFlag: flag, expiryCode: String(code), ...(day === istDateKey(new Date()) ? { forceLive: 'true' } : {}) })
+      fetch(`/api/oi-replay/${u}/expiry-band?${params.toString()}`, { signal: controller.signal })
+        .then(async (r) => {
+          const body = await r.json().catch(() => null)
+          if (!r.ok || !body?.success) throw new Error(body?.error || `Request failed (HTTP ${r.status}).`)
+          return body
+        })
+        .then((body) => set(code, {
+          state: 'ready', ce: body.cePoints ?? [], pe: body.pePoints ?? [], liveCe: [], livePe: [],
+          expiry: body.optionExpiry ?? null, dhanBandSteps: body.dhanBandSteps ?? null, liveFrom: body.liveFrom ?? null, note: body.note ?? null,
+        }))
+        .catch((err) => { if (!controller.signal.aborted) set(code, { state: 'error', error: err.message || 'failed' }) })
+    }
+    return () => controller.abort()
+  }, [sumKey, result])
+  const sumBands = sumKey && expiryBands.key === sumKey ? expiryBands.byCode : NO_BANDS
+  const sumBandList = SUMMED_EXPIRY_CODES.map((code) => ({ code, state: 'loading', ...sumBands[code] }))
+  const sumExtras = useMemo(() => {
+    if (!sumKey) return null
+    const ready = SUMMED_EXPIRY_CODES.map((c) => sumBands[c]).filter((b) => b?.state === 'ready')
+    return {
+      ce: ready.map((b) => (isLive ? [...b.ce, ...b.liveCe] : b.ce)),
+      pe: ready.map((b) => (isLive ? [...b.pe, ...b.livePe] : b.pe)),
+    }
+  }, [sumKey, sumBands, isLive])
+  const ceByStrike = useMemo(() => {
+    const base = isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])
+    return groupByStrike(sumExtras?.ce.length ? sumExpiryOi(base, sumExtras.ce) : base)
+  }, [result, liveCePoints, isLive, sumExtras])
+  const peByStrike = useMemo(() => {
+    const base = isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])
+    return groupByStrike(sumExtras?.pe.length ? sumExpiryOi(base, sumExtras.pe) : base)
+  }, [result, livePePoints, isLive, sumExtras])
   // The option CDV / OBV card's inputs: the run's option bars plus (live) each live minute - later points of the same
   // strike and minute win - and the spot the page shows (the run's 1-minute bars plus the live tail).
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
@@ -4448,8 +4501,14 @@ export default function OiReplayPage() {
     const ce = []
     const pe = []
     const foreign = new Map()
+    const summed = new Map()
     for (const tick of batch) {
       if (tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) {
+        // Σ 3 expiries: the next / far expiry's legs, for their OI.
+        if (sumOn && tick?.underlying === underlying && SUM_LIVE_FLAGS.includes(tick?.expiryFlag)) {
+          if (!summed.has(tick.expiryFlag)) summed.set(tick.expiryFlag, { ce: [], pe: [] })
+          summed.get(tick.expiryFlag)[tick.side === 'CE' ? 'ce' : 'pe'].push(tick)
+        }
         // A leg an open paper position on another index holds: kept for its own P&L / SL / target.
         if (foreignLegs.has(`${tick?.underlying}:${tick?.expiryFlag}:${tick?.side}:${tick?.strike}`)) {
           const key = `${tick.underlying}:${tick.expiryFlag}:${tick.side}`
@@ -4465,6 +4524,19 @@ export default function OiReplayPage() {
         const next = { ...prev }
         for (const [key, ticks] of foreign) next[key] = mergeLiveOptionTicks(prev[key] ?? [], ticks, null)
         return next
+      })
+    }
+    if (summed.size) {
+      setExpiryBands((prev) => {
+        if (prev.key !== sumKey) return prev
+        const byCode = { ...prev.byCode }
+        for (const [flag, ticks] of summed) {
+          const code = Number(flag.slice(1))
+          const band = byCode[code]
+          if (band?.state !== 'ready') continue   // its band is still loading - it holds the minutes up to its answer
+          byCode[code] = { ...band, liveCe: mergeLiveOptionTicks(band.liveCe, ticks.ce, null), livePe: mergeLiveOptionTicks(band.livePe, ticks.pe, null) }
+        }
+        return { ...prev, byCode }
       })
     }
     if (ce.length === 0 && pe.length === 0) return
@@ -4583,7 +4655,12 @@ export default function OiReplayPage() {
     }
     setFuturesFlow((prev) => (prev?.bars ? { ...prev, bars: mergeDeltaPush(prev.bars, payload.minutes).minutes } : prev))
   }
-  const feedGroups = useMemo(() => [...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : []), ...(deltaGroup ? [deltaGroup] : [])], [liveExtraGroups, foreignChainKey, deltaGroup])
+  // Σ 3 expiries, live: the next and far expiries' chains too (their ticks carry their OI - handleOiReplayTicks).
+  const sumGroupKey = sumOn && isLive ? SUM_LIVE_FLAGS.map((f) => `c:${underlying}:${f}`).join('|') : ''
+  const feedGroups = useMemo(() => [...new Set([
+    ...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : []),
+    ...(sumGroupKey ? sumGroupKey.split('|') : []), ...(deltaGroup ? [deltaGroup] : []),
+  ])], [liveExtraGroups, foreignChainKey, sumGroupKey, deltaGroup])
   const liveConnectionState = useOiReplayLiveFeed(handleSpotUpdate, handleOiReplayTicks, handleFuturesTicks, handleRestSnapshot, handleLiveReconnected, isLive ? feedLag.recordPainted : null, underlying, liveExpiryFlag, liveTradeActive ? applyLivePositions : null, feedGroups, handleDivergenceAlert, handleOrderFlowDelta)
 
   // A plain tick, unrelated to any live data - exists ONLY so feedStalled below re-evaluates on a
@@ -4918,6 +4995,8 @@ export default function OiReplayPage() {
     dayKey: result ? `${underlying}-${result.date}` : null, enabled: oiBreakAlertSettings.on && !!result,
     hpWindowMinutes: oiBreakAlertSettings.windowMinutes, hpAtmShiftPct: oiBreakAlertSettings.atmShiftPct,
     serverCovers: !!oiBreakAlertSettings.server?.covers, types: alertTypes, toTelegram: oiBreakAlertSettings.telegram,
+    // How many other expiries the OI holds (0 = none): the watch starts again with each, as with any change of the data.
+    summed: Math.max(sumExtras?.ce.length ?? 0, sumExtras?.pe.length ?? 0),
   })
 
   // Sudden OI walls as of the replay's current point (suddenOi.js - the same rule as the Order Flow
@@ -6326,6 +6405,14 @@ export default function OiReplayPage() {
                   options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
                 />
               )}
+              <Tooltip title={isLive && liveExpiryFlag !== 'N1'
+                ? 'Pick the nearest expiry (the first) to sum it with the next two.'
+                : "Every OI read on the page - the OI totals' Δ and cumulative Δ, Day OI, Total OI, the heatmap, the walls, Market Read, the ladder and the OI alerts - takes the nearest expiry's OI plus the next two expiries'. Premiums cannot be added, so the straddle, the premium charts, GEX, the option CDV / OBV and paper trades stay on the nearest expiry."}>
+                <Checkbox
+                  checked={sumExpiries} disabled={isLive && liveExpiryFlag !== 'N1'}
+                  onChange={(e) => { setSumExpiries(e.target.checked); if (!e.target.checked) setExpiryBands({ key: null, byCode: NO_BANDS }) }}
+                >Σ 3 expiries</Checkbox>
+              </Tooltip>
               <DatePicker value={date} onChange={pickDate} format="DD MMM YYYY" placeholder="Trading day" />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={TIMEFRAME_OPTIONS} />
               <Tooltip title={isTodayDate ? "Replays today's session so far with the Start/Pause/slider - use Go Live to follow it live again" : undefined}>
@@ -6489,6 +6576,25 @@ export default function OiReplayPage() {
                   <Button size="small" onClick={() => foldAllText(true)}>Open all</Button>
                 </Tooltip>
               </Space>
+            )}
+            {/* Σ 3 expiries: what the OI is the sum of, what is still loading or missing, and what stays on the nearest. */}
+            {sumOn && (
+              <Alert
+                type="info" showIcon style={{ padding: '4px 10px' }}
+                message={<span style={{ fontSize: 12 }}>Σ 3 expiries · {expirySumText(result.optionExpiry, sumBandList, { live: isLive })}</span>}
+                description={(
+                  <FoldText id="oiReplay.sumExpiries" label="what is summed" summary="Every OI read is the sum; premiums, the straddle, GEX, the option CDV and paper trades stay on the nearest expiry.">
+                    <span style={{ fontSize: 12 }}>
+                      Every OI read on the page is the sum - the OI totals' Δ and cumulative Δ, Day OI, Total OI, the heatmap, the walls, Market
+                      Read, the ladder and the OI alerts. Premiums cannot be added (each expiry has its own price), so the straddle, the premium
+                      charts, GEX (each expiry has its own gamma), the option CDV / OBV and the paper trades stay on the nearest expiry. An
+                      expiry first read at a strike later in the day counts there by its change from that reading, not its whole OI (it
+                      would read as OI added). The OI alerts pop up here only, tagged "3 expiries" - Telegram stays on the server's
+                      nearest-expiry watch.{sumBandList.filter((b) => b.note).map((b) => ` Expiry ${b.code}: ${b.note}`).join('')}
+                    </span>
+                  </FoldText>
+                )}
+              />
             )}
             {isLive && liveExpiryFlag !== 'N1' && (
               <Alert

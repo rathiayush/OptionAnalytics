@@ -1,0 +1,98 @@
+// OI Replay's "Σ 3 expiries" (expirySum.js): every OI read takes the nearest expiry's OI plus the next two's at the same
+// strike and minute; the premiums stay the nearest's; an expiry first read at a strike later in the day counts by its change
+// only; nothing after a point's time is read.
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { SUMMED_EXPIRY_CODES, expirySumText, liveFlagOfCode, sumExpiryOi } from '../src/expirySum.js'
+
+// 1-minute points of one day from 09:15 IST: minute i of strike s.
+const OPEN = Date.parse('2026-11-05T09:15:00+05:30')
+const at = (i) => new Date(OPEN + i * 60_000).toISOString()
+const pt = (strike, i, oi, extra = {}) => ({ time: at(i), strike, openInterest: oi, price: 100 + i, impliedVolatility: 12, volume: 5, ...extra })
+const oiAt = (points, strike, i) => points.find((p) => p.strike === strike && p.ms === OPEN + i * 60_000)?.openInterest
+
+test('the expiries summed: the next and the one after, the live feed\'s N2 / N3', () => {
+  assert.deepEqual(SUMMED_EXPIRY_CODES, [2, 3])
+  assert.deepEqual(SUMMED_EXPIRY_CODES.map(liveFlagOfCode), ['N2', 'N3'])
+})
+
+test('each point\'s OI is the three expiries\' at that strike and minute; the premium, IV and volume stay the nearest\'s', () => {
+  const base = [pt(25000, 0, 1000), pt(25000, 1, 1100), pt(25050, 0, 500)]
+  const next = [pt(25000, 0, 300, { price: 999 }), pt(25000, 1, 320), pt(25050, 0, 50)]
+  const far = [pt(25000, 0, 40), pt(25000, 1, 45)]
+  const sum = sumExpiryOi(base, [next, far])
+  assert.equal(oiAt(sum, 25000, 0), 1340)
+  assert.equal(oiAt(sum, 25000, 1), 1465)
+  assert.equal(oiAt(sum, 25050, 0), 550)          // the far expiry has none there: nearest + next
+  const p = sum.find((x) => x.strike === 25000 && x.ms === OPEN)
+  assert.equal(p.price, 100)                       // the nearest's premium, never the next's 999
+  assert.equal(p.impliedVolatility, 12)
+  assert.equal(p.volume, 5)
+  assert.equal(p.oiNearest, 1000)
+  // Nothing else to add: the points as they were.
+  assert.equal(sumExpiryOi(base, []), base)
+  assert.equal(sumExpiryOi(base, [[], null]), base)
+})
+
+test('an expiry\'s last reading at or before the minute is carried on - never a later one', () => {
+  const base = [pt(25000, 0, 1000), pt(25000, 1, 1000), pt(25000, 2, 1000), pt(25000, 3, 1000)]
+  const next = [pt(25000, 0, 200), pt(25000, 2, 260)]   // nothing at minute 1 and 3
+  const sum = sumExpiryOi(base, [next])
+  assert.deepEqual([0, 1, 2, 3].map((i) => oiAt(sum, 25000, i)), [1200, 1200, 1260, 1260])
+  // A reading 30 seconds into minute 2 (live) is not seen at minute 2's start, but from the next point on.
+  const live = sumExpiryOi(base, [[pt(25000, 0, 200), { time: new Date(OPEN + 2.5 * 60_000).toISOString(), strike: 25000, openInterest: 900 }]])
+  assert.deepEqual([0, 1, 2, 3].map((i) => oiAt(live, 25000, i)), [1200, 1200, 1200, 1900])
+})
+
+test('an expiry first read at a strike later in the day counts by its change from that reading - no fake OI added', () => {
+  const base = [0, 1, 2, 3, 4].map((i) => pt(25150, i, 1000))
+  // The next expiry's ATM±3 window reaches this strike only at minute 2 (spot moved): 5000 then, 5300 at minute 4.
+  const next = [pt(25150, 2, 5000), pt(25150, 3, 5000), pt(25150, 4, 5300)]
+  const sum = sumExpiryOi(base, [next])
+  assert.deepEqual([0, 1, 2, 3, 4].map((i) => oiAt(sum, 25150, i)), [1000, 1000, 1000, 1000, 1300])
+  // Read from the strike's start: counted in full.
+  const full = sumExpiryOi(base, [[pt(25150, 0, 5000), pt(25150, 4, 5300)]])
+  assert.deepEqual([0, 4].map((i) => oiAt(full, 25150, i)), [6000, 6300])
+  // A strike the nearest joins later: the other expiry read before it counts in full from the nearest's first reading.
+  const late = sumExpiryOi([pt(25200, 3, 700)], [[pt(25200, 1, 80), pt(25200, 3, 90)]])
+  assert.equal(oiAt(late, 25200, 3), 790)
+})
+
+test('strikes the nearest does not have are left out; a point with no OI keeps none; outside the session nothing', () => {
+  const base = [pt(25000, 0, 1000), pt(25000, 1, null)]
+  const next = [pt(25000, 0, 10), pt(26000, 0, 999), { time: '2026-11-05T15:45:00+05:30', strike: 25000, openInterest: 1 }]
+  const sum = sumExpiryOi(base, [next])
+  assert.equal(sum.length, 2)
+  assert.ok(!sum.some((p) => p.strike === 26000))
+  assert.equal(oiAt(sum, 25000, 0), 1010)
+  assert.equal(sum.find((p) => p.ms === OPEN + 60_000).openInterest, null)
+})
+
+test('no look-ahead: the sum of the minutes up to a clock is the same worked out from the points up to it only', () => {
+  const strikes = [24900, 24950, 25000, 25050, 25100]
+  const day = (seed, from = 0) => strikes.flatMap((s, k) => Array.from({ length: 40 }, (_, i) => i)
+    .filter((i) => i >= from + (k % 2) * 7 && (i * seed + k) % 3 !== 0)
+    .map((i) => pt(s, i, 1000 * seed + k * 37 + ((i * seed * 13) % 50))))
+  const base = day(1)
+  const next = day(2, 5)
+  const far = day(3, 11)
+  const whole = sumExpiryOi(base, [next, far])
+  for (const clock of [0, 6, 12, 19, 33, 39]) {
+    const cut = (pts) => pts.filter((p) => Date.parse(p.time) <= OPEN + clock * 60_000)
+    const part = sumExpiryOi(cut(base), [cut(next), cut(far)])
+    const upTo = whole.filter((p) => Date.parse(p.time) <= OPEN + clock * 60_000)
+    const key = (p) => `${p.strike}|${Date.parse(p.time)}`
+    assert.deepEqual(new Map(upTo.map((p) => [key(p), p.openInterest])), new Map(part.map((p) => [key(p), p.openInterest])), `clock ${clock}`)
+  }
+})
+
+test('the controls\' line says what is summed and what is not', () => {
+  assert.equal(expirySumText('2026-11-10', [
+    { code: 2, state: 'ready', expiry: '2026-11-17' }, { code: 3, state: 'ready', expiry: '2026-11-24' },
+  ], { live: true }), 'OI = 10 Nov + 17 Nov + 24 Nov')
+  assert.equal(expirySumText('2026-11-10', [
+    { code: 2, state: 'ready', expiry: '2026-11-17', dhanBandSteps: 3 }, { code: 3, state: 'loading' },
+  ]), 'OI = 10 Nov + 17 Nov (the one after loading…) - the next / far expiries ATM±3 only (all Dhan gives for a past day of an expiry that is not the nearest)')
+  assert.equal(expirySumText(null, [{ code: 2, state: 'error', error: 'Dhan said no' }, { code: 3, state: 'ready', expiry: null }]),
+    'OI = nearest + the one after (next not loaded (Dhan said no))')
+})
