@@ -878,7 +878,20 @@ When adding or changing a strategy:
   no rule is known to equal it: every bar also tallies the other candidate rules (`DeltaRules`, `RuleCount` - depth sockets,
   the trade's own packet, tick rule - kept in the day's file, `/api/order-flow/{u}/delta-rules`), shown on the Order Flow page's
   "Delta rules" card (folded, `OrderFlowDeltaRules.jsx`, Dhan's "K" format) to set against Dhan's candles before changing the
-  rule. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
+  rule. DHAN'S MARKET FEED IS A SNAPSHOT ABOUT ONCE A SECOND, not a packet a trade (Dhan's support page; its API docs say
+  "tick-by-tick event based") - the Full packet carries LTP, LTQ (the LAST trade's quantity only), LTT (whole seconds), ATP
+  (float32 - too coarse to recover a second's average price), the day's volume, the book's total buy / sell QUANTITY (resting
+  orders, never trades - not read as delta), OI and 5 levels; the 20 / 200-level depth feeds (NSE only; 200 = one instrument a
+  socket) carry the book alone, no trades. So one packet's volume is often many trades, at several prices, both ways, and
+  the rule in use gives ALL of it its last trade's side and price. The comparison rule "LTQ + book" (`RuleLtqBook`,
+  `LtqBookDelta` / `BookTaken`, the card's own column; a day saved before it keeps the other three and shows "—"; a minute
+  restored from such a checkpoint and traded on shows none) gives only the last trade (the LTQ, held to the packet's volume)
+  that side and splits the rest of the second by what was TAKEN off each side of the PREVIOUS market feed packet's 5-level
+  book (`_feedBids` / `_feedAsks`, fresh as the quote): ask levels the new best ask moved past plus the drop at it = bought,
+  the bids the mirror = sold (pulled orders count too - an estimate), else by the price's move, else half and half. It is
+  a comparison only - the footprint stays on the rule in use until it is chosen against Dhan's candles. A trade with NO side
+  known yet (before any trade of the engine had one - no quote, an unchanged price) is NEUTRAL: half buy, half sell in the
+  bars, no tape print, no iceberg read (it started as a buy - `_lastSide` was 1). `OrderFlowLtqBookTests.cs`. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
   stale time); the tape and sweeps stay on arrival (they need the milliseconds). A packet behind the last moves neither the
   price the tick rule reads nor the quote. EVERY
   tick (`SpotTick.ReceivedAt`, stamped on the market feed's receive loop) and depth packet (stamped on its socket's loop) goes

@@ -17,7 +17,8 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 ///  2. inside the spread, the midpoint - above it = buy, below = sell;
 ///  3. at the midpoint, or with a crossed or locked book (bid and ask are separate depth packets, so the book can be
 ///     half updated), the tick rule - up from the previous trade price = buy, down = sell, unchanged = same side as the
-///     last trade.
+///     last trade. Before any trade of the engine has a side, an undecided one is NEUTRAL - half buy, half sell in the
+///     bars, no tape print (it used to start as a buy).
 /// With no recent market feed quote (QuoteMaxAge) the depth sockets' quotes decide: each event is stamped with when it
 /// came off its socket (SpotTick.ReceivedAt, the depth socket's receive time - see OrderFlowService) and a trade is
 /// judged against the quotes that had ARRIVED by its tick's stamp.
@@ -77,12 +78,15 @@ public sealed class OrderFlowEngine
     private long? _prevVolume;
     private DateTimeOffset? _recordedFrom;
     private decimal _prevLtp, _prevBid, _prevAsk;
-    private int _lastSide = 1;
+    // 0 = no trade has had a side yet: an undecided trade is then neutral (split in the bars), not a buy.
+    private int _lastSide;
     // The previous market feed packet's best bid / ask, and when it came: the book before the next packet's trade.
     private decimal _feedBid, _feedAsk;
     private DateTimeOffset _feedQuoteAt;
-    // The last side of each comparison rule (each runs on its own, as if it were the only one).
-    private readonly int[] _ruleSides = { 1, 1, 1 };
+    // The last side of each side-based comparison rule (each runs on its own, as if it were the only one).
+    private readonly int[] _ruleSides = new int[RuleLtqBook];
+    // The previous market feed packet's 5-level book (the Full packet's own) - what the LTQ + book rule reads.
+    private DepthLevel[]? _feedBids, _feedAsks;
     private DepthLevel[] _bids = Array.Empty<DepthLevel>();
     private DepthLevel[] _asks = Array.Empty<DepthLevel>();
     // Each book side by price (built when first needed after the side changes) - what is displayed at a price, read for
@@ -231,8 +235,11 @@ public sealed class OrderFlowEngine
     }
 
     /// <summary>A market feed tick, <paramref name="now"/> = when it came off the socket (SpotTick.ReceivedAt).</summary>
-    /// <summary>The comparison rules, by their place in a bar's tallies (see DeltaRules).</summary>
-    private const int RuleDepthBook = 0, RuleOwnPacket = 1, RuleTickOnly = 2, RuleCount = 3;
+    /// <summary>The comparison rules, by their place in a bar's tallies (see DeltaRules). The first three give each
+    /// packet's whole volume one side; LtqBook splits it (LtqBookDelta).</summary>
+    private const int RuleDepthBook = 0, RuleOwnPacket = 1, RuleTickOnly = 2, RuleLtqBook = 3, RuleCount = 4;
+    /// <summary>A day saved before the LTQ + book rule was kept holds the first three only.</summary>
+    private const int RuleCountBeforeLtq = 3;
 
     /// <summary>The side by every rule: [the rule the bars use, then the comparison rules in their order].</summary>
     private (int Side, long[] Delta) Sides(SpotTick tick, decimal price, long traded, DateTimeOffset now)
@@ -246,8 +253,54 @@ public sealed class OrderFlowEngine
         _ruleSides[RuleOwnPacket] = Classify(price, tick.BestBidPrice, tick.BestAskPrice, _prevLtp, _ruleSides[RuleOwnPacket]);
         _ruleSides[RuleTickOnly] = Classify(price, 0, 0, _prevLtp, _ruleSides[RuleTickOnly]);
         var delta = new long[RuleCount];
-        for (var i = 0; i < RuleCount; i++) delta[i] = _ruleSides[i] * traded;
+        for (var i = 0; i < RuleLtqBook; i++) delta[i] = _ruleSides[i] * traded;
+        var bookFresh = feedQuote && _feedBids is not null && _feedAsks is not null;
+        delta[RuleLtqBook] = LtqBookDelta(side, traded, tick.LastTradedQty, price, _prevLtp,
+            bookFresh ? _feedBids : null, bookFresh ? _feedAsks : null, tick.Bids, tick.Asks);
         return (side, delta);
+    }
+
+    /// <summary>
+    /// The LTQ + BOOK rule (a comparison - DeltaRules' LtqBook): Dhan's market feed is a SNAPSHOT about once a second, not
+    /// a packet a trade (Dhan's own support page), so one packet's volume is often many trades, at several prices, both
+    /// ways - the other rules give all of it the side of its LAST trade. Here only the last trade - Dhan's Last Traded
+    /// Quantity, at most the packet's volume - takes that side (<paramref name="lastTradeSide"/>, the bars' rule); the rest
+    /// of the packet's volume is split by the liquidity TAKEN off each side of the 5-level book between the previous
+    /// packet and this one (BookTaken: ask levels the new best ask moved past, and the drop at it, = bought; the bids the
+    /// mirror = sold - pulled orders count too, so it is an estimate), else by the price's move from the previous trade
+    /// (up = bought, down = sold), else half and half. Returns the packet's delta (buy - sell).
+    /// </summary>
+    internal static long LtqBookDelta(int lastTradeSide, long traded, long lastTradedQty, decimal price, decimal prevLtp,
+        IReadOnlyList<DepthLevel>? prevBids, IReadOnlyList<DepthLevel>? prevAsks, IReadOnlyList<DepthLevel>? bids, IReadOnlyList<DepthLevel>? asks)
+    {
+        if (traded <= 0) return 0;
+        var last = Math.Clamp(lastTradedQty, 0, traded);
+        var rest = traded - last;
+        var bought = BookTaken(prevAsks, asks, ask: true);
+        var sold = BookTaken(prevBids, bids, ask: false);
+        var buyShare = bought + sold > 0 ? bought / (double)(bought + sold)
+            : prevLtp > 0 && price > prevLtp ? 1
+            : prevLtp > 0 && price < prevLtp ? 0
+            : 0.5;
+        var restBuy = (long)Math.Round(rest * buyShare, MidpointRounding.AwayFromZero);
+        return Math.Sign(lastTradeSide) * last + restBuy - (rest - restBuy);
+    }
+
+    /// <summary>The quantity taken off one side of a 5-level book between two packets (best level first): every level the
+    /// new best price has moved past (an ask under the new best ask, a bid over the new best bid) in full, and what the new
+    /// best price's own level lost. Levels further out are left alone - the 5-level window shifts, and what moves there is
+    /// orders placed or pulled, not trades. 0 without both books.</summary>
+    internal static long BookTaken(IReadOnlyList<DepthLevel>? before, IReadOnlyList<DepthLevel>? after, bool ask)
+    {
+        if (before is not { Count: > 0 } || after is not { Count: > 0 }) return 0;
+        var best = after[0].Price;
+        long taken = 0;
+        foreach (var level in before)
+        {
+            if (ask ? level.Price < best : level.Price > best) taken += level.Quantity;
+            else if (level.Price == best) taken += Math.Max(0, level.Quantity - after[0].Quantity);
+        }
+        return taken;
     }
 
     public void OnTick(SpotTick tick, DateTimeOffset now)
@@ -287,6 +340,7 @@ public sealed class OrderFlowEngine
                 _prevVolume = tick.Volume;
                 if (price > 0) _prevLtp = price;
                 if (tick.BestBidPrice > 0 && tick.BestAskPrice > 0) (_feedBid, _feedAsk, _feedQuoteAt) = (tick.BestBidPrice, tick.BestAskPrice, now);
+                if (tick.Bids is { Length: > 0 } feedBids && tick.Asks is { Length: > 0 } feedAsks) (_feedBids, _feedAsks) = (feedBids, feedAsks);
             }
             _feedSession = tick.FeedSession;
             _prevBid = _bids.Length > 0 ? _bids[0].Price : tick.BestBidPrice;
@@ -348,6 +402,7 @@ public sealed class OrderFlowEngine
         _prevVolume = null;
         _recordedFrom = null;
         _prevLtp = _prevBid = _prevAsk = _feedBid = _feedAsk = 0;
+        _feedBids = _feedAsks = null;
         _recentQuotes.Clear();
         _lastQuote = null;
         _unbookedVolume = 0;
@@ -367,7 +422,13 @@ public sealed class OrderFlowEngine
         var minute = IstMinute(tradedAt);
         if (!_bars.TryGetValue(minute, out var bar))
             _bars[minute] = bar = new MinuteBar { Time = minute, Open = price, High = price, Low = price, Close = price, RuleDelta = new long[RuleCount] };
-        if (bar.RuleDelta is { } tallies) for (var i = 0; i < RuleCount; i++) tallies[i] += ruleDelta[i];
+        if (bar.RuleDelta is { } tallies)
+        {
+            // A minute restored from a checkpoint saved before the LTQ + book rule: its comparison would be part of the
+            // minute only - none for it.
+            if (tallies.Length == RuleCount) for (var i = 0; i < RuleCount; i++) tallies[i] += ruleDelta[i];
+            else bar.RuleDelta = null;
+        }
         bar.High = Math.Max(bar.High, price);
         bar.Low = Math.Min(bar.Low, price);
         bar.Close = price;
@@ -376,7 +437,17 @@ public sealed class OrderFlowEngine
         if (!bar.Levels.TryGetValue(price, out var level)) bar.Levels[price] = level = new LevelVolume();
         if (!_dayVolume.TryGetValue(price, out var atPrice)) _dayVolume[price] = atPrice = new LevelVolume();
         if (side > 0) { level.Buy += quantity; bar.Buy += quantity; atPrice.Buy += quantity; }
-        else { level.Sell += quantity; bar.Sell += quantity; atPrice.Sell += quantity; }
+        else if (side < 0) { level.Sell += quantity; bar.Sell += quantity; atPrice.Sell += quantity; }
+        else
+        {
+            // No side known (before any trade had one): neutral - half each way, no print, no iceberg read.
+            var sold = quantity / 2;
+            var bought = quantity - sold;
+            level.Buy += bought; bar.Buy += bought; atPrice.Buy += bought;
+            level.Sell += sold; bar.Sell += sold; atPrice.Sell += sold;
+            _lastTradeAt = now;
+            return;
+        }
         _lastTradeAt = now;
 
         if (quantity >= LotSize)
@@ -529,10 +600,11 @@ public sealed class OrderFlowEngine
         lock (_lock) bars = CopyBars(_bars.Values);
         return bars.GroupBy(b => b.Time.ToUnixTimeSeconds() / bucket).Select(candle =>
         {
-            long? Rule(int rule) => candle.All(b => b.Rules is not null) ? candle.Sum(b => b.Rules![rule]) : null;
+            long? Rule(int rule) => candle.All(b => b.Rules is { } r && r.Length > rule) ? candle.Sum(b => b.Rules![rule]) : null;
             return new OrderFlowRuleRow(
                 DateTimeOffset.FromUnixTimeSeconds(candle.Key * bucket).ToOffset(IstClock.Offset),
-                candle.Sum(b => b.Buy + b.Sell), candle.Sum(b => b.Buy - b.Sell), Rule(RuleDepthBook), Rule(RuleOwnPacket), Rule(RuleTickOnly));
+                candle.Sum(b => b.Buy + b.Sell), candle.Sum(b => b.Buy - b.Sell), Rule(RuleDepthBook), Rule(RuleOwnPacket), Rule(RuleTickOnly),
+                Rule(RuleLtqBook));
         }).ToList();
     }
 
@@ -778,7 +850,7 @@ public sealed class OrderFlowEngine
             foreach (var saved in day.Bars)
             {
                 if (_bars.ContainsKey(saved.Time)) continue;
-                var bar = new MinuteBar { Time = saved.Time, Open = saved.Open, High = saved.High, Low = saved.Low, Close = saved.Close, Buy = saved.Buy, Sell = saved.Sell, Trades = saved.Trades, RuleDelta = saved.Rules is { Length: RuleCount } rules ? rules.ToArray() : null };
+                var bar = new MinuteBar { Time = saved.Time, Open = saved.Open, High = saved.High, Low = saved.Low, Close = saved.Close, Buy = saved.Buy, Sell = saved.Sell, Trades = saved.Trades, RuleDelta = saved.Rules is { Length: RuleCount or RuleCountBeforeLtq } rules ? rules.ToArray() : null };
                 foreach (var level in saved.Levels)
                 {
                     bar.Levels[level.Price] = new LevelVolume { Buy = level.Buy, Sell = level.Sell };
@@ -880,8 +952,10 @@ public sealed record OrderFlowBackfillMinute(DateTimeOffset Time, long Buy, long
 
 /// <summary>One candle's delta by each candidate side rule (OrderFlowEngine.DeltaRules): Delta = the rule the bars use (the
 /// previous market feed packet's quote); DepthBook = the depth sockets' quotes (the rule before it); OwnPacket = the
-/// trade's own packet's quote, the book it left behind; TickRule = up from the last price = buy, down = sell.</summary>
-public sealed record OrderFlowRuleRow(DateTimeOffset Time, long Volume, long Delta, long? DepthBook, long? OwnPacket, long? TickRule);
+/// trade's own packet's quote, the book it left behind; TickRule = up from the last price = buy, down = sell; LtqBook = only
+/// the last trade (Dhan's LTQ) on the bars' side, the rest of each 1-second packet split by the book taken off each side
+/// (OrderFlowEngine.LtqBookDelta). Null = recorded before that rule was kept.</summary>
+public sealed record OrderFlowRuleRow(DateTimeOffset Time, long Volume, long Delta, long? DepthBook, long? OwnPacket, long? TickRule, long? LtqBook = null);
 
 /// <summary>One minute's aggressor volume - see OrderFlowEngine.LiveDelta.</summary>
 public sealed record OrderFlowDeltaMinute(DateTimeOffset Time, long Buy, long Sell);
