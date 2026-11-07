@@ -608,7 +608,14 @@ When adding or changing a strategy:
   default, = since the open - the day's FIRST flip (every reading from the first that was not level on the other side;
   OI since open starts level), N = at least N minutes straight right before the flip (an earlier flip allowed); with the
   crosses' own "by ≥ %"; the box says "min = since open" at 0 (`param2.after`), the words "held since the open" /
-  "held ≥ N min before" (`param2.text`). The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
+  "held ≥ N min before" (`param2.text`). THE S-R WALLS NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3, CE cross
+  PE - and since open too"): two conditions, "S-R walls ATM ±: total OI (CE vs PE)" (`atmOi`) and "... since open (CE vs PE
+  added)" (`atmOiOpen`), on the strikes ATM ± N of each minute (`param3` "ATM ±", 0 - `ATM_OI_MAX` 5, default 1): their CE
+  (R) and PE (S) OI added up - the spot chart's walls' own OI - or what each added since the open (a strike from its own
+  first reading); worked out in `prepareDay`'s walls loop (`atmOi[i][N]` = { ce, pe, dce, dpe }, readings up to the minute,
+  the summed expiries' OI with Σ 3 expiries) and carried by `timeframeView`. Each: PE / CE above, PE / CE crossed above
+  (in the look-back, still above), and held since the morning then flipped (`HELD`), with "by ≥ %" - total: of the lower
+  one (as Total OI's), since open: of CE + PE added (as OI since open's). The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks, and DIVERGENCE - asked for: "cumulative delta was x at 9:30, the same at 10:00 or only some %
   decreased, and price dipped more - that is divergence": Bullish / Bearish divergence = over the look-back spot moved
   >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or

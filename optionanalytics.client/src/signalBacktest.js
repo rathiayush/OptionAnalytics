@@ -235,15 +235,32 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   // The OI walls (the spot chart's S-R): the most call OI at or above spot, the most put OI at or below it - the strikes'
   // latest OI at the end of each minute; with them, the walls since the open (`wallsSinceOpen`).
   const minuteWalls = []
+  // With them, the S / R walls' own figures NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3"): for each ATM ± N
+  // (0 - ATM_OI_MAX strikes either side of that minute's ATM), the strikes' CE and PE OI added up - the walls' total -
+  // and their change since the open (each strike from its own first reading, as chainOiTotals; the spot chart's "Δ").
+  const atmOi = []
   {
-    const cursors = strikes.map((k) => ({ k, ce: [...(ceOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null }))
+    const cursors = strikes.map((k) => ({ k, ce: [...(ceOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null, ceOpen: null, peOpen: null }))
+    const cursorAt = new Map(cursors.map((c) => [c.k, c]))
     for (let i = 0; i < n; i++) {
       for (const c of cursors) {
-        while (c.ci < c.ce.length && c.ce[c.ci][0] <= t[i]) { const v = c.ce[c.ci++][1].oi; if (Number.isFinite(v)) c.ceOi = v }
-        while (c.pi < c.pe.length && c.pe[c.pi][0] <= t[i]) { const v = c.pe[c.pi++][1].oi; if (Number.isFinite(v)) c.peOi = v }
+        while (c.ci < c.ce.length && c.ce[c.ci][0] <= t[i]) { const v = c.ce[c.ci++][1].oi; if (Number.isFinite(v)) { c.ceOi = v; if (c.ceOpen == null) c.ceOpen = v } }
+        while (c.pi < c.pe.length && c.pe[c.pi][0] <= t[i]) { const v = c.pe[c.pi++][1].oi; if (Number.isFinite(v)) { c.peOi = v; if (c.peOpen == null) c.peOpen = v } }
       }
       const { resistance, support } = oiWalls(cursors.map((c) => ({ strike: c.k, ceOi: c.ceOi ?? 0, peOi: c.peOi ?? 0 })), spotBars[i].c)
       minuteWalls.push({ resistance: resistance?.strike ?? null, support: support?.strike ?? null, resistanceOi: resistance?.ceOi ?? null, supportOi: support?.peOi ?? null })
+      const bands = []
+      let ce = 0, pe = 0, dce = 0, dpe = 0, seen = false
+      for (let N = 0; N <= ATM_OI_MAX; N++) {
+        for (const k of N === 0 ? [atm[i]] : [atm[i] - N * step, atm[i] + N * step]) {
+          const c = cursorAt.get(Math.round(k * 100) / 100)
+          if (!c) continue
+          if (c.ceOi != null) { ce += c.ceOi; dce += c.ceOi - c.ceOpen; seen = true }
+          if (c.peOi != null) { pe += c.peOi; dpe += c.peOi - c.peOpen; seen = true }
+        }
+        bands.push(seen ? { ce, pe, dce, dpe } : null)
+      }
+      atmOi.push(bands)
     }
   }
   const walls = wallsSinceOpen(minuteWalls)
@@ -274,7 +291,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, tot, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
+    ok: true, date, underlying: u, step, n, t, atm, oi, tot, atmOi, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap), spotVwap: Array.from(spotVwap),
@@ -371,7 +388,7 @@ export function timeframeView(d, tf = 1) {
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last), from: Int32Array.from(first),
-    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
+    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), atmOi: pick(d.atmOi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
     vwap: pick(d.vwap), spotVwap: pick(d.spotVwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
@@ -646,6 +663,57 @@ const HELD = { param2: { label: 'held ≥', unit: ' min', default: 0, min: 0, ma
 // How far one Total OI line is over the other, in % of the lower one (PE 4.4 cr over CE 4 cr = 10%); 0 = any lead.
 const TOTAL_LEAD = { param: pctParam('by ≥', 0, 100, 0.5) }
 const totalLeadPct = (x) => { const lo = x ? Math.min(x.ce, x.pe) : 0; return lo > 0 ? (Math.abs(x.pe - x.ce) / lo) * 100 : NaN }
+
+// THE S / R WALLS NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3, CE cross PE - and since open too"): the
+// strikes ATM ± N of each minute (prepareDay's `atmOi`), their CE (R) and PE (S) OI added up - TOTAL (the walls' own OI,
+// the spot chart's S-R) or SINCE OPEN (what was added since 09:15, its "Δ"). `param3` - how many strikes either side.
+const ATM_OI_MAX = 5
+const ATM_BAND = { param3: { label: 'ATM ±', unit: ' strikes', default: 1, min: 0, max: ATM_OI_MAX, step: 1, text: (v) => `ATM ± ${v}` } }
+const atmBandOf = (p3) => Math.min(ATM_OI_MAX, Math.max(0, Number.isFinite(Number(p3)) && p3 != null ? Math.round(Number(p3)) : ATM_BAND.param3.default))
+function atmOiCondition(mode) {
+  const open = mode === 'open'
+  const what = open ? 'added since open' : 'total OI'
+  // The pair a minute reads: the band's CE / PE total OI, or what each added since the open.
+  const pair = (d, k, N) => { const x = d.atmOi?.[k]?.[N]; return x ? (open ? { ce: x.dce, pe: x.dpe } : { ce: x.ce, pe: x.pe }) : null }
+  const lead = open ? LEAD : TOTAL_LEAD
+  return {
+    id: open ? 'atmOiOpen' : 'atmOi', group: 'OI',
+    // The difference first - the indicator box cuts a long name.
+    name: open ? 'S-R walls ATM ±: since open (CE vs PE added)' : 'S-R walls ATM ±: total OI (CE vs PE)',
+    options: [
+      opt('peAbove', `PE ${what} above CE`, 'ceAbove', { ...lead, ...ATM_BAND }), opt('ceAbove', `CE ${what} above PE`, 'peAbove', { ...lead, ...ATM_BAND }),
+      opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...lead, ...ATM_BAND }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...lead, ...ATM_BAND }),
+      opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
+      opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
+    ],
+    // "by ≥ %": the side ahead NOW by that much - total OI: of the lower one (as Total OI's); since open: of CE + PE added
+    // (as OI since open's).
+    test: (d, i, v, w, p, p2, p3) => {
+      const N = atmBandOf(p3)
+      const gap = (k) => { const x = pair(d, k, N); return x ? x.pe - x.ce : NaN }
+      const lead = () => {
+        const x = pair(d, i, N)
+        if (!x) return false
+        if (open) { const size = Math.abs(x.ce) + Math.abs(x.pe); return size > 0 ? Math.abs(x.pe - x.ce) / size >= frac(p) : false }
+        return x.ce > 0 && x.pe > 0 && totalLeadPct(x) >= (p ?? 0) - 1e-9
+      }
+      switch (v) {
+        case 'peAbove': return gap(i) > 0 && lead()
+        case 'ceAbove': return gap(i) < 0 && lead()
+        case 'peCross': return crossed(gap, i, w, true) && lead()
+        case 'ceCross': return crossed(gap, i, w, false) && lead()
+        case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
+        case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        default: return false
+      }
+    },
+    show: (d, i, l) => {
+      const N = atmBandOf(l?.param3)
+      const x = pair(d, i, N)
+      return x ? `ATM ± ${N} ${open ? 'added since open' : 'total'} CE ${fmtL(x.ce)} · PE ${fmtL(x.pe)}` : `ATM ± ${N} OI —`
+    },
+  }
+}
 
 const fmtLakh = (v) => `${(v / 1e5).toFixed(1)}L`
 
@@ -1065,6 +1133,8 @@ export const RULE_CONDITIONS = [
     test: (d, i, v, w) => d.hp.some((h) => h.dir === (v === 'bullish' ? 1 : -1) && h.i <= i && h.i > i - w),
     show: () => '🎯',
   },
+  atmOiCondition('total'),
+  atmOiCondition('open'),
   {
     id: 'oiWalls', group: 'OI', name: 'OI S-R walls (spot chart)',
     options: [

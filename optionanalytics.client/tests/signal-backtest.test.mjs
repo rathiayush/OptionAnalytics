@@ -1389,3 +1389,77 @@ test('held since the morning, then flipped: OI since open, Total OI and the cumu
   assert.deepEqual(at(ruleSignals(noisy, lines([{ id: 'oiOpen', value: 'peFlip' }]))), [])
   assert.deepEqual(at(ruleSignals(noisy, lines([{ id: 'oiOpen', value: 'peFlip', param2: 30 }]))), [[60, 'rule', 'buyCE']])
 })
+
+// Asked for: "S-R walls total CE PE ATM ± 1, 2, 3 - CE cross PE - and these since open too": the walls' CE (R) and PE (S)
+// OI at the strikes ATM ± N of each minute, summed - total, and added since the open.
+test('S-R walls near ATM: the band sums from the day itself, total and since open, each minute from its own readings', () => {
+  const { run } = syntheticDay()
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  assert.ok(d.ok)
+  // The OI of a strike at a minute from the raw points (each minute's point holds its close); its first reading = the open.
+  const oiAt = (points, k, ms) => points.filter((p) => p.strike === k && Date.parse(p.time) <= ms).at(-1)?.openInterest
+  for (const i of [5, 120, 250]) {
+    for (const N of [0, 1, 3]) {
+      const ks = []
+      for (let s = -N; s <= N; s++) ks.push(d.atm[i] + s * d.step)
+      const sum = (points) => ks.reduce((a, k) => a + (oiAt(points, k, d.t[i]) ?? 0), 0)
+      const open = (points) => ks.reduce((a, k) => a + ((oiAt(points, k, d.t[i]) ?? 0) - (oiAt(points, k, d.t[0]) ?? 0)), 0)
+      const x = d.atmOi[i][N]
+      assert.equal(x.ce, sum(run.cePoints), `CE total ATM ± ${N} at ${i}`)
+      assert.equal(x.pe, sum(run.pePoints), `PE total ATM ± ${N} at ${i}`)
+      assert.equal(x.dce, open(run.cePoints), `CE since open ATM ± ${N} at ${i}`)
+      assert.equal(x.dpe, open(run.pePoints), `PE since open ATM ± ${N} at ${i}`)
+    }
+  }
+  assert.equal(d.atmOi[0][1].dce, 0)                                   // nothing added at the open
+  // A day cut part way has the same figures up to the cut - nothing after a minute reaches it.
+  const cut = Date.parse(run.spotCandlesOneMinute[150].time)
+  const part = prepareDay({ ...run, optionExpiry: '2026-10-06', spotCandlesOneMinute: run.spotCandlesOneMinute.filter((b) => Date.parse(b.time) <= cut),
+    cePoints: run.cePoints.filter((p) => Date.parse(p.time) <= cut), pePoints: run.pePoints.filter((p) => Date.parse(p.time) <= cut) }, { underlying: 'NIFTY' })
+  assert.deepEqual(part.atmOi[150], d.atmOi[150])
+  // A 5-minute view reads each candle's last minute.
+  const v5 = timeframeView(d, 5)
+  assert.deepEqual(v5.atmOi[3], d.atmOi[v5.at[3]])
+})
+
+test('S-R walls near ATM: CE vs PE total OI and added since open - above, crossed, held since the morning then flipped, ATM ± N', () => {
+  const f = (d, id, value, i, { w = 5, p = 0, p2 = 0, p3 = 1 } = {}) => cond(id).test(d, i, value, w, p, p2, p3)
+  // ATM ± 1: CE above PE (total) until minute 60, PE above from it; ATM ± 3 (wider): CE stays above all day.
+  // Since open: CE added more until 80, PE added more from it.
+  const band = (i) => {
+    const near = i < 60 ? { ce: 3e6, pe: 2e6 } : { ce: 2e6, pe: 3e6 }
+    const added = i < 80 ? { dce: 4e5, dpe: 1e5 } : { dce: 1e5, dpe: 6e5 }
+    const wide = { ce: 9e6, pe: 7e6, dce: added.dce, dpe: added.dpe }
+    const one = { ...near, ...added }
+    return [one, one, one, wide, wide, wide]
+  }
+  const d = { ...fakeDay(), atmOi: Array.from({ length: 360 }, (_, i) => band(i)) }
+  // Total OI, ATM ± 1
+  assert.ok(f(d, 'atmOi', 'ceAbove', 30) && !f(d, 'atmOi', 'peAbove', 30))
+  assert.ok(f(d, 'atmOi', 'peAbove', 70) && !f(d, 'atmOi', 'ceAbove', 70))
+  assert.ok(f(d, 'atmOi', 'peCross', 62) && !f(d, 'atmOi', 'ceCross', 62))   // PE crossed above CE at 60, 2 min ago
+  assert.ok(!f(d, 'atmOi', 'peCross', 66) && f(d, 'atmOi', 'peCross', 66, { w: 10 }))
+  assert.ok(f(d, 'atmOi', 'peFlip', 62))                                      // CE above since the morning, then PE
+  assert.ok(f(d, 'atmOi', 'peFlip', 62, { p2: 45 }) && !f(d, 'atmOi', 'peFlip', 62, { p2: 75 })) // CE held 60 min
+  assert.ok(f(d, 'atmOi', 'peAbove', 70, { p: 50 }) && !f(d, 'atmOi', 'peAbove', 70, { p: 51 })) // PE 3 over CE 2 = 50%
+  // ATM ± 3: CE above all day - no cross, no flip
+  assert.ok(f(d, 'atmOi', 'ceAbove', 70, { p3: 3 }) && !f(d, 'atmOi', 'peCross', 62, { p3: 3 }) && !f(d, 'atmOi', 'peFlip', 62, { p3: 3 }))
+  // Added since open, ATM ± 1: CE ahead until 80, PE crosses above at 80
+  assert.ok(f(d, 'atmOiOpen', 'ceAbove', 70) && f(d, 'atmOiOpen', 'peCross', 82) && f(d, 'atmOiOpen', 'peFlip', 82))
+  assert.ok(!f(d, 'atmOiOpen', 'peCross', 62))                                // the total's cross is not the since-open one
+  assert.ok(f(d, 'atmOiOpen', 'peAbove', 90, { p: 70 }) && !f(d, 'atmOiOpen', 'peAbove', 90, { p: 72 })) // 5 of 7 = 71%
+  // No readings: nothing holds.
+  const empty = { ...fakeDay(), atmOi: Array.from({ length: 360 }, () => [null, null, null, null, null, null]) }
+  assert.ok(!f(empty, 'atmOi', 'peAbove', 70) && !f(empty, 'atmOiOpen', 'ceAbove', 70))
+  // Through the engine, with the mirror: the rule at PE's cross, its mirror never (CE never crossed back).
+  assert.deepEqual(at(ruleSignals(d, lines([{ id: 'atmOi', value: 'peCross', param3: 1 }], 'buyCE', { mirror: true }))), [[60, 'rule', 'buyCE']])
+  assert.deepEqual(at(ruleSignals(d, lines([{ id: 'atmOi', value: 'peCross', param3: 3 }]))), [])
+  // Saved, said and mirrored: ATM ± 1 by default, held to 0 - 5, kept by the mirror.
+  assert.deepEqual(cleanLine({ id: 'atmOi', value: 'peCross' }), { id: 'atmOi', value: 'peCross', join: 'and', param: 0, param3: 1, windowMin: DEFAULT_WINDOW })
+  assert.equal(cleanLine({ id: 'atmOiOpen', value: 'peAbove', param3: 9 }).param3, 5)
+  assert.equal(cleanLine({ id: 'atmOiOpen', value: 'peFlip' }).param2, 0)
+  assert.match(lineText({ id: 'atmOi', value: 'ceCross', param3: 2, windowMin: 10 }), /S-R walls ATM ±: total OI \(CE vs PE\): CE crossed above PE, ATM ± 2 \(last 10 min\)$/)
+  assert.match(lineText({ id: 'atmOiOpen', value: 'peFlip', param2: 0, param3: 3 }), /CE above since the morning, then PE crossed above, held since the open, ATM ± 3/)
+  assert.deepEqual(mirrorLines([{ id: 'atmOiOpen', value: 'peCross', param3: 2, windowMin: 10 }]), [{ id: 'atmOiOpen', value: 'ceCross', param3: 2, windowMin: 10 }])
+  assert.match(cond('atmOi').show(d, 70, { param3: 1 }), /ATM ± 1 total CE \+20\.0L · PE \+30\.0L/)
+})
