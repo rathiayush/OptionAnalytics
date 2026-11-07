@@ -486,27 +486,25 @@ public sealed class OiReplayService
         return liveBars.Count > 0 ? liveBars : storedBars;
     }
 
-    /// <summary>The expiries OI Replay's "Σ 3 expiries" adds to the nearest one: the 2nd and the 3rd (Dhan's rolling-option
-    /// expiryCode 2 and 3 of the series' flag - counted from the day itself, so on a past day the 2nd / 3rd expiry that
-    /// was listed THEN; today the live feed's N2 / N3).</summary>
-    internal const int MaxSummedExpiryCode = 3;
-
-    /// <summary>The live feed's positional flag of each summed expiry code (2 -> N2, 3 -> N3).</summary>
-    internal static readonly string[] SummedLiveFlags = Enumerable.Range(2, MaxSummedExpiryCode - 1).Select(c => $"N{c}").ToArray();
+    /// <summary>The live feed's chains OI Replay's live "Σ 3 expiries" adds to the nearest expiry: the NEXT expiry (N2 - the
+    /// series' rolling-option expiryCode 2) and the MONTHLY (MONTH - the MONTH series' code 1; the page leaves it out when
+    /// it IS the nearest or the next expiry, so nothing is counted twice).</summary>
+    internal static readonly string[] SummedLiveFlags = { "N2", "MONTH" };
 
     /// <summary>How many strikes either side of the ATM Dhan's rolling-option endpoint gives for an expiry that is NOT the
     /// nearest: its docs - "index options near expiry allow up to ATM+10 / ATM-10, all other contracts up to ATM+3 /
     /// ATM-3". So only those are asked (a request for more would only fail, again and again).</summary>
     internal const int OtherExpiryBandSteps = 3;
 
-    /// <summary>One day's option band of the 2nd or 3rd nearest expiry (`expiryCode` 2 / 3) - CE and PE points as the run's,
-    /// only their OI is read (OI Replay adds it to the nearest expiry's, `expirySum.js`). A PAST day: Dhan's rolling
-    /// options, ATM±3 (OtherExpiryBandSteps - all Dhan gives), kept on disk like every past day (DhanDataCache) - nothing
-    /// comes from the stored database, which keeps the current cycle only. TODAY: the live feed's own 1-minute bars of
-    /// N2 / N3 (ATM±10, LiveOptionLegStore) from the first minute it holds - no Dhan call at all when that is the open -
-    /// and Dhan's ATM±3 backfill (once a day - TodayFetchShare) only for the minutes before it. Either way every strike
-    /// read is carried on minute by minute within the run's ATM±10 band (CarryForward), so one that leaves the ATM±3
-    /// window keeps its last reading rather than dropping out of the sum.</summary>
+    /// <summary>TODAY's option band of an expiry OI Replay's live "Σ 3 expiries" adds to the nearest (LIVE ONLY - a past day
+    /// is refused, asking Dhan nothing): the NEXT expiry (`expiryFlag` WEEK / MONTH with `expiryCode` 2 - the live feed's
+    /// N2) or the MONTHLY (MONTH, code 1 - the live feed's MONTH chain). CE and PE points as the run's - the page adds their
+    /// OI to the nearest expiry's (`expirySum.js`) and works out each expiry's own GEX from their premiums (`gex.js`). The
+    /// live feed's own 1-minute bars (ATM±10, LiveOptionLegStore) from the first minute it holds - no Dhan call at all
+    /// when that is the open - and Dhan's backfill (once a day - TodayFetchShare; the monthly's shared with a MONTH run's)
+    /// only for the minutes before it: ATM±10 for the monthly (the nearest of its series), ATM±3 for the next expiry (all
+    /// Dhan's rolling options give for an expiry that is not the nearest - OtherExpiryBandSteps). Every strike read is
+    /// carried on minute by minute within the run's ATM±10 band (CarryForward).</summary>
     public async Task<OiReplayExpiryBand> ExpiryBandAsync(
         string underlying, DateOnly date, string expiryFlag, int expiryCode, CancellationToken cancellationToken, bool forceLive = false, bool forceFetch = false)
     {
@@ -519,11 +517,11 @@ public sealed class OiReplayService
             return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "The expiry series is WEEK or MONTH.");
         if (underlying == "BANKNIFTY" && expiryFlag == "WEEK")
             return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "BANKNIFTY has no weekly expiry - NSE discontinued it. Use Monthly instead.");
-        if (expiryCode < 2 || expiryCode > MaxSummedExpiryCode)
-            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, $"The expiry code is 2 (the next expiry) or {MaxSummedExpiryCode} (the one after).");
-        if (!_allowLiveDataFallback && !forceLive && !forceFetch && !AlwaysLiveUnderlyings.Contains(underlying))
-            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode,
-                "The next and far expiries come from Dhan only (the stored database keeps the current cycle) - live data is off on this server (OiReplay:AllowLiveDataFallback).");
+        var monthly = expiryCode == 1;
+        if (!(expiryCode == 2 || (monthly && expiryFlag == "MONTH")))
+            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "The expiries summed are the next one (expiry code 2) and the monthly (MONTH, code 1).");
+        if (date != IstClock.Today())
+            return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, "The 3-expiry sum is live only - today's day.");
 
         await _instrumentMaster.EnsureLoadedAsync(cancellationToken);
         var instrument = _instrumentMaster.FindSpot(underlying);
@@ -538,7 +536,8 @@ public sealed class OiReplayService
         if (spotBars.Count == 0)
             return OiReplayExpiryBand.Failed(underlying, date, expiryFlag, expiryCode, spotError ?? $"No {underlying} spot for {date:dd MMM yyyy}.");
 
-        var liveFlag = $"N{expiryCode}";
+        var liveFlag = monthly ? "MONTH" : "N2";
+        var dhanBand = monthly ? StrikeBandSteps : OtherExpiryBandSteps;
         var firstLive = isToday && _liveBars is not null ? _liveBars.FirstOptionMinute(underlying, liveFlag, date) : null;
         var open = new DateTimeOffset(date.ToDateTime(new TimeOnly(9, 16)), IstClock.Offset);
         var askDhan = firstLive is null || firstLive.Value > open;
@@ -565,7 +564,7 @@ public sealed class OiReplayService
             }
             var ceTasks = new List<Task<List<OiReplayPoint>>>();
             var peTasks = new List<Task<List<OiReplayPoint>>>();
-            for (var k = -OtherExpiryBandSteps; k <= OtherExpiryBandSteps; k++)
+            for (var k = -dhanBand; k <= dhanBand; k++)
             {
                 var token = ExpiredOptionBacktestService.StrikeToken(k);
                 ceTasks.Add(FetchAsync(token, "CALL"));
@@ -593,10 +592,10 @@ public sealed class OiReplayService
         string? note = null;
         if (askDhan && answered < asked)
             note = answered == 0
-                ? $"Dhan sent none of its {asked} series (ATM±{OtherExpiryBandSteps}, CE and PE)."
-                : $"Dhan sent {answered} of its {asked} series (ATM±{OtherExpiryBandSteps}, CE and PE).";
+                ? $"Dhan sent none of its {asked} series (ATM±{dhanBand}, CE and PE)."
+                : $"Dhan sent {answered} of its {asked} series (ATM±{dhanBand}, CE and PE).";
         return new OiReplayExpiryBand(true, null, underlying, date, expiryFlag, expiryCode, liveFlag, ce, pe,
-            DhanBandSteps: askDhan ? OtherExpiryBandSteps : null, LiveFrom: firstLive, Note: note);
+            DhanBandSteps: askDhan ? dhanBand : null, LiveFrom: firstLive, Note: note);
     }
 
     /// <summary>`points` with a point at every spot minute for every strike within `bandSteps` strikes of that minute's

@@ -374,3 +374,70 @@ test('parityForward: the middle of the three nearest strikes; spot when there is
   assert.equal(parityForward([{ strike: 25000, call: 120, put: 100 }, { strike: 25050, call: 95, put: 120 }], 25010), 25022.5)
 })
 
+
+// OI Replay's live "Σ 3 expiries": other expiries added in (`chains`), each worked out as its own chain.
+test('other expiries added in: each its own gamma (its own time to expiry and IV) - the sum of each worked out alone', () => {
+  const near = day({ minutes: 20, spot: (m) => 25000 + 3 * m, ceOi: (k, m) => 1e6 + 2e4 * m, iv: () => 12, years: () => 3 / 365 })
+  const next = day({ minutes: 20, spot: (m) => 25000 + 3 * m, ceOi: (k) => 4e5 + (k % 100 === 0 ? 3e5 : 0), peOi: (k, m) => 6e5 + 1e4 * m, iv: () => 14, years: () => 10 / 365 })
+  const month = day({ minutes: 20, spot: (m) => 25000 + 3 * m, ceOi: () => 2e6, peOi: () => 2.5e6, iv: () => 15, years: () => 24 / 365, strikes: STRIKES.filter((k, i) => i % 2 === 0) })
+  for (const sign of ['standard', 'buildup']) {
+    const alone = [near, next, month].map((d) => gexDay(d.ce, d.pe, d.spots, { sign }))
+    const sum = gexDay(near.ce, near.pe, near.spots, { sign, chains: [{ cePoints: next.ce, pePoints: next.pe }, { cePoints: month.ce, pePoints: month.pe }] })
+    assert.equal(sum.length, 20)
+    for (const [i, m] of sum.entries()) {
+      const parts = alone.map((a) => a[i])
+      assert.ok(close(m.net, parts.reduce((s, p) => s + p.net, 0), Math.abs(m.net) * 1e-9 + 1e-6), `${sign} net at ${i}`)
+      assert.ok(close(m.calls, parts.reduce((s, p) => s + p.calls, 0), Math.abs(m.calls) * 1e-9 + 1e-6))
+      assert.ok(close(m.puts, parts.reduce((s, p) => s + p.puts, 0), Math.abs(m.puts) * 1e-9 + 1e-6))
+      assert.equal(m.expiries, 3)
+      // The minute's forward, time to expiry and ATM are the nearest's; the times differ by expiry (implied from each
+      // chain's own straddle).
+      assert.equal(m.years, parts[0].years)
+      assert.ok(close(parts[0].years, 3 / 365, 2e-4) && close(parts[1].years, 10 / 365, 2e-4) && close(parts[2].years, 24 / 365, 2e-4))
+      // Each strike's OI is all three's; a strike only the near and next have, theirs.
+      const row = (mm, k) => mm.strikes.find((r) => r.strike === k)
+      assert.equal(row(m, 25000).ceOi, parts.reduce((s, p) => s + (row(p, 25000)?.ceOi ?? 0), 0))
+      assert.equal(row(m, 25050).peOi, row(parts[0], 25050).peOi + row(parts[1], 25050).peOi)
+    }
+    // The profile (and so the flip) is the three profiles added up.
+    const last = sum.at(-1)
+    const profiles = alone.map((a) => gexProfile({ ...a.at(-1), band: last.band }))
+    for (const [j, pt] of gexProfile(last).entries())
+      assert.ok(close(pt.net, profiles.reduce((s, pr) => s + pr[j].net, 0), Math.abs(pt.net) * 1e-9 + 1e-6))
+  }
+  // Nothing added: exactly the nearest's as before.
+  assert.deepEqual(gexDay(near.ce, near.pe, near.spots, { chains: [] }), gexDay(near.ce, near.pe, near.spots))
+})
+
+test('the walls and the max gamma read every expiry\'s gamma x OI - a big monthly strike takes the call wall', () => {
+  const near = day({ minutes: 5, ceOi: (k) => (k === 25150 ? 3e6 : 1e6) })
+  const nearOnly = gexDay(near.ce, near.pe, near.spots).at(-1)
+  assert.equal(nearOnly.callWall, 25150)
+  // The monthly has twelve times the OI at 25,300: added in, the call wall is there.
+  const month = day({ minutes: 5, ceOi: (k) => (k === 25300 ? 4e7 : 2e5), years: () => 24 / 365 })
+  const both = gexDay(near.ce, near.pe, near.spots, { chains: [{ cePoints: month.ce, pePoints: month.pe }] }).at(-1)
+  assert.equal(both.callWall, 25300)
+  assert.equal(both.maxGamma, 25300)
+})
+
+test('another expiry that cannot be read at a minute adds nothing then; nothing after the minute read is used', () => {
+  const near = day({ minutes: 30, spot: (m) => 25000 + 5 * m })
+  const next = day({ minutes: 30, spot: (m) => 25000 + 5 * m, ceOi: () => 2e6, years: () => 10 / 365 })
+  // The next expiry starts at 09:25 (the live feed began recording it then).
+  const from = at('09:25')
+  const late = { cePoints: next.ce.filter((p) => Date.parse(p.time) >= from), pePoints: next.pe.filter((p) => Date.parse(p.time) >= from) }
+  const sum = gexDay(near.ce, near.pe, near.spots, { chains: [late] })
+  const nearOnly = gexDay(near.ce, near.pe, near.spots)
+  assert.equal(sum[5].expiries, 1)
+  assert.equal(sum[5].net, nearOnly[5].net)
+  assert.equal(sum[10].expiries, 2)
+  assert.notEqual(sum[10].net, nearOnly[10].net)
+  // Cut at 09:35: the same minutes as the whole day's up to it (both signs).
+  for (const sign of ['standard', 'buildup']) {
+    const cutAt = at('09:35')
+    const cut = (pts) => pts.filter((p) => Date.parse(p.time) <= cutAt)
+    const whole = gexDay(near.ce, near.pe, near.spots, { sign, chains: [late] })
+    const part = gexDay(cut(near.ce), cut(near.pe), near.spots.filter((b) => b.time <= cutAt), { sign, chains: [{ cePoints: cut(late.cePoints), pePoints: cut(late.pePoints) }] })
+    assert.deepEqual(gexUpTo(whole, cutAt + 30_000), part)
+  }
+})

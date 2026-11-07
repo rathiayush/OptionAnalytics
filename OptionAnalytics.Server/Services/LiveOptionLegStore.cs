@@ -8,7 +8,7 @@ namespace OptionAnalytics.Server.Services;
 /// tick here), kept in memory only - every index the feed tracks, all day, whether or not a page is open:
 ///  - each option leg's newest reading (GET /api/oi-replay/{underlying}/live-legs);
 ///  - each leg's 1-minute bars (open / high / low / close, OI, volume from the day's cumulative volume) of the WEEK / MONTH
-///    chains and of the 2nd and 3rd nearest expiries (N2 / N3 - OI Replay's "Σ 3 expiries", OiReplayService.ExpiryBandAsync),
+///    chains and of the next expiry (N2 - with the monthly, what OI Replay's live "Σ 3 expiries" adds, OiReplayService.ExpiryBandAsync),
 ///    and the near futures' bars - so today's OI Replay run is served from here after ONE backfill from Dhan per series per
 ///    day (OiReplayService), and switching index on the live page asks Dhan for nothing.
 /// A new IST day starts empty.
@@ -37,8 +37,8 @@ public sealed class LiveOptionLegStore
     public void Record(LiveOptionTick tick) => Record(tick, -1, keepBars: true);
 
     /// <summary>A leg's tick - `dayVolume` Dhan's cumulative volume for the day (-1 unknown); `keepBars` false keeps
-    /// only its newest reading (the positional N-expiries but N2 / N3 - today's run asks for WEEK / MONTH, the 3-expiry
-    /// sum for N2 / N3).</summary>
+    /// only its newest reading (the positional N-expiries but N2 - today's run asks for WEEK / MONTH, the 3-expiry sum for
+    /// N2 and MONTH).</summary>
     public void Record(LiveOptionTick tick, long dayVolume, bool keepBars)
     {
         _latest[(tick.Underlying, tick.ExpiryFlag, tick.Side, tick.Strike)] = tick;

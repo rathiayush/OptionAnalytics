@@ -3,7 +3,7 @@
 // only; nothing after a point's time is read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { SUMMED_EXPIRY_CODES, expirySumText, liveFlagOfCode, sumExpiryOi } from '../src/expirySum.js'
+import { expirySumText, sumExpiryOi, summedExpiries } from '../src/expirySum.js'
 
 // 1-minute points of one day from 09:15 IST: minute i of strike s.
 const OPEN = Date.parse('2026-11-05T09:15:00+05:30')
@@ -11,9 +11,22 @@ const at = (i) => new Date(OPEN + i * 60_000).toISOString()
 const pt = (strike, i, oi, extra = {}) => ({ time: at(i), strike, openInterest: oi, price: 100 + i, impliedVolatility: 12, volume: 5, ...extra })
 const oiAt = (points, strike, i) => points.find((p) => p.strike === strike && p.ms === OPEN + i * 60_000)?.openInterest
 
-test('the expiries summed: the next and the one after, the live feed\'s N2 / N3', () => {
-  assert.deepEqual(SUMMED_EXPIRY_CODES, [2, 3])
-  assert.deepEqual(SUMMED_EXPIRY_CODES.map(liveFlagOfCode), ['N2', 'N3'])
+test('the expiries summed, live: the next and the monthly - the monthly never twice', () => {
+  const listed = ['2026-11-10', '2026-11-17', '2026-11-24', '2026-12-01', '2026-12-29']
+  // NIFTY, early in the month: the current weekly + the next weekly + the month's last (monthly).
+  assert.deepEqual(summedExpiries(listed, '2026-11-24', 'WEEK'), [
+    { key: 'N2', liveFlag: 'N2', expiryFlag: 'WEEK', expiryCode: 2, expiry: '2026-11-17', name: 'next' },
+    { key: 'MONTH', liveFlag: 'MONTH', expiryFlag: 'MONTH', expiryCode: 1, expiry: '2026-11-24', name: 'monthly' },
+  ])
+  // The month's last weeks: the monthly IS the next expiry, or the current one - not counted twice.
+  assert.deepEqual(summedExpiries(['2026-11-17', '2026-11-24', '2026-12-01'], '2026-11-24', 'WEEK').map((b) => b.key), ['N2'])
+  assert.deepEqual(summedExpiries(['2026-11-24', '2026-12-01', '2026-12-08'], '2026-11-24', 'WEEK').map((b) => b.key), ['N2'])
+  // BANKNIFTY (monthlies only): the current month is the monthly - the current + the next month.
+  assert.deepEqual(summedExpiries(['2026-11-24', '2026-12-29', '2027-01-26'], '2026-11-24', 'MONTH'), [
+    { key: 'N2', liveFlag: 'N2', expiryFlag: 'MONTH', expiryCode: 2, expiry: '2026-12-29', name: 'next' },
+  ])
+  // The listed expiries not loaded yet: nothing to add yet.
+  assert.deepEqual(summedExpiries([], '2026-11-24', 'WEEK'), [])
 })
 
 test('each point\'s OI is the three expiries\' at that strike and minute; the premium, IV and volume stay the nearest\'s', () => {
@@ -86,13 +99,13 @@ test('no look-ahead: the sum of the minutes up to a clock is the same worked out
   }
 })
 
-test('the controls\' line says what is summed and what is not', () => {
-  assert.equal(expirySumText('2026-11-10', [
-    { code: 2, state: 'ready', expiry: '2026-11-17' }, { code: 3, state: 'ready', expiry: '2026-11-24' },
-  ], { live: true }), 'OI = 10 Nov + 17 Nov + 24 Nov')
-  assert.equal(expirySumText('2026-11-10', [
-    { code: 2, state: 'ready', expiry: '2026-11-17', dhanBandSteps: 3 }, { code: 3, state: 'loading' },
-  ]), 'OI = 10 Nov + 17 Nov (the one after loading…) - the next / far expiries ATM±3 only (all Dhan gives for a past day of an expiry that is not the nearest)')
-  assert.equal(expirySumText(null, [{ code: 2, state: 'error', error: 'Dhan said no' }, { code: 3, state: 'ready', expiry: null }]),
-    'OI = nearest + the one after (next not loaded (Dhan said no))')
+test('the controls\' line says what is summed, what is not, and the monthly counted once', () => {
+  const [next, month] = summedExpiries(['2026-11-10', '2026-11-17'], '2026-11-24', 'WEEK')
+  assert.equal(expirySumText('2026-11-10', [{ ...next, state: 'ready' }, { ...month, state: 'ready' }], { month: '2026-11-24' }),
+    'OI = 10 Nov (current) + 17 Nov (next) + 24 Nov (monthly)')
+  assert.equal(expirySumText('2026-11-10', [{ ...next, state: 'ready', dhanBandSteps: 3, liveFrom: '2026-11-10T05:30:00Z' }, { ...month, state: 'loading' }], { month: '2026-11-24' }),
+    'OI = 10 Nov (current) + 17 Nov (next) (monthly loading…) - the next expiry ATM±3 before 11:00 (all Dhan gives for it; the live feed\'s ATM±10 from then)')
+  const [onlyNext] = summedExpiries(['2026-11-17', '2026-11-24'], '2026-11-24', 'WEEK')
+  assert.equal(expirySumText('2026-11-17', [{ ...onlyNext, state: 'error', error: 'Dhan said no' }], { month: '2026-11-24' }),
+    'OI = 17 Nov (current) (next not loaded (Dhan said no)) - the monthly (24 Nov) is already the next expiry - counted once')
 })

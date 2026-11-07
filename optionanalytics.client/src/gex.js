@@ -139,11 +139,12 @@ export function parityForward(pairs, spot) {
   return Math.abs(mid / spot - 1) <= 0.02 ? mid : spot
 }
 
-/** The net GEX (rupees per 1% move) if spot were `S`: `options` [{ strike, sigma, dealerOi }], `years` the time to expiry,
- * `carry` the forward / spot (kept as spot moves). */
+/** The net GEX (rupees per 1% move) if spot were `S`: `options` [{ strike, sigma, dealerOi, years?, carry? }], `years` the
+ * time to expiry, `carry` the forward / spot (kept as spot moves) - an option's own `years` / `carry` where it has them (an
+ * option of another expiry - `gexDay`'s `chains`). */
 export function netGexAt(options, S, years, carry = 1) {
   let net = 0
-  for (const o of options) net += bsGamma(S, o.strike, o.sigma, years, S * carry) * o.dealerOi * S * S * 0.01
+  for (const o of options) net += bsGamma(S, o.strike, o.sigma, o.years ?? years, S * (o.carry ?? carry)) * o.dealerOi * S * S * 0.01
   return net
 }
 
@@ -244,105 +245,156 @@ function flipOf(options, spot, years, lo, hi, carry) {
   return best
 }
 
+// One expiry's chain for the day: its legs by strike, its expiry, and what is carried minute to minute - the time to expiry
+// last implied and (the build-up sign) each leg's book.
+function chainOf(cePoints, pePoints, expiry, sign) {
+  const ce = sideRows(cePoints)
+  const pe = sideRows(pePoints)
+  return {
+    ce, pe,
+    strikes: [...new Set([...ce.keys(), ...pe.keys()])].sort((a, b) => b - a),
+    expiryMs: expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null,
+    implied: null,
+    book: sign === 'buildup' ? new Map() : null,
+  }
+}
+
+// One chain at minute `t`, spot `spot`: its forward, time to expiry, ATM and IVs, and each strike's legs with their gamma
+// and the dealers' OI - null while it has no ATM straddle or no time to expiry yet.
+function chainAt(chain, t, spot) {
+  const readings = chain.strikes.map((strike) => ({ strike, c: readingAt(chain.ce.get(strike), t), p: readingAt(chain.pe.get(strike), t) }))
+  // The ATM: the strike nearest spot with both legs read - its straddle and IV give the time to expiry.
+  const atm = readings.filter((r) => r.c && r.p).sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || a.strike - b.strike)[0]
+  if (!atm) return null
+  // The forward, from put-call parity at the strikes nearest spot (spot itself when it cannot be read).
+  const forward = parityForward(readings.filter((r) => r.c && r.p).map((r) => ({ strike: r.strike, call: r.c.price, put: r.p.price })), spot)
+  const carry = forward / spot
+  // Dhan's ATM IV: the time to expiry implied from it (the fallback with no expiry date, and kept as a check).
+  const dhanIvs = [atm.c.iv, atm.p.iv].filter((v) => v > 0).map(ivFraction)
+  const dhanAtmIv = dhanIvs.length ? dhanIvs.reduce((a, b) => a + b, 0) / dhanIvs.length : null
+  if (dhanAtmIv != null) chain.implied = impliedYears(atm.c.price + atm.p.price, forward, atm.strike, dhanAtmIv) ?? chain.implied
+  const toExpiry = Number.isFinite(chain.expiryMs) && chain.expiryMs > t ? (chain.expiryMs - t) / YEAR_MS : null
+  const years = toExpiry ?? chain.implied
+  if (years == null) return null
+  // Each strike's IV from its own premium - the out-of-the-money leg first, then the other - Dhan's IV where neither
+  // gives one; outside 0.5 - 2x the ATM IV (a stale print), the ATM IV.
+  const strikeIv = new Map()
+  for (const { strike, c, p } of readings) {
+    const above = strike >= forward
+    const otm = above ? c : p, itm = above ? p : c
+    const own = (otm ? impliedVol(otm.price, forward, strike, years, above) : null) ?? (itm ? impliedVol(itm.price, forward, strike, years, !above) : null)
+    const dhan = [otm?.iv, itm?.iv].find((v) => v > 0)
+    const iv = own ?? (dhan > 0 ? ivFraction(dhan) : null)
+    if (iv != null) strikeIv.set(strike, iv)
+  }
+  const atmIv = strikeIv.get(atm.strike) ?? dhanAtmIv
+  if (atmIv == null) return null
+  const sigmaAt = (strike) => {
+    const own = strikeIv.get(strike)
+    return own != null && own >= IV_BAND[0] * atmIv && own <= IV_BAND[1] * atmIv ? own : atmIv
+  }
+  const legs = []
+  for (const { strike, c, p } of readings) {
+    if (!c && !p) continue
+    const sigma = sigmaAt(strike)
+    const cState = chain.book && c ? stepBuildup(chain.book, `c${strike}`, c, { strike, forward, years, isCall: true, standard: 1 }) : null
+    const pState = chain.book && p ? stepBuildup(chain.book, `p${strike}`, p, { strike, forward, years, isCall: false, standard: -1 }) : null
+    legs.push({
+      strike, c, p, sigma,
+      cGamma: c ? bsGamma(spot, strike, sigma, years, forward) : 0,
+      pGamma: p ? bsGamma(spot, strike, sigma, years, forward) : 0,
+      cDealer: c ? dealerOi(c, 1, cState) : null,
+      pDealer: p ? dealerOi(p, -1, pState) : null,
+    })
+  }
+  return { forward, carry, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', implied: chain.implied, atm: atm.strike, atmIv, legs }
+}
+
 /**
  * The day's GEX, one entry per minute of spot (every minute given - pick the replay clock's with `gexAt`).
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
  * Each minute: `{ time, spot, forward, carry (forward / spot), years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
- * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, sigma, dealerOi }],
+ * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, sigma, dealerOi, years, carry }],
  * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
  * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
  * leaves the flip out (null) - the costly part - for a caller that needs only the net and the walls.
+ * `chains`: OTHER EXPIRIES added in (OI Replay's live "Σ 3 expiries" - [{ cePoints, pePoints, expiry }]): each worked out
+ * as its own chain - its own forward, time to expiry, each strike's IV from its own premiums, its own build-up book - and
+ * added strike by strike: the net, calls and puts, each strike's GEX, OI and gamma x OI (so the walls and the max gamma
+ * read all of them), the flip and the profile (each option at its own expiry's time and carry). The minute's forward,
+ * time to expiry, ATM and IV stay the first chain's (the nearest); a minute the first chain cannot be read is left out,
+ * another chain that cannot be read adds nothing that minute. `expiries` on a minute = how many were added in it.
  */
-export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true } = {}) {
+export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true, chains = [] } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
-  const ce = sideRows(cePoints)
-  const pe = sideRows(pePoints)
-  const strikes = [...new Set([...ce.keys(), ...pe.keys()])].sort((a, b) => b - a)
+  const all = [chainOf(cePoints, pePoints, expiry, sign), ...(chains ?? []).map((c) => chainOf(c?.cePoints, c?.pePoints, c?.expiry ?? null, sign))]
+  const strikes = [...new Set(all.flatMap((c) => c.strikes))].sort((a, b) => b - a)
   const steps = strikes.slice(1).map((k, i) => strikes[i] - k).filter((d) => d > 0)
   const strikeStep = steps.length ? Math.min(...steps) : 0
   const held = { call: null, put: null, max: null }   // the strikes holding the levels, minute to minute
-  const book = sign === 'buildup' ? new Map() : null    // the build-up read of each leg, reading to reading
-  const expiryMs = expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null
   const minutes = []
-  let implied = null
   for (const { t, spot } of spots) {
-    const readings = strikes.map((strike) => ({ strike, c: readingAt(ce.get(strike), t), p: readingAt(pe.get(strike), t) }))
-    // The ATM: the strike nearest spot with both legs read - its straddle and IV give the time to expiry.
-    const atm = readings.filter((r) => r.c && r.p).sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || a.strike - b.strike)[0]
-    if (!atm) continue
-    // The forward, from put-call parity at the strikes nearest spot (spot itself when it cannot be read).
-    const forward = parityForward(readings.filter((r) => r.c && r.p).map((r) => ({ strike: r.strike, call: r.c.price, put: r.p.price })), spot)
-    const carry = forward / spot
-    // Dhan's ATM IV: the time to expiry implied from it (the fallback with no expiry date, and kept as a check).
-    const dhanIvs = [atm.c.iv, atm.p.iv].filter((v) => v > 0).map(ivFraction)
-    const dhanAtmIv = dhanIvs.length ? dhanIvs.reduce((a, b) => a + b, 0) / dhanIvs.length : null
-    if (dhanAtmIv != null) implied = impliedYears(atm.c.price + atm.p.price, forward, atm.strike, dhanAtmIv) ?? implied
-    const toExpiry = Number.isFinite(expiryMs) && expiryMs > t ? (expiryMs - t) / YEAR_MS : null
-    const years = toExpiry ?? implied
-    if (years == null) continue
-    // Each strike's IV from its own premium - the out-of-the-money leg first, then the other - Dhan's IV where neither
-    // gives one; outside 0.5 - 2x the ATM IV (a stale print), the ATM IV.
-    const strikeIv = new Map()
-    for (const { strike, c, p } of readings) {
-      const above = strike >= forward
-      const otm = above ? c : p, itm = above ? p : c
-      const own = (otm ? impliedVol(otm.price, forward, strike, years, above) : null) ?? (itm ? impliedVol(itm.price, forward, strike, years, !above) : null)
-      const dhan = [otm?.iv, itm?.iv].find((v) => v > 0)
-      const iv = own ?? (dhan > 0 ? ivFraction(dhan) : null)
-      if (iv != null) strikeIv.set(strike, iv)
-    }
-    const atmIv = strikeIv.get(atm.strike) ?? dhanAtmIv
-    if (atmIv == null) continue
-    const sigmaAt = (strike) => {
-      const own = strikeIv.get(strike)
-      return own != null && own >= IV_BAND[0] * atmIv && own <= IV_BAND[1] * atmIv ? own : atmIv
+    const first = chainAt(all[0], t, spot)
+    if (!first) continue
+    const read = [first, ...all.slice(1).map((chain) => chainAt(chain, t, spot))].filter(Boolean)
+    const legsAt = new Map()
+    for (const cm of read) for (const leg of cm.legs) {
+      if (!legsAt.has(leg.strike)) legsAt.set(leg.strike, [])
+      legsAt.get(leg.strike).push({ leg, cm })
     }
     const options = []
     const rows = []
     let calls = 0, puts = 0
     const callWeights = new Map(), putWeights = new Map(), gammaWeights = new Map()
     const zone = WALL_ZONE * strikeStep
+    const unit = spot * spot * 0.01
     let lowStrike = Infinity, highStrike = -Infinity
-    for (const { strike, c, p } of readings) {
-      if (!c && !p) continue
-      const sigma = sigmaAt(strike)
-      const cGamma = c ? bsGamma(spot, strike, sigma, years, forward) : 0
-      const pGamma = p ? bsGamma(spot, strike, sigma, years, forward) : 0
-      const unit = spot * spot * 0.01
-      const cState = book && c ? stepBuildup(book, `c${strike}`, c, { strike, forward, years, isCall: true, standard: 1 }) : null
-      const pState = book && p ? stepBuildup(book, `p${strike}`, p, { strike, forward, years, isCall: false, standard: -1 }) : null
-      const call = c ? cGamma * dealerOi(c, 1, cState) * unit : null
-      const put = p ? pGamma * dealerOi(p, -1, pState) * unit : null
-      if (c) options.push({ strike, sigma, dealerOi: dealerOi(c, 1, cState) })
-      if (p) options.push({ strike, sigma, dealerOi: dealerOi(p, -1, pState) })
+    for (const strike of strikes) {
+      const legs = legsAt.get(strike)
+      if (!legs) continue
+      let call = null, put = null, ceOi = null, peOi = null, cWeight = 0, pWeight = 0
+      for (const { leg, cm } of legs) {
+        if (leg.c) {
+          call = (call ?? 0) + leg.cGamma * leg.cDealer * unit
+          options.push({ strike, sigma: leg.sigma, dealerOi: leg.cDealer, years: cm.years, carry: cm.carry })
+          cWeight += leg.cGamma * leg.c.oi
+          ceOi = (ceOi ?? 0) + leg.c.oi
+        }
+        if (leg.p) {
+          put = (put ?? 0) + leg.pGamma * leg.pDealer * unit
+          options.push({ strike, sigma: leg.sigma, dealerOi: leg.pDealer, years: cm.years, carry: cm.carry })
+          pWeight += leg.pGamma * leg.p.oi
+          peOi = (peOi ?? 0) + leg.p.oi
+        }
+      }
       calls += call ?? 0
       puts += put ?? 0
       // The levels' weights: gamma x OI, whoever holds it - the call wall from the strikes clear above spot (or the one
       // holding it, until spot is clear past it), the put wall below the same way, the max gamma any.
-      const cWeight = c ? cGamma * c.oi : 0
-      const pWeight = p ? pGamma * p.oi : 0
-      if (c && (strike >= spot + zone || (strike === held.call && strike >= spot - zone))) callWeights.set(strike, cWeight)
-      if (p && (strike <= spot - zone || (strike === held.put && strike <= spot + zone))) putWeights.set(strike, pWeight)
+      if (call != null && (strike >= spot + zone || (strike === held.call && strike >= spot - zone))) callWeights.set(strike, cWeight)
+      if (put != null && (strike <= spot - zone || (strike === held.put && strike <= spot + zone))) putWeights.set(strike, pWeight)
       gammaWeights.set(strike, cWeight + pWeight)
       lowStrike = Math.min(lowStrike, strike)
       highStrike = Math.max(highStrike, strike)
-      rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi: c?.oi ?? null, peOi: p?.oi ?? null, gamma: (cWeight + pWeight) * unit })
+      rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi, peOi, gamma: (cWeight + pWeight) * unit })
     }
     held.call = holdLevel(callWeights, held.call)
     held.put = holdLevel(putWeights, held.put)
     held.max = holdLevel(gammaWeights, held.max)
     // The flip: within rangePct % of spot and the strikes loaded; near their edge (a strike step or a 1-sigma move),
     // the strikes not loaded weigh in.
+    const { forward, carry, years, atmIv } = first
     const flip = flips ? flipOf(options, spot, years, Math.max(spot * (1 - rangePct / 100), lowStrike), Math.min(spot * (1 + rangePct / 100), highStrike), carry) : null
     const edge = Math.max(strikeStep, atmIv * Math.sqrt(years) * spot)
     minutes.push({
-      time: t, spot, forward, carry, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', impliedYears: implied,
-      atm: atm.strike, atmIv, net: calls + puts, calls, puts,
+      time: t, spot, forward, carry, years, yearsFrom: first.yearsFrom, impliedYears: first.implied,
+      atm: first.atm, atmIv, net: calls + puts, calls, puts,
       flip, flipEdge: flip != null && (flip - lowStrike < edge || highStrike - flip < edge),
       callWall: held.call, putWall: held.put, maxGamma: held.max,
       band: [lowStrike, highStrike], options, strikes: rows,
+      ...(all.length > 1 ? { expiries: read.length } : {}),
     })
   }
   return minutes
