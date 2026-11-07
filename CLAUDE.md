@@ -925,6 +925,19 @@ When adding or changing a strategy:
   CSV" = the whole table (`rowsCsv` - a row a candle, a column a feature and a label) for a spreadsheet or your own model.
   Not in it: the order flow's footprint delta and the book heatmap (kept 30 days only) and the market profile's TPOs. It
   places nothing, feeds no strategy; a reading that holds is built as a rule and run through the backtest like any other.
+  IN THE BACKGROUND (asked for - "this feature finder should also work on background jobs"): a background run has a KIND
+  (`kind` - "backtest", the default, or "features"; `SignalBacktestJobService.Kinds`; a run saved before reads as a
+  backtest). The queue dialog's "Backtest the rule / Feature finder" switch picks it; the page's Feature finder button with
+  no days loaded, the card's "In the background · N days" and Run in background with no rule open it on Feature finder
+  (it needs no rule). Up to 300 days: the job script (`BACKTEST_KIND=features`) loads each day as a backtest does (Σ 3
+  expiries too; Trade in not used - the CE / PE are the index's own, as on the page), keeps only its `dayRows`, tries a day
+  that failed on the way once more, then writes the whole table to `BACKTEST_CSV` - `{id}.features.csv`, kept and removed
+  with the run, `GET /api/signal-backtest/jobs/{id}/features.csv` (its owner or an admin) - and every label's report
+  (`featureReports`) to the result; no table = the run failed. The list tags it "Feature finder" with its candles, days and
+  how many readings held for CE buy / PE buy / spot 30m (`SummaryOf`); Open shows its report on the page
+  (`StoredFeatureFinderCard` - the label switch works out nothing again), CSV downloads the table; Telegram "🔬 Feature
+  finder done" with the held counts and the best reading for CE / PE buys. `tests/signal-backtest-job.test.mjs` (the job's
+  CSV and reports = the page's for the same days), `SignalBacktestJobServiceTests.cs`.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

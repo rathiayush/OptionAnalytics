@@ -212,12 +212,15 @@ export function featureReport(rows, target = 'fwd30') {
   const early = split ? rows.filter((r) => r.date < firstLater) : rows
   const later = split ? rows.filter((r) => r.date >= firstLater) : rows
   const laterDays = split ? dates.filter((x) => x >= firstLater) : dates
+  // Each later day's rows, grouped once (a background run's 100 later days x 36 features would filter them 3600 times).
+  const byDay = new Map(laterDays.map((day) => [day, []]))
+  for (const r of later) byDay.get(r.date)?.push(r)
   const out = FEATURES.map((f) => {
     const ic = (list) => spearman(list.map((r) => r.f[f.key]), list.map((r) => r.y[target]))
     const icEarly = ic(early), icLater = ic(later)
     let agree = 0, counted = 0
     for (const day of laterDays) {
-      const own = ic(later.filter((r) => r.date === day))
+      const own = ic(byDay.get(day))
       if (!fin(own) || !fin(icEarly) || own === 0) continue
       counted++
       if (Math.sign(own) === Math.sign(icEarly)) agree++
@@ -236,6 +239,10 @@ export function featureReport(rows, target = 'fwd30') {
     firstLater, rows: rows.length, earlyRows: early.length, laterRows: later.length, features: out,
   }
 }
+
+/** The report for EVERY label ({ fwd15: featureReport(rows, 'fwd15'), ... }) - what a background Feature finder run keeps,
+ *  so its card switches label as the page's does, with nothing worked out again. */
+export const featureReports = (rows) => Object.fromEntries(LABELS.map((l) => [l.key, featureReport(rows, l.key)]))
 
 const cell = (v) => {
   if (typeof v === 'number') return fin(v) ? String(Math.round(v * 10000) / 10000) : ''

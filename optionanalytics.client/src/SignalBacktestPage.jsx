@@ -12,13 +12,13 @@ import {
 } from './signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings, indexLevels, loadBacktestDay, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
-import { runResult, useBackgroundRuns } from './signalBacktestQueue.js'
+import { downloadFeaturesCsv, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
 import { RULE_TEMPLATES, TEMPLATE_FAMILIES, templateById, templateRow, withTemplate } from './signalTemplates.js'
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
-import { FeatureFinderCard } from './FeatureFinderCard.jsx'
+import { FeatureFinderCard, StoredFeatureFinderCard } from './FeatureFinderCard.jsx'
 import { DATE_INPUT_FORMATS, isPastDay, rangePresets, withRangeEnd } from './backtestDates.js'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
@@ -533,10 +533,19 @@ export default function SignalBacktestPage() {
   // The background runs (the server's queue) and the one opened here, if any - its report is shown instead of the page's.
   const { jobs, refresh: refreshJobs } = useBackgroundRuns()
   const [bgTelegram, setBgTelegram] = usePersistedState(STORE.bgTelegram, true)
+  // The dialog's kind of run when open ('backtest' / 'features'), else false.
   const [bgOpen, setBgOpen] = useState(false)
+  // A background FEATURE FINDER run opened on the page (its own card - the backtest's report stays as it is).
+  const [featureRun, setFeatureRun] = useState(null)
+  const featureRunRef = useRef(null)
   const openRun = async (job) => {
     try {
       const result = await runResult(job.id)
+      if (job.kind === 'features') {
+        setFeatureRun({ job, result })
+        requestAnimationFrame(() => featureRunRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+        return
+      }
       setViewing({ job, result })
       setTradeFilter('all')
     } catch (err) {
@@ -764,8 +773,8 @@ export default function SignalBacktestPage() {
               {running
                 ? <Button size="small" danger icon={<StopOutlined />} onClick={stop}>Stop</Button>
                 : <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={start} disabled={!dates.length}>Run backtest</Button>}
-              <Tooltip title="Run it on the server instead - now, after the close or at a time. Close the browser; the report waits under Background runs.">
-                <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(true)} disabled={!backgroundDays || !hasLines}>Run in background</Button>
+              <Tooltip title="Run it on the server instead - the rule's backtest or the Feature finder, now, after the close or at a time. Close the browser; the report waits under Background runs.">
+                <Button size="small" icon={<CloudServerOutlined />} onClick={() => setBgOpen(hasLines ? 'backtest' : 'features')} disabled={!backgroundDays}>Run in background</Button>
               </Tooltip>
             </Space>
             {tradeIn && (
@@ -801,8 +810,9 @@ export default function SignalBacktestPage() {
                     Compare all {RULE_TEMPLATES.length}
                   </Button>
                 </Tooltip>
-                <Tooltip title={touch ? null : loadedDays.length ? `Every reading the rule builder has, at every candle of the ${loadedDays.length} days loaded, against what happened after it - which ones told it on the earlier days AND still did on the later ones; the whole table as CSV` : 'Run the backtest first - the readings are looked at on the days it loads'}>
-                  <Button size="small" icon={<ExperimentOutlined />} onClick={() => setFeaturesOpen(true)} disabled={!loadedDays.length || running}>
+                <Tooltip title={touch ? null : loadedDays.length ? `Every reading the rule builder has, at every candle of the ${loadedDays.length} days loaded, against what happened after it - which ones told it on the earlier days AND still did on the later ones; the whole table as CSV` : `Run it in the background over the ${backgroundDays} days picked - or run the backtest first to see it here on the days it loads`}>
+                  {/* No days loaded: it runs on the server over the days picked (up to 300). */}
+                  <Button size="small" icon={<ExperimentOutlined />} onClick={() => (loadedDays.length ? setFeaturesOpen(true) : setBgOpen('features'))} disabled={(!loadedDays.length && !backgroundDays) || running}>
                     Feature finder
                   </Button>
                 </Tooltip>
@@ -1045,7 +1055,10 @@ export default function SignalBacktestPage() {
           </Card>
         )}
         {featuresOpen && loadedDays.length > 0 && (
-          <FeatureFinderCard days={loadedDays} settings={engine} underlying={run.underlying} onClose={() => setFeaturesOpen(false)} />
+          <FeatureFinderCard
+            days={loadedDays} settings={engine} underlying={run.underlying} onClose={() => setFeaturesOpen(false)}
+            onBackground={() => setBgOpen('features')} backgroundDays={backgroundDays}
+          />
         )}
         {saved.loaded && (
           <SavedStrategiesCard
@@ -1053,7 +1066,18 @@ export default function SignalBacktestPage() {
             onLoad={(st) => applyRunSettings(st, st.name)} onSave={() => setSaveOpen(true)}
           />
         )}
-        <BackgroundRunsCard jobs={jobs} refresh={refreshJobs} viewingId={viewing?.job.id ?? null} onOpen={openRun} onUse={applyRunSettings} />
+        <BackgroundRunsCard
+          jobs={jobs} refresh={refreshJobs} viewingIds={[viewing?.job.id, featureRun?.job.id].filter(Boolean)} onOpen={openRun} onUse={applyRunSettings}
+        />
+        {/* Gone with its run when the run is removed. */}
+        {featureRun && jobs.some((j) => j.id === featureRun.job.id) && (
+          <div ref={featureRunRef}>
+            <StoredFeatureFinderCard
+              run={featureRun} onClose={() => setFeatureRun(null)}
+              onDownload={() => downloadFeaturesCsv(featureRun.job).catch((err) => message.error(`The dataset could not be downloaded: ${err.message}`))}
+            />
+          </div>
+        )}
 
         {shown && (
           <>
@@ -1142,6 +1166,7 @@ export default function SignalBacktestPage() {
       )}
       {bgOpen && (
         <RunInBackgroundModal
+          kind={bgOpen} canBacktest={hasLines}
           settings={pageSettings} days={backgroundDays} telegram={bgTelegram} setTelegram={setBgTelegram}
           ruleSummary={ruleText(rule.lines, rule.action, rule.logic) + (mirrorOn ? ' (and its mirror)' : '') + expiryNote}
           onClose={() => setBgOpen(false)} onQueued={() => { setBgOpen(false); refreshJobs() }}

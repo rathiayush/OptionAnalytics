@@ -298,6 +298,91 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         Assert.Equal(1, SignalBacktestJobService.Validate(Request(Settings(from: "2026-10-23", to: "2026-10-30")), Now).Plan!.Days);   // before today only
     }
 
+    // A Feature finder run as the real job writes it: the table to BACKTEST_CSV, then the report - each label's, what holds
+    // first; it echoes the kind it was handed.
+    private string FeaturesScript(bool csv = true) => Script($$"""
+        import { writeFileSync } from 'node:fs'
+        const job = JSON.parse(process.env.BACKTEST_JOB)
+        console.log('PROGRESS ' + JSON.stringify({ stage: 'day', day: job.from, done: 0, total: 5, rows: 0, okDays: 0 }))
+        if ({{(csv ? "true" : "false")}}) writeFileSync(process.env.BACKTEST_CSV, 'date,time,move15,ceBuy\n2026-10-19,09:30,0.1,5\n')
+        const report = (held) => ({ split: true, features: [
+          ...held.map((name) => ({ key: name, name, holds: true, icLater: 0.08 })),
+          { key: 'x', name: 'Not this one', holds: false, icLater: 0.2 } ] })
+        writeFileSync(process.env.BACKTEST_OUT, JSON.stringify({ ok: true, kind: process.env.BACKTEST_KIND, settings: job, features: {
+          rows: 1234, okDays: 4, failed: [{ date: '2026-10-21', reason: 'holiday' }],
+          reports: { fwd15: report([]), fwd30: report(['Spot move over 15 min %']), fwd60: report([]),
+                     ceBuy: report(['Spot above the GEX put wall %', 'RSI 14']), peBuy: report(['<RSI>']) } } }))
+        """);
+
+    [Fact]
+    public async Task A_feature_finder_run_keeps_its_dataset_and_says_what_held()
+    {
+        var telegrams = new List<string>();
+        var s = Service(FeaturesScript(), telegrams);
+        var job = s.Add("me@x.com", Request(name: null) with { Kind = "Features" }, Now).Job!;
+        Assert.Equal("features", job.Kind);
+        Assert.Equal("NIFTY 19 Oct – 23 Oct", job.Name);                      // the kind is its own field (a tag, the Telegram's header)
+        Assert.True(s.TryStartNext(Now));
+        var done = await UntilEnded(s, job.Id);
+        Assert.Equal("done", done.State);
+        var sum = done.Summary!;
+        Assert.Equal("features", sum["kind"]!.GetValue<string>());
+        Assert.Equal(1234, sum["rows"]!.GetValue<double>());
+        Assert.Equal(4, sum["okDays"]!.GetValue<double>());
+        Assert.Equal(1, sum["failedDays"]!.GetValue<double>());
+        Assert.True(sum["split"]!.GetValue<bool>());
+        Assert.Equal(2, sum["held"]!["ceBuy"]!.GetValue<int>());
+        Assert.Equal(0, sum["held"]!["fwd15"]!.GetValue<int>());
+        Assert.Equal("Spot above the GEX put wall %", sum["best"]!["ceBuy"]!.GetValue<string>());
+        Assert.Null(sum["best"]!["fwd15"]);
+        // The job was told its kind; its report and dataset are kept, the dataset for its own account (an admin) only.
+        var report = JsonNode.Parse(File.ReadAllText(s.ResultPath(job.Id, "me@x.com")!))!;
+        Assert.Equal("features", report["kind"]!.GetValue<string>());
+        var csv = s.FeaturesPath(job.Id, "me@x.com")!;
+        Assert.StartsWith("date,time,move15", File.ReadAllText(csv));
+        Assert.Equal(csv, s.FeaturesPath(job.Id, null));
+        Assert.Null(s.FeaturesPath(job.Id, "them@x.com"));
+        Assert.False(File.Exists(csv + ".running"));
+        var message = Assert.Single(telegrams);
+        Assert.Contains("Feature finder done", message);
+        Assert.Contains("1234 candles · 4 days · 1 day(s) not run", message);
+        Assert.Contains("CE buy 2 · PE buy 1 · spot 30m 1", message);
+        Assert.Contains("Best for CE buy: Spot above the GEX put wall %", message);
+        Assert.Contains("Best for PE buy: &lt;RSI&gt;", message);             // HTML-escaped
+        // Removing the run removes its dataset.
+        Assert.True(s.Delete(job.Id, "me@x.com"));
+        Assert.False(File.Exists(csv));
+    }
+
+    [Fact]
+    public async Task A_backtest_has_no_dataset_and_a_feature_finder_run_without_one_fails()
+    {
+        var s = Service(GoodScript());
+        var backtest = s.Add("a@x.com", Request(), Now).Job!;
+        Assert.Equal("backtest", backtest.Kind);
+        s.TryStartNext(Now);
+        Assert.Equal("done", (await UntilEnded(s, backtest.Id)).State);
+        Assert.Null(s.FeaturesPath(backtest.Id, null));
+        Assert.Contains("Signal backtest done", SignalBacktestJobService.TelegramText(s.Get(backtest.Id, null)!));
+
+        var telegrams = new List<string>();
+        var noCsv = Service(FeaturesScript(csv: false), telegrams);
+        var job = noCsv.Add("a@x.com", Request() with { Kind = "features" }, Now).Job!;
+        noCsv.TryStartNext(Now);
+        var failed = await UntilEnded(noCsv, job.Id);
+        Assert.Equal("failed", failed.State);
+        Assert.Equal("the run wrote no dataset", failed.Error);
+        Assert.Null(noCsv.ResultPath(job.Id, null));
+        Assert.Contains("Feature finder failed", Assert.Single(telegrams));
+        // A run kept before kinds reads as a backtest; a kind that is neither is refused.
+        var path = Path.Combine(JobsDir, $"{backtest.Id}.json");
+        File.WriteAllText(path, File.ReadAllText(path).Replace("\"kind\":\"backtest\",", ""));
+        Assert.DoesNotContain("\"kind\"", File.ReadAllText(path));
+        Assert.Equal("backtest", Service(GoodScript()).Get(backtest.Id, null)!.Kind);
+        Assert.Contains("backtest or the Feature finder", SignalBacktestJobService.Validate(Request() with { Kind = "tuning" }, Now).Error);
+        Assert.Equal("my run", SignalBacktestJobService.Validate(Request() with { Kind = "features" }, Now).Plan!.Name);
+    }
+
     [Fact]
     public void A_missing_job_script_fails_the_run_with_the_reason()
     {

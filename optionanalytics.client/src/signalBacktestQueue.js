@@ -19,8 +19,30 @@ async function api(path, options) {
 export const queueRun = (body) => api(API, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
 export const cancelRun = (id) => api(`${API}/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
 export const deleteRun = (id) => api(`${API}/${encodeURIComponent(id)}`, { method: 'DELETE' })
-/** A finished run's report: { ok, settings, dates, report } (Infinity kept). */
+/** A finished run's report: { ok, settings, dates, report } (Infinity kept) - a Feature finder run's { ok, kind: 'features',
+ *  settings, dates, features: { rows, okDays, timeframe, failed, reports } }. */
 export const runResult = (id) => api(`${API}/${encodeURIComponent(id)}/result`)
+
+/** The file a Feature finder run's dataset is saved as - the page's own card names its CSV the same way. */
+export const featuresFileName = (job) => `features-${job.underlying ?? ''}-${job.settings?.timeframe ?? ''}m-${job.from ?? ''}-${job.to ?? ''}.csv`
+
+/** A finished Feature finder run's dataset CSV, saved by the browser - fetched first, so a failure is said (not a page of
+ *  JSON saved as the CSV). */
+export async function downloadFeaturesCsv(job) {
+  const r = await fetch(`${API}/${encodeURIComponent(job.id)}/features.csv`)
+  if (!r.ok) {
+    const text = await r.text().catch(() => '')
+    let reason = text.slice(0, 200)
+    try { reason = JSON.parse(text)?.error ?? reason } catch { /* not JSON */ }
+    throw new Error(reason || `HTTP ${r.status}`)
+  }
+  const blob = await r.blob()
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = featuresFileName(job)
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
+}
 
 /** The next close of the session (15:45 IST today) while the market is open or yet to open today, else null (= now). */
 export function afterTheClose(nowMs = Date.now()) {

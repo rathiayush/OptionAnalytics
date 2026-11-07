@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Auth;
@@ -25,7 +26,8 @@ public sealed class SignalBacktestController : ControllerBase
     [HttpGet("jobs")]
     public IReadOnlyList<SignalBacktestJob> Jobs() => _jobs.List(Scope);
 
-    /// <summary>POST /api/signal-backtest/jobs - queues a run: { settings, name, startAtUtc (null = now), telegram }.</summary>
+    /// <summary>POST /api/signal-backtest/jobs - queues a run: { settings, name, startAtUtc (null = now), telegram, kind
+    /// ("backtest" - the default - or "features") }.</summary>
     [HttpPost("jobs")]
     public IActionResult Queue([FromBody] SignalBacktestRequest request)
     {
@@ -47,4 +49,15 @@ public sealed class SignalBacktestController : ControllerBase
         _jobs.ResultPath(id, Scope) is { } path
             ? PhysicalFile(path, "application/json")
             : NotFound(new { error = "No report for that run (not finished, failed or removed)." });
+
+    /// <summary>GET /api/signal-backtest/jobs/{id}/features.csv - a finished Feature finder run's dataset (a row a candle, a
+    /// column a reading and what came next).</summary>
+    [HttpGet("jobs/{id}/features.csv")]
+    public IActionResult Features(string id)
+    {
+        if (_jobs.FeaturesPath(id, Scope) is not { } path || _jobs.Get(id, Scope) is not { } job)
+            return NotFound(new { error = "No dataset for that run (not a Feature finder run, not finished, failed or removed)." });
+        var timeframe = job.Settings["timeframe"] is JsonValue v && v.TryGetValue<int>(out var tf) ? $"-{tf}m" : "";
+        return PhysicalFile(path, "text/csv", $"features-{job.Underlying}{timeframe}-{job.From}-{job.To}.csv");
+    }
 }

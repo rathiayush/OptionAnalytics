@@ -13,9 +13,10 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { BACKTEST_DEFAULTS, prepareDay, simulateRun, summarize } from '../src/signalBacktest.js'
 import {
-  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, indexLevels, loadBacktestDay, monthRows, reportHead, reportReplacer, reportReviver, runRange,
-  withIndexLevels,
+  backtestReport, cleanBacktestSettings, dayOutcome, defaultRunName, engineSettings, featureRunHead, featureTradeText, indexLevels, loadBacktestDay, monthRows, reportHead,
+  reportReplacer, reportReviver, runRange, withIndexLevels,
 } from '../src/signalBacktestJob.js'
+import { dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
 
 const { run } = syntheticDay()
 const BASE = Date.parse('2026-10-05T00:00:00Z')
@@ -451,4 +452,77 @@ test('Σ 3 expiries in the background: each day loads its next and monthly expir
   // Every day the run read (not the holiday) asked its two bands once - the next (code 2) and the monthly.
   const bands = (date) => asked.filter((a) => a.path.endsWith('/expiry-band') && a.date === date).map((a) => a.search.replace(/^\?date=[\d-]+&/, ''))
   for (const date of DATES) assert.deepEqual(bands(date), date === HOLIDAY ? [] : ['expiryFlag=WEEK&expiryCode=2', 'expiryFlag=MONTH&expiryCode=1'], date)
+})
+
+test('the FEATURE FINDER in the background: the page\'s table of the same days as CSV, every label\'s report, a failed day tried once more', async (t) => {
+  // Two weeks - enough days (9 run, the holiday not) for the earlier / later check.
+  const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-19', '2026-10-20', '2026-10-21', '2026-10-22', '2026-10-23']
+  const asked = []
+  let failOnce = true
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const date = url.searchParams.get('date')
+    asked.push({ path: url.pathname, date })
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, PREV)
+    if (url.pathname === '/api/oi-replay/NIFTY/run') {
+      if (date === HOLIDAY) return json(200, { success: false, error: 'holiday' })
+      if (date === '2026-10-14' && failOnce) { failOnce = false; return json(503, { error: 'busy' }) }
+      return json(200, runFor(date))
+    }
+    return json(404, { error: 'not mocked' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json')
+  const csv = join(dir, 'features.csv')
+  // 5-minute candles, a CE / PE bought with 30% SL / 60% target; the rule plays no part.
+  const settings = cleanBacktestSettings({ underlying: 'NIFTY', from: dates[0], to: dates.at(-1), timeframe: 5, slPct: 30, targetPct: 60 })
+  const progress = []
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
+      env: {
+        ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26',
+        BACKTEST_KIND: 'features', BACKTEST_CSV: csv, BACKTEST_JOB: JSON.stringify(settings),
+      },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    })
+    child.stdout.on('data', (b) => progress.push(...String(b).split('\n').filter((l) => l.startsWith('PROGRESS ')).map((l) => JSON.parse(l.slice(9)))))
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  assert.equal(code, 0)
+  // What the page's Feature finder builds from the same days (each prepared as the loader prepares it).
+  const engine = engineSettings(settings)
+  const rows = dates.filter((d) => d !== HOLIDAY).flatMap((date) => dayRows(prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV }), engine))
+  assert.ok(rows.length > 9 * 50)
+  assert.equal(readFileSync(csv, 'utf8'), rowsCsv(rows))
+  const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
+  assert.equal(result.ok, true)
+  assert.equal(result.kind, 'features')
+  assert.equal(result.report, undefined)
+  assert.deepEqual(result.dates, dates)
+  assert.deepEqual({ ...result.features, reports: null }, { rows: rows.length, okDays: 9, timeframe: 5, failed: [{ date: HOLIDAY, reason: 'holiday' }], reports: null })
+  // Every label's report as the page's card works it out - through JSON, as the page reads it back.
+  assert.deepEqual(result.features.reports, JSON.parse(JSON.stringify(featureReports(rows))))
+  assert.deepEqual(Object.keys(result.features.reports), ['fwd15', 'fwd30', 'fwd60', 'ceBuy', 'peBuy'])
+  assert.equal(result.features.reports.ceBuy.split, true)
+  assert.equal(result.features.reports.ceBuy.laterDays, 3)
+  // The day that failed on the way was asked twice, the holiday once; the progress counts the rows.
+  const runs = (date) => asked.filter((a) => a.path.endsWith('/run') && a.date === date).length
+  assert.deepEqual([runs('2026-10-14'), runs(HOLIDAY), runs('2026-10-12')], [2, 1, 1])
+  assert.deepEqual(progress.filter((p) => p.stage === 'retry').map((p) => p.day), ['2026-10-14'])
+  assert.deepEqual(progress.at(-1), { stage: 'done', done: 10, total: 10, rows: rows.length, okDays: 9 })
+})
+
+test('a Feature finder run\'s name and heading: the index, the days, the candles and the option its CE / PE labels buy', () => {
+  const s = cleanBacktestSettings({ underlying: 'BANKNIFTY', from: '2026-08-03', to: '2026-10-23', timeframe: 5, slPct: 30, targetPct: 60, strategyName: 'My rule' })
+  assert.equal(defaultRunName(s, 'features'), 'BANKNIFTY 3 Aug 2026 – 23 Oct 2026 · 5m candles')
+  assert.match(defaultRunName(s), /^My rule · BANKNIFTY /)                 // a backtest's as before
+  assert.equal(featureRunHead(s, 58), 'BANKNIFTY · 58 days · 3 Aug 2026 – 23 Oct 2026 · 5m candles · ATM CE / PE bought: SL 30% · target 60%')
+  const more = { ...s, moneyness: -2, levelUnit: 'pts', trailGap: 10, trailStart: 5, timeStopMin: 30, sumExpiries: true }
+  assert.equal(featureTradeText(more), '5m candles · OI Σ 3 expiries · 2 OTM CE / PE bought: SL 30 pts · target 60 pts · trail 10 pts after +5 pts · out after 30 min')
+  assert.equal(featureRunHead({ ...s, targetPct: 0 }, 1), 'BANKNIFTY · 1 day · 3 Aug 2026 – 23 Oct 2026 · 5m candles · ATM CE / PE bought: SL 30% · target none')
 })

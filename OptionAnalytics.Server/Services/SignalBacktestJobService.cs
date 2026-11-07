@@ -17,6 +17,9 @@ namespace OptionAnalytics.Server.Services;
 /// ({id}.result.json), so the queue and the reports survive a restart / deploy: a run the restart cut off is queued again
 /// (and failed after <see cref="MaxAttempts"/> tries). Telegram when a run ends, if asked. Read-only: a run places nothing,
 /// changes no setting and feeds no strategy or alert; its Dhan calls are the page's (each past day once - the cache keeps it).
+/// A run is one of two <see cref="Kinds"/>: "backtest" (the rule's report) or "features" - the page's FEATURE FINDER over the
+/// days (featureFinder.js: every reading at every candle against what came next, its report for each label in the result and
+/// the whole table as a CSV beside it, {id}.features.csv).
 /// </summary>
 public sealed class SignalBacktestJobService : BackgroundService
 {
@@ -32,6 +35,11 @@ public sealed class SignalBacktestJobService : BackgroundService
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     /// <summary>MAX_BACKGROUND_DAYS - the job runs the latest 300 weekdays of a longer range.</summary>
     public const int MaxDays = 300;
+    /// <summary>What a run is: the rule's backtest, or the Feature finder's table and report.</summary>
+    public static readonly string[] Kinds = { "backtest", "features" };
+    /// <summary>The Feature finder's labels (featureFinder.js LABELS) - each one's report is in a features run's result.</summary>
+    internal static readonly (string Key, string Name)[] FeatureTargets =
+        { ("ceBuy", "CE buy"), ("peBuy", "PE buy"), ("fwd15", "spot 15m"), ("fwd30", "spot 30m"), ("fwd60", "spot 60m") };
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { WriteIndented = false };
 
@@ -128,7 +136,8 @@ public sealed class SignalBacktestJobService : BackgroundService
         lock (_lock)
         {
             _jobs.Remove(id);
-            foreach (var path in new[] { JobPath(id), ResultFile(id), ResultFile(id) + ".running", ResultFile(id) + ".running.tmp" })
+            foreach (var path in new[] { JobPath(id), ResultFile(id), ResultFile(id) + ".running", ResultFile(id) + ".running.tmp",
+                         FeaturesFile(id), FeaturesFile(id) + ".running", FeaturesFile(id) + ".running.tmp" })
                 TryDelete(path);
         }
         return true;
@@ -140,6 +149,15 @@ public sealed class SignalBacktestJobService : BackgroundService
         var job = Get(id, owner);
         if (job is null || job.State != "done") return null;
         var path = ResultFile(id);
+        return File.Exists(path) ? path : null;
+    }
+
+    /// <summary>The dataset CSV of a finished Feature finder run (null when there is none, or the run is not the account's).</summary>
+    public string? FeaturesPath(string id, string? owner)
+    {
+        var job = Get(id, owner);
+        if (job is null || job.State != "done" || job.Kind != "features") return null;
+        var path = FeaturesFile(id);
         return File.Exists(path) ? path : null;
     }
 
@@ -162,6 +180,8 @@ public sealed class SignalBacktestJobService : BackgroundService
             }
             var output = ResultFile(next.Id);
             TryDelete(output + ".running");
+            var csv = next.Kind == "features" ? FeaturesFile(next.Id) : null;
+            if (csv is not null) TryDelete(csv + ".running");
             var node = _configuration["ScannerRunner:NodePath"] is { Length: > 0 } n ? n : "node";
             var info = new ProcessStartInfo(node)
             {
@@ -173,6 +193,8 @@ public sealed class SignalBacktestJobService : BackgroundService
             info.Environment["RUNNER_KEY"] = _key.Value;
             info.Environment["BACKTEST_JOB"] = next.Settings.ToJsonString();
             info.Environment["BACKTEST_OUT"] = output + ".running";
+            info.Environment["BACKTEST_KIND"] = next.Kind;
+            if (csv is not null) info.Environment["BACKTEST_CSV"] = csv + ".running";
             var process = new Process { StartInfo = info, EnableRaisingEvents = true };
             var id = next.Id;
             process.OutputDataReceived += (_, e) => OnOutput(id, e.Data);
@@ -198,7 +220,7 @@ public sealed class SignalBacktestJobService : BackgroundService
             _runningId = id;
             Put(next with { State = "running", StartedUtc = now, FinishedUtc = null, Error = null, Progress = null, Attempts = next.Attempts + 1 });
             _logger.LogInformation("Signal backtest {Id} started ({Name}, pid {Pid}).", id, next.Name, process.Id);
-            _ = WatchAsync(process, id, output);
+            _ = WatchAsync(process, id, output, csv);
             return true;
         }
     }
@@ -245,7 +267,7 @@ public sealed class SignalBacktestJobService : BackgroundService
         _logger.LogInformation("[signal-backtest {Id}] {Line}", id, line);
     }
 
-    private async Task WatchAsync(Process process, string id, string output)
+    private async Task WatchAsync(Process process, string id, string output, string? csv)
     {
         SignalBacktestJob? ended = null;
         try
@@ -262,8 +284,14 @@ public sealed class SignalBacktestJobService : BackgroundService
                     var body = JsonNode.Parse(File.ReadAllText(running));
                     if (body?["ok"]?.GetValue<bool>() == true)
                     {
-                        summary = SummaryOf(body);
-                        File.Move(running, output, overwrite: true);
+                        // A Feature finder run's table is written before its report: no table, no run.
+                        if (csv is not null && !File.Exists(csv + ".running")) error = "the run wrote no dataset";
+                        else
+                        {
+                            summary = SummaryOf(body);
+                            if (csv is not null) File.Move(csv + ".running", csv, overwrite: true);
+                            File.Move(running, output, overwrite: true);
+                        }
                     }
                     else error = body?["error"]?.GetValue<string>() ?? "the run failed";
                 }
@@ -271,6 +299,7 @@ public sealed class SignalBacktestJobService : BackgroundService
             }
             else error = process.ExitCode != 0 ? $"the run exited with code {process.ExitCode}" : "the run wrote no report";
             TryDelete(running);
+            if (csv is not null) TryDelete(csv + ".running");
             lock (_lock)
             {
                 if (_jobs.TryGetValue(id, out var job) && job.State == "running")
@@ -304,12 +333,37 @@ public sealed class SignalBacktestJobService : BackgroundService
         if (ended is { Telegram: true }) await NotifyAsync(TelegramText(ended));
     }
 
-    /// <summary>The run's numbers for the list - the report's "Both" row (net, trades, win %) and the days run / not run.</summary>
+    /// <summary>The run's numbers for the list - the report's "Both" row (net, trades, win %) and the days run / not run; a
+    /// Feature finder run's: its candles, days, and for each label how many readings held on the later days and the best of
+    /// them (its report lists what holds first).</summary>
     internal static JsonNode SummaryOf(JsonNode body)
     {
+        double? Num(JsonNode? n) => n is JsonValue v && v.TryGetValue<double>(out var d) && double.IsFinite(d) ? d : null;
+        if ((body["kind"] as JsonValue)?.TryGetValue<string>(out var kind) == true && kind == "features")
+        {
+            var f = body["features"];
+            var reports = f?["reports"];
+            var held = new JsonObject();
+            var best = new JsonObject();
+            foreach (var (key, _) in FeatureTargets)
+            {
+                var list = (reports?[key]?["features"] as JsonArray)?.Where(x => (x?["holds"] as JsonValue)?.TryGetValue<bool>(out var h) == true && h).ToList() ?? new();
+                held[key] = list.Count;
+                if (list.FirstOrDefault()?["name"] is JsonValue name && name.TryGetValue<string>(out var n)) best[key] = n;
+            }
+            return new JsonObject
+            {
+                ["kind"] = "features",
+                ["rows"] = Num(f?["rows"]),
+                ["okDays"] = Num(f?["okDays"]),
+                ["failedDays"] = (double)((f?["failed"] as JsonArray)?.Count ?? 0),
+                ["split"] = (reports?["fwd30"]?["split"] as JsonValue)?.TryGetValue<bool>(out var split) == true && split,
+                ["held"] = held,
+                ["best"] = best,
+            };
+        }
         var report = body["report"];
         var all = report?["all"];
-        double? Num(JsonNode? n) => n is JsonValue v && v.TryGetValue<double>(out var d) && double.IsFinite(d) ? d : null;
         return new JsonObject
         {
             ["net"] = Num(all?["net"]),
@@ -324,9 +378,22 @@ public sealed class SignalBacktestJobService : BackgroundService
     internal static string TelegramText(SignalBacktestJob job)
     {
         var name = WebUtility.HtmlEncode(job.Name);
-        if (job.State != "done") return $"⚠️ <b>Signal backtest failed</b> - {name}\n{WebUtility.HtmlEncode(job.Error ?? "unknown error")}";
+        var what = job.Kind == "features" ? "Feature finder" : "Signal backtest";
+        if (job.State != "done") return $"⚠️ <b>{what} failed</b> - {name}\n{WebUtility.HtmlEncode(job.Error ?? "unknown error")}";
         var s = job.Summary;
         double? Num(string key) => s?[key] is JsonValue v && v.TryGetValue<double>(out var d) ? d : null;
+        if (job.Kind == "features")
+        {
+            var notRun = Num("failedDays") is > 0 and var nr ? $" · {nr:0} day(s) not run" : "";
+            var head = $"🔬 <b>Feature finder done</b> - {name}\n{(Num("rows") ?? 0):0} candles · {(Num("okDays") ?? 0):0} days{notRun}";
+            if (s?["split"] is not JsonValue sv || !sv.TryGetValue<bool>(out var split) || !split)
+                return $"{head}\nToo few days for the earlier / later check - open it on the page, download the dataset CSV.";
+            int Held(string key) => s?["held"]?[key] is JsonValue v && v.TryGetValue<int>(out var c) ? c : 0;
+            var lines = string.Join(" · ", FeatureTargets.Where(t => t.Key is "ceBuy" or "peBuy" or "fwd30").Select(t => $"{t.Name} {Held(t.Key)}"));
+            var best = FeatureTargets.Where(t => t.Key is "ceBuy" or "peBuy")
+                .Select(t => s?["best"]?[t.Key] is JsonValue b && b.TryGetValue<string>(out var bn) ? $"\nBest for {t.Name}: {WebUtility.HtmlEncode(bn)}" : "");
+            return $"{head}\nReadings that held on the later days: {lines}{string.Concat(best)}";
+        }
         var net = Num("net") ?? 0;
         var india = CultureInfo.GetCultureInfo("en-IN");
         var rupees = $"{(net < 0 ? "−" : "")}₹{Math.Abs(Math.Round(net)).ToString("N0", india)}";
@@ -368,12 +435,14 @@ public sealed class SignalBacktestJobService : BackgroundService
         clean["underlying"] = underlying;
         clean["from"] = from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         clean["to"] = to.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var kind = string.IsNullOrWhiteSpace(request.Kind) ? "backtest" : request.Kind.Trim().ToLowerInvariant();
+        if (!Kinds.Contains(kind)) return (null, "A run is a backtest or the Feature finder.");
         var name = (request.Name ?? "").Trim();
         if (name.Length > 80) name = name[..80];
         if (name.Length == 0) name = $"{underlying} {from.ToString("d MMM", CultureInfo.InvariantCulture)} – {to.ToString("d MMM", CultureInfo.InvariantCulture)}";
         return (new SignalBacktestJob
         {
-            Id = "", Owner = "", Name = name, Settings = clean, Underlying = underlying,
+            Id = "", Owner = "", Name = name, Kind = kind, Settings = clean, Underlying = underlying,
             From = (string)clean["from"]!, To = (string)clean["to"]!, Days = Math.Min(days, MaxDays),
             Telegram = request.Telegram, StartAtUtc = startAt, State = "queued",
         }, null);
@@ -399,6 +468,7 @@ public sealed class SignalBacktestJobService : BackgroundService
 
     private string JobPath(string id) => Path.Combine(_dir, $"{id}.json");
     private string ResultFile(string id) => Path.Combine(_dir, $"{id}.result.json");
+    private string FeaturesFile(string id) => Path.Combine(_dir, $"{id}.features.csv");
 
     private static string NewId(DateTimeOffset now) => $"{now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("n")[..6]}";
 
@@ -456,6 +526,7 @@ public sealed class SignalBacktestJobService : BackgroundService
             _jobs.Remove(job.Id);
             TryDelete(JobPath(job.Id));
             TryDelete(ResultFile(job.Id));
+            TryDelete(FeaturesFile(job.Id));
         }
     }
 
@@ -478,8 +549,9 @@ public sealed class SignalBacktestJobService : BackgroundService
 }
 
 /// <summary>A run asked for by the Signal backtest page: its settings (the page's - index, from / to, the rule, levels,
-/// timeframe), a name, when to start (null = now) and whether to send Telegram when it ends.</summary>
-public sealed record SignalBacktestRequest(JsonNode? Settings, string? Name = null, DateTimeOffset? StartAtUtc = null, bool Telegram = true);
+/// timeframe), a name, when to start (null = now), whether to send Telegram when it ends and what it is
+/// (<see cref="SignalBacktestJobService.Kinds"/> - null = a backtest).</summary>
+public sealed record SignalBacktestRequest(JsonNode? Settings, string? Name = null, DateTimeOffset? StartAtUtc = null, bool Telegram = true, string? Kind = null);
 
 /// <summary>A background run: what was asked, its state (queued / running / done / failed / cancelled), its progress
 /// (the day it is on, the trades and net so far) and, once done, the report's numbers.</summary>
@@ -488,6 +560,8 @@ public sealed record SignalBacktestJob
     public required string Id { get; init; }
     public required string Owner { get; init; }
     public required string Name { get; init; }
+    /// <summary>"backtest" (the rule's report) or "features" (the Feature finder) - a run saved before kinds is a backtest.</summary>
+    public string Kind { get; init; } = "backtest";
     public required JsonNode Settings { get; init; }
     public required string Underlying { get; init; }
     public required string From { get; init; }

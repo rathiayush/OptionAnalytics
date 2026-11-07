@@ -299,13 +299,34 @@ export function reportHead(s, okDays) {
   if (!okDays) return ''
   const unit = s.levelUnit === 'pts' ? ' pts' : '%'
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
-  const trail = s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
+  const trail = trailText(s)
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
   const cost = s.costSl ? ` · cost SL (${s.costSl}${s.costAfter > 0 ? ` after +${s.costAfter}${s.costSl === 'spot' ? ' pts' : unit}` : ''})` : ''
   const strike = s.moneyness ? ` · ${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
   return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''}${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+}
+
+// The trailing stop in words (' · trail 10% after +5%'), '' when off.
+function trailText(s) {
+  const unit = s.levelUnit === 'pts' ? ' pts' : '%'
+  return s.trailGap > 0 ? ` · trail ${s.trailGap}${unit}${s.trailStart > 0 ? ` after +${s.trailStart}${unit}` : ''}` : ''
+}
+
+/** What a Feature finder run reads its readings against: the candles and the option its CE / PE labels buy (the strike, SL /
+ *  target / trail / time stop). */
+export function featureTradeText(s) {
+  const unit = s.levelUnit === 'pts' ? ' pts' : '%'
+  const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
+  const strike = s.moneyness ? `${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : 'ATM'
+  const timeStop = s.timeStopMin > 0 ? ` · out after ${s.timeStopMin} min` : ''
+  return `${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''} · ${strike} CE / PE bought: SL ${level(s.slPct)} · target ${level(s.targetPct)}${trailText(s)}${timeStop}`
+}
+
+/** A Feature finder run's heading: the index, the days run and their range, and `featureTradeText`. */
+export function featureRunHead(s, okDays) {
+  return `${s.underlying} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${featureTradeText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */
@@ -315,8 +336,11 @@ export function chargesText(s) {
   return `net of STT ${s.sttPct}% + ₹${s.brokeragePerOrder} an order${other}`
 }
 
-/** A run's name when none is given: the strategy's name (when it has one), the index and the days - else the trade. */
-export function defaultRunName(s) {
+/** A run's name when none is given: the strategy's name (when it has one), the index and the days - else the trade; a
+ *  Feature finder run (`kind` 'features') the index, the days and the candles (its tag in the list and its Telegram say
+ *  what it is). */
+export function defaultRunName(s, kind = 'backtest') {
+  if (kind === 'features') return `${s.underlying} ${runRange(s.from, s.to)} · ${s.timeframe}m candles`
   if (s.strategyName) return `${s.strategyName} · ${s.underlying} ${runRange(s.from, s.to)}`
   return `${s.underlying} ${runRange(s.from, s.to)} · ${ACTION_OF[s.rule?.action]?.label ?? ''}${s.rule?.mirror ? ' + mirror' : ''}`
 }
