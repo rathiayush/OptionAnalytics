@@ -269,6 +269,9 @@ body {
 @media (max-width: 768px) { .oa-date-input input { font-size: 16px !important; } }
 .oa-template-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid #ffffff14; }
 .oa-template-row:last-of-type { border-bottom: none; }
+/* The feature finder on a phone: a block a reading (FeatureFinderCard.jsx). */
+.oa-feature-row { display: flex; flex-direction: column; gap: 2px; padding: 8px 0; border-bottom: 1px solid #ffffff14; }
+.oa-feature-row:last-of-type { border-bottom: none; }
 .oa-rule-logic-row .ant-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; flex: 1; min-width: 0; }
 .oa-rule-logic .oa-rule-logic-choice { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 @media (max-width: 600px) {

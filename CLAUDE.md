@@ -908,6 +908,23 @@ When adding or changing a strategy:
   (`orderTrades` in `signalStrategyHistory.js`: punched at, entry, SL, target, exit time / price / why, "open" until it
   exits; a block a trade on a phone - `tests/signal-strategy-history.test.mjs`); every outcome to Telegram, whatever Alerts
   says. `SignalLiveOrdersTests.cs` (a fake Dhan behind `ISignalOrderGateway`), `tests/signal-live.test.mjs` (the payload).
+- The Signal backtest's FEATURE FINDER (asked for - "we have plenty of information ... can we use machine learning to find
+  the best correlation and create models?" - the first step: `featureFinder.js`, `FeatureFinderCard.jsx`, the page's
+  "Feature finder" button beside "Compare all", on the days the run loaded - nothing loaded again): every reading the rule
+  builder has (`FEATURES` - OI since open, Total OI and its 15-min change, the S-R walls ATM ± 1 / 2, 🎯, the CE / PE / Net
+  cumulative Δ on their range, the OI / GEX walls and net GEX, the straddle vs its VWAP / decay line, price vs VWAP, spot's
+  move, the day's range and the IB, yesterday's POC / VAH / VAL, pivot and CPR, RSI / EMAs, time of day, expiry) at the
+  close of every candle of the timeframe in the entry window (`dayRows` - each read off the prepared day / `timeframeView`,
+  so known at the candle's close: a day cut part way gives the same features, `tests/feature-finder.test.mjs`), and
+  `LABELS` - what happened AFTER it: spot 15 / 30 / 60 min later (none past the day's end) and an ATM (the page's
+  moneyness) CE / PE BOUGHT there with the page's SL / target / trail / time stop (`simulateTrade` - the backtest's own
+  trade, return % of the entry). `featureReport`: per feature, Spearman's rank correlation with the label picked on the
+  EARLIER days (the first 2/3 of the dates) and on the LATER ones; HOLDS = the same sign and |later| >= `HOLD_IC` (0.05);
+  how many later days agree on their own; the later days' top / bottom fifth (win % of the trades, or the average move);
+  what holds first. Under 6 days there is no split (a warning); under 10 later days it says "a hint, not proof". "Dataset
+  CSV" = the whole table (`rowsCsv` - a row a candle, a column a feature and a label) for a spreadsheet or your own model.
+  Not in it: the order flow's footprint delta and the book heatmap (kept 30 days only) and the market profile's TPOs. It
+  places nothing, feeds no strategy; a reading that holds is built as a rule and run through the backtest like any other.
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -

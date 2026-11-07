@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { CloudServerOutlined, CloseOutlined, DownloadOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
+import { CloudServerOutlined, CloseOutlined, DownloadOutlined, ExperimentOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
@@ -18,6 +18,7 @@ import { RULE_TEMPLATES, TEMPLATE_FAMILIES, templateById, templateRow, withTempl
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
+import { FeatureFinderCard } from './FeatureFinderCard.jsx'
 import { DATE_INPUT_FORMATS, isPastDay, rangePresets, withRangeEnd } from './backtestDates.js'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
@@ -609,6 +610,8 @@ export default function SignalBacktestPage() {
     setCompare((c) => ({ ...c, status: 'done', rows }))
   }
   const closeCompare = () => { compareToken.current++; setCompare({ status: 'idle', rows: [], done: 0, total: 0, days: 0 }) }
+  // The FEATURE FINDER (FeatureFinderCard / featureFinder.js): every reading against what came next, on the days loaded.
+  const [featuresOpen, setFeaturesOpen] = useState(false)
   // What the report cards show: the opened background run, else this page's run.
   const shown = useMemo(() => {
     if (viewing) {
@@ -796,6 +799,11 @@ export default function SignalBacktestPage() {
                 <Tooltip title={touch ? null : loadedDays.length ? `Run all ${RULE_TEMPLATES.length} over the ${loadedDays.length} days loaded and rank them (each with its own timeframe and levels; lots, charges and limits from the page)` : 'Run the backtest first - the templates are compared on the days it loads'}>
                   <Button size="small" icon={<TrophyOutlined />} onClick={compareAll} disabled={!loadedDays.length || compare.status === 'running' || running}>
                     Compare all {RULE_TEMPLATES.length}
+                  </Button>
+                </Tooltip>
+                <Tooltip title={touch ? null : loadedDays.length ? `Every reading the rule builder has, at every candle of the ${loadedDays.length} days loaded, against what happened after it - which ones told it on the earlier days AND still did on the later ones; the whole table as CSV` : 'Run the backtest first - the readings are looked at on the days it loads'}>
+                  <Button size="small" icon={<ExperimentOutlined />} onClick={() => setFeaturesOpen(true)} disabled={!loadedDays.length || running}>
+                    Feature finder
                   </Button>
                 </Tooltip>
               </Space>
@@ -1035,6 +1043,9 @@ export default function SignalBacktestPage() {
                   </Space>
                 )}
           </Card>
+        )}
+        {featuresOpen && loadedDays.length > 0 && (
+          <FeatureFinderCard days={loadedDays} settings={engine} underlying={run.underlying} onClose={() => setFeaturesOpen(false)} />
         )}
         {saved.loaded && (
           <SavedStrategiesCard
