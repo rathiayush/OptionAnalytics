@@ -729,6 +729,81 @@ test('OI divergence - OI since open and Total OI: price moved >= A % but PE − 
   assert.ok(!holds(fakeDay({ spot, tot: () => ({ ce: 0, pe: 0 }) }), 'totalOi', 'divBull', 60, 30, 0.3, 10))
 })
 
+test('S-R walls near ATM - one strike: ATM 25000, ATM −1 = 24950 alone, ATM +1 = 25050 alone; a band around it; the mirror the other side', () => {
+  const { run } = syntheticDay()
+  const d = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  const oiAt = (points, k, ms) => points.filter((p) => p.strike === k && Date.parse(p.time) <= ms).at(-1)?.openInterest
+  const f = (id, value, i, { p = 0, p3 = 0, p4 = 0, w = 5 } = {}) => cond(id).test(d, i, value, w, p, 0, p3, p4)
+  for (const i of [5, 120, 250]) {
+    const atm = d.atm[i]
+    // Each strike's own readings, from the raw points: ATM - 1 = atm - 50 (NIFTY's step), ATM + 1 = atm + 50.
+    for (const k of [-5, -1, 1, 3]) {
+      const strike = atm + k * d.step
+      const ce = oiAt(run.cePoints, strike, d.t[i]), pe = oiAt(run.pePoints, strike, d.t[i])
+      const ce0 = oiAt(run.cePoints, strike, d.t[0]), pe0 = oiAt(run.pePoints, strike, d.t[0])
+      const j = (k + 10) * 4
+      assert.equal(d.atmStrikes[i][j], ce, `CE at ATM ${k} (${strike}) at ${i}`)
+      assert.equal(d.atmStrikes[i][j + 1], pe, `PE at ATM ${k} at ${i}`)
+      assert.equal(d.atmStrikes[i][j + 2], ce - (ce0 ?? ce), `CE added at ATM ${k} at ${i}`)
+      // The conditions read that strike alone (± 0): PE above CE there exactly when its PE OI is the larger.
+      assert.equal(f('atmOi', 'peAbove', i, { p4: k }), pe > ce, `PE above CE at ATM ${k} at ${i}`)
+      assert.equal(f('atmOi', 'ceAbove', i, { p4: k }), ce > pe, `CE above PE at ATM ${k} at ${i}`)
+    }
+    // ATM (0) reads the ATM band, as before; around another strike the band's strikes are added (ATM −1 ± 1 = −2, −1, 0).
+    for (const N of [0, 1, 2]) {
+      const sum = (off, key) => [...Array(2 * N + 1)].reduce((a, _, s) => a + (d.atmStrikes[i][(off - N + s + 10) * 4 + key] || 0), 0)
+      assert.equal(sum(0, 0), d.atmOi[i][N].ce, `ATM ± ${N} from the strikes = the band at ${i}`)
+      assert.equal(sum(0, 3), d.atmOi[i][N].dpe)
+      const around = sum(-1, 1) - sum(-1, 0)
+      assert.equal(f('atmOi', 'peAbove', i, { p3: N, p4: -1 }), around > 0, `ATM −1 ± ${N} at ${i}`)
+    }
+  }
+  // The strikes off ATM are kept out to ± 10 (a band of ± 5 around ATM ± 5); a day cut part way, and the 5-minute view.
+  assert.equal(d.atmStrikes[0].length, 21 * 4)
+  const cut = Date.parse(run.spotCandlesOneMinute[150].time)
+  const part = prepareDay({ ...run, optionExpiry: '2026-10-06', spotCandlesOneMinute: run.spotCandlesOneMinute.filter((b) => Date.parse(b.time) <= cut),
+    cePoints: run.cePoints.filter((p) => Date.parse(p.time) <= cut), pePoints: run.pePoints.filter((p) => Date.parse(p.time) <= cut) }, { underlying: 'NIFTY' })
+  assert.deepEqual(part.atmStrikes[150], d.atmStrikes[150])
+  const v5 = timeframeView(d, 5)
+  assert.deepEqual(v5.atmStrikes[3], d.atmStrikes[v5.at[3]])
+
+  // By hand: ATM 25000 (the fake day's spot), PE OI ahead at 24950 (ATM −1) only, CE ahead at 25050 (ATM +1) only.
+  const row = (strikes) => {
+    const r = new Float64Array(84).fill(NaN)
+    for (const [k, ce, pe] of strikes) { const j = (k + 10) * 4; r[j] = ce; r[j + 1] = pe; r[j + 2] = ce - 1e6; r[j + 3] = pe - 1e6 }
+    return r
+  }
+  const strikes = [[-2, 2e6, 2e6], [-1, 2e6, 5e6], [0, 4e6, 3e6], [1, 6e6, 2e6], [2, 2e6, 2e6]]
+  const hand = { ...fakeDay(), atmOi: Array.from({ length: 360 }, () => [{ ce: 4e6, pe: 3e6, dce: 3e6, dpe: 2e6 }]), atmStrikes: Array.from({ length: 360 }, () => row(strikes)) }
+  const g = (id, value, { p3 = 0, p4 = 0 } = {}) => cond(id).test(hand, 70, value, 5, 0, 0, p3, p4)
+  assert.ok(g('atmOi', 'peAbove', { p4: -1 }) && !g('atmOi', 'ceAbove', { p4: -1 }))     // 24950: PE 5 over CE 2
+  assert.ok(g('atmOi', 'ceAbove', { p4: 1 }) && !g('atmOi', 'peAbove', { p4: 1 }))       // 25050: CE 6 over PE 2
+  assert.ok(g('atmOi', 'ceAbove', { p4: 0 }))                                             // ATM: as before (CE 4 over PE 3)
+  assert.ok(g('atmOi', 'peAbove', { p3: 1, p4: -1 }))                                     // 24900 - 25000: PE 10 over CE 8
+  assert.ok(g('atmOiOpen', 'peAbove', { p4: -1 }) && g('atmOiOpen', 'ceAbove', { p4: 1 })) // added since open the same way
+  assert.ok(!g('atmOi', 'peAbove', { p4: 4 }) && !g('atmOi', 'ceAbove', { p4: 4 }))       // no strike there: nothing holds
+  assert.match(cond('atmOi').show(hand, 70, { param3: 0, param4: -1 }), /^ATM −1 only \(24950\) total CE \+20\.0L · PE \+50\.0L$/)
+
+  // The line: saved, held to −5 ... +5, said, and mirrored to the other side (ATM −1 <-> ATM +1; ATM stays ATM).
+  const line = cleanLine({ id: 'atmOi', value: 'peAbove', param3: 0, param4: -1 })
+  assert.deepEqual(line, { id: 'atmOi', value: 'peAbove', join: 'and', param: 0, param3: 0, param4: -1 })
+  assert.equal(cleanLine({ id: 'atmOi', value: 'peAbove', param4: -9 }).param4, -5)
+  assert.match(lineText(line), /: PE total OI above CE, ATM −1 only$/)
+  assert.match(lineText({ ...line, param3: 2, param4: 3 }), /: PE total OI above CE, ATM \+3 ± 2$/)
+  assert.match(lineText({ ...line, param3: 2, param4: 0 }), /: PE total OI above CE, ATM ± 2$/)
+  assert.deepEqual(mirrorLines([line]), [{ ...line, value: 'ceAbove', param4: 1 }])
+  assert.equal(mirrorLines([{ ...line, param4: 0 }])[0].param4, 0)
+  // Through the engine: the rule fires on ATM −1's PE (bullish), its mirror on ATM +1's CE.
+  const rule = lines([line], 'buyCE', { mirror: true })
+  const sig = ruleSignals(hand, rule)
+  assert.ok(sig.some((x) => x.side === 'rule') && sig.some((x) => x.side === 'mirror'))
+  // The Strike choice: ATM −5 ... ATM +5 in a list, and picking one off ATM reads that strike alone (± 0).
+  const o = cond('atmOi').options.find((x) => x.value === 'peAbove')
+  assert.deepEqual(o.param4.choices.map((c) => c.label), ['ATM −5', 'ATM −4', 'ATM −3', 'ATM −2', 'ATM −1', 'ATM', 'ATM +1', 'ATM +2', 'ATM +3', 'ATM +4', 'ATM +5'])
+  assert.deepEqual(o.param4.also(-1, { param3: 1, param4: 0 }), { param3: 0 })
+  assert.deepEqual(o.param4.also(2, { param3: 1, param4: -1 }), {})
+})
+
 test('S-R walls near ATM - divergence: price moved >= A % but the band\'s PE − CE (total / added since open) followed by less than B % of its range', () => {
   // Spot as the OI divergences': down 0.4% from 30 to 60, up 0.8% from 60 to 100.
   const spot = (i) => (i < 30 ? 25000 : i < 60 ? 25000 - (i - 30) * (100 / 30) : i < 100 ? 24900 + (i - 60) * 5 : 25100)
@@ -766,9 +841,9 @@ test('S-R walls near ATM - divergence: price moved >= A % but the band\'s PE −
     assert.ok(!holds(empty, id, 'divBull', 60, 30, 0.3, 10), `${id} no readings`)
     // In a rule: its three numbers kept, the mirror the bearish one with the same numbers; it signals in the fall.
     const line = cleanLine({ id, value: 'divBull', windowMin: 30, param: 0.3, param2: 10, param3: 2 })
-    assert.deepEqual(line, { id, value: 'divBull', join: 'and', param: 0.3, param2: 10, param3: 2, windowMin: 30 })
-    assert.deepEqual(cleanLine({ id, value: 'divBear' }), { id, value: 'divBear', join: 'and', param: 0.2, param2: 10, param3: 1, windowMin: DEFAULT_WINDOW })
-    assert.deepEqual(mirrorLines([line]).map((l) => [l.value, l.param, l.param2, l.param3, l.windowMin]), [['divBear', 0.3, 10, 2, 30]])
+    assert.deepEqual(line, { id, value: 'divBull', join: 'and', param: 0.3, param2: 10, param3: 2, param4: 0, windowMin: 30 })
+    assert.deepEqual(cleanLine({ id, value: 'divBear' }), { id, value: 'divBear', join: 'and', param: 0.2, param2: 10, param3: 1, param4: 0, windowMin: DEFAULT_WINDOW })
+    assert.deepEqual(mirrorLines([line]).map((l) => [l.value, l.param, l.param2, l.param3, l.param4, l.windowMin]), [['divBear', 0.3, 10, 2, 0, 30]])
     assert.match(lineText(line), new RegExp(`Bullish divergence: price fell, PE − CE ${id === 'atmOi' ? 'total' : 'added'} did not fall with it price ≥ 0\\.3%, followed < 10% of range, ATM ± 2 \\(last 30 min\\)$`))
     const signals = ruleSignals(held, lines([line], 'buyCE'))
     assert.equal(signals[0].side, 'rule')
@@ -1502,7 +1577,7 @@ test('S-R walls near ATM: CE vs PE total OI and added since open - above, crosse
   assert.deepEqual(at(ruleSignals(d, lines([{ id: 'atmOi', value: 'peCross', param3: 1 }], 'buyCE', { mirror: true }))), [[60, 'rule', 'buyCE']])
   assert.deepEqual(at(ruleSignals(d, lines([{ id: 'atmOi', value: 'peCross', param3: 3 }]))), [])
   // Saved, said and mirrored: ATM ± 1 by default, held to 0 - 5, kept by the mirror.
-  assert.deepEqual(cleanLine({ id: 'atmOi', value: 'peCross' }), { id: 'atmOi', value: 'peCross', join: 'and', param: 0, param3: 1, windowMin: DEFAULT_WINDOW })
+  assert.deepEqual(cleanLine({ id: 'atmOi', value: 'peCross' }), { id: 'atmOi', value: 'peCross', join: 'and', param: 0, param3: 1, param4: 0, windowMin: DEFAULT_WINDOW })
   assert.equal(cleanLine({ id: 'atmOiOpen', value: 'peAbove', param3: 9 }).param3, 5)
   assert.equal(cleanLine({ id: 'atmOiOpen', value: 'peFlip' }).param2, 0)
   assert.match(lineText({ id: 'atmOi', value: 'ceCross', param3: 2, windowMin: 10 }), /S-R walls ATM ±: total OI \(CE vs PE\): CE crossed above PE, ATM ± 2 \(last 10 min\)$/)
