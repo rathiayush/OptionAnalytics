@@ -701,6 +701,11 @@ function atmOiCondition(mode) {
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...lead, ...ATM_BAND }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...lead, ...ATM_BAND }),
       opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
       opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
+      // As OI since open's and Total OI's (asked for - "add bullish div as well"): the band's PE − CE follows price when
+      // the OI confirms the move (puts written into a rise, calls into a fall); price moved >= `param` % but it followed by
+      // less than `param2` % of its own range so far. The band follows spot (its strikes are each minute's ATM ± N).
+      opt('divBull', `Bullish divergence: price fell, PE − CE ${open ? 'added' : 'total'} did not fall with it`, 'divBear', { ...DIVERGENCE, ...ATM_BAND }),
+      opt('divBear', `Bearish divergence: price rose, PE − CE ${open ? 'added' : 'total'} did not rise with it`, 'divBull', { ...DIVERGENCE, ...ATM_BAND }),
     ],
     // "by ≥ %": the side ahead NOW by that much - total OI: of the lower one (as Total OI's); since open: of CE + PE added
     // (as OI since open's).
@@ -720,6 +725,7 @@ function atmOiCondition(mode) {
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
