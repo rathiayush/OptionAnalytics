@@ -28,6 +28,7 @@ import {
 } from './oiLevelBreaks.js'
 import { buildOiTotalsRows } from './oiTotalsHeatmap.js'
 import { gexDay } from './gex.js'
+import { sumExpiryOi } from './expirySum.js'
 import { straddleRead } from './straddle.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
@@ -131,8 +132,13 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * prevVp, prevDay, pivots, atm, ce, pe, ceVol, peVol, ceCum, peCum, netCum, expiry, isExpiry }` - or `{ ok: false, reason }`.
  * `expiry` = the expiry of the options loaded (the run's `optionExpiry` - the weekly, BANKNIFTY's monthly), `isExpiry` =
  * the day IS that expiry (known before the open - the expiry calendar).
+ * `expiryChains`: the day's OTHER EXPIRIES for the "Σ 3 expiries" option (OI Replay's - the next expiry and the monthly,
+ * [{ cePoints, pePoints, expiry }] as GET expiry-band sends them): every OI read - OI since the open, Total OI, the OI
+ * totals' cumulative Δ / breaks / 🎯, the OI walls - takes the current expiry's OI plus theirs (`sumExpiryOi`), GEX adds
+ * each expiry's own (`gexDay`'s `chains`); the premiums (the ATM straddle, the option bars and volumes, the trades) stay
+ * the current expiry's. `expiries` on the day = how many were summed. None given: exactly as before.
  */
-export function prepareDay(run, { underlying = null, prevProfile = null, minMinutes = 30 } = {}) {
+export function prepareDay(run, { underlying = null, prevProfile = null, minMinutes = 30, expiryChains = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
   const session = inSession
   const spotBars = (run?.spotCandlesOneMinute ?? [])
@@ -196,6 +202,10 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   // Options.
   const ceLegs = legsByStrike(run?.cePoints)
   const peLegs = legsByStrike(run?.pePoints)
+  // Σ 3 expiries: the OI reads take the summed OI - the premiums stay the current expiry's (ceLegs / peLegs).
+  const chains = (expiryChains ?? []).filter((c) => c?.cePoints?.length || c?.pePoints?.length)
+  const ceOiLegs = chains.length ? legsByStrike(sumExpiryOi(run?.cePoints, chains.map((c) => c.cePoints ?? []))) : ceLegs
+  const peOiLegs = chains.length ? legsByStrike(sumExpiryOi(run?.pePoints, chains.map((c) => c.pePoints ?? []))) : peLegs
   const strikes = [...new Set([...ceLegs.keys(), ...peLegs.keys()])].sort((a, b) => a - b)
   let step = run?.step > 0 ? run.step : null
   if (!step) for (let k = 1; k < strikes.length; k++) { const d = strikes[k] - strikes[k - 1]; if (d > 0 && (step == null || d < step)) step = d }
@@ -205,8 +215,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   // OI since the open, chain-wide (a strike joining the band later counts from its first reading - chainOiTotals.js).
   const byStrikeSeries = (legs) => new Map([...legs].map(([k, minutes]) => [k, [...minutes].sort((a, b) => a[0] - b[0])
     .filter(([, b]) => Number.isFinite(b.oi)).map(([ms, b]) => ({ ms, openInterest: b.oi }))]))
-  const ceSeries = byStrikeSeries(ceLegs)
-  const peSeries = byStrikeSeries(peLegs)
+  const ceSeries = byStrikeSeries(ceOiLegs)
+  const peSeries = byStrikeSeries(peOiLegs)
   const totals = chainOiTotalsAt(ceSeries, peSeries, t[0], t)
   const oi = totals.map((x) => ({ ce: x.ce - totals[0].ce, pe: x.pe - totals[0].pe }))
   // Total OI: the chain-wide CE / PE open interest itself (OI Replay's "Total OI" and its lookback table - the same totals).
@@ -226,7 +236,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   // latest OI at the end of each minute; with them, the walls since the open (`wallsSinceOpen`).
   const minuteWalls = []
   {
-    const cursors = strikes.map((k) => ({ k, ce: [...(ceLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null }))
+    const cursors = strikes.map((k) => ({ k, ce: [...(ceOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null }))
     for (let i = 0; i < n; i++) {
       for (const c of cursors) {
         while (c.ci < c.ce.length && c.ce[c.ci][0] <= t[i]) { const v = c.ce[c.ci++][1].oi; if (Number.isFinite(v)) c.ceOi = v }
@@ -238,9 +248,10 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   }
   const walls = wallsSinceOpen(minuteWalls)
 
-  // GEX (standard sign) - each minute from readings up to it (gex.js).
+  // GEX (standard sign) - each minute from readings up to it (gex.js); with other expiries, each one's own added.
   const spotForOptions = spotBars.map((b) => ({ time: b.t, close: b.c }))
-  const gexByMinute = new Map(gexDay(run?.cePoints, run?.pePoints, spotForOptions, { expiry: run?.optionExpiry ?? null, flips: false }).map((m) => [m.time, m]))
+  const gexOptions = { expiry: run?.optionExpiry ?? null, flips: false, ...(chains.length ? { chains } : {}) }
+  const gexByMinute = new Map(gexDay(run?.cePoints, run?.pePoints, spotForOptions, gexOptions).map((m) => [m.time, m]))
   const gex = t.map((ms) => {
     const m = gexByMinute.get(ms)
     return m ? { net: m.net, callWall: m.callWall, putWall: m.putWall } : null
@@ -273,6 +284,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     prevDay, pivots: pivotLevels(prevDay),
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t), ceVol: packVolumes(ceLegs, t), peVol: packVolumes(peLegs, t),
     expiry, isExpiry: expiry === date,
+    ...(chains.length ? { expiries: 1 + chains.length } : {}),
   }
 }
 

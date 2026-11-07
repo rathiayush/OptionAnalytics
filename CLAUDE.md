@@ -453,7 +453,8 @@ When adding or changing a strategy:
   (`handleOiReplayTicks`), live. A line under the controls says what the OI is the sum of (dates; what is loading; the
   monthly counted once; the next expiry's ATM±3 - a past day's only, today's before the feed's first minute). The OI alerts read the sum and say "· 3 expiries" -
   in the app only, NEVER to Telegram from the page while summing (the server's watch and the Telegram keys are the current
-  expiry's; a replay never sends Telegram anyway); the watch starts again as each expiry joins. Not in the Signal backtest.
+  expiry's; a replay never sends Telegram anyway); the watch starts again as each expiry joins. The Signal backtest has the
+  same option (its own checkbox - see there).
   `OiReplayExpiryBandTests.cs` (a past day asks Dhan once - ATM±3 code 2 / ATM±10 MONTH code 1 - then disk; today the feed's
   bars with no option call, or Dhan's before the feed's first minute, once a day; the day's current / next / monthly).
 - Chain-wide OI (`chainOiTotals.js` - the Day OI card's since-open figures and chart, the Total OI lookback, the External
@@ -792,6 +793,23 @@ When adding or changing a strategy:
   net (a table; on a phone a block each - a table hid the names under its pinned column), each with Load & edit. They are
   starting points, not measured edges - the ranking says so. `tests/signal-templates.test.mjs` (every template whole - no
   condition dropped, its logic read, a side for the mirror, its levels in range; a row = that template's own report).
+  Σ 3 EXPIRIES (asked for - "in signal backtest also give this option ... data will be calculated based on three expiry";
+  OI Replay's own - the "Σ 3 expiries" checkbox beside Strike, `optionanalytics.signalBacktest.sumExpiries`, the settings'
+  `sumExpiries`, off by default): each day loads its current / next / monthly expiry (`GET summed-expiries`) and the bands of
+  the next and the monthly (`GET expiry-band`, the monthly once when it is the current or next - `summedExpiries`;
+  `loadExpiryChains` in `signalBacktestJob.js`, `loadBacktestDay`'s `sumExpiries`) and `prepareDay`'s `expiryChains` sums
+  them into EVERY OI READ of the rule - OI since open, Total OI, the CE / PE / Net cumulative Δ and their breaks and 🎯, the
+  OI walls (`sumExpiryOi`) - and GEX adds each expiry's own (`gexDay`'s `chains`); the premiums - the straddle, the option
+  premium indicators, the trades - stay the current expiry's. None given = exactly as before. A day whose other expiries
+  cannot be loaded does not run (a server error tried once more, a refusal kept - it would be another strategy's numbers); a
+  past day's next expiry is ATM±3 (all Dhan gives), from disk after the first time. The page keeps such days apart
+  (`loadDay`'s key), its run remembers what it loaded (a change waits for the next run - the page says so), the day chart
+  loads the run's kind of day, the report heading says "OI Σ 3 expiries" (`reportHead`); the engine never reads the flag
+  (`engineSettings` drops it). A background run takes it (`scanner-runner/signal-backtest.mjs`), a saved strategy too - its
+  LIVE SCAN reads today's next and monthly expiries from the server's memory (`forceLive`) for the strategies with it, cut
+  to the completed minutes (`prepareLiveDay`'s `expiryChains`), backed off on their own so the index's other strategies go
+  on. `tests/signal-backtest-sum.test.mjs` (the sums, the premiums kept, GEX, a cut part way = the whole day's, the loader's
+  requests and failures), `-job` (the background run = the page's report) and `signal-live.test.mjs`.
   STRATEGY NAME (asked for - "add strategy name ... to runs"): the rule card's "Strategy name" box
   (`optionanalytics.signalBacktest.strategyName`) - filled by a template loaded (its name; Undo puts the old one back), a
   saved strategy loaded (its own name) or a background run's Use settings (its settings' name), or typed - is the settings'

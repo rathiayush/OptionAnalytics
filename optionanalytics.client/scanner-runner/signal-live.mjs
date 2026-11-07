@@ -11,7 +11,7 @@
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
 //   LIVE_NOW, LIVE_ONCE           (tests only) a fixed clock (ISO) and one round, then exit
 
-import { cleanBacktestSettings, engineSettings, prevProfileUrl } from '../src/signalBacktestJob.js'
+import { cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
 import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -21,6 +21,12 @@ const ONCE = process.env.LIVE_ONCE === '1'
 const MIN_MS = 60_000
 const now = () => FIXED_NOW ?? Date.now()
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+// A GET whose answer is read whatever its status - { ok, status, body } (loadExpiryChains).
+async function getJson(path) {
+  const res = await fetch(`${BASE}${path}`, { headers: { 'X-Runner-Key': KEY } })
+  return { ok: res.ok, status: res.status, body: await res.json().catch(() => null) }
+}
 
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(`${BASE}${path}`, {
@@ -74,7 +80,10 @@ async function round(nowMs) {
     wanted.add(u)
     for (const s of strategies) if (s.clean.tradeIn) wanted.add(s.clean.tradeIn)
   }
+  // An index a strategy reads with "Σ 3 expiries": its day with today's next and monthly expiries summed in too.
+  const summing = new Set(list.filter((s) => s.clean.sumExpiries).map((s) => s.clean.underlying))
   const days = new Map()
+  const summedDays = new Map()
   for (const u of wanted) {
     if ((backoff.get(u)?.until ?? 0) > nowMs) continue
     try {
@@ -83,14 +92,29 @@ async function round(nowMs) {
       const day = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs })
       backoff.delete(u)
       if (day.ok && day.date === date) days.set(u, day)
+      // Its other expiries, for the strategies reading it with "Σ 3 expiries" - backed off on their own, so the index's
+      // other strategies go on; a summing strategy waits for the next round when they cannot be read now.
+      const sumKey = `${u} Σ 3 expiries`
+      if (summing.has(u) && (backoff.get(sumKey)?.until ?? 0) <= nowMs) {
+        try {
+          const summed = await loadExpiryChains(getJson, u, date, { live: true })
+          if (!summed.ok) throw new Error(summed.reason)
+          const sumDay = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs, expiryChains: summed.chains })
+          backoff.delete(sumKey)
+          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }))
+        } catch (err) {
+          failed(sumKey, err.message)
+        }
+      }
     } catch (err) {
       failed(u, err.message)
     }
   }
   for (const [u, strategies] of byIndex) {
-    const day = days.get(u)
-    if (!day || (complete && strategies.every((s) => s.reported))) continue
+    if (complete && strategies.every((s) => s.reported)) continue
     for (const s of strategies) {
+      const day = (s.clean.sumExpiries ? summedDays : days).get(u)
+      if (!day) continue
       // Trading in another index: its day too - not read this round, the strategy waits for the next.
       const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
       if (s.clean.tradeIn && !tradeDay) continue

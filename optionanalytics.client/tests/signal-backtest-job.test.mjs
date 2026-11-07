@@ -400,3 +400,55 @@ test('month by month: the report\'s days and trades by calendar month - the tota
   assert.deepEqual(monthRows(null), [])
   assert.deepEqual(monthRows({ dayRows: [{ date: '2026-09-28', ok: true, trades: 0, net: 0 }], trades: [] }).map((m) => [m.month, m.days, m.trades, m.winRate, m.best]), [['2026-09', 1, 0, null, null]])
 })
+
+test('Σ 3 expiries in the background: each day loads its next and monthly expiries, summed - the page\'s report', async (t) => {
+  const asked = []
+  const chainOf = (date, scale) => {
+    const r = runFor(date)
+    const side = (list) => list.map((p) => ({ ...p, openInterest: p.openInterest * scale, price: p.price * 2 }))
+    return { cePoints: side(r.cePoints), pePoints: side(r.pePoints) }
+  }
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    const date = url.searchParams.get('date')
+    asked.push({ path: url.pathname, date, search: url.search })
+    const json = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, PREV)
+    if (url.pathname === '/api/oi-replay/NIFTY/run') return json(200, date === HOLIDAY ? { success: false, error: 'holiday' } : runFor(date))
+    if (url.pathname === '/api/oi-replay/NIFTY/summed-expiries') return json(200, { current: '2026-10-27', next: '2026-11-03', monthly: '2026-11-24' })
+    if (url.pathname === '/api/oi-replay/NIFTY/expiry-band') {
+      const c = chainOf(date, url.searchParams.get('expiryFlag') === 'MONTH' ? 3 : 1)
+      return json(200, { success: true, ...c })
+    }
+    return json(404, { error: 'not mocked' })
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json')
+  const settings = { ...SETTINGS, sumExpiries: true }
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))], {
+      env: { ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26', BACKTEST_JOB: JSON.stringify(settings) },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    })
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  assert.equal(code, 0)
+  const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
+  assert.equal(result.settings.sumExpiries, true)
+  // The page's report for the same days, each prepared with its two other expiries.
+  const engine = engineSettings(settings)
+  const outcomes = DATES.map((date) => {
+    if (date === HOLIDAY) return dayOutcome(date, { ok: false, date, reason: 'holiday' }, engine)
+    const chains = [{ ...chainOf(date, 1), expiry: '2026-11-03' }, { ...chainOf(date, 3), expiry: '2026-11-24' }]
+    return dayOutcome(date, prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV, expiryChains: chains }), engine)
+  })
+  const page = JSON.parse(JSON.stringify(backtestReport(outcomes, settings), reportReplacer), reportReviver)
+  assert.deepEqual(result.report, page)
+  // Every day the run read (not the holiday) asked its two bands once - the next (code 2) and the monthly.
+  const bands = (date) => asked.filter((a) => a.path.endsWith('/expiry-band') && a.date === date).map((a) => a.search.replace(/^\?date=[\d-]+&/, ''))
+  for (const date of DATES) assert.deepEqual(bands(date), date === HOLIDAY ? [] : ['expiryFlag=WEEK&expiryCode=2', 'expiryFlag=MONTH&expiryCode=1'], date)
+})
