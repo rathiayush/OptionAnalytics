@@ -32,9 +32,14 @@ export function completedRun(run, nowMs) {
   }
 }
 
-/** Today's day prepared from the completed minutes (or { ok: false, reason }). */
-export function prepareLiveDay(run, { underlying, prevProfile = null, nowMs }) {
-  return prepareDay(completedRun(run, nowMs), { underlying, prevProfile, minMinutes: LIVE_MIN_MINUTES })
+/** Today's day prepared from the completed minutes (or { ok: false, reason }). `expiryChains` - a strategy's "Σ 3 expiries":
+ *  today's next and monthly expiries (loadExpiryChains, live), cut to the completed minutes too. */
+export function prepareLiveDay(run, { underlying, prevProfile = null, nowMs, expiryChains = null }) {
+  const chains = expiryChains?.map((c) => {
+    const cut = completedRun({ cePoints: c.cePoints, pePoints: c.pePoints }, nowMs)
+    return { ...c, cePoints: cut.cePoints ?? [], pePoints: cut.pePoints ?? [] }
+  }) ?? null
+  return prepareDay(completedRun(run, nowMs), { underlying, prevProfile, minMinutes: LIVE_MIN_MINUTES, expiryChains: chains })
 }
 
 /** IST date ('YYYY-MM-DD'), minute of the day and weekday (0 Sunday) of `ms`. */

@@ -113,7 +113,8 @@ function useChartDay(key, own, load) {
 /**
  * The card. `report` / `settings` - what the report cards show (the page's run, or an opened background run); `dayOf(date)`
  * - the page's own prepared day for `date` (null for a background run's), `tradeDayOf(date)` - the same for the trade-in
- * index (`settings.tradeIn` - the trades were taken in it, so the chart shows it by default), `loadDay(underlying, date, signal)` - loads one
+ * index (`settings.tradeIn` - the trades were taken in it, so the chart shows it by default), `loadDay(underlying, date, signal,
+ * { sumExpiries })` - loads one (the signal index's with the run's "Σ 3 expiries")
  * (the page's loader: kept for the tab's life); `date` / `onDate` - the day picked (a click on a day or a trade row picks
  * it too); `open` / `onOpen` - shown or closed (a row click shows it again).
  */
@@ -135,8 +136,8 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDay
 
   // The days: the signal index's (the rule read it) and, trading in another, that index's (the trades were taken in it).
   const tradeIn = settings.tradeIn || ''
-  const signalDay = useChartDay(picked && open ? `${runKey}|${settings.underlying}|${picked}` : null, picked ? dayOf?.(picked) ?? null : null,
-    (signal) => loadDay(settings.underlying, picked, signal))
+  const signalDay = useChartDay(picked && open ? `${runKey}|${settings.underlying}|${picked}${settings.sumExpiries ? '|Σ3' : ''}` : null, picked ? dayOf?.(picked) ?? null : null,
+    (signal) => loadDay(settings.underlying, picked, signal, { sumExpiries: Boolean(settings.sumExpiries) }))
   const tradeDayL = useChartDay(picked && open && tradeIn ? `${runKey}|${tradeIn}|${picked}` : null, picked && tradeIn ? tradeDayOf?.(picked) ?? null : null,
     (signal) => loadDay(tradeIn, picked, signal))
   const day = signalDay.day

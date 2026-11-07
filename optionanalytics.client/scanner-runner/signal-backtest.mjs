@@ -49,7 +49,9 @@ async function main() {
   // Trading in another index: that index's day of the same date too (the trades are taken in it); a day either failed on
   // the way is tried once more.
   const runDay = async (date) => {
-    const day = await loadBacktestDay(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS })
+    // "Σ 3 expiries": the day's next and monthly expiries summed into its OI reads (loadBacktestDay) - the traded index's
+    // day is read for its premiums only.
+    const day = await loadBacktestDay(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries })
     const tradeDay = settings.tradeIn && day.ok ? await loadBacktestDay(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
     outcomes.set(date, dayOutcome(date, day, engine, tradeDay))
     return { retry: Boolean(day.retry || tradeDay?.retry) }

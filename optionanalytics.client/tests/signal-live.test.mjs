@@ -131,7 +131,12 @@ test('the texts: an entry (and "seen late" after a restart), an exit with its re
 // SENSEX's day for a strategy trading in it: the synthetic day, its premiums half as high again.
 const sensexRun = { ...run, underlying: 'SENSEX', optionExpiry: '2026-10-08', cePoints: run.cePoints.map((p) => ({ ...p, price: p.price * 1.5 })), pePoints: run.pePoints.map((p) => ({ ...p, price: p.price * 1.5 })) }
 
-async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true }) {
+// The day's other expiries for a strategy with "Σ 3 expiries": the next (the same OI) and the monthly (twice it).
+const sumChain = (scale, expiry) => ({ expiry, cePoints: run.cePoints.map((p) => ({ ...p, openInterest: p.openInterest * scale })), pePoints: run.pePoints.map((p) => ({ ...p, openInterest: p.openInterest * scale })) })
+const SUM_NEXT = sumChain(1, '2026-10-13')
+const SUM_MONTHLY = sumChain(2, '2026-10-27')
+
+async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, bandsOk = true }) {
   const asked = []
   const posted = []
   const server = createServer((req, res) => {
@@ -146,6 +151,12 @@ async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true }) {
       if (url.pathname === '/api/oi-replay/NIFTY/run') return runOk ? json(200, { ...run, optionExpiry: '2026-10-06' }) : json(503, { error: 'busy' })
       if (url.pathname === '/api/oi-replay/SENSEX/run') return sensexOk ? json(200, sensexRun) : json(503, { error: 'busy' })
       if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, { success: false })
+      if (url.pathname === '/api/oi-replay/NIFTY/summed-expiries') return json(200, { current: '2026-10-06', next: '2026-10-13', monthly: '2026-10-27' })
+      if (url.pathname === '/api/oi-replay/NIFTY/expiry-band') {
+        if (!bandsOk) return json(503, { error: 'busy' })
+        const c = url.searchParams.get('expiryFlag') === 'MONTH' ? SUM_MONTHLY : SUM_NEXT
+        return json(200, { success: true, cePoints: c.cePoints, pePoints: c.pePoints })
+      }
       return json(404, { error: 'not mocked' })
     })
   })
@@ -284,4 +295,42 @@ test('trade in another index live: the signals read on NIFTY today, the trades t
   // A NIFTY-only strategy beside it is not held up by SENSEX.
   const both = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, { ...strategy, id: 's2' }], sensexOk: false })
   assert.deepEqual(both.posted.map((p) => p.body.strategyId), ['s1'])
+})
+
+test('Σ 3 expiries live: a strategy saved with it reads today with its next and monthly expiries summed - the others as before', async () => {
+  // A rule that reads the OI: total PE OI above CE.
+  const sumSettings = cleanBacktestSettings({
+    underlying: 'NIFTY', sumExpiries: true, maxTradesPerDay: 6, cooldownMin: 0, timeStopMin: 30,
+    rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'vwap', value: 'crossedAbove', windowMin: 5 } }] }, action: 'buyCE', mirror: true },
+  })
+  const summing = { id: 's2', name: 'Summed', settings: sumSettings, sent: [], reported: false }
+  const noon = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, summing] })
+  assert.equal(noon.code, 0)
+  // Today's bands from the server's memory (forceLive): the next (code 2 of the weekly series) and the monthly.
+  const bands = noon.asked.filter((a) => a.path === '/api/oi-replay/NIFTY/expiry-band').map((a) => a.search)
+  assert.deepEqual(bands, ['?date=2026-10-05&expiryFlag=WEEK&expiryCode=2&forceLive=true', '?date=2026-10-05&expiryFlag=MONTH&expiryCode=1&forceLive=true'])
+  const events = (id) => noon.posted.find((p) => p.path === '/api/signal-strategies/live/events' && p.body.strategyId === id)?.body.events ?? []
+  const summedDay = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00'), expiryChains: [SUM_NEXT, SUM_MONTHLY] })
+  assert.equal(summedDay.expiries, 3)
+  assert.deepEqual(events('s2').map((e) => e.key), liveDayEvents(summedDay, engineSettings(sumSettings)).events.map((e) => e.key))
+  // The strategy without it: as before.
+  const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
+  assert.deepEqual(events('s1').map((e) => e.key), liveDayEvents(day, ENGINE).events.map((e) => e.key))
+  // Its other expiries not readable now: it waits (backed off on its own) - the strategy without it goes on.
+  const busy = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, summing], bandsOk: false })
+  assert.ok(busy.posted.some((p) => p.body.strategyId === 's1'))
+  assert.ok(!busy.posted.some((p) => p.body.strategyId === 's2'))
+  assert.match(busy.log, /NIFTY Σ 3 expiries: today not read \(.*busy.*\) - again in 1 min/)
+  // No strategy with it: no band asked.
+  const plain = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })
+  assert.ok(!plain.asked.some((a) => a.path.endsWith('/expiry-band') || a.path.endsWith('/summed-expiries')))
+})
+
+test('the live day is cut to the completed minutes - the other expiries\' too', () => {
+  const late = { ...SUM_NEXT, cePoints: SUM_NEXT.cePoints.map((p) => ({ ...p })), pePoints: SUM_NEXT.pePoints }
+  const a = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('11:00'), expiryChains: [late] })
+  const cut = (list) => list.filter((p) => Date.parse(p.time) + MIN <= at('11:00'))
+  const b = prepareDay(completedRun({ ...run, optionExpiry: '2026-10-06' }, at('11:00')), { underlying: 'NIFTY', minMinutes: 5, expiryChains: [{ ...late, cePoints: cut(late.cePoints), pePoints: cut(late.pePoints) }] })
+  assert.deepEqual(a.tot, b.tot)
+  assert.deepEqual(a.gex, b.gex)
 })

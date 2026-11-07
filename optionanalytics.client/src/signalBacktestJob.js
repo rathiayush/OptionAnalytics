@@ -10,6 +10,7 @@ import {
   simulateDay, summarize,
 } from './signalBacktest.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
+import { summedExpiries } from './expirySum.js'
 
 export const BACKTEST_UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 export const SIDE_NAMES = { rule: 'Rule', mirror: 'Mirror', all: 'Both' }
@@ -18,16 +19,48 @@ const GROUP_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c.group]))
 
 // The day as OI Replay loads it (1-minute, the index's own series - BANKNIFTY's monthly) and the previous trading day's
 // volume profile (spot's POC / VAH / VAL / HVN / LVN - OI Replay's entry chart lines).
-export const runUrl = (u, date) => `/api/oi-replay/${u}/run?date=${date}&timeframeMinutes=1&expiryFlag=${u === 'BANKNIFTY' ? 'MONTH' : 'WEEK'}`
+export const seriesFlag = (u) => (u === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
+export const runUrl = (u, date) => `/api/oi-replay/${u}/run?date=${date}&timeframeMinutes=1&expiryFlag=${seriesFlag(u)}`
 export const prevProfileUrl = (u, date) => `/api/oi-replay/${u}/previous-day-volume-profile?date=${date}`
+// "Σ 3 expiries" (OI Replay's): the day's current / next / monthly expiry, and the band of each one added to the current.
+export const summedExpiriesUrl = (u, date) => `/api/oi-replay/${u}/summed-expiries?date=${date}&expiryFlag=${seriesFlag(u)}`
+export const expiryBandUrl = (u, date, band, live = false) =>
+  `/api/oi-replay/${u}/expiry-band?date=${date}&expiryFlag=${band.expiryFlag}&expiryCode=${band.expiryCode}${live ? '&forceLive=true' : ''}`
+
+/**
+ * The day's OTHER EXPIRIES for the "Σ 3 expiries" option - the next expiry and the monthly (the monthly only when it is not
+ * the current or the next: an expiry is never counted twice - `summedExpiries`), as `prepareDay`'s `expiryChains`. `getJson(url)`
+ * -> { ok, status, body }; `live` - today's, from the server's memory (`forceLive`). { ok: true, chains, expiries (the dates
+ * summed, the current first) } or { ok: false, reason, retry (a server error / rate limit - worth one more try) }.
+ */
+export async function loadExpiryChains(getJson, u, date, { live = false } = {}) {
+  const dates = await getJson(summedExpiriesUrl(u, date))
+  if (!dates.ok || !dates.body?.current) {
+    return { ok: false, reason: `the day's expiries: ${dates.body?.error ?? (dates.ok ? 'could not be worked out' : `HTTP ${dates.status}`)}`, retry: !dates.ok ? dates.status >= 500 || dates.status === 429 : true }
+  }
+  const { current, next, monthly } = dates.body
+  const spec = summedExpiries([current, next].filter(Boolean), monthly, seriesFlag(u))
+  const chains = []
+  for (const band of spec) {
+    const r = await getJson(expiryBandUrl(u, date, band, live))
+    if (!r.ok || !r.body?.success) {
+      return { ok: false, reason: `the ${band.name} expiry (${band.expiry}): ${r.body?.error ?? `HTTP ${r.status}`}`, retry: !r.ok && (r.status >= 500 || r.status === 429) }
+    }
+    chains.push({ cePoints: r.body.cePoints ?? [], pePoints: r.body.pePoints ?? [], expiry: band.expiry ?? r.body.optionExpiry ?? null, name: band.name })
+  }
+  return { ok: true, chains, expiries: [current, ...spec.map((b) => b.expiry)] }
+}
 
 /**
  * One day loaded and prepared (`prepareDay`), or { ok: false, date, reason } - with `final` when the day's own data cannot
  * be read (it will not change: keep it), `retry` when it failed on the way (a timeout, the network, a server error: worth
  * one more try). A day without the previous day's profile still runs (its previous-day lines never hold). Throws only
- * when `signal` stops it.
+ * when `signal` stops it. `sumExpiries` - the "Σ 3 expiries" option: the day's next and monthly expiries loaded too
+ * (`loadExpiryChains`) and summed into its OI reads, each one's own GEX added (`prepareDay`'s `expiryChains`); the day then
+ * says which (`sumExpiries` - the dates). A day whose other expiries cannot be loaded does not run (it would be another
+ * strategy's numbers).
  */
-export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl } = {}) {
+export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false } = {}) {
   const get = fetchImpl ?? globalThis.fetch
   const timeout = new AbortController()
   const timer = setTimeout(() => timeout.abort('timeout'), timeoutMs)
@@ -39,9 +72,19 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     const r = await get(runUrl(underlying, date), { signal: timeout.signal })
     const body = await r.json().catch(() => null)
     if (!r.ok || !body?.success) return { ok: false, date, reason: body?.error ?? `HTTP ${r.status}`, retry: r.status >= 500 || r.status === 429 }
+    let summed = null
+    if (sumExpiries) {
+      const getJson = async (url) => {
+        const res = await get(url, { signal: timeout.signal })
+        return { ok: res.ok, status: res.status, body: await res.json().catch(() => null) }
+      }
+      summed = await loadExpiryChains(getJson, underlying, date)
+      if (!summed.ok) return { ok: false, date, reason: `Σ 3 expiries - ${summed.reason}`, ...(summed.retry ? { retry: true } : { final: true }) }
+    }
     // Let a page draw its progress before the day's minutes are worked through.
     await new Promise((resolve) => setTimeout(resolve, 0))
-    const day = prepareDay(body, { underlying, prevProfile: await prevPromise })
+    const day = prepareDay(body, { underlying, prevProfile: await prevPromise, expiryChains: summed?.chains ?? null })
+    if (day.ok && summed) day.sumExpiries = summed.expiries
     return day.ok ? day : { ok: false, date, reason: day.reason, final: true }
   } catch (err) {
     if (signal?.aborted) throw err
@@ -98,6 +141,8 @@ export function cleanBacktestSettings(s = {}) {
     timeframe: TIMEFRAMES.includes(Number(s?.timeframe)) ? Number(s.timeframe) : d.timeframe,
     expiryDay: EXPIRY_DAY_CHOICES.some((c) => c.value === s?.expiryDay) ? s.expiryDay : d.expiryDay,
     strategyName: strategyName(s?.strategyName),
+    // "Σ 3 expiries": the OI reads on the current + next + monthly expiry's OI, GEX on each one's own (loadBacktestDay).
+    sumExpiries: s?.sumExpiries === true,
   }
 }
 
@@ -131,7 +176,7 @@ export function strategyName(v) {
 /** What the engine reads (simulateDay): the settings with the rule made whole and the TRADED index's lot size (the trade-in
  *  index's when there is one). */
 export function engineSettings(s) {
-  const { underlying, from: _from, to: _to, rule, strategyName: _name, ...rest } = s
+  const { underlying, from: _from, to: _to, rule, strategyName: _name, sumExpiries: _sum, ...rest } = s
   return { ...rest, tradeIn: s.tradeIn || '', rule: normalizeRule(rule), lotSize: PAPER_TRADE_LOT_SIZE[s.tradeIn || underlying] ?? 1 }
 }
 
@@ -260,7 +305,7 @@ export function reportHead(s, okDays) {
   const strike = s.moneyness ? ` · ${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : ''
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''}${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
 }
 
 /** The charges a run takes off its P&L, in words. */

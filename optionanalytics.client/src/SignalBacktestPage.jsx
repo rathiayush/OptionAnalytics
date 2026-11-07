@@ -59,6 +59,7 @@ const STORE = {
   rule: 'optionanalytics.signalBacktest.rule',
   bgTelegram: 'optionanalytics.signalBacktest.bgTelegram',
   expiryDay: 'optionanalytics.signalBacktest.expiryDay',
+  sumExpiries: 'optionanalytics.signalBacktest.sumExpiries',
   chartOpen: 'optionanalytics.signalBacktest.chartOpen',
   strategyName: 'optionanalytics.signalBacktest.strategyName',
 }
@@ -306,10 +307,11 @@ function remember(key, day) {
   while (PREPARED.size > PREPARED_MAX) PREPARED.delete(PREPARED.keys().next().value)
 }
 
-async function loadDay(underlying, date, signal) {
-  const key = `${underlying}|${date}`
+// `sumExpiries` - the day with its next and monthly expiries summed into the OI reads ("Σ 3 expiries"): its own day.
+async function loadDay(underlying, date, signal, { sumExpiries = false } = {}) {
+  const key = `${underlying}|${date}${sumExpiries ? '|Σ3' : ''}`
   if (PREPARED.has(key)) return { day: PREPARED.get(key), cached: true }
-  const day = await loadBacktestDay(underlying, date, { signal, timeoutMs: LOAD_TIMEOUT_MS })
+  const day = await loadBacktestDay(underlying, date, { signal, timeoutMs: LOAD_TIMEOUT_MS, sumExpiries })
   // A day whose own data cannot be read is kept as such; one that failed on the way is asked again next run.
   if (day.ok || day.final) remember(key, day.ok ? day : { ok: false, date, reason: day.reason })
   return { day }
@@ -424,6 +426,10 @@ export default function SignalBacktestPage() {
   // On the options' expiry day: as the rule, or always buy / always sell (overriding the rule's buy / sell there).
   const [storedExpiryDay, setExpiryDay] = usePersistedState(STORE.expiryDay, BACKTEST_DEFAULTS.expiryDay)
   const expiryDay = EXPIRY_DAY_CHOICES.some((c) => c.value === storedExpiryDay) ? storedExpiryDay : BACKTEST_DEFAULTS.expiryDay
+  // "Σ 3 expiries" (OI Replay's - asked for: "in signal backtest also give this option ... data will be calculated based on
+  // three expiry"): every OI read on the current + next + monthly expiry's OI, GEX on each one's own (loadBacktestDay).
+  const [storedSumExpiries, setSumExpiries] = usePersistedState(STORE.sumExpiries, false)
+  const sumExpiries = storedSumExpiries === true
   // The expiry day's choice in words, after the rule in the Save / Run in background dialogs.
   const expiryNote = expiryDay === 'skip' ? ' · not traded on expiry day' : expiryDay !== 'rule' ? ` · on expiry day: ${expiryDay} options` : ''
   const [storedRule, setStoredRule] = usePersistedState(STORE.rule, BACKTEST_DEFAULTS.rule)
@@ -483,15 +489,16 @@ export default function SignalBacktestPage() {
     abortRef.current = controller
     const u = index
     const ti = tradeIn
+    const sum = sumExpiries
     const list = dates
     setViewing(null)
-    setRun({ status: 'running', underlying: u, tradeIn: ti, dates: list, done: 0, current: list[0] ?? null, results: [] })
+    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, dates: list, done: 0, current: list[0] ?? null, results: [] })
     const results = []
     for (let k = 0; k < list.length; k++) {
       setRun((r) => ({ ...r, current: list[k], done: k }))
       try {
         // The signal index's day - and, trading in another, that index's day of the same date (where the trades are taken).
-        const { day, cached } = await loadDay(u, list[k], controller.signal)
+        const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum })
         const trade = ti && day?.ok ? await loadDay(ti, list[k], controller.signal) : null
         results.push({ date: list[k], day, tradeDay: trade?.day ?? null, cached: Boolean(cached) })
       } catch {
@@ -509,13 +516,15 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, costSl, costAfter, strategyName: strategyNameText,
+    timeframe, expiryDay, costSl, costAfter, strategyName: strategyNameText, sumExpiries,
   }), [index, tradeIn, costSl, costAfter, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
-    otherPerTrade, timeframe, expiryDay, strategyNameText])
+    otherPerTrade, timeframe, expiryDay, strategyNameText, sumExpiries])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
-  const runSettings = useMemo(() => ({ ...pageSettings, underlying: run.underlying ?? index, tradeIn: run.underlying ? run.tradeIn ?? '' : tradeIn }),
-    [pageSettings, run.underlying, run.tradeIn, index, tradeIn])
+  const runSettings = useMemo(() => ({
+    ...pageSettings, underlying: run.underlying ?? index, tradeIn: run.underlying ? run.tradeIn ?? '' : tradeIn,
+    sumExpiries: run.underlying ? Boolean(run.sumExpiries) : sumExpiries,
+  }), [pageSettings, run.underlying, run.tradeIn, run.sumExpiries, index, tradeIn, sumExpiries])
   const engine = useMemo(() => engineSettings(runSettings), [runSettings])
   const outcomes = useMemo(() => run.results.map((r) => dayOutcome(r.date, r.day, engine, r.tradeDay)), [run.results, engine])
   const localReport = useMemo(() => backtestReport(outcomes, engine), [outcomes, engine])
@@ -548,6 +557,7 @@ export default function SignalBacktestPage() {
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
     setSttPct(s.sttPct); setBrokeragePerOrder(s.brokeragePerOrder); setOtherPerTrade(s.otherPerTrade)
     setExpiryDay(s.expiryDay)
+    setSumExpiries(s.sumExpiries)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
   }
   // The saved strategies (the server's CSV) and their daily live scan.
@@ -761,9 +771,9 @@ export default function SignalBacktestPage() {
                 - {tradeIn}&apos;s ATM at the signal&apos;s minute, its premiums, its lot ({PAPER_TRADE_LOT_SIZE[tradeIn]}) and its expiry. Each day loads both indices.
               </Text>
             )}
-            {run.underlying && !viewing && (run.underlying !== index || (run.tradeIn ?? '') !== tradeIn) && (
+            {run.underlying && !viewing && (run.underlying !== index || (run.tradeIn ?? '') !== tradeIn || Boolean(run.sumExpiries) !== sumExpiries) && (
               <Text type="warning" style={{ fontSize: 12 }}>
-                The report below is the last run&apos;s - {run.underlying}{run.tradeIn ? ` signals traded in ${run.tradeIn}` : ''}. Run again for {index}{tradeIn ? ` traded in ${tradeIn}` : ''}.
+                The report below is the last run&apos;s - {run.underlying}{run.tradeIn ? ` signals traded in ${run.tradeIn}` : ''}{run.sumExpiries ? ', OI Σ 3 expiries' : ''}. Run again for {index}{tradeIn ? ` traded in ${tradeIn}` : ''}{sumExpiries ? ', OI Σ 3 expiries' : ''}.
               </Text>
             )}
 
@@ -841,6 +851,11 @@ export default function SignalBacktestPage() {
                   options={MONEYNESS_CHOICES.map((m) => ({ value: m, label: m === 0 ? 'ATM' : `${Math.abs(m)} ${m > 0 ? 'ITM' : 'OTM'}` }))}
                 />
               </Space>
+              <Tooltip title="Σ 3 expiries (OI Replay's): every OI read of the rule - OI since open, Total OI, the CE / PE / Net cumulative Δ and their breaks and 🎯, the OI walls - on the current expiry's OI plus the next expiry's and the monthly's (the monthly once, when it is already the current or next), and GEX adding each expiry's own. Premiums cannot be added: the straddle, the option premium indicators and the trades stay on the current expiry. Each day loads its two other expiries too (a past day's next expiry ATM±3 - all Dhan gives for it; from disk after the first time). A change waits for the next run.">
+                <Checkbox checked={sumExpiries} onChange={(e) => setSumExpiries(e.target.checked)}>
+                  <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Σ 3 expiries</Text>
+                </Checkbox>
+              </Tooltip>
               <Tooltip title="On the options' expiry day (the weekly's - BANKNIFTY's monthly): trade as the rule says, always BUY or always SELL options - overriding the rule's Buy / Sell that day (the signal's direction kept: a bullish signal buys the call or sells the put, a bearish one buys the put or sells the call; the same SL, target and trail) - or DON'T TRADE that day at all (its signals are listed, none taken).">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Expiry day</Text>
