@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Alert, Breadcrumb, Button, Card, Col, Popconfirm, Row, Segmented, Space, Statistic, Table, Tag, Typography, message } from 'antd'
-import { ArrowUpOutlined, DeleteOutlined, FileOutlined, FolderOutlined, HomeOutlined, ReloadOutlined } from '@ant-design/icons'
+import { ArrowUpOutlined, DeleteOutlined, DownloadOutlined, FileOutlined, FolderOutlined, HomeOutlined, ReloadOutlined } from '@ant-design/icons'
 import { NavBar, useMediaQuery, usePersistedState } from './shared.jsx'
-import { countOf, crumbsOf, deleteText, deletedText, formatBytes, parentOf, sortEntries } from './cacheBrowser.js'
+import { EVERYTHING_URL, countOf, crumbsOf, deleteText, deletedText, downloadText, downloadUrl, formatBytes, parentOf, sortEntries } from './cacheBrowser.js'
 
 const { Title, Text } = Typography
 
@@ -11,6 +11,9 @@ const { Title, Text } = Typography
 // Backtest's CSVs - each with its size; open one and walk its folders, each with what is under it; delete a file, a
 // folder and everything in it, or everything in a cache - each confirmed, with what it will remove. Everything here can be
 // fetched again (the confirm says how); settings, strategies, preferences and logs are not caches and are not listed.
+// DOWNLOAD (asked for - "give option to download whole data as zip"): a file as it is, a folder / a whole cache as one
+// zip, or every cache in one zip - a zip confirmed first with its size; the server writes it as it reads (no copy on its
+// disk), so the browser's own download shows it coming in.
 // No timer: loaded on opening, after a delete and by Refresh.
 
 const TIME = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -23,6 +26,15 @@ async function api(url, options) {
   try { body = text ? JSON.parse(text) : null } catch { /* not JSON */ }
   if (!r.ok) throw new Error(body?.error ?? `HTTP ${r.status}`)
   return body
+}
+// A download the browser saves (the server answers it as an attachment) - the page stays where it is.
+function startDownload(url) {
+  const a = document.createElement('a')
+  a.href = url
+  a.download = ''
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 const listUrl = (root, path) => `/api/cache/${encodeURIComponent(root)}?path=${encodeURIComponent(path ?? '')}`
 const deleteUrl = (root, path) => (path ? listUrl(root, path) : `/api/cache/${encodeURIComponent(root)}?all=true`)
@@ -87,6 +99,13 @@ export default function CachePage() {
       <Button size="small" danger type="text" icon={<DeleteOutlined />} loading={busy === e.path} aria-label={`Delete ${e.name}`} title={`Delete ${e.name}`} />
     </Popconfirm>
   )
+  const downloadButton = (e) => (e.folder
+    ? (
+      <Popconfirm title={downloadText(e)} okText="Download" onConfirm={() => startDownload(downloadUrl(root.id, e.path))}>
+        <Button size="small" type="text" icon={<DownloadOutlined />} aria-label={`Download ${e.name}`} title={`Download ${e.name} as a zip`} />
+      </Popconfirm>
+    )
+    : <Button size="small" type="text" icon={<DownloadOutlined />} href={downloadUrl(root.id, e.path)} download aria-label={`Download ${e.name}`} title={`Download ${e.name}`} />)
   const nameCell = (e) => (
     <Space size={6} style={{ minWidth: 0 }}>
       {e.folder ? <FolderOutlined style={{ color: '#d4b106' }} /> : <FileOutlined style={{ opacity: 0.6 }} />}
@@ -101,7 +120,7 @@ export default function CachePage() {
     { title: 'Size', dataIndex: 'bytes', key: 'bytes', width: 100, align: 'right', render: (v) => formatBytes(v) },
     { title: 'Files', key: 'files', width: 90, align: 'right', render: (_, e) => (e.folder ? Number(e.files).toLocaleString('en-IN') : '') },
     { title: 'Last changed', dataIndex: 'modifiedUtc', key: 'modified', width: 170, render: (v) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text> },
-    { title: '', key: 'delete', width: 50, align: 'center', render: (_, e) => deleteButton(e) },
+    { title: '', key: 'actions', width: 80, align: 'center', render: (_, e) => <Space size={0}>{downloadButton(e)}{deleteButton(e)}</Space> },
   ]
 
   const rootCard = (r) => {
@@ -120,6 +139,12 @@ export default function CachePage() {
                 </Space>
                 <Text type="secondary" style={{ fontSize: 11 }}>Newest {fmtTime(r.totals.newestUtc)} · oldest {fmtTime(r.totals.oldestUtc)}</Text>
                 <Text type="secondary" style={{ fontSize: 11, wordBreak: 'break-all' }}>{r.path}</Text>
+                <span onClick={(ev) => ev.stopPropagation()}>
+                  <Popconfirm title={downloadText({ name: r.name, folder: true, files: r.totals.files, bytes: r.totals.bytes })} okText="Download"
+                    onConfirm={() => startDownload(downloadUrl(r.id, ''))} disabled={!r.totals.files}>
+                    <Button size="small" icon={<DownloadOutlined />} disabled={!r.totals.files}>Download zip</Button>
+                  </Popconfirm>
+                </span>
               </Space>
             )
             : <Text type="secondary" style={{ fontSize: 12 }}>Not kept on disk on this server.</Text>}
@@ -133,7 +158,38 @@ export default function CachePage() {
     ...crumbsOf(path).map((c, k, all) => ({ title: k === all.length - 1 ? <Text strong>{c.name}</Text> : <a onClick={() => setPath(c.path)}>{c.name}</a> })),
   ]
   const here = listing?.totals
+  const everything = (roots ?? []).filter((r) => r.exists).reduce((a, r) => ({ files: a.files + r.totals.files, bytes: a.bytes + r.totals.bytes }), { files: 0, bytes: 0 })
   const emptyLabel = path ? `Delete this folder` : `Empty ${root?.name ?? 'this cache'}`
+
+  // On a phone the actions go in the card's body, not its header: beside the title they squeezed it to nothing (the
+  // folder's trail could not be seen or tapped).
+  const topActions = (
+    <Space size={6} wrap>
+      <Popconfirm
+        title={`Download EVERY cache as one zip - ${countOf(everything.files, 'file')}, ${formatBytes(everything.bytes)}?`}
+        description="Each cache is its own folder in it. A big one takes a while - the browser shows it coming in."
+        okText="Download" onConfirm={() => startDownload(EVERYTHING_URL)} disabled={!everything.files}>
+        <Button size="small" icon={<DownloadOutlined />} disabled={!everything.files}>Download everything</Button>
+      </Popconfirm>
+      <Button size="small" icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>
+    </Space>
+  )
+  const folderActions = root?.exists && (
+    <Space size={6} wrap>
+      {path && <Button size="small" icon={<ArrowUpOutlined />} onClick={() => setPath(parentOf(path))}>Up</Button>}
+      <Popconfirm title={downloadText({ name: path ? crumbsOf(path).at(-1)?.name : root.name, folder: true, files: here?.files, bytes: here?.bytes })}
+        okText="Download" onConfirm={() => startDownload(downloadUrl(root.id, path))} disabled={!here?.files}>
+        <Button size="small" icon={<DownloadOutlined />} disabled={!here?.files}>Download zip</Button>
+      </Popconfirm>
+      <Popconfirm
+        title={path ? deleteText({ name: crumbsOf(path).at(-1)?.name, folder: true, files: here?.files, bytes: here?.bytes }) : `Delete EVERYTHING in ${root.name} - ${countOf(here?.files, 'file')}, ${formatBytes(here?.bytes)}?`}
+        description={path ? 'It is fetched again the next time it is needed.' : 'The folder stays, empty; every day in it is fetched again the next time it is needed.'}
+        okText={path ? 'Delete' : 'Empty it'} okButtonProps={{ danger: true }} onConfirm={() => remove(path, path ? crumbsOf(path).at(-1)?.name : root.name)}
+        disabled={!here?.files && !listing?.entries?.length}>
+        <Button size="small" danger icon={<DeleteOutlined />} loading={busy === (path || '*')} disabled={!here?.files && !listing?.entries?.length}>{emptyLabel}</Button>
+      </Popconfirm>
+    </Space>
+  )
 
   return (
     <div style={{ maxWidth: 1400, margin: '0 auto', padding: narrow ? '16px 8px' : '24px 16px' }}>
@@ -143,9 +199,9 @@ export default function CachePage() {
           <NavBar />
         </Space>
 
-        <Card size="small" title="Cache - the server's data caches"
-          extra={<Button size="small" icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>}>
+        <Card size="small" title="Cache - the server's data caches" extra={narrow ? null : topActions}>
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            {narrow && topActions}
             <Text type="secondary" style={{ fontSize: 12 }}>
               Everything here is data the server can fetch again - a day deleted is asked of Dhan (or NSE) again the next time it
               is needed. Settings, saved strategies, preferences and logs are not caches and are not listed.
@@ -159,19 +215,9 @@ export default function CachePage() {
         {root?.exists && (
           <Card size="small"
             title={<Breadcrumb items={trail} />}
-            extra={(
-              <Space size={6} wrap>
-                {path && <Button size="small" icon={<ArrowUpOutlined />} onClick={() => setPath(parentOf(path))}>Up</Button>}
-                <Popconfirm
-                  title={path ? deleteText({ name: crumbsOf(path).at(-1)?.name, folder: true, files: here?.files, bytes: here?.bytes }) : `Delete EVERYTHING in ${root.name} - ${countOf(here?.files, 'file')}, ${formatBytes(here?.bytes)}?`}
-                  description={path ? 'It is fetched again the next time it is needed.' : 'The folder stays, empty; every day in it is fetched again the next time it is needed.'}
-                  okText={path ? 'Delete' : 'Empty it'} okButtonProps={{ danger: true }} onConfirm={() => remove(path, path ? crumbsOf(path).at(-1)?.name : root.name)}
-                  disabled={!here?.files && !listing?.entries?.length}>
-                  <Button size="small" danger icon={<DeleteOutlined />} loading={busy === (path || '*')} disabled={!here?.files && !listing?.entries?.length}>{emptyLabel}</Button>
-                </Popconfirm>
-              </Space>
-            )}>
+            extra={narrow ? null : folderActions}>
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
+              {narrow && folderActions}
               <Space size={12} wrap>
                 <Text style={{ fontSize: 12 }}>{here ? `${countOf(here.files, 'file')} · ${formatBytes(here.bytes)} in this folder` : ' '}</Text>
                 <Segmented size="small" value={sortBy} onChange={setSortBy}
@@ -187,7 +233,7 @@ export default function CachePage() {
                       <div key={e.path} className="oa-bg-run">
                         <Space size={6} style={{ justifyContent: 'space-between', width: '100%' }}>
                           {nameCell(e)}
-                          {deleteButton(e)}
+                          <Space size={0}>{downloadButton(e)}{deleteButton(e)}</Space>
                         </Space>
                         <Text style={{ fontSize: 12 }}>{formatBytes(e.bytes)}{e.folder ? ` · ${countOf(e.files, 'file')}` : ''} · {fmtTime(e.modifiedUtc)}</Text>
                         {e.about && <Text type="secondary" style={{ fontSize: 11 }}>{e.about}</Text>}

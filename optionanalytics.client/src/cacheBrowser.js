@@ -51,3 +51,15 @@ export function sortEntries(entries, by = 'name') {
   }[by] ?? ((a, b) => a.name.localeCompare(b.name))
   return list.sort((a, b) => (a.folder === b.folder ? cmp(a, b) : a.folder ? -1 : 1))
 }
+
+/** Where a download comes from: a file as it is, a folder ('' = the whole cache) as one zip; every cache in one zip. */
+export const downloadUrl = (root, path) => `/api/cache/${encodeURIComponent(root)}/download?path=${encodeURIComponent(path ?? '')}`
+export const EVERYTHING_URL = '/api/cache/everything.zip'
+
+/** What a download is about to fetch, in words - so a big zip is never a surprise. */
+export function downloadText(entry) {
+  if (!entry) return ''
+  return entry.folder
+    ? `Download "${entry.name}" as one zip - ${countOf(entry.files, 'file')}, ${formatBytes(entry.bytes)}?`
+    : `Download "${entry.name}" (${formatBytes(entry.bytes)})?`
+}

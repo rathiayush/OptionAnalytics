@@ -2,7 +2,7 @@
 // did, and the rows' order.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { countOf, crumbsOf, deleteText, deletedText, formatBytes, parentOf, sortEntries } from '../src/cacheBrowser.js'
+import { EVERYTHING_URL, countOf, crumbsOf, deleteText, deletedText, downloadText, downloadUrl, formatBytes, parentOf, sortEntries } from '../src/cacheBrowser.js'
 
 test('sizes in words', () => {
   assert.equal(formatBytes(0), '0 B')
@@ -45,4 +45,12 @@ test('folders first, then by the column asked', () => {
   assert.deepEqual(sortEntries(rows, 'bytes').map((r) => r.name), ['m', 'z', 'a.gz', 'b.gz'])
   assert.deepEqual(sortEntries(rows, 'modified').map((r) => r.name), ['m', 'z', 'a.gz', 'b.gz'])
   assert.deepEqual(sortEntries([{ name: 'x', folder: false, bytes: 1 }, { name: 'y', folder: false, bytes: 2 }], 'bytes').map((r) => r.name), ['y', 'x'])
+})
+
+test('a download: a file as it is, a folder or a whole cache as one zip, every cache in one zip - each said before it starts', () => {
+  assert.equal(downloadUrl('dhan', 'v1/charts-intraday'), '/api/cache/dhan/download?path=v1%2Fcharts-intraday')
+  assert.equal(downloadUrl('order-flow', ''), '/api/cache/order-flow/download?path=')
+  assert.equal(EVERYTHING_URL, '/api/cache/everything.zip')
+  assert.equal(downloadText({ name: 'v1', folder: true, files: 21345, bytes: 4.2 * 1024 ** 3 }), 'Download "v1" as one zip - 21,345 files, 4.20 GB?')
+  assert.equal(downloadText({ name: 'a.csv', folder: false, files: 1, bytes: 1024 }), 'Download "a.csv" (1.00 KB)?')
 })

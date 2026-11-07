@@ -865,7 +865,15 @@ When adding or changing a strategy:
   folder kept) - each confirmed with what it removes; everything in a cache only with `all=true` (a request that lost its
   path never empties one). Every path is relative to its cache and checked: no "..", nothing absolute or outside the folder,
   NO SYMLINK FOLLOWED - one on the way is refused, one inside a folder being deleted is removed itself, never what it points
-  at. Each delete is logged with who did it. No timer - loaded on opening, after a delete, by Refresh; a block an entry on
+  at. Each delete is logged with who did it. DOWNLOAD (asked for - "option to download whole data as zip"): a FILE as it
+  is (`GET /api/cache/{root}/download?path=`), a FOLDER or a whole cache (path '') as ONE ZIP, and EVERY cache in one zip
+  (`GET /api/cache/everything.zip`, each cache its own folder in it - `AllFolders`) - buttons on each row, each cache's
+  card, the open folder and "Download everything", every zip confirmed with its files and size (`downloadText`). The zip
+  is STREAMED into the response as it is written (`CacheBrowser.WriteZip`, `ZipStreamResult`) - no temp file, so a 10 GB
+  cache needs no disk; gzip / zip files are STORED (already compressed), the rest deflated fast; `.tmp` files (a write in
+  progress) and symlinks are left out, a file busy or gone on the way skipped; the same path checks as a delete; the browser's
+  stop ends it (`RequestAborted`). On a phone the cards' buttons sit in their body, not beside the title (they squeezed
+  the folder's trail to nothing). No timer - loaded on opening, after a delete, by Refresh; a block an entry on
   a phone (`CacheBrowserTests.cs`, `tests/cache-browser.test.mjs`).
 - ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
