@@ -392,6 +392,31 @@ When adding or changing a strategy:
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
   minute, EMA 9). CDV is drawn raw like the dashboard's chart ("Smooth CDV (EMA 9)" checkbox for the Pine look). One fixed
   day is held to the same numbers on both sides (`CdvParityTests.cs`, `tests/option-flow.test.mjs`) - change one, change both.
+- OI Replay's DELTA PROFILES (asked for - "like volume profile and market profile we need to build delta profile: the delta
+  profile of option data on the spot chart, and also on the futures chart - add two more components on OI Replay"; two
+  cards, `optionDeltaProfile` / `futuresDeltaProfile` - `DeltaProfileCard.jsx`, the maths `deltaProfile.js`, the drawing
+  `deltaProfilePrimitive.js`): the candles with, at the right of the plot (`PANEL_SHARE`, the time axis's right offset
+  leaving it empty, at least `MIN_SPAN` candle widths), a VOLUME column (how much traded at each price row - grey, the value
+  area brighter, the POC amber, also a faint band across the candles: the big volume node) and a DELTA column (buyers minus
+  sellers there - green right of its centre line, red left); the row under the crosshair outlined and read out under the
+  chart; timeframe 1 / 3 / 5 / 15 and the row size per index (`PROFILE_ROWS` / `PROFILE_ROW_CHOICES`, shared by both cards -
+  `optionanalytics.oiReplay.deltaProfileRows`). OPTIONS ON SPOT (`optionDeltaProfile`): the run's option bars (live ones
+  added - `flowCePoints`) given a side as the Option CDV does - `barProxyDelta` (where the close sits in the bar's range) x
+  `deltaWeight` (the strike's delta at that minute's spot; volume weighted the same) - added up a minute and SPREAD over the
+  spot rows that minute's spot bar covered (its last price when it has none); Net = CE Δ − PE Δ (+ bullish: calls bought /
+  puts sold), CE / PE alone their own buying (+) / selling (−); in lots of the index (`PAPER_TRADE_LOT_SIZE`). FUTURES
+  (`futuresDeltaProfile`): the Order Flow day's footprint (`/api/order-flow/{u}/day/{date}` at the row size, with
+  `backfillBars` - the minutes the server did not record live estimated from 1-minute candles and TAGGED, a whole day
+  estimated when it holds none), `dayVolumeProfile` regrouped, delta = buy − sell, in lots (`meta.lotSize`); live it is
+  loaded again every minute (a page timer - `POLL_HEADERS`; the server's memory, not Dhan). Both count only the minutes up
+  to the replay clock (`asOfMs`; live the latest) - `tests/delta-profile.test.mjs` (worked values, the sides, the value
+  area, a profile at a clock = the one built from the minutes before it). Their charts fit the whole day THEMSELVES
+  (`fitContent` after setting the right offset, until the viewer drags / zooms - `useChartUserControl`): the shared
+  `fitWholeDay` reads the visible range back at once while the chart applies a change a frame later, and from a one-candle
+  start it kept the first zoom's cap for good. The cards are in "Sections shown" and added ONCE to a choice saved before
+  them (`SECTION_ADDITIONS`, `withAddedSections`, `SECTIONS_VERSION` 4 - only the cards added since the version a choice was
+  saved at, so one hidden since stays hidden; `tests/dashboard-layout.test.mjs`). A read, not a signal - it feeds no
+  strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is

@@ -57,6 +57,8 @@ const CARD_ROWS = {
   gex: 19,
   ladder: 16,
   futures: 21,
+  optionDeltaProfile: 20,
+  futuresDeltaProfile: 20,
 }
 export const defaultRows = (id) => CARD_ROWS[id] ?? DEFAULT_ROWS
 
@@ -308,6 +310,30 @@ export function withSplitSections(stored, splits = SECTION_SPLITS) {
   return out
 }
 
+// Cards added to a saved "Sections shown" ONCE, by the SECTIONS_VERSION that brought them: each right after the card
+// named (`after`) - wherever that card is shown; a card split OUT of another (`onlyWithAfter`) only there, a NEW card at
+// the end when that card is not shown (asked for - it should be on the page; hiding it afterwards sticks).
+export const SECTION_ADDITIONS = [
+  { version: 3, card: 'oiTotals', after: 'oiHeatmap', onlyWithAfter: true },
+  // The delta profiles (asked for - "add two more components on OI Replay").
+  { version: 4, card: 'optionDeltaProfile', after: 'optionFlow' },
+  { version: 4, card: 'futuresDeltaProfile', after: 'futures' },
+]
+
+/** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
+export function withAddedSections(stored, savedVersion, additions = SECTION_ADDITIONS) {
+  if (!Array.isArray(stored)) return stored
+  const from = Number(savedVersion) || 0
+  const out = [...stored]
+  for (const a of additions) {
+    if (a.version <= from || out.includes(a.card)) continue
+    const at = out.indexOf(a.after)
+    if (at >= 0) out.splice(at + 1, 0, a.card)
+    else if (!a.onlyWithAfter) out.push(a.card)
+  }
+  return out
+}
+
 /** The cards to show, reconciled with the ones the page has now: anything saved that no longer exists is
  *  dropped, and nothing saved at all means `fallback` (the page's own default set). */
 export function reconcileSections(stored, allValues, fallback) {
@@ -343,8 +369,9 @@ export const LAYOUT_VERSION = '2'
 // Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration. Never taken back down: '3'
 // added the DEX card (since removed - a saved "dex" is just dropped); going back to '2' would run the migration again
 // and bring back an OI totals card someone hid.
+// '4' added the two delta profiles (SECTION_ADDITIONS).
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '3'
+export const SECTIONS_VERSION = '4'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands

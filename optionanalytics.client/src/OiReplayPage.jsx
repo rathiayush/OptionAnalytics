@@ -38,6 +38,7 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
+import { FuturesDeltaProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { useGexDays } from './useGexDays.js'
@@ -63,7 +64,7 @@ import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
-  STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withSplitSections, WIDE_LAYOUT_PX,
+  STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS, useReplayClockBroadcast } from './replaySync.jsx'
@@ -734,6 +735,8 @@ const SECTION_OPTIONS = [
   { value: 'straddle', label: 'ATM straddle' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
   { value: 'futures', label: 'Futures' },
+  { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
+  { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
 // What the page shows before anyone picks: everything but the two reads whose numbers are all on the cards
@@ -774,7 +777,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'futures']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -796,9 +799,11 @@ function migrateSavedDashboard() {
   layoutMigrated = true
   try {
     if (window.localStorage.getItem(STORED_SECTIONS_VERSION) !== JSON.stringify(SECTIONS_VERSION)) {
+      // Only the cards added since the version this choice was saved at (a card hidden since stays hidden).
+      const savedVersion = JSON.parse(window.localStorage.getItem(STORED_SECTIONS_VERSION) ?? 'null')
       window.localStorage.setItem(STORED_SECTIONS_VERSION, JSON.stringify(SECTIONS_VERSION))
       const sections = JSON.parse(window.localStorage.getItem(STORED_SECTIONS) ?? 'null')
-      if (Array.isArray(sections)) window.localStorage.setItem(STORED_SECTIONS, JSON.stringify(withSplitSections(sections)))
+      if (Array.isArray(sections)) window.localStorage.setItem(STORED_SECTIONS, JSON.stringify(withAddedSections(sections, savedVersion)))
     }
     if (window.localStorage.getItem(STORED_LAYOUT_VERSION) === JSON.stringify(LAYOUT_VERSION)) return
     window.localStorage.setItem(STORED_LAYOUT_VERSION, JSON.stringify(LAYOUT_VERSION))
@@ -4852,6 +4857,10 @@ export default function OiReplayPage() {
   const futuresVwapMinutes = useMemo(() => sessionVwapFromBars(futuresPointsRaw.map((p) => ({
     time: toChartTime(p.time), high: p.high, low: p.low, close: p.close, volume: p.volume,
   }))) ?? [], [futuresPointsRaw])
+  // The delta profile cards' candles: the 1-minute spot and futures bars up to the clock (each card makes its own
+  // timeframe's candles).
+  const deltaSpotBars = useMemo(() => oneMinBars.slice(0, visibleCount), [oneMinBars, visibleCount])
+  const deltaFuturesBars = useMemo(() => (asOfMs == null ? EMPTY_ARRAY : futuresBarsChart.filter((b) => b.time <= toChartTime(asOfMs))), [futuresBarsChart, asOfMs])
   const displayFuturesBars = useMemo(() => {
     if (asOfMs == null) return []
     const cutoff = toChartTime(asOfMs)
@@ -7063,6 +7072,34 @@ export default function OiReplayPage() {
                   </Card>
                 </Col>
               </Row>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
+            {/* The DELTA PROFILES (DeltaProfileCard.jsx, deltaProfile.js): at each price, how much traded (volume) and who was
+                the aggressor (delta) - the options' flow on the spot chart, the futures' footprint on the futures chart -
+                up to the replay clock, live as it trades. */}
+            {visibleSections.includes('optionDeltaProfile') && (
+              <DashboardCard key="optionDeltaProfile" {...dash('optionDeltaProfile')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Option delta profile on spot (CE / PE flow by spot price){isLive ? ' · live' : ''}</Space>}>
+                  <OptionDeltaProfileCard
+                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
+                    underlying={underlying} dayKey={`${underlying}-${result.date}`}
+                  />
+                </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+            {visibleSections.includes('futuresDeltaProfile') && (
+              <DashboardCard key="futuresDeltaProfile" {...dash('futuresDeltaProfile')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Futures delta profile (footprint by price){isLive ? ' · live' : ''}</Space>}>
+                  <FuturesDeltaProfileCard
+                    futuresBars={deltaFuturesBars} asOfMs={asOfMs} underlying={underlying} date={result.date} isLive={isLive}
+                    dayKey={`${underlying}-${result.date}`}
+                  />
+                </Card>
               </LiveSection>
               </DashboardCard>
             )}

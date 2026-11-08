@@ -7,7 +7,7 @@ import {
   FIT_SCALE_MAX, FIT_SCALE_MIN, GRID_COLS, GRID_MARGIN, GRID_ROW_HEIGHT, MIN_H, MIN_W,
   defaultLayout, defaultRows, defaultSpan, fitLayoutHeights, gridItem, isDefaultArrangement, isDefaultLayout,
   isStackedLayout, nextFitScale, presetLayout, pxToRows, reconcileGridLayout, reconcileSections, rowsToHold, rowsToPx,
-  SECTION_SPLITS, withSplitSections, defaultSpan as spanOf, cardsARowChoices, SIX_A_ROW_PX,
+  SECTION_SPLITS, withSplitSections, withAddedSections, SECTION_ADDITIONS, SECTIONS_VERSION, defaultSpan as spanOf, cardsARowChoices, SIX_A_ROW_PX,
   CHART_GROW, POPUP_CHART_GROW, chartGrow, grownChartHeight,
 } from '../src/dashboardLayout.js'
 
@@ -277,4 +277,21 @@ test('the charts are the main part: taller than they ask, up to a share of the w
   assert.equal(grownChartHeight(320, null), 320)
   assert.equal(grownChartHeight(0, monitor), 0)
   assert.equal(chartGrow(0).cap, 558)                         // an unknown window reads as a common one
+})
+
+test('cards added since a "Sections shown" was saved come in ONCE - by the version that brought them, a card hidden since stays hidden', () => {
+  assert.equal(SECTIONS_VERSION, '4')
+  assert.equal(Math.max(...SECTION_ADDITIONS.map((a) => a.version)), Number(SECTIONS_VERSION))
+  // Saved at version 3 (the OI totals already split out): the two delta profiles, after the option flow and the futures.
+  assert.deepEqual(withAddedSections(['dayOi', 'optionFlow', 'gex', 'futures'], '3'), ['dayOi', 'optionFlow', 'optionDeltaProfile', 'gex', 'futures', 'futuresDeltaProfile'])
+  // Those cards not shown: a NEW card at the end all the same; the totals (split out of the heatmap) only with it.
+  assert.deepEqual(withAddedSections(['dayOi'], '3'), ['dayOi', 'optionDeltaProfile', 'futuresDeltaProfile'])
+  // Saved at 3 with the totals hidden since: they are not brought back.
+  assert.deepEqual(withAddedSections(['oiHeatmap', 'futures'], '3'), ['oiHeatmap', 'futures', 'futuresDeltaProfile', 'optionDeltaProfile'])
+  // Saved before any version: the totals too (where the heatmap is), as the split always did.
+  assert.deepEqual(withAddedSections(['oiHeatmap'], null), ['oiHeatmap', 'oiTotals', 'optionDeltaProfile', 'futuresDeltaProfile'])
+  // At the current version nothing changes; a card already there is not doubled; nothing saved stays nothing.
+  assert.deepEqual(withAddedSections(['gex'], '4'), ['gex'])
+  assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures'], '3'), ['futuresDeltaProfile', 'futures', 'optionDeltaProfile'])
+  assert.equal(withAddedSections(null, '3'), null)
 })

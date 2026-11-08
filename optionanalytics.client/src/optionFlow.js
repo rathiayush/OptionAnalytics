@@ -76,8 +76,8 @@ export function bucketLine(series, minutes) {
 
 // One bar per strike and minute. Live, the run's bars and the live minutes are passed together: a later point of the same
 // strike and minute is the newer reading of it and replaces the earlier one, keeping the larger volume (the run's bar of
-// the minute the page loaded in and that minute's live point each saw only part of it).
-function bars(points) {
+// the minute the page loaded in and that minute's live point each saw only part of it). The delta profile reads them too.
+export function optionBars(points) {
   const byKey = new Map()
   for (const p of points ?? []) {
     if (!p || !Number.isFinite(p.strike) || !Number.isFinite(p.price)) continue
@@ -92,7 +92,8 @@ function bars(points) {
   return [...byKey.values()]
 }
 
-function spotLookup(spotBars) {
+/** The spot of a minute (ms) from `spotBars` - that minute's close, else the last one before it, never a later one. */
+export function spotLookup(spotBars) {
   const byMinute = new Map()
   for (const b of spotBars ?? []) if (b && b.close > 0) byMinute.set(minuteOf(b.time), b.close)
   const minutes = [...byMinute.keys()].sort((a, b) => a - b)
@@ -109,7 +110,7 @@ function spotLookup(spotBars) {
 }
 
 function sideFlow(points, spotAt, isCall, clock, obvSpot) {
-  const all = bars(points).filter((b) => clock == null || b.t <= clock).sort((a, b) => a.t - b.t || a.strike - b.strike)
+  const all = optionBars(points).filter((b) => clock == null || b.t <= clock).sort((a, b) => a.t - b.t || a.strike - b.strike)
   // CDV: increments per minute, run from zero.
   const cdvByMinute = new Map()
   // OBV: each strike's running total, carried at every minute of the side's timeline.
