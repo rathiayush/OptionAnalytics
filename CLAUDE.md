@@ -415,8 +415,19 @@ When adding or changing a strategy:
   `fitWholeDay` reads the visible range back at once while the chart applies a change a frame later, and from a one-candle
   start it kept the first zoom's cap for good. The cards are in "Sections shown" and added ONCE to a choice saved before
   them (`SECTION_ADDITIONS`, `withAddedSections`, `SECTIONS_VERSION` 4 - only the cards added since the version a choice was
-  saved at, so one hidden since stays hidden; `tests/dashboard-layout.test.mjs`). A read, not a signal - it feeds no
-  strategy or alert.
+  saved at, so one hidden since stays hidden; `tests/dashboard-layout.test.mjs`). PREVIOUS DAY / DAYS (asked for - "a
+  checkbox to see the previous day's delta, and N days too"): each card's "Previous day" tick and Days (1 - 20, default 1,
+  unticked = as before) - the Profiles page's rule (`profileSessions` / `pastSessionsNeeded`): unticked = the day so far and
+  the N - 1 sessions before it, ticked = the N sessions BEFORE the day, a COMPOSITE added up price by price
+  (`optionDeltaProfileOf` / `futuresDeltaProfileOf` take a list of sessions), drawn over the day's candles with the price
+  scale holding the whole profile (no minute of the day yet - live before the open - the latest session's candles stand
+  in, said on the card). The days before (`deltaProfileDays.js`, `usePastDeltaSessions`): weekdays walked back ONE REQUEST
+  AT A TIME, N + 10 at most - the options' from that day's run (`/api/oi-replay/{u}/run`, the charts' series), kept as its
+  minutes (`optionDeltaMinutes`), the futures' from its Order Flow day (`FETCH_ROWS`, regrouped; the footprint IN LOTS of
+  its own day's lot size - `footprintBars`); a day with no session (a run without success, a 404 - a holiday) stepped
+  over, the walk STOPS at the first failure and says which day (Retry walks again - never a loop); a day that came back
+  is kept for the tab (`cachedDay`, one on its way shared), a failure or a holiday not. A tick, never a timer; the day
+  shown alone (unticked) needs nothing loaded. A read, not a signal - it feeds no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is

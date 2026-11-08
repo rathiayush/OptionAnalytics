@@ -16,6 +16,10 @@
 //    bought / puts sold), negative bearish (puts bought / calls sold); CE or PE alone shows that side's own buying (+) and
 //    selling (-).
 //
+// SESSIONS: one profile can be of several days - the composite of the day so far and the sessions before it, or of the
+// sessions before the day alone (`optionDeltaProfileOf` / `futuresDeltaProfileOf` take a list; OI Replay's "Previous
+// day" / "Days" - deltaProfileDays.js loads the days before), each day's rows added up price by price.
+//
 // NO LOOK-AHEAD: only the minutes up to the clock (`asOfMs` - the minute shown, whose bar is complete on a replayed day;
 // live, the latest) count - a profile cut at any clock equals the whole day's built only from the minutes before it.
 // Pure: no page, no network.
@@ -70,18 +74,18 @@ function spread(rows, low, high, rowSize, amounts) {
 }
 
 /**
- * The OPTIONS' delta profile on the spot chart: `cePoints` / `pePoints` (the run's 1-minute option bars - strike, open /
- * high / low / close as price, volume; live, with the live minutes), `spotBars` [{ time (ms), open, high, low, close }]
- * (1-minute), `rowSize` (spot points a row), `side` ('net' / 'ce' / 'pe'), `asOfMs` (the clock - null: everything).
- * Rows: [{ price, volume, delta, ce, pe, ceVol, peVol }] - volume and delta of the side picked, in delta-weighted
- * contracts; `totals` { ce, pe, net } (the day's deltas so far); `minutes` - the minutes counted.
+ * The OPTIONS' flow minute by minute, what their delta profile on the spot chart is built from: `cePoints` / `pePoints`
+ * (the run's 1-minute option bars - strike, open / high / low / close as price, volume; live, with the live minutes),
+ * `spotBars` [{ time (ms), open, high, low, close }] (1-minute), `asOfMs` (the clock - null: everything). Each minute
+ * [{ t, low, high, ceVol, peVol, ce, pe }], by time: the CE / PE delta-weighted volume and bar-proxy delta of every
+ * strike, and the spot's range that minute (its last price when it has no bar) - the rows it is laid on. A day already
+ * replayed is kept as this (a few hundred numbers, not the run).
  */
-export function optionDeltaProfile(cePoints, pePoints, spotBars, { asOfMs = null, rowSize = 5, side = 'net' } = {}) {
+export function optionDeltaMinutes(cePoints, pePoints, spotBars, { asOfMs = null } = {}) {
   const clock = asOfMs == null ? null : minuteOf(asOfMs)
   const spot = (spotBars ?? []).filter((b) => b && b.close > 0 && Number.isFinite(msOf(b.time)) && (clock == null || minuteOf(msOf(b.time)) <= clock))
   const spotAt = spotLookup(spot.map((b) => ({ time: msOf(b.time), close: b.close })))
   const spotBar = new Map(spot.map((b) => [minuteOf(msOf(b.time)), b]))
-  // Each minute's delta-weighted volume and delta, CE and PE.
   const minutes = new Map()
   const add = (points, isCall) => {
     for (const b of optionBars(points)) {
@@ -90,27 +94,51 @@ export function optionDeltaProfile(cePoints, pePoints, spotBars, { asOfMs = null
       if (!s) continue
       const w = deltaWeight(b.strike, s, isCall)
       let m = minutes.get(b.t)
-      if (!m) minutes.set(b.t, m = { ceVol: 0, peVol: 0, ce: 0, pe: 0 })
+      if (!m) {
+        // The spot's range in that minute, else its last price (a minute the spot did not trade in - one row).
+        const bar = spotBar.get(b.t)
+        const low = bar ? Math.min(bar.low ?? bar.close, bar.close) : s
+        const high = bar ? Math.max(bar.high ?? bar.close, bar.close) : s
+        minutes.set(b.t, m = { t: b.t, low, high, ceVol: 0, peVol: 0, ce: 0, pe: 0 })
+      }
       if (isCall) { m.ceVol += b.volume * w; m.ce += barProxyDelta(b) * w } else { m.peVol += b.volume * w; m.pe += barProxyDelta(b) * w }
     }
   }
   add(cePoints, true)
   add(pePoints, false)
+  return [...minutes.values()].sort((a, b) => a.t - b.t)
+}
+
+/**
+ * The OPTIONS' delta profile over one or more SESSIONS - each an array of `optionDeltaMinutes` - `rowSize` (spot points
+ * a row), `side` ('net' / 'ce' / 'pe'). Several sessions are a COMPOSITE: every minute of each laid on the rows it
+ * covered, added up. Rows: [{ price, volume, delta, ce, pe, ceVol, peVol }] - volume and delta of the side picked, in
+ * delta-weighted contracts; `totals` { ce, pe, net } (the sessions' deltas); `minutes` - the minutes counted.
+ */
+export function optionDeltaProfileOf(sessions, { rowSize = 5, side = 'net' } = {}) {
   const rows = new Map()
   const totals = { ce: 0, pe: 0, net: 0 }
-  for (const [t, m] of minutes) {
-    // The spot's range in that minute, else its last price (a minute the spot did not trade in - one row).
-    const bar = spotBar.get(t)
-    const low = bar ? Math.min(bar.low ?? bar.close, bar.close) : spotAt(t)
-    const high = bar ? Math.max(bar.high ?? bar.close, bar.close) : spotAt(t)
-    spread(rows, low, high, rowSize, m)
-    totals.ce += m.ce
-    totals.pe += m.pe
+  let count = 0
+  for (const minutes of sessions ?? []) {
+    for (const m of minutes ?? []) {
+      spread(rows, m.low, m.high, rowSize, { ceVol: m.ceVol, peVol: m.peVol, ce: m.ce, pe: m.pe })
+      totals.ce += m.ce
+      totals.pe += m.pe
+      count++
+    }
   }
   totals.net = totals.ce - totals.pe
   const pick = side === 'ce' ? (r) => [r.ceVol, r.ce] : side === 'pe' ? (r) => [r.peVol, r.pe] : (r) => [r.ceVol + r.peVol, r.ce - r.pe]
   const list = [...rows.values()].map((r) => { const [volume, delta] = pick(r); return { ...r, volume, delta } })
-  return { ...finishDeltaProfile(list, rowSize), side, totals, minutes: minutes.size }
+  return { ...finishDeltaProfile(list, rowSize), side, totals, minutes: count }
+}
+
+/**
+ * The OPTIONS' delta profile on the spot chart of one day: `optionDeltaMinutes` of the bars up to the clock, as its
+ * profile (`optionDeltaProfileOf` - one session).
+ */
+export function optionDeltaProfile(cePoints, pePoints, spotBars, { asOfMs = null, rowSize = 5, side = 'net' } = {}) {
+  return optionDeltaProfileOf([optionDeltaMinutes(cePoints, pePoints, spotBars, { asOfMs })], { rowSize, side })
 }
 
 /**
@@ -120,11 +148,22 @@ export function optionDeltaProfile(cePoints, pePoints, spotBars, { asOfMs = null
  * the minutes counted are estimates, `minutes` - all counted.
  */
 export function futuresDeltaProfile(bars, { asOfMs = null, rowSize = 5 } = {}) {
+  return futuresDeltaProfileOf([barsUpTo(bars, asOfMs)], { rowSize })
+}
+
+/** The minute bars up to the clock (`asOfMs` - its minute counts; null: all). */
+export function barsUpTo(bars, asOfMs = null) {
   const clock = asOfMs == null ? null : minuteOf(asOfMs)
-  const known = (bars ?? []).filter((b) => Number.isFinite(msOf(b.time)) && (clock == null || minuteOf(msOf(b.time)) <= clock))
-  const vp = dayVolumeProfile(known, rowSize)
+  return (bars ?? []).filter((b) => Number.isFinite(msOf(b.time)) && (clock == null || minuteOf(msOf(b.time)) <= clock))
+}
+
+/** The FUTURES' delta profile over one or more SESSIONS - each an array of the Order Flow day's minute bars, as
+ *  `futuresDeltaProfile` takes them - added up price by price (a COMPOSITE when there are several). */
+export function futuresDeltaProfileOf(sessions, { rowSize = 5 } = {}) {
+  const all = (sessions ?? []).flatMap((bars) => bars ?? [])
+  const vp = dayVolumeProfile(all, rowSize)
   const list = (vp.rows ?? []).map((r) => ({ price: r.price, buy: r.buy, sell: r.sell, volume: r.buy + r.sell, delta: r.buy - r.sell }))
-  return { ...finishDeltaProfile(list, rowSize), minutes: known.length, estimatedMinutes: known.filter((b) => b.estimated).length }
+  return { ...finishDeltaProfile(list, rowSize), minutes: all.length, estimatedMinutes: all.filter((b) => b.estimated).length }
 }
 
 /** The row holding `price` in a profile (its rows' bottoms, `rowSize` apart), or null - what the crosshair reads. */
