@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Checkbox, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
 import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
@@ -8,8 +8,9 @@ import { useChartUserControl } from './oiShared.jsx'
 import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { DeltaProfilePrimitive, PANEL_SHARE } from './deltaProfilePrimitive.js'
-import { OPTION_DELTA_SIDES, barsUpTo, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
-import { EXTRA_WEEKDAYS, footprintBars, usePastDeltaSessions } from './deltaProfileDays.js'
+import { OPTION_DELTA_SIDES, barsUpTo, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
+import { PREV_PROFILE } from './profileColors.js'
+import { EXTRA_WEEKDAYS, cachedDay, footprintBars, loadFuturesDay, loadOptionDay, optionDayKey, walkPastSessions } from './deltaProfileDays.js'
 import { MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, pastSessionsNeeded, profileSessions } from './profileZones.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 
@@ -50,8 +51,20 @@ function candlesOf(bars, minutes) {
   return out
 }
 
-/** The candles and the profile beside them. `onHover(price | null)` - the price under the crosshair. */
-function DeltaProfileChart({ candles, profile, dayKey, onHover, height: givenHeight = 380 }) {
+// The volume profile's levels drawn as price lines (asked for - "draw the volume profile's LVN, HVN, POC, VAL, VAH as
+// well"), as the Profiles page and OI Replay's entry charts draw theirs: POC solid, VAH / VAL dashed, ONE HVN and ONE LVN
+// dotted - each labelled on the price axis. Across the candles; the profile's panel stands over them on the right.
+const LEVEL_LINES = [
+  { key: 'poc', title: 'POC', color: PREV_PROFILE.poc, width: 2, style: 0 },
+  { key: 'vah', title: 'VAH', color: PREV_PROFILE.va, width: 1, style: 2 },
+  { key: 'val', title: 'VAL', color: PREV_PROFILE.va, width: 1, style: 2 },
+  { key: 'hvn', title: 'HVN', color: PREV_PROFILE.hvn, width: 1, style: 1 },
+  { key: 'lvn', title: 'LVN', color: PREV_PROFILE.lvn, width: 1, style: 1 },
+]
+
+/** The candles and the profile beside them, `levels` (deltaProfileLevels - null: no lines) as price lines.
+ *  `onHover(price | null)` - the price under the crosshair. */
+function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, height: givenHeight = 380 }) {
   const height = useFitHeight(givenHeight)
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -62,6 +75,7 @@ function DeltaProfileChart({ candles, profile, dayKey, onHover, height: givenHei
   useEffect(() => { hoverRef.current = onHover })
   // The profile's price range - the price scale holds it too: the sessions before the day can reach past its candles.
   const rangeRef = useRef(null)
+  const linesRef = useRef([])
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
@@ -102,6 +116,7 @@ function DeltaProfileChart({ candles, profile, dayKey, onHover, height: givenHei
       chartRef.current = null
       seriesRef.current = null
       primitiveRef.current = null
+      linesRef.current = []
     }
   }, [])
   useChartHeight(chartRef, height)
@@ -129,7 +144,42 @@ function DeltaProfileChart({ candles, profile, dayKey, onHover, height: givenHei
     if ((old?.low !== range?.low || old?.high !== range?.high) && !userControlRef.current) chartRef.current?.priceScale('right').applyOptions({ autoScale: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile])
+  useEffect(() => {
+    const series = seriesRef.current
+    if (!series) return
+    for (const line of linesRef.current) series.removePriceLine(line)
+    linesRef.current = LEVEL_LINES.filter((l) => Number.isFinite(levels?.[l.key])).map((l) => series.createPriceLine({
+      price: levels[l.key], color: l.color, title: l.title, lineWidth: l.width, lineStyle: l.style, axisLabelVisible: true,
+    }))
+  }, [levels])
   return <div ref={containerRef} style={{ width: '100%', height }} />
+}
+
+// The levels in words, coloured as their lines - with the rows that saw the most buying and selling.
+function LevelsLine({ levels, show }) {
+  if (!levels) return null
+  const at = (v) => price(v)
+  return (
+    <Space wrap size={[10, 0]} style={{ fontSize: 12 }}>
+      {show ? (
+        <>
+          <span style={{ color: PREV_PROFILE.poc }}>POC {at(levels.poc)}</span>
+          <span style={{ color: PREV_PROFILE.va }}>VAH {at(levels.vah)} · VAL {at(levels.val)}</span>
+          <span style={{ color: PREV_PROFILE.hvn }}>HVN {at(levels.hvn)}</span>
+          <span style={{ color: PREV_PROFILE.lvn }}>LVN {at(levels.lvn)}</span>
+        </>
+      ) : null}
+      <span style={{ color: UP_COLOR }}>most bought {at(levels.buy)}</span>
+      <span style={{ color: DOWN_COLOR }}>most sold {at(levels.sell)}</span>
+    </Space>
+  )
+}
+
+// The "Levels" tick (both cards): the volume profile's POC / VAH / VAL / HVN / LVN lines on the chart - on by default.
+function useLevelsShown() {
+  const [shown, setShown] = usePersistedState('optionanalytics.oiReplay.deltaProfileLevels', true)
+  const on = shown !== false
+  return [on, <Checkbox key="levels" checked={on} onChange={(e) => setShown(e.target.checked)}>Levels</Checkbox>]
 }
 
 // The row under the crosshair, in words.
@@ -156,6 +206,34 @@ function useRowSize(underlying) {
     </Tooltip>
   )
   return [row, select]
+}
+
+const IDLE = { loading: false, sessions: NONE, error: null }
+
+/**
+ * The `count` sessions before `dateKey` of `kind` ('options' - of the `flag` series - or 'futures'), oldest first, as they
+ * come in: { loading, sessions [{ date, items, candles }], error: { date, message } | null, retry }. `count` 0 = none.
+ */
+function usePastDeltaSessions(kind, underlying, dateKey, count, flag = '') {
+  const [attempt, setAttempt] = useState(0)
+  const retry = useCallback(() => setAttempt((a) => a + 1), [])
+  const want = count > 0 && underlying && dateKey ? `${kind}|${underlying}|${flag}|${dateKey}|${count}|${attempt}` : null
+  const [state, setState] = useState({ key: null, ...IDLE })
+  useEffect(() => {
+    if (!want) return undefined
+    let cancelled = false
+    // Until the walk's first session the hook answers "loading" for this key (state.key differs) - nothing to set here.
+    const load = kind === 'options'
+      ? (date) => cachedDay(optionDayKey(underlying, flag, date), () => loadOptionDay(underlying, date, flag))
+      : (date) => cachedDay(`futures|${underlying}|${date}`, () => loadFuturesDay(underlying, date))
+    walkPastSessions(dateKey, count, load, {
+      cancelled: () => cancelled,
+      onSession: (sessions) => { if (!cancelled) setState({ key: want, loading: true, sessions, error: null }) },
+    }).then(({ sessions, error }) => { if (!cancelled) setState({ key: want, loading: false, sessions, error }) })
+    return () => { cancelled = true }
+  }, [want]) // eslint-disable-line react-hooks/exhaustive-deps
+  if (!want) return { ...IDLE, retry }
+  return state.key === want ? { loading: state.loading, sessions: state.sessions, error: state.error, retry } : { loading: true, sessions: NONE, error: null, retry }
 }
 
 // "Previous day" / "Days" of one card (kept per card): unticked = the day so far and the N - 1 sessions before it,
@@ -229,6 +307,8 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const todayMinutes = useMemo(() => (choice.of === 'previous' ? NONE : optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs })), [cePoints, pePoints, spotMs, asOfMs, choice.of])
   const sessions = useMemo(() => profileSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayMinutes, past.sessions, choice.dayCount, choice.of])
   const profile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide }), [sessions, rowSize, shownSide])
+  const levels = useMemo(() => deltaProfileLevels(profile), [profile])
+  const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(choice.of === 'today' && todayMinutes.length ? [date] : [])]
   const { candles, standIn } = useCandles(spotBars, past, timeframe)
   const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
@@ -240,6 +320,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
         {rowSelect}
         {choice.control}
+        {levelsTick}
       </Space>
       <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} />
       {profile.rows.length && candles.length ? (
@@ -247,9 +328,10 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           <Text style={{ fontSize: 12 }}>
             Net Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots
             {' '}(CE <span style={{ color: deltaColor(profile.totals.ce) }}>{lots(profile.totals.ce / lotSize, true)}</span> · PE{' '}
-            <span style={{ color: deltaColor(-profile.totals.pe) }}>{lots(profile.totals.pe / lotSize, true)}</span>) · POC {price(profile.poc)}
+            <span style={{ color: deltaColor(-profile.totals.pe) }}>{lots(profile.totals.pe / lotSize, true)}</span>) · POC {price(levels?.poc ?? profile.poc)}
           </Text>
-          <DeltaProfileChart candles={candles} profile={profile} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
+          <LevelsLine levels={levels} show={levelsOn} />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
@@ -267,7 +349,10 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           DAYS: the day so far with the sessions before it added up (a composite - where the option flow sat over several
           days); &quot;Previous day&quot; ticked = the sessions BEFORE the day only (each its own expiry&apos;s options, as
           its replay shows them), drawn over the day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price.
-          A day not loaded before comes from the server&apos;s disk, or Dhan once.
+          A day not loaded before comes from the server&apos;s disk, or Dhan once. LEVELS: the volume profile&apos;s POC
+          (solid), VAH / VAL (dashed - the value area, 70% of the volume) and ONE HVN / LVN (dotted - the busiest row of
+          the busy areas beside the POC, the thinnest of the thin areas inside the range), as the Profiles page draws them;
+          &quot;most bought / sold&quot; = the rows with the largest buying / selling. The Signal backtest reads the same levels.
         </Text>
       </FoldText>
     </Space>
@@ -309,6 +394,8 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
   const todayBars = useMemo(() => (choice.of === 'previous' ? NONE : barsUpTo(day.bars, asOfMs)), [day.bars, asOfMs, choice.of])
   const sessions = useMemo(() => profileSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayBars, past.sessions, choice.dayCount, choice.of])
   const profile = useMemo(() => futuresDeltaProfileOf(sessions, { rowSize }), [sessions, rowSize])
+  const levels = useMemo(() => deltaProfileLevels(profile), [profile])
+  const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(choice.of === 'today' && todayBars.length ? [date] : [])]
   const { candles, standIn } = useCandles(futuresBars, past, timeframe)
   const soFar = choice.of === 'today' && choice.dayCount === 1
@@ -318,6 +405,7 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
         <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
         {rowSelect}
         {choice.control}
+        {levelsTick}
         {profile.estimatedMinutes > 0 && (
           <Tooltip title="Minutes the server did not record live (a restart, or a day older than the 30 it keeps): their buy / sell is an estimate from Dhan's 1-minute candles, spread over the candle's range.">
             <Tag color="orange" style={{ margin: 0 }}>{profile.estimatedMinutes === profile.minutes ? 'estimated from 1-min candles' : `${profile.estimatedMinutes} of ${profile.minutes} min estimated`}</Tag>
@@ -329,9 +417,10 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
       {profile.rows.length && candles.length ? (
         <>
           <Text style={{ fontSize: 12 }}>
-            Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.delta) }}>{lots(profile.delta, true)}</Text> lots · volume {lots(profile.volume)} lots · POC {price(profile.poc)}
+            Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.delta) }}>{lots(profile.delta, true)}</Text> lots · volume {lots(profile.volume)} lots · POC {price(levels?.poc ?? profile.poc)}
           </Text>
-          <DeltaProfileChart candles={candles} profile={profile} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
+          <LevelsLine levels={levels} show={levelsOn} />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={1} deltaWord="Δ" />
         </>
       ) : day.loading || past.loading ? <Text type="secondary">{past.loading && !day.loading ? 'Loading the days before…' : 'Loading the futures footprint…'}</Text>
@@ -347,7 +436,9 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           DAYS: the day so far with the sessions before it added up (a composite - the levels several days defended);
           &quot;Previous day&quot; ticked = the sessions BEFORE the day only (each day&apos;s own near futures), drawn over the
           day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price. The server keeps the last 30 days it
-          recorded; an older day is its estimate from 1-minute candles.
+          recorded; an older day is its estimate from 1-minute candles. LEVELS: the volume profile&apos;s POC (solid), VAH /
+          VAL (dashed) and ONE HVN / LVN (dotted), as the Profiles page draws them; &quot;most bought / sold&quot; = the rows
+          with the largest buying / selling.
         </Text>
       </FoldText>
     </Space>

@@ -6,11 +6,12 @@
 // A run = its days' OUTCOMES put together: each day is replayed through the rule on its own (simulateDay - the days are
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
-  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, mirrorIsSame, mirrorLines, normalizeRule, prepareDay, ruleText,
-  simulateDay, summarize,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
+  prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import { summedExpiries } from './expirySum.js'
+import { cachedDay, loadOptionDay, optionDayKey, rememberDay, walkPastSessions } from './deltaProfileDays.js'
 
 export const BACKTEST_UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 export const SIDE_NAMES = { rule: 'Rule', mirror: 'Mirror', all: 'Both' }
@@ -73,7 +74,7 @@ export async function loadExpiryChains(getJson, u, date, { live = false } = {}) 
  * says which (`sumExpiries` - the dates). A day whose other expiries cannot be loaded does not run (it would be another
  * strategy's numbers).
  */
-export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false } = {}) {
+export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false, deltaDays = 0 } = {}) {
   const get = fetchImpl ?? globalThis.fetch
   const timeout = new AbortController()
   const timer = setTimeout(() => timeout.abort('timeout'), timeoutMs)
@@ -103,7 +104,11 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     const day = prepareDay(body, { underlying, prevProfile: await prevPromise, expiryChains: summed?.chains ?? null })
     if (day.ok && summed) day.sumExpiries = summed.expiries
     if (day.ok) day.dhanCalls = dhanCalls
-    return day.ok ? day : { ok: false, date, reason: day.reason, final: true, dhanCalls }
+    if (!day.ok) return { ok: false, date, reason: day.reason, final: true, dhanCalls }
+    // Its option flow kept for the next day's walk back (the option delta profile's days before) - asked of no one again.
+    rememberDay(optionDayKey(underlying, seriesFlag(underlying), date), { date, items: day.odm, candles: dayCandles(day) })
+    const past = await attachDeltaPast(day, underlying, deltaDays, { fetch: get })
+    return past.ok ? day : { ok: false, date, reason: past.reason, retry: true, dhanCalls }
   } catch (err) {
     if (signal?.aborted) throw err
     return { ok: false, date, reason: timeout.signal.aborted ? 'took too long to load' : String(err?.message ?? err), retry: true }
@@ -111,6 +116,27 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     clearTimeout(timer)
     signal?.removeEventListener('abort', abort)
   }
+}
+
+// A prepared day's spot candles (ms), as the delta profile cards keep a day.
+const dayCandles = (day) => day.t.map((t, i) => ({ time: t, open: day.spot.o[i], high: day.spot.h[i], low: day.spot.l[i], close: day.spot.c[i] }))
+
+/**
+ * The OPTION DELTA PROFILE'S DAYS BEFORE (a rule reading "Profile of: Days before" or more than one day -
+ * `deltaDaysNeeded`): the `count` sessions before the day's date put on it as `odmPast` (oldest first, each its
+ * `optionDeltaMinutes`), walked back as OI Replay's cards walk (deltaProfileDays.js - weekdays one at a time, a holiday
+ * stepped over): a day of the run already loaded is not asked again (`rememberDay`), the others are the run of that day,
+ * kept for the tab / process. Done once for a day (a later rule needing more walks on). { ok } - or { ok: false, reason }
+ * when a day before could not be loaded (stopped there: the day is not run - its numbers would be another profile's).
+ */
+export async function attachDeltaPast(day, underlying, count, { fetch: fetchImpl } = {}) {
+  if (!day?.ok || !(count > 0) || (Array.isArray(day.odmPast) && (day.odmPastWanted ?? 0) >= count)) return { ok: true }
+  const flag = seriesFlag(underlying)
+  const found = await walkPastSessions(day.date, count, (date) => cachedDay(optionDayKey(underlying, flag, date), () => loadOptionDay(underlying, date, flag, fetchImpl)))
+  if (found.error) return { ok: false, reason: `option Δ profile of the days before - ${found.error.date}: ${found.error.message}` }
+  day.odmPast = found.sessions.map((x) => x.items)
+  day.odmPastWanted = count
+  return { ok: true }
 }
 
 const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(`${v}T00:00:00Z`))
@@ -207,6 +233,8 @@ export function dayOutcome(date, day, engine, tradeDay = null) {
   const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay })
   return {
     date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
+    // How many sessions before the day the option delta profile had (null: none asked for).
+    deltaPast: Array.isArray(day.odmPast) ? day.odmPast.length : null,
     limit: dayLimit ?? null, trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
@@ -253,12 +281,15 @@ export function backtestReport(outcomes, settings) {
   ]
   const readsPrev = rule.lines.some((l) => GROUP_OF[l.id] === 'PrevProfile')
   const readsPivots = rule.lines.some((l) => GROUP_OF[l.id] === 'Pivots')
+  const deltaNeed = deltaDaysNeeded(rule)
   return {
     trades, rows, all, dayRows, lines, okDays: okDays.length, sides,
     failed: days.filter((o) => !o.ok).map((o) => ({ date: o.date, reason: o.reason })),
     noPrev: readsPrev ? okDays.filter((o) => !o.prev).map((o) => o.date) : [],
     // A day outcome kept before the pivot points (an older background run) has no `pivots` - not listed as without them.
     noPivots: readsPivots ? okDays.filter((o) => o.pivots === false).map((o) => o.date) : [],
+    // The option delta profile's days before: the days that had fewer than the rule reads (the data starts later).
+    noDeltaPast: deltaNeed > 0 ? okDays.filter((o) => o.deltaPast != null && o.deltaPast < deltaNeed).map((o) => o.date) : [],
   }
 }
 

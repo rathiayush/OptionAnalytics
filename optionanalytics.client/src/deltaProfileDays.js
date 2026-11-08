@@ -10,9 +10,9 @@
 // for the tab's life once it came back (`CACHE`), so a change of Days, the row or the side asks the server nothing again;
 // a failure is not kept. Weekdays are walked back ONE REQUEST AT A TIME (a day the server does not hold comes from Dhan
 // the first time); a day with no session (a holiday) is stepped over; the walk STOPS at the first failure and says so -
-// the card's Retry walks again (nothing kept is asked again). A click, never a timer.
+// the card's Retry walks again (nothing kept is asked again). A click, never a timer. Pure - no React (the cards' hook,
+// `usePastDeltaSessions`, is in DeltaProfileCard.jsx): the Signal backtest's loader and runners read it too.
 
-import { useCallback, useEffect, useState } from 'react'
 import { optionDeltaMinutes } from './deltaProfile.js'
 import { FETCH_ROWS, barsKnownAt, withBackfillBars } from './profileZones.js'
 
@@ -129,6 +129,16 @@ export async function loadFuturesDay(underlying, date, fetchImpl) {
 const CACHE = new Map()
 const CACHE_MAX = 80
 const IN_FLIGHT = new Map()
+/** The cache's key of a day of the options (a series - WEEK / MONTH - of an index). */
+export const optionDayKey = (underlying, flag, date) => `options|${underlying}|${flag}|${date}`
+/** Keeps a day loaded some other way (the Signal backtest's own days - their run is already in): the next day's walk back
+ *  finds it here instead of asking for its run again. */
+export function rememberDay(key, day) {
+  if (!day?.items?.length) return
+  CACHE.delete(key)
+  CACHE.set(key, day)
+  if (CACHE.size > CACHE_MAX) CACHE.delete(CACHE.keys().next().value)
+}
 export function cachedDay(key, load) {
   if (CACHE.has(key)) return Promise.resolve(CACHE.get(key))
   if (IN_FLIGHT.has(key)) return IN_FLIGHT.get(key)
@@ -143,33 +153,4 @@ export function cachedDay(key, load) {
     .finally(() => IN_FLIGHT.delete(key))
   IN_FLIGHT.set(key, pending)
   return pending
-}
-
-const NONE = []
-const IDLE = { loading: false, sessions: NONE, error: null }
-
-/**
- * The `count` sessions before `dateKey` of `kind` ('options' - of the `flag` series - or 'futures'), oldest first, as they
- * come in: { loading, sessions [{ date, items, candles }], error: { date, message } | null, retry }. `count` 0 = none.
- */
-export function usePastDeltaSessions(kind, underlying, dateKey, count, flag = '') {
-  const [attempt, setAttempt] = useState(0)
-  const retry = useCallback(() => setAttempt((a) => a + 1), [])
-  const want = count > 0 && underlying && dateKey ? `${kind}|${underlying}|${flag}|${dateKey}|${count}|${attempt}` : null
-  const [state, setState] = useState({ key: null, ...IDLE })
-  useEffect(() => {
-    if (!want) return undefined
-    let cancelled = false
-    // Until the walk's first session the hook answers "loading" for this key (state.key differs) - nothing to set here.
-    const load = kind === 'options'
-      ? (date) => cachedDay(`options|${underlying}|${flag}|${date}`, () => loadOptionDay(underlying, date, flag))
-      : (date) => cachedDay(`futures|${underlying}|${date}`, () => loadFuturesDay(underlying, date))
-    walkPastSessions(dateKey, count, load, {
-      cancelled: () => cancelled,
-      onSession: (sessions) => { if (!cancelled) setState({ key: want, loading: true, sessions, error: null }) },
-    }).then(({ sessions, error }) => { if (!cancelled) setState({ key: want, loading: false, sessions, error }) })
-    return () => { cancelled = true }
-  }, [want]) // eslint-disable-line react-hooks/exhaustive-deps
-  if (!want) return { ...IDLE, retry }
-  return state.key === want ? { loading: state.loading, sessions: state.sessions, error: state.error, retry } : { loading: true, sessions: NONE, error: null, retry }
 }

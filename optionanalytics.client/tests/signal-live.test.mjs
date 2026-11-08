@@ -136,7 +136,12 @@ const sumChain = (scale, expiry) => ({ expiry, cePoints: run.cePoints.map((p) =>
 const SUM_NEXT = sumChain(1, '2026-10-13')
 const SUM_MONTHLY = sumChain(2, '2026-10-27')
 
-async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, bandsOk = true }) {
+// A day before today as the server sends it (the same day's data, its option bars with a range and volume - the calls
+// closing near their highs: bought).
+const withVolume = (list, up) => list.map((p, k) => ({ ...p, open: p.price, high: p.price * (up ? 1.01 : 1.04), low: p.price * (up ? 0.96 : 0.99), volume: 100 + (k % 9) * 50 }))
+const PAST_RUN = { ...run, optionExpiry: '2026-10-06', cePoints: withVolume(run.cePoints, true), pePoints: withVolume(run.pePoints, false) }
+
+async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, bandsOk = true, pastOk = true }) {
   const asked = []
   const posted = []
   const server = createServer((req, res) => {
@@ -148,6 +153,8 @@ async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, band
       const json = (status, b) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)) }
       if (url.pathname === '/api/signal-strategies/live') return json(200, { today: DATE, strategies })
       if (url.pathname.startsWith('/api/signal-strategies/live/')) { posted.push({ path: url.pathname, body: JSON.parse(body) }); return json(200, {}) }
+      // A day before today (the option delta profile's days before) - the same day's data, for the plumbing.
+      if (url.pathname === '/api/oi-replay/NIFTY/run' && url.searchParams.get('date') !== DATE) return pastOk ? json(200, PAST_RUN) : json(503, { error: 'busy' })
       if (url.pathname === '/api/oi-replay/NIFTY/run') return runOk ? json(200, { ...run, optionExpiry: '2026-10-06' }) : json(503, { error: 'busy' })
       if (url.pathname === '/api/oi-replay/SENSEX/run') return sensexOk ? json(200, sensexRun) : json(503, { error: 'busy' })
       if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, { success: false })
@@ -333,4 +340,32 @@ test('the live day is cut to the completed minutes - the other expiries\' too', 
   const b = prepareDay(completedRun({ ...run, optionExpiry: '2026-10-06' }, at('11:00')), { underlying: 'NIFTY', minMinutes: 5, expiryChains: [{ ...late, cePoints: cut(late.cePoints), pePoints: cut(late.pePoints) }] })
   assert.deepEqual(a.tot, b.tot)
   assert.deepEqual(a.gex, b.gex)
+})
+
+test('the option delta profile\'s days before live: walked back once for a strategy reading them, a failure backed off - the others go on', async () => {
+  // The previous day's option flow net positive / negative (a level known before the open): it fires at 09:30.
+  const deltaSettings = cleanBacktestSettings({
+    underlying: 'NIFTY', maxTradesPerDay: 2, cooldownMin: 0, timeStopMin: 30,
+    rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'odpDelta', value: 'netPositive', param4: 1 } }] }, action: 'buyCE', mirror: true },
+  })
+  const reading = { id: 's3', name: 'Delta before', settings: deltaSettings, sent: [], reported: false }
+  const noon = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, reading] })
+  assert.equal(noon.code, 0)
+  // Today (forceLive) and the weekday before it - asked once.
+  const runs = noon.asked.filter((a) => a.path === '/api/oi-replay/NIFTY/run').map((a) => new URLSearchParams(a.search).get('date'))
+  assert.deepEqual(runs, [DATE, '2026-10-02'])
+  const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
+  day.odmPast = [prepareDay(PAST_RUN, { underlying: 'NIFTY' }).odm]
+  const events = (r, id) => r.posted.find((p) => p.path === '/api/signal-strategies/live/events' && p.body.strategyId === id)?.body.events ?? []
+  const expected = liveDayEvents(day, engineSettings(deltaSettings)).events.map((e) => e.key)
+  assert.ok(expected.length > 0)
+  assert.deepEqual(events(noon, 's3').map((e) => e.key), expected)
+  // The days before not readable now: that strategy waits (backed off on its own), the other goes on.
+  const busy = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, reading], pastOk: false })
+  assert.ok(busy.posted.some((p) => p.body.strategyId === 's1'))
+  assert.ok(!busy.posted.some((p) => p.body.strategyId === 's3'))
+  assert.match(busy.log, /NIFTY option Δ days before: today not read \(.*busy.*\) - again in 1 min/)
+  // No strategy reading them: no day before asked.
+  const plain = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })
+  assert.deepEqual(plain.asked.filter((a) => a.path === '/api/oi-replay/NIFTY/run').map((a) => new URLSearchParams(a.search).get('date')), [DATE])
 })

@@ -243,6 +243,8 @@ body {
 .oa-rule-line .oa-rule-win { width: 120px; }
 /* The S-R walls' Strike (ATM - 5 ... ATM + 5): a dropdown with its label inside. */
 .oa-rule-line .oa-rule-strike { width: 140px; }
+/* The option delta profile's "Profile of: Day so far / Days before". */
+.oa-rule-line .oa-rule-strike--wide { width: 200px; }
 .oa-rule-line > .ant-btn { margin-left: auto; }
 @media (max-width: 600px) {
   .oa-rule-line .oa-rule-ind, .oa-rule-line .oa-rule-val { flex: 1 1 100%; width: 100%; max-width: none; }

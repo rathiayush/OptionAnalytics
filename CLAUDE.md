@@ -427,7 +427,11 @@ When adding or changing a strategy:
   its own day's lot size - `footprintBars`); a day with no session (a run without success, a 404 - a holiday) stepped
   over, the walk STOPS at the first failure and says which day (Retry walks again - never a loop); a day that came back
   is kept for the tab (`cachedDay`, one on its way shared), a failure or a holiday not. A tick, never a timer; the day
-  shown alone (unticked) needs nothing loaded. A read, not a signal - it feeds no strategy or alert.
+  shown alone (unticked) needs nothing loaded. LEVELS (asked for - "draw the volume profile's LVN, HVN, POC, VAL, VAH as
+  well"; the "Levels" tick, on by default, `optionanalytics.oiReplay.deltaProfileLevels`): the profile's POC (solid), VAH /
+  VAL (dashed) and ONE HVN / LVN (dotted - `volumeZones`' `topHvn` / `thinLvn`, the Profiles page's) as price lines labelled
+  on the axis, in its colours (`PREV_PROFILE`), and a line naming them with the rows of the most buying / selling -
+  `deltaProfileLevels`, the same the Signal backtest reads. The cards themselves feed no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is
@@ -718,7 +722,22 @@ When adding or changing a strategy:
   the timeframe (`emaSlopeHolds`), UP for an option on the up side (`RISING`: above, crossed up, a candle crossing up, a
   whole candle over, reclaimed; the fast over / crossing up the slow, a close above both) and DOWN for the others; 0, the
   default, is not read (a line saved before reads as it did; its words say nothing of it). The mirror keeps the number.
-  Spot's mirror is the other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. EVERY comparison takes a "by ≥ %"
+  Spot's mirror is the other side's option; a premium's the other option's same one. `tests/signal-backtest-indicators.test.mjs`. OI
+  REPLAY'S OPTION DELTA PROFILE (asked for - "add this in our indicator as well"; group `DeltaProfile`, `DELTA_CONDITIONS`):
+  the NET option flow on spot rows of the index's default size (`PROFILE_ROWS`) as the card works it out (`optionDeltaMinutes` -
+  `prepareDay`'s `odm`): price vs its POC / VAH / VAL / HVN / LVN and the MOST BOUGHT / MOST SOLD rows (`odpPoc` ... `odpSell`,
+  `levelCondition` - the levels `deltaProfileLevels`, the cards' own; the mirror of most bought is most sold) and the flow AT
+  the price (`odpDelta` - spot in a row of net buying / selling by ≥ % of the largest row, the profile's net positive /
+  negative by ≥ % of its volume); every one with "Profile of" (`param4`: the DAY SO FAR - developing, read at each candle from
+  the minutes up to its close, `optionDeltaSteps` / `optionDeltaAt` - or the DAYS BEFORE, fixed all day) and "Days" (`param3`,
+  1 - `DELTA_DAYS_MAX` 5) - the card's "Previous day" / Days. The sessions before come with the day (`odmPast`,
+  `attachDeltaPast` in `signalBacktestJob.js`, only when the rule reads them - `deltaDaysNeeded`): walked back as the cards
+  walk (deltaProfileDays.js), the run's own days kept as they load (`rememberDay` - a run asks only the first day's days
+  before); a day before that fails = the day not run (retried); without them those lines never hold - the page says "Run
+  again" when the rule now reads more than the run loaded, the report lists days with fewer (`noDeltaPast`). The background
+  run and the day chart load them too; the LIVE SCAN walks them once an index a day (backed off on a failure - a strategy
+  reading them waits, the others go on). `tests/signal-backtest-delta.test.mjs` (a clock = the minutes up to it, the levels,
+  the days before, the mirror, a live cut = the whole day's, the loader), `signal-live.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
   reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
   "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /

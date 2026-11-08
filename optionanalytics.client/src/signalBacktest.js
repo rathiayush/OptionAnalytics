@@ -32,6 +32,8 @@ import { sumExpiryOi } from './expirySum.js'
 import { straddleRead } from './straddle.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
+import { optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
+import { PROFILE_ROWS, pastSessionsNeeded } from './profileZones.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -141,7 +143,10 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * optionExpiry); `prevProfile` the previous day's volume profile response (`previousProfile` - its levels; its `bars`, the
  * previous session's spot minutes - `previousDayBars` - give the pivot points and the indicators' warm-up). Returns `{ ok:
  * true, date, underlying, step, n, t, spot, price, priceSource, vwap, spotVwap, oi, breaks, hp, walls, gex, straddle, ib,
- * prevVp, prevDay, pivots, atm, ce, pe, ceVol, peVol, ceCum, peCum, netCum, expiry, isExpiry }` - or `{ ok: false, reason }`.
+ * prevVp, prevDay, pivots, atm, ce, pe, ceVol, peVol, ceCum, peCum, netCum, expiry, isExpiry, odm }` - or `{ ok: false, reason }`.
+ * `odm` = the options' flow minute by minute (`optionDeltaMinutes` - OI Replay's option delta profile on spot, its
+ * conditions read it up to each minute); `odmPast` - the sessions before the day, oldest first - is put on by the loader
+ * when a rule reads them (`attachDeltaPast` in signalBacktestJob.js), else absent.
  * `expiry` = the expiry of the options loaded (the run's `optionExpiry` - the weekly, BANKNIFTY's monthly), `isExpiry` =
  * the day IS that expiry (known before the open - the expiry calendar).
  * `expiryChains`: the day's OTHER EXPIRIES for the "Σ 3 expiries" option (OI Replay's - the next expiry and the monthly,
@@ -328,6 +333,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     prevDay, pivots: pivotLevels(prevDay),
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t), ceVol: packVolumes(ceLegs, t), peVol: packVolumes(peLegs, t),
     expiry, isExpiry: expiry === date,
+    odm: optionDeltaMinutes(run?.cePoints, run?.pePoints, spotBars.map((b) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }))),
     ...(chains.length ? { expiries: 1 + chains.length } : {}),
   }
 }
@@ -884,19 +890,21 @@ function cumCondition(line, group, meaning) {
 }
 
 // A level of the PREVIOUS day's volume profile - fixed all day, known before the session opens, read on spot (that
-// profile is spot's).
-function levelCondition({ id, group, name, short, level }) {
-  const L = (d, k) => { const x = k >= 0 ? level(d, k) : null; return Number.isFinite(x) ? x : null }
+// profile is spot's). `level(d, k, p3, p4)` - the level at candle k (one that moves - the option delta profile's of the
+// day so far - is read at each candle); `more` - numbers every option takes besides its own (passed on as p3 / p4).
+function levelCondition({ id, group, name, short, level, more = {} }) {
+  const at = (d, k, p3, p4) => { const x = k >= 0 ? level(d, k, p3, p4) : null; return Number.isFinite(x) ? x : null }
   return {
     id, group, name,
     options: [
-      opt('above', 'Price above it', 'below', OVER), opt('below', 'Price below it', 'above', OVER),
-      opt('crossedAbove', 'Crossed above it', 'crossedBelow', { ...W, ...OVER }), opt('crossedBelow', 'Crossed below it', 'crossedAbove', { ...W, ...OVER }),
-      opt('heldAbove', 'Touched it, closed back above (support held)', 'heldBelow', NEAR(0.05)),
-      opt('heldBelow', 'Touched it, closed back below (resistance held)', 'heldAbove', NEAR(0.05)),
-      opt('near', 'Near it', 'near', NEAR(0.05)),
+      opt('above', 'Price above it', 'below', { ...OVER, ...more }), opt('below', 'Price below it', 'above', { ...OVER, ...more }),
+      opt('crossedAbove', 'Crossed above it', 'crossedBelow', { ...W, ...OVER, ...more }), opt('crossedBelow', 'Crossed below it', 'crossedAbove', { ...W, ...OVER, ...more }),
+      opt('heldAbove', 'Touched it, closed back above (support held)', 'heldBelow', { ...NEAR(0.05), ...more }),
+      opt('heldBelow', 'Touched it, closed back below (resistance held)', 'heldAbove', { ...NEAR(0.05), ...more }),
+      opt('near', 'Near it', 'near', { ...NEAR(0.05), ...more }),
     ],
-    test: (d, i, v, w, p) => {
+    test: (d, i, v, w, p, p2, p3, p4) => {
+      const L = (dd, k) => at(dd, k, p3, p4)
       const bars = d.spot
       const c = bars.c
       const x = L(d, i)
@@ -920,9 +928,93 @@ function levelCondition({ id, group, name, short, level }) {
         default: return false
       }
     },
-    show: (d, i) => `${short} ${fmtP(L(d, i))}`,
+    show: (d, i, l) => `${short} ${fmtP(at(d, i, l?.param3, l?.param4))}`,
   }
 }
+
+// OI REPLAY'S OPTION DELTA PROFILE ON SPOT (asked for - "add this in our indicator as well", the delta profile cards): the
+// options' flow laid on the spot rows they traded at (deltaProfile.js - each strike's bar-proxy delta x its delta weight,
+// CE − PE: + = calls bought / puts sold), NET, in rows of the index's default size (PROFILE_ROWS - NIFTY 5, BANKNIFTY /
+// SENSEX 10 points). Its levels as the card draws them (`deltaProfileLevels`): the POC, VAH, VAL, ONE HVN / LVN, and the
+// rows with the most buying / selling. "Profile of" (param4) and "Days" (param3) as the card's "Previous day" / Days:
+// the DAY SO FAR (with the Days − 1 sessions before it - a composite; developing - read at each candle from the minutes up
+// to its close) or the DAYS BEFORE (fixed all day, known before the open). The sessions before come with the day
+// (`odmPast`, loaded for the rule - `deltaDaysNeeded`); without them those lines never hold (the report lists the days).
+export const DELTA_DAYS_MAX = 5
+const deltaDaysOf = (v) => Math.min(DELTA_DAYS_MAX, Math.max(1, Number.isFinite(Number(v)) && v != null ? Math.round(Number(v)) : 1))
+const deltaOfOf = (v) => (Number(v) === 1 ? 'previous' : 'today')
+const deltaProfileText = (days, of) => (of === 'previous'
+  ? (days > 1 ? `profile of the ${days} days before` : 'profile of the previous day')
+  : (days > 1 ? `profile of the day so far + ${days - 1} day${days > 2 ? 's' : ''} before` : 'profile of the day so far'))
+const DELTA_PROFILE_OF = {
+  param3: { label: 'Days', unit: '', default: 1, min: 1, max: DELTA_DAYS_MAX, step: 1, text: (v, l) => deltaProfileText(deltaDaysOf(v), deltaOfOf(l?.param4)) },
+  // `wide` - its dropdown is drawn wider than the Strike's (the page).
+  param4: { label: 'Profile of', default: 0, min: 0, max: 1, step: 1, wide: true, text: () => '', choices: [{ value: 0, label: 'Day so far' }, { value: 1, label: 'Days before' }] },
+}
+/** How many sessions BEFORE the day a line of the option delta profile reads (0 = the day alone). */
+export const deltaPastOfLine = (l) => (GROUP_OF_DELTA.has(l?.id) ? pastSessionsNeeded(deltaDaysOf(l.param3), deltaOfOf(l.param4)) : 0)
+const DELTA_READS = new WeakMap()     // a day's `odm` -> Map(profile choice -> optionDeltaSteps), worked out once
+/** The option delta profile a line reads, minute by minute (`optionDeltaSteps`) - null when it needs sessions before the
+ *  day that were not loaded. A view (`timeframeView`) shares its day's. */
+function deltaRead(d, p3, p4) {
+  if (!Array.isArray(d?.odm)) return null
+  const days = deltaDaysOf(p3), of = deltaOfOf(p4)
+  const need = pastSessionsNeeded(days, of)
+  if (need > 0 && !Array.isArray(d.odmPast)) return null
+  let kept = DELTA_READS.get(d.odm)
+  if (!kept) DELTA_READS.set(d.odm, kept = new Map())
+  const key = `${of}|${days}`
+  if (!kept.has(key)) {
+    const past = need > 0 ? d.odmPast.slice(-need) : []
+    kept.set(key, optionDeltaSteps(past, of === 'previous' ? [] : d.odm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5 }))
+  }
+  return kept.get(key)
+}
+/** The profile at candle k - from the minutes up to its close (`d.t[k]`, its last minute). */
+const deltaAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4), d.t[k]) : null)
+const deltaLevel = (key, name, short, mirror = null) => ({
+  ...levelCondition({ id: `odp${key[0].toUpperCase()}${key.slice(1)}`, group: 'DeltaProfile', name, short: `option Δ ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
+  ...(mirror ? { mirror } : {}),
+})
+const DELTA_CONDITIONS = [
+  deltaLevel('poc', 'Option Δ profile: POC', 'POC'),
+  deltaLevel('vah', 'Option Δ profile: VAH', 'VAH'),
+  deltaLevel('val', 'Option Δ profile: VAL', 'VAL'),
+  deltaLevel('hvn', 'Option Δ profile: HVN', 'HVN'),
+  deltaLevel('lvn', 'Option Δ profile: LVN', 'LVN'),
+  // The rows option buyers / sellers were busiest at - the mirror reads the other one (above the most bought <-> below
+  // the most sold).
+  deltaLevel('buy', 'Option Δ profile: most bought row (bullish flow)', 'most bought', 'odpSell'),
+  deltaLevel('sell', 'Option Δ profile: most sold row (bearish flow)', 'most sold', 'odpBuy'),
+  {
+    // The flow AT the price: the net delta of the row spot is in, by ≥ % of the profile's largest row; and the profile's
+    // net (CE − PE) by ≥ % of its volume.
+    id: 'odpDelta', group: 'DeltaProfile', name: 'Option Δ profile: buying / selling at the price',
+    options: [
+      opt('buying', 'Spot in a row of net option BUYING (green: calls bought / puts sold)', 'selling', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
+      opt('selling', 'Spot in a row of net option SELLING (red: puts bought / calls sold)', 'buying', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
+      opt('netPositive', "The profile's net Δ positive (bullish flow)", 'netNegative', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
+      opt('netNegative', "The profile's net Δ negative (bearish flow)", 'netPositive', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
+    ],
+    // "by ≥ %": a row's Δ of the profile's largest |row Δ|; the net of the profile's volume.
+    test: (d, i, v, w, p, p2, p3, p4) => {
+      const x = deltaAtCandle(d, i, p3, p4)
+      if (!x) return false
+      switch (v) {
+        case 'buying': { const r = x.rowDelta(d.spot.c[i]); return r > 0 && r >= frac(p) * x.maxAbsDelta }
+        case 'selling': { const r = x.rowDelta(d.spot.c[i]); return r < 0 && -r >= frac(p) * x.maxAbsDelta }
+        case 'netPositive': return x.delta > 0 && x.delta >= frac(p) * x.volume
+        case 'netNegative': return x.delta < 0 && -x.delta >= frac(p) * x.volume
+        default: return false
+      }
+    },
+    show: (d, i, l) => {
+      const x = deltaAtCandle(d, i, l?.param3, l?.param4)
+      return x ? `option Δ at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option Δ profile —'
+    },
+  },
+]
+const GROUP_OF_DELTA = new Set(DELTA_CONDITIONS.map((c) => c.id))
 const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, level: (d) => d.prevVp?.[key] })
 // A pivot point of the previous session's high / low / close (`pivotLevels`) - read on spot, fixed all day. Its mirror is
 // the level on the other side (R1 <-> S1; P stays P).
@@ -1446,6 +1538,7 @@ export const RULE_CONDITIONS = [
     },
     show: (d) => (d.pivots ? `CPR ${fmtP(d.pivots.bc)} - ${fmtP(d.pivots.tc)} (${d.pivots.widthPct.toFixed(2)}%)` : 'CPR —'),
   },
+  ...DELTA_CONDITIONS,
 ]
 // Lines saved while the volume profile levels were today's developing ones (POC / HVN / LVN): read as the previous
 // day's same level - the levels are the previous day's now, on request.
@@ -2370,4 +2463,11 @@ export function tradesCsv(trades) {
     t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', t.why,
   ])
   return [head, ...rows].map((r) => r.map(cell).join(',')).join('\n')
+}
+
+/** How many sessions BEFORE each day a rule's option delta profile lines read (the most of them; 0 = none) - what the
+ *  loader puts on the day (`odmPast`). The mirror's lines read the same days. */
+export function deltaDaysNeeded(rule) {
+  const lines = normalizeRule(rule).lines
+  return lines.reduce((most, l) => Math.max(most, deltaPastOfLine(l)), 0)
 }

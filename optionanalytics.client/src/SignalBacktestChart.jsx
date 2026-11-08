@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { CandlestickSeries, CrosshairMode, LineSeries, LineStyle, createSeriesMarkers } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, useMediaQuery, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
-import { TIMEFRAMES, istMinute, optionName, simulateDay } from './signalBacktest.js'
+import { TIMEFRAMES, deltaDaysNeeded, istMinute, optionName, simulateDay } from './signalBacktest.js'
 import { engineSettings } from './signalBacktestJob.js'
 import { dayChartData, dayOptions, defaultChartDay, defaultChartOption, ruleIndicators, skippedMarkers, tradeMarkers } from './signalBacktestChart.js'
 import { FoldText } from './FoldText.jsx'
@@ -137,7 +137,8 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDay
   // The days: the signal index's (the rule read it) and, trading in another, that index's (the trades were taken in it).
   const tradeIn = settings.tradeIn || ''
   const signalDay = useChartDay(picked && open ? `${runKey}|${settings.underlying}|${picked}${settings.sumExpiries ? '|Σ3' : ''}` : null, picked ? dayOf?.(picked) ?? null : null,
-    (signal) => loadDay(settings.underlying, picked, signal, { sumExpiries: Boolean(settings.sumExpiries) }))
+    // With the option delta profile's sessions before the day when the rule reads them (so its tags are the run's).
+    (signal) => loadDay(settings.underlying, picked, signal, { sumExpiries: Boolean(settings.sumExpiries), deltaDays: deltaDaysNeeded(settings.rule) }))
   const tradeDayL = useChartDay(picked && open && tradeIn ? `${runKey}|${tradeIn}|${picked}` : null, picked && tradeIn ? tradeDayOf?.(picked) ?? null : null,
     (signal) => loadDay(tradeIn, picked, signal))
   const day = signalDay.day

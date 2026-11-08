@@ -11,7 +11,8 @@
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
 //   LIVE_NOW, LIVE_ONCE           (tests only) a fixed clock (ISO) and one round, then exit
 
-import { cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
+import { attachDeltaPast, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
+import { deltaDaysNeeded } from '../src/signalBacktest.js'
 import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -63,6 +64,22 @@ async function prevProfile(u, date) {
   return body ?? null
 }
 
+// The option delta profile's sessions before today (a strategy reading "Days before" or more than one day): walked back
+// once an index a day (attachDeltaPast - the past days' runs, the server's disk); a failure is backed off like a day.
+const deltaPasts = new Map()
+const withKey = (path, options = {}) => fetch(`${BASE}${path}`, { ...options, headers: { ...(options.headers ?? {}), 'X-Runner-Key': KEY } })
+async function deltaPast(u, date, count) {
+  const key = `${u}|${date}`
+  const kept = deltaPasts.get(key)
+  if (kept && kept.count >= count) return kept.sessions
+  const stand = { ok: true, date }
+  const r = await attachDeltaPast(stand, u, count, { fetch: withKey })
+  if (!r.ok) throw new Error(r.reason)
+  for (const k of deltaPasts.keys()) if (!k.endsWith(`|${date}`)) deltaPasts.delete(k)
+  deltaPasts.set(key, { count, sessions: stand.odmPast })
+  return stand.odmPast
+}
+
 async function round(nowMs) {
   const ist = istClock(nowMs)
   if (ist.weekday === 0 || ist.weekday === 6 || ist.minute < LIVE_FROM_MINUTE || ist.minute > LIVE_UNTIL_MINUTE) return
@@ -82,6 +99,9 @@ async function round(nowMs) {
   }
   // An index a strategy reads with "Σ 3 expiries": its day with today's next and monthly expiries summed in too.
   const summing = new Set(list.filter((s) => s.clean.sumExpiries).map((s) => s.clean.underlying))
+  // The most sessions before today an index's strategies read on the option delta profile.
+  const deltaNeed = new Map()
+  for (const s of list) deltaNeed.set(s.clean.underlying, Math.max(deltaNeed.get(s.clean.underlying) ?? 0, deltaDaysNeeded(s.clean.rule)))
   const days = new Map()
   const summedDays = new Map()
   for (const u of wanted) {
@@ -92,6 +112,18 @@ async function round(nowMs) {
       const day = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs })
       backoff.delete(u)
       if (day.ok && day.date === date) days.set(u, day)
+      // The option delta profile's days before - a strategy reading them waits for the next round when they cannot be read.
+      const deltaKey = `${u} option Δ days before`
+      let past = null
+      if ((deltaNeed.get(u) ?? 0) > 0 && (backoff.get(deltaKey)?.until ?? 0) <= nowMs) {
+        try {
+          past = await deltaPast(u, date, deltaNeed.get(u))
+          backoff.delete(deltaKey)
+          if (day.ok) day.odmPast = past
+        } catch (err) {
+          failed(deltaKey, err.message)
+        }
+      }
       // Its other expiries, for the strategies reading it with "Σ 3 expiries" - backed off on their own, so the index's
       // other strategies go on; a summing strategy waits for the next round when they cannot be read now.
       const sumKey = `${u} Σ 3 expiries`
@@ -101,7 +133,7 @@ async function round(nowMs) {
           if (!summed.ok) throw new Error(summed.reason)
           const sumDay = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs, expiryChains: summed.chains })
           backoff.delete(sumKey)
-          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }))
+          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}))
         } catch (err) {
           failed(sumKey, err.message)
         }
@@ -115,6 +147,7 @@ async function round(nowMs) {
     for (const s of strategies) {
       const day = (s.clean.sumExpiries ? summedDays : days).get(u)
       if (!day) continue
+      if (deltaDaysNeeded(s.clean.rule) > 0 && !Array.isArray(day.odmPast)) continue
       // Trading in another index: its day too - not read this round, the strategy waits for the next.
       const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
       if (s.clean.tradeIn && !tradeDay) continue
