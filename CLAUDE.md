@@ -615,7 +615,16 @@ When adding or changing a strategy:
   first reading); worked out in `prepareDay`'s walls loop (`atmOi[i][N]` = { ce, pe, dce, dpe }, readings up to the minute,
   the summed expiries' OI with Σ 3 expiries) and carried by `timeframeView`. Each: PE / CE above, PE / CE crossed above
   (in the look-back, still above), and held since the morning then flipped (`HELD`), with "by ≥ %" - total: of the lower
-  one (as Total OI's), since open: of CE + PE added (as OI since open's). The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
+  one (as Total OI's), since open: of CE + PE added (as OI since open's); and Bullish / Bearish DIVERGENCE (asked for - "add
+  bullish div as well in option"): the band's PE − CE (total / added) read as OI since open's and Total OI's - the same
+  `divergenceHolds`, its price move / followed < % and the ATM ± N; the band follows spot, so part of a total's move can be
+  its strikes changing as ATM moves. ONE STRIKE (asked for - "ATM is 25000: +1 = 25050, -1 = 24950"; the box took no -1 -
+  it is the band's width): the "Strike" dropdown (`param4`, ATM - 5 ... ATM + 5, ATM the default - as before; a list, no
+  typing - a phone's number pad has no minus) is the strike the band is around - ATM + k steps of each minute's ATM;
+  picking one off ATM sets ± to 0 (`also`), so ATM - 1 reads 24950 ALONE (± N widens it around that strike); worked out
+  from `prepareDay`'s `atmStrikes` (each strike ATM ± 10 of the minute: CE, PE and their changes since the open,
+  `atmBandPair`; ATM itself still reads `atmOi`); the mirror reads the other side's strike (ATM - 1 <-> ATM + 1 -
+  `param4.mirror`; `mirrorLine` now applies any number's `mirror`). The CE / PE / Net cumulative Δ (positive / negative, turned, rising / falling / stable against its range so far,
   its own S/R breaks, and DIVERGENCE - asked for: "cumulative delta was x at 9:30, the same at 10:00 or only some %
   decreased, and price dipped more - that is divergence": Bullish / Bearish divergence = over the look-back spot moved
   >= `param` % down / up but the line FOLLOWED it by less than `param2` % of its own range so far - held, barely moved or
@@ -623,8 +632,8 @@ When adding or changing a strategy:
   price - unwound into a fall; CE and Net against it - calls written into a fall); the mirror swaps bullish / bearish with
   the same numbers. OI SINCE OPEN and TOTAL OI CE vs PE take the same divergence (asked for - "add this bullish div signal
   in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
-  which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all five
-  lines. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all seven
+  lines (the S-R walls near ATM's two too). A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
   as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from
   morning or lowest OI wall": near / broke above the HIGHEST resistance and near / broke below the LOWEST support the walls
   have been at since the open, and near / broke the STRONGEST of each - the minute's wall with the most call / put OI so

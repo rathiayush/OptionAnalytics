@@ -140,7 +140,16 @@ function ConditionRow({ line, no, onChange, onRemove }) {
           onChange={(v) => onChange(editLine(line, { param3: v ?? o.param3.default }))} addonBefore={o.param3.label} addonAfter={o.param3.unit}
         />
       )}
-      {o.param4 && (
+      {o.param4?.choices && (
+        // A number picked from a list (the S-R walls' Strike: ATM - 5 ... ATM + 5) - a dropdown, no typing (a phone's
+        // number pad has no minus key); `also` - what the pick changes with it (off ATM: ± 0, that strike alone).
+        <Select
+          size="small" className="oa-rule-strike" prefix={o.param4.label} value={line.param4 ?? o.param4.default}
+          onChange={(v) => onChange(editLine(line, { param4: v, ...(o.param4.also?.(v, line) ?? {}) }))}
+          options={o.param4.choices} popupMatchSelectWidth={false} classNames={POPUP}
+        />
+      )}
+      {o.param4 && !o.param4.choices && (
         <Tooltip title={o.param4.tip}>
           <InputNumber
             size="small" className="oa-rule-num oa-rule-num--slope" min={o.param4.min} max={o.param4.max} step={o.param4.step} value={line.param4}

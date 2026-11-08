@@ -253,6 +253,10 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   // (0 - ATM_OI_MAX strikes either side of that minute's ATM), the strikes' CE and PE OI added up - the walls' total -
   // and their change since the open (each strike from its own first reading, as chainOiTotals; the spot chart's "Δ").
   const atmOi = []
+  // And each strike ATM - STRIKE_REACH ... ATM + STRIKE_REACH of the minute on its own (asked for - "ATM is 25000: -1 =
+  // 24950, +1 = 25050"): [CE, PE, CE added, PE added] a strike, NaN where it has no reading - the conditions' Strike
+  // choice reads a band around ATM ± k from it (`atmBandPair`).
+  const atmStrikes = []
   {
     const cursors = strikes.map((k) => ({ k, ce: [...(ceOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), pe: [...(peOiLegs.get(k) ?? new Map())].sort((a, b) => a[0] - b[0]), ci: 0, pi: 0, ceOi: null, peOi: null, ceOpen: null, peOpen: null }))
     const cursorAt = new Map(cursors.map((c) => [c.k, c]))
@@ -275,6 +279,15 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
         bands.push(seen ? { ce, pe, dce, dpe } : null)
       }
       atmOi.push(bands)
+      const row = new Float64Array((2 * STRIKE_REACH + 1) * 4).fill(NaN)
+      for (let off = -STRIKE_REACH; off <= STRIKE_REACH; off++) {
+        const c = cursorAt.get(Math.round((atm[i] + off * step) * 100) / 100)
+        if (!c) continue
+        const j = (off + STRIKE_REACH) * 4
+        if (c.ceOi != null) { row[j] = c.ceOi; row[j + 2] = c.ceOi - c.ceOpen }
+        if (c.peOi != null) { row[j + 1] = c.peOi; row[j + 3] = c.peOi - c.peOpen }
+      }
+      atmStrikes.push(row)
     }
   }
   const walls = wallsSinceOpen(minuteWalls)
@@ -305,7 +318,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   }
 
   return {
-    ok: true, date, underlying: u, step, n, t, atm, oi, tot, atmOi, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
+    ok: true, date, underlying: u, step, n, t, atm, oi, tot, atmOi, atmStrikes, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
     spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c), v: priceBars.map((b) => b.v) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap), vwapSd: Array.from(vwapSd), spotVwap: Array.from(spotVwap),
@@ -404,7 +417,7 @@ export function timeframeView(d, tf = 1) {
   const toCandles = (events) => events.map((e) => ({ ...e, i: candleOf[e.i] }))
   const view = {
     ...d, tf: m, n: first.length, at: Int32Array.from(last), from: Int32Array.from(first),
-    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), atmOi: pick(d.atmOi), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
+    t: pick(d.t), atm: pick(d.atm), oi: pick(d.oi), tot: pick(d.tot), atmOi: pick(d.atmOi), atmStrikes: pick(d.atmStrikes), walls: pick(d.walls), gex: pick(d.gex), straddle: pick(d.straddle),
     vwap: pick(d.vwap), vwapSd: pick(d.vwapSd), spotVwap: pick(d.spotVwap), ceCum: pick(reads.ceCum), peCum: pick(reads.peCum), netCum: pick(reads.netCum),
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
@@ -682,15 +695,45 @@ const totalLeadPct = (x) => { const lo = x ? Math.min(x.ce, x.pe) : 0; return lo
 
 // THE S / R WALLS NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3, CE cross PE - and since open too"): the
 // strikes ATM ± N of each minute (prepareDay's `atmOi`), their CE (R) and PE (S) OI added up - TOTAL (the walls' own OI,
-// the spot chart's S-R) or SINCE OPEN (what was added since 09:15, its "Δ"). `param3` - how many strikes either side.
+// the spot chart's S-R) or SINCE OPEN (what was added since 09:15, its "Δ"). `param3` - how many strikes either side;
+// `param4` - the STRIKE the band is around (asked for - "ATM is 25000: -1 = 24950, +1 = 25050"): ATM (0, the default -
+// as before) or ATM - 5 ... ATM + 5 (`atmStrikes`); picking one off ATM sets ± to 0 - that strike alone - and the mirror
+// reads the other side's (ATM - 1 <-> ATM + 1).
 const ATM_OI_MAX = 5
-const ATM_BAND = { param3: { label: 'ATM ±', unit: ' strikes', default: 1, min: 0, max: ATM_OI_MAX, step: 1, text: (v) => `ATM ± ${v}` } }
-const atmBandOf = (p3) => Math.min(ATM_OI_MAX, Math.max(0, Number.isFinite(Number(p3)) && p3 != null ? Math.round(Number(p3)) : ATM_BAND.param3.default))
+const STRIKE_REACH = 2 * ATM_OI_MAX
+const signed = (k) => (k < 0 ? `ATM −${-k}` : k > 0 ? `ATM +${k}` : 'ATM')
+const atmBandOf = (p3) => Math.min(ATM_OI_MAX, Math.max(0, Number.isFinite(Number(p3)) && p3 != null ? Math.round(Number(p3)) : 1))
+const atmCentreOf = (p4) => Math.min(ATM_OI_MAX, Math.max(-ATM_OI_MAX, Number.isFinite(Number(p4)) && p4 != null ? Math.round(Number(p4)) : 0))
+// The band in words: "ATM ± 1", "ATM −1 only", "ATM −1 ± 2".
+const bandText = (N, k) => (k ? (N ? `${signed(k)} ± ${N}` : `${signed(k)} only`) : `ATM ± ${N}`)
+const ATM_BAND = {
+  param3: { label: '±', unit: ' strikes around', default: 1, min: 0, max: ATM_OI_MAX, step: 1, text: (v, l) => bandText(atmBandOf(v), atmCentreOf(l?.param4)) },
+  param4: {
+    label: 'Strike', default: 0, min: -ATM_OI_MAX, max: ATM_OI_MAX, step: 1, mirror: (v) => (v ? -v : 0), text: () => '',
+    choices: Array.from({ length: 2 * ATM_OI_MAX + 1 }, (_, j) => j - ATM_OI_MAX).map((k) => ({ value: k, label: signed(k) })),
+    // Off ATM, the strike alone (± 0) - "ATM - 1" reads 24950 only; widened again by hand if wanted.
+    also: (v, line) => (!line.param4 && v ? { param3: 0 } : {}),
+  },
+}
+/** The CE / PE of the band `centre` ± N strikes around a minute's ATM (`total`: OI, else added since the open) - ATM's
+ *  own `atmOi` band, any other centre from its strikes (`atmStrikes`); null when no strike of it has a reading. */
+function atmBandPair(d, k, N, centre, open) {
+  if (!centre) { const x = d.atmOi?.[k]?.[N]; return x ? (open ? { ce: x.dce, pe: x.dpe } : { ce: x.ce, pe: x.pe }) : null }
+  const row = d.atmStrikes?.[k]
+  if (!row) return null
+  let ce = 0, pe = 0, seen = false
+  for (let s = centre - N; s <= centre + N; s++) {
+    const j = (s + STRIKE_REACH) * 4 + (open ? 2 : 0)
+    if (Number.isFinite(row[j])) { ce += row[j]; seen = true }
+    if (Number.isFinite(row[j + 1])) { pe += row[j + 1]; seen = true }
+  }
+  return seen ? { ce, pe } : null
+}
 function atmOiCondition(mode) {
   const open = mode === 'open'
   const what = open ? 'added since open' : 'total OI'
   // The pair a minute reads: the band's CE / PE total OI, or what each added since the open.
-  const pair = (d, k, N) => { const x = d.atmOi?.[k]?.[N]; return x ? (open ? { ce: x.dce, pe: x.dpe } : { ce: x.ce, pe: x.pe }) : null }
+  const pair = (d, k, N, centre) => atmBandPair(d, k, N, centre, open)
   const lead = open ? LEAD : TOTAL_LEAD
   return {
     id: open ? 'atmOiOpen' : 'atmOi', group: 'OI',
@@ -701,14 +744,19 @@ function atmOiCondition(mode) {
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...lead, ...ATM_BAND }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...lead, ...ATM_BAND }),
       opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
       opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...lead, ...HELD, ...ATM_BAND }),
+      // As OI since open's and Total OI's (asked for - "add bullish div as well"): the band's PE − CE follows price when
+      // the OI confirms the move (puts written into a rise, calls into a fall); price moved >= `param` % but it followed by
+      // less than `param2` % of its own range so far. The band follows spot (its strikes are each minute's ATM ± N).
+      opt('divBull', `Bullish divergence: price fell, PE − CE ${open ? 'added' : 'total'} did not fall with it`, 'divBear', { ...DIVERGENCE, ...ATM_BAND }),
+      opt('divBear', `Bearish divergence: price rose, PE − CE ${open ? 'added' : 'total'} did not rise with it`, 'divBull', { ...DIVERGENCE, ...ATM_BAND }),
     ],
     // "by ≥ %": the side ahead NOW by that much - total OI: of the lower one (as Total OI's); since open: of CE + PE added
     // (as OI since open's).
-    test: (d, i, v, w, p, p2, p3) => {
-      const N = atmBandOf(p3)
-      const gap = (k) => { const x = pair(d, k, N); return x ? x.pe - x.ce : NaN }
+    test: (d, i, v, w, p, p2, p3, p4) => {
+      const N = atmBandOf(p3), centre = atmCentreOf(p4)
+      const gap = (k) => { const x = pair(d, k, N, centre); return x ? x.pe - x.ce : NaN }
       const lead = () => {
-        const x = pair(d, i, N)
+        const x = pair(d, i, N, centre)
         if (!x) return false
         if (open) { const size = Math.abs(x.ce) + Math.abs(x.pe); return size > 0 ? Math.abs(x.pe - x.ce) / size >= frac(p) : false }
         return x.ce > 0 && x.pe > 0 && totalLeadPct(x) >= (p ?? 0) - 1e-9
@@ -720,13 +768,15 @@ function atmOiCondition(mode) {
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         default: return false
       }
     },
     show: (d, i, l) => {
-      const N = atmBandOf(l?.param3)
-      const x = pair(d, i, N)
-      return x ? `ATM ± ${N} ${open ? 'added since open' : 'total'} CE ${fmtL(x.ce)} · PE ${fmtL(x.pe)}` : `ATM ± ${N} OI —`
+      const N = atmBandOf(l?.param3), centre = atmCentreOf(l?.param4)
+      const x = pair(d, i, N, centre)
+      const strike = centre && finite(d.atm?.[i]) && finite(d.step) ? ` (${d.atm[i] + centre * d.step})` : ''
+      return x ? `${bandText(N, centre)}${strike} ${open ? 'added since open' : 'total'} CE ${fmtL(x.ce)} · PE ${fmtL(x.pe)}` : `${bandText(N, centre)} OI —`
     },
   }
 }
@@ -1835,19 +1885,19 @@ export function ruleLogic(rule) {
 function mirrorLine(l) {
   const o = optionOf(l.id, l.value)
   const out = { ...l, id: CONDITION[l.id]?.mirror ?? l.id, value: o?.opposite ?? l.value }
-  if (o?.param?.mirror && Number.isFinite(l.param)) out.param = o.param.mirror(l.param)
+  for (const key of ['param', 'param2', 'param3', 'param4']) if (o?.[key]?.mirror && Number.isFinite(l[key])) out[key] = o[key].mirror(l[key])
   return out
 }
 /** The mirror's lines - each line's opposite value (numbers, windows and joins kept). */
 export const mirrorLines = (lines) => lines.map(mirrorLine)
 /** Whether the mirror would be the rule itself (no line has a side). */
-export const mirrorIsSame = (lines) => lines.every((l) => { const m = mirrorLine(l); return m.id === l.id && m.value === l.value && m.param === l.param })
+export const mirrorIsSame = (lines) => lines.every((l) => { const m = mirrorLine(l); return m.id === l.id && m.value === l.value && ['param', 'param2', 'param3', 'param4'].every((k) => m[k] === l[k]) })
 
 /** One line in words: "Price vs VWAP: Price above VWAP by ≥ 0.1% (last 5 min)". */
 export function lineText(line) {
   const c = CONDITION[line.id], o = optionOf(line.id, line.value)
   if (!c || !o) return ''
-  const more = (key) => (o[key] && line[key] != null ? (o[key].text ? o[key].text(line[key]) : `${o[key].label} ${line[key]}${o[key].unit}`) : null)
+  const more = (key) => (o[key] && line[key] != null ? (o[key].text ? o[key].text(line[key], line) : `${o[key].label} ${line[key]}${o[key].unit}`) : null)
   const extra = [more('param2'), more('param3'), more('param4')].filter(Boolean).map((x) => `, ${x}`).join('')
   const num = (o.param && line.param > 0 ? ` ${o.param.label} ${line.param}${o.param.unit}` : '') + extra
   const win = o.windowed ? ` (last ${line.windowMin ?? DEFAULT_WINDOW} min)` : ''
