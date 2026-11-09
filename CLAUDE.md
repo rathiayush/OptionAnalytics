@@ -673,14 +673,16 @@ When adding or changing a strategy:
   the same numbers. OI SINCE OPEN and TOTAL OI CE vs PE take the same divergence (asked for - "add this bullish div signal
   in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
   which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all seven
-  lines (the S-R walls near ATM's two too). ADDED THIS MUCH % IN THE LAST N MIN (asked for - "OI total, OI since open, OI
-  cumulative net CE − PE: add an indicator like added this much % in last n min"; `ADDED` / `addedPctHolds`): OI since
+  lines (the S-R walls near ATM's two too). INCREASED / DECREASED BY % IN THE LAST N MIN (asked for - "OI total, OI since
+  open, OI cumulative net CE − PE: add an indicator like added this much % in last n min"; `ADDED` / `pctChangeHolds`): OI since
   open and Total OI CE vs PE - "PE / CE OI increased" (`peAddedPct` / `ceAddedPct`) and, asked for next ("increased or
   decreased in min"), "PE / CE OI decreased" (`peShedPct` / `ceShedPct` - unwinding; `PCT_CHANGE_OPTIONS`, the mirror
   the other side's same move) - and the CE / PE / Net cumulative Δ - "Increased / Decreased" (`upPct` / `downPct`); the
-  look-back 1 - 60 min (1 = the last minute): the line's move over the look-back in % of
-  the OI at the look-back's start (the side's chain-wide total, `tot`; CE + PE for the Net) - as Total CE / PE OI's
-  "Increased by" reads it; "by ≥" 1% by default, 0 = any move that way, up to 50. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  look-back 1 - 60 min (1 = the last minute): the line's % change over the look-back OF ITS OWN VALUE at the look-back's
+  start (asked for - "not total OI - it is the value: 50, after 5 min 75, that is a 50% change"): (now − then) / |then| -
+  the CE / PE added since the open, the CE / PE total OI, the cumulative Δ line itself (-50 -> -75 = down 50%, -50 -> -25
+  up 50%); a start of 0 (since the open, at the open) has none; "by ≥" 10% by default, 0 = any move that way, up to
+  1000. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
   as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from
   morning or lowest OI wall": near / broke above the HIGHEST resistance and near / broke below the LOWEST support the walls
   have been at since the open, and near / broke the STRONGEST of each - the minute's wall with the most call / put OI so
