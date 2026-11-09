@@ -688,21 +688,21 @@ const MOVE = { windowed: true, param: pctParam('by', 0.1, 5, 0.05) }
 const OVER = { param: pctParam('by ≥', 0, 5, 0.05) }
 // "by ≥ %" of a line's own range so far (`pastPct`) - for the lines with no price: the cumulative Δ, the net GEX.
 const PAST = { param: pctParam('by ≥', 0, 100, 1) }
-// "ADDED THIS MUCH % IN THE LAST N MIN" (asked for - "OI total, OI since open, OI cumulative net CE − PE: add an indicator
-// like added this much % in last n min"): how far a line moved over the look-back, in % of the OI it is a share of at the
-// look-back's start - the side's chain-wide total OI (`tot`; CE + PE for the Net) - as Total CE / PE OI's "Increased by"
-// reads it. `up` false = the move down (OI shed / the Net falling). Nothing before the look-back's start is needed.
-const ADDED = { windowed: true, param: { label: 'by ≥', unit: '% of OI', default: 1, min: 0, max: 50, step: 0.1 } }
-function addedPctHolds(change, base, up, p) {
-  if (!finite(change) || !(base > 0)) return false
-  const moved = up ? change : -change
-  return moved > 0 && (moved / base) * 100 >= (p ?? 0) - 1e-9
+// "INCREASED / DECREASED BY % IN THE LAST N MIN" (asked for - "OI total, OI since open, OI cumulative net CE − PE: add an
+// indicator like added this much % in last n min", then "not of total OI - it is the value: 50, after 5 min 75, that is a
+// 50% change"): the line's % change over the look-back, of ITS OWN VALUE at the look-back's start - (now − then) / |then|
+// x 100 - the plain % change, so -50 -> -25 is up 50% and -50 -> -75 down 50%. `up` false = the move down. A start of 0
+// (OI since open at the open) has no % - never true. Nothing before the look-back's start is needed.
+const ADDED = { windowed: true, param: { label: 'by ≥', unit: '% of its value', default: 10, min: 0, max: 1000, step: 0.1 } }
+function pctChangeHolds(now, then, up, p) {
+  if (!finite(now) || !finite(then) || then === 0) return false
+  const moved = up ? now - then : then - now
+  return moved > 0 && (moved / Math.abs(then)) * 100 >= (p ?? 0) - 1e-9
 }
-const totalAt = (d, k, side) => { const x = d.tot?.[k]; return !x ? NaN : side === 'net' ? x.ce + x.pe : x[side] }
-// OI since open's and Total OI's "INCREASED / DECREASED by % in the last N min" (asked for - "total OI and since open OI
-// ... the % change ... increased or decreased in min"; the look-back 1 - 60 min): each side up (added) or down (shed), in
-// % of its total OI at the look-back's start; the mirror is the other side's same move - put writing <-> call writing,
-// puts unwinding <-> calls unwinding.
+const totalAt = (d, k, side) => { const x = d.tot?.[k]; return !x ? NaN : x[side] }
+// OI since open's and Total OI's "INCREASED / DECREASED by % in the last N min" (the look-back 1 - 60 min): each side's
+// own line up (added) or down (shed) - the CE / PE added since the open, the CE / PE total; the mirror is the other side's
+// same move - put writing <-> call writing, puts unwinding <-> calls unwinding.
 const PCT_CHANGE_OPTIONS = [
   opt('peAddedPct', 'PE OI increased (put writing - bullish)', 'ceAddedPct', ADDED),
   opt('ceAddedPct', 'CE OI increased (call writing - bearish)', 'peAddedPct', ADDED),
@@ -877,7 +877,7 @@ function cumCondition(line, group, meaning) {
       opt('brokeResistance', 'Broke its resistance', 'brokeSupport', { ...W, ...PAST }), opt('brokeSupport', 'Broke its support', 'brokeResistance', { ...W, ...PAST }),
       opt('divBull', 'Bullish divergence: price fell, the line did not follow', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, the line did not follow', 'divBull', DIVERGENCE),
-      // Added this much % in the look-back: the line's move, in % of the OI it is of (CE / PE total, CE + PE for the Net).
+      // Increased / decreased by % in the look-back: the line's own % change (50 -> 75 = 50%).
       opt('upPct', `Increased (${meaning.up})`, 'downPct', ADDED),
       opt('downPct', `Decreased (${meaning.down})`, 'upPct', ADDED),
     ],
@@ -908,7 +908,7 @@ function cumCondition(line, group, meaning) {
         case 'divBull': case 'divBear': return divergenceHolds(d, x, i, w, follows, v === 'divBull', p, p2)
         case 'upPct': case 'downPct': {
           const back = Math.max(0, i - w)
-          return addedPctHolds(series[i] - series[back], totalAt(d, back, line), v === 'upPct', p)
+          return pctChangeHolds(series[i], series[back], v === 'upPct', p)
         }
         default: return false
       }
@@ -1273,7 +1273,7 @@ export const RULE_CONDITIONS = [
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
           const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
-          return addedPctHolds(d.oi[i]?.[side] - d.oi[back]?.[side], totalAt(d, back, side), v.endsWith('AddedPct'), p)
+          return pctChangeHolds(d.oi[i]?.[side], d.oi[back]?.[side], v.endsWith('AddedPct'), p)
         }
         default: return false
       }
@@ -1310,7 +1310,7 @@ export const RULE_CONDITIONS = [
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
           const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
-          return addedPctHolds(totalAt(d, i, side) - totalAt(d, back, side), totalAt(d, back, side), v.endsWith('AddedPct'), p)
+          return pctChangeHolds(totalAt(d, i, side), totalAt(d, back, side), v.endsWith('AddedPct'), p)
         }
         default: return false
       }

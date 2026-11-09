@@ -851,44 +851,49 @@ test('S-R walls near ATM - divergence: price moved >= A % but the band\'s PE −
   }
 })
 
-test('OI added this much % in the last N min - OI since open, Total OI and the cumulative Δ lines, in % of the OI then', () => {
-  // Chain-wide OI 4 cr a side. From 40 to 50 the puts add 10L (2.5% of PE OI) - since the open and in the totals alike.
-  const rise = (i) => (i < 40 ? 0 : i < 50 ? (i - 40) * 1e5 : 10e5)
-  const d = fakeDay({ oi: (i) => ({ ce: 0, pe: rise(i) }), tot: (i) => ({ ce: 4e7, pe: 4e7 + rise(i) }) })
+test('OI increased / decreased by % in the last N min - OI since open, Total OI and the cumulative Δ lines, of their own value', () => {
+  // The user's example: the line is 50 (lakh), 5 minutes later 75 = a 50% change. Up from 40 to 45, then flat.
+  const val = (i) => (i <= 40 ? 50e5 : i < 45 ? 50e5 + (i - 40) * 5e5 : 75e5)
+  const d = fakeDay({ oi: (i) => ({ ce: 20e5, pe: val(i) }), tot: (i) => ({ ce: 4e7, pe: val(i) }) })
   for (const id of ['oiOpen', 'totalOi']) {
-    assert.ok(holds(d, id, 'peAddedPct', 50, 10, 2.5) && !holds(d, id, 'peAddedPct', 50, 10, 2.6), `${id}: 10L of 4 cr = 2.5%`)
-    assert.ok(holds(d, id, 'peAddedPct', 50, 5, 1.2) && !holds(d, id, 'peAddedPct', 50, 5, 1.3), `${id}: the last 5 min only - 5L = 1.25%`)
-    assert.ok(!holds(d, id, 'ceAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 30, 10, 0), `${id}: calls added nothing; nothing before 40`)
-    assert.ok(holds(d, id, 'peAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 70, 10, 0), `${id}: 0 = any addition; none from 50 on`)
+    assert.ok(holds(d, id, 'peAddedPct', 45, 5, 50) && !holds(d, id, 'peAddedPct', 45, 5, 50.1), `${id}: 50 -> 75 in 5 min = 50%`)
+    assert.ok(holds(d, id, 'peAddedPct', 45, 10, 50), `${id}: the same over 10 min (flat before)`)
+    assert.ok(holds(d, id, 'peAddedPct', 47, 5, 25) && !holds(d, id, 'peAddedPct', 47, 5, 25.1), `${id}: 60 -> 75 = 25%`)
+    assert.ok(holds(d, id, 'peAddedPct', 41, 1, 10) && !holds(d, id, 'peAddedPct', 41, 1, 10.1), `${id}: the last 1 minute - 50 -> 55 = 10%`)
+    assert.ok(!holds(d, id, 'ceAddedPct', 45, 5, 0) && !holds(d, id, 'ceShedPct', 45, 5, 0), `${id}: the calls did not move`)
+    assert.ok(!holds(d, id, 'peShedPct', 45, 5, 0) && !holds(d, id, 'peAddedPct', 60, 5, 0), `${id}: up is not down; flat from 45 = nothing`)
   }
-  // Puts shed instead: not "up" - "down" by 10L of 4 cr = 2.5%; the calls did neither.
-  const shed = fakeDay({ oi: (i) => ({ ce: 0, pe: -rise(i) }), tot: (i) => ({ ce: 4e7, pe: 4e7 - rise(i) }) })
+  // Of ITS OWN value, not of the total OI: the since-open line rose 50% while the totals sat still - and the other way.
+  const own = fakeDay({ oi: (i) => ({ ce: 0, pe: val(i) }) })
+  assert.ok(holds(own, 'oiOpen', 'peAddedPct', 45, 5, 50) && !holds(own, 'totalOi', 'peAddedPct', 45, 5, 0))
+  // Down: 75 -> 50 = 33.3%.
+  const down = fakeDay({ oi: (i) => ({ ce: 0, pe: 125e5 - val(i) }), tot: (i) => ({ ce: 4e7, pe: 125e5 - val(i) }) })
   for (const id of ['oiOpen', 'totalOi']) {
-    assert.ok(!holds(shed, id, 'peAddedPct', 50, 10, 0) && !holds(d, id, 'peShedPct', 50, 10, 0), `${id}: up is not down`)
-    assert.ok(holds(shed, id, 'peShedPct', 50, 10, 2.5) && !holds(shed, id, 'peShedPct', 50, 10, 2.6) && !holds(shed, id, 'ceShedPct', 50, 10, 0), `${id}: PE down 2.5%`)
-    // The last 1 minute: 1L of 4 cr = 0.25%.
-    assert.ok(holds(shed, id, 'peShedPct', 45, 1, 0.25) && !holds(shed, id, 'peShedPct', 45, 1, 0.3), `${id}: the last minute`)
+    assert.ok(holds(down, id, 'peShedPct', 45, 5, 33.3) && !holds(down, id, 'peShedPct', 45, 5, 33.4) && !holds(down, id, 'peAddedPct', 45, 5, 0), `${id}: 75 -> 50 = down 33.3%`)
   }
-  assert.deepEqual(mirrorLines([{ id: 'totalOi', value: 'peShedPct', param: 1, windowMin: 1 }]), [{ id: 'totalOi', value: 'ceShedPct', param: 1, windowMin: 1 }])
-  // The cumulative lines: the Net (CE − PE) up 16L over the look-back = 2% of CE + PE OI (8 cr); the PE line down 8L = 2% of PE OI.
-  const cum = fakeDay({ netCum: (i) => (i < 40 ? 0 : i < 50 ? (i - 40) * 1.6e5 : 16e5), peCum: (i) => (i < 40 ? 0 : i < 50 ? -(i - 40) * 0.8e5 : -8e5) })
-  assert.ok(holds(cum, 'cumNet', 'upPct', 50, 10, 2) && !holds(cum, 'cumNet', 'upPct', 50, 10, 2.1) && !holds(cum, 'cumNet', 'downPct', 50, 10, 0))
-  assert.ok(holds(cum, 'cumPe', 'downPct', 50, 10, 2) && !holds(cum, 'cumPe', 'downPct', 50, 10, 2.1) && !holds(cum, 'cumPe', 'upPct', 50, 10, 0))
-  // No total OI read (a day before the totals load): never.
-  assert.ok(!holds(fakeDay({ netCum: (i) => i * 1e5, tot: () => ({ ce: 0, pe: 0 }) }), 'cumNet', 'upPct', 50, 10, 0))
-  // The line: its % (1 by default) and look-back kept, said, and mirrored to the other side with the same numbers.
-  assert.deepEqual(cleanLine({ id: 'oiOpen', value: 'peAddedPct' }), { id: 'oiOpen', value: 'peAddedPct', join: 'and', param: 1, windowMin: DEFAULT_WINDOW })
-  assert.equal(cleanLine({ id: 'totalOi', value: 'ceAddedPct', param: 80 }).param, 50)
-  const line = cleanLine({ id: 'oiOpen', value: 'peAddedPct', param: 2, windowMin: 15 })
-  assert.match(lineText(line), /^OI since open \(chain-wide\): PE OI increased \(put writing - bullish\) by ≥ 2% of OI \(last 15 min\)$/)
+  assert.deepEqual(mirrorLines([{ id: 'totalOi', value: 'peShedPct', param: 20, windowMin: 1 }]), [{ id: 'totalOi', value: 'ceShedPct', param: 20, windowMin: 1 }])
+  // A start of 0 (OI since open at the open) has no % change.
+  const fromZero = fakeDay({ oi: (i) => ({ ce: 0, pe: i < 3 ? 0 : 1e5 }) })
+  assert.ok(!holds(fromZero, 'oiOpen', 'peAddedPct', 4, 5, 0))
+  // The cumulative lines, below 0 as well: -50 -> -75 is down 50%, -50 -> -25 up 50% (the plain % change, of |then|).
+  const neg = fakeDay({ netCum: (i) => -val(i), peCum: (i) => -125e5 + val(i) })
+  assert.ok(holds(neg, 'cumNet', 'downPct', 45, 5, 50) && !holds(neg, 'cumNet', 'downPct', 45, 5, 50.1) && !holds(neg, 'cumNet', 'upPct', 45, 5, 0))
+  assert.ok(holds(neg, 'cumPe', 'upPct', 45, 5, 33.3) && !holds(neg, 'cumPe', 'upPct', 45, 5, 33.4) && !holds(neg, 'cumPe', 'downPct', 45, 5, 0), '-75 -> -50 = up 33.3%')
+  const pos = fakeDay({ netCum: val })
+  assert.ok(holds(pos, 'cumNet', 'upPct', 45, 5, 50) && !holds(pos, 'cumNet', 'downPct', 45, 5, 0))
+  // The line: its % (10 by default, up to 1000) and look-back kept, said, and mirrored to the other side with the same numbers.
+  assert.deepEqual(cleanLine({ id: 'oiOpen', value: 'peAddedPct' }), { id: 'oiOpen', value: 'peAddedPct', join: 'and', param: 10, windowMin: DEFAULT_WINDOW })
+  assert.equal(cleanLine({ id: 'totalOi', value: 'ceAddedPct', param: 5000 }).param, 1000)
+  const line = cleanLine({ id: 'oiOpen', value: 'peAddedPct', param: 50, windowMin: 5 })
+  assert.match(lineText(line), /^OI since open \(chain-wide\): PE OI increased \(put writing - bullish\) by ≥ 50% of its value \(last 5 min\)$/)
   assert.deepEqual(mirrorLines([line]), [{ ...line, value: 'ceAddedPct' }])
   assert.deepEqual(mirrorLines([{ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }]), [{ id: 'cumNet', value: 'downPct', param: 2, windowMin: 15 }])
-  assert.match(lineText({ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }), /Net \(CE − PE\) cumulative Δ: Increased \(call writers gaining - bearish\) by ≥ 2% of OI \(last 15 min\)$/)
-  // Through the engine: the puts' 2.5% in 10 min is the rule's signal (bullish); the mirror (calls added) never.
-  const sig = ruleSignals(d, lines([{ id: 'totalOi', value: 'peAddedPct', param: 2, windowMin: 10 }], 'buyCE', { mirror: true }))
+  assert.match(lineText({ id: 'cumNet', value: 'upPct', param: 50, windowMin: 5 }), /Net \(CE − PE\) cumulative Δ: Increased \(call writers gaining - bearish\) by ≥ 50% of its value \(last 5 min\)$/)
+  // Through the engine: the puts' 50% in 5 min is the rule's signal (bullish); the mirror (calls up) never.
+  const sig = ruleSignals(d, lines([{ id: 'totalOi', value: 'peAddedPct', param: 50, windowMin: 5 }], 'buyCE', { mirror: true }))
   assert.equal(sig.length, 1)
   assert.equal(sig[0].side, 'rule')
-  assert.ok(sig[0].i > 40 && sig[0].i <= 50, `signal at ${sig[0].i}`)
+  assert.ok(sig[0].i > 40 && sig[0].i <= 45, `signal at ${sig[0].i}`)
 })
 
 test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
