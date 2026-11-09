@@ -1,8 +1,9 @@
-// Quick views - a popup for a quick scan of one card, by keyboard (a SINGLE key of the bottom row, Z X C V B N M - no
-// Ctrl / Alt / Shift; the same again or Esc closes, another letter switches) or by the "Quick view" buttons. A key held
-// with Ctrl / Cmd is the browser's or the text box's (Ctrl + C copies, Ctrl + N opens a window). B is Futures here - the
-// order ticket's buy is F1 (S / F2 still sell). The old Ctrl + Shift + 1 - 7 still open them (`digit`). The popup shows
-// the card's own content, live with the page (replay clock or live).
+// Quick views - a popup for a quick scan of one card, by keyboard (a SINGLE key of the bottom row, Z X C V B N M , . - no
+// Ctrl / Alt / Shift; the same again or Esc closes, another key switches) or by the "Quick view" buttons and the floating
+// button. A key held with Ctrl / Cmd is the browser's or the text box's (Ctrl + C copies, Ctrl + N opens a window). B is
+// Futures here - the order ticket's buy is F1 (S / F2 still sell). The old Ctrl + Shift + 1 - 9 still open them (`digit`).
+// The popup shows the card's own content, live with the page (replay clock or live). `code` - the key's KeyboardEvent code
+// when it is not a letter (`Key` + letter).
 export const QUICK_VIEWS = [
   { key: 'dayOi', letter: 'Z', digit: 1, label: 'Day OI', title: 'Day OI since the open' },
   { key: 'oiCharts', letter: 'X', digit: 2, label: 'OI charts', title: 'OI totals charts - CE, PE and Net' },
@@ -11,17 +12,22 @@ export const QUICK_VIEWS = [
   { key: 'futures', letter: 'B', digit: 7, label: 'Futures', title: 'Futures - candles, OI, VWAP and the previous day\'s profile' },
   { key: 'oiHeatmap', letter: 'N', digit: 3, label: 'OI heatmap', title: 'OI change heatmap (all strikes) and the totals' },
   { key: 'premium', letter: 'M', digit: 4, label: 'Premium', title: 'Option premium - CE and PE (ATM by default)' },
+  // The delta profiles (asked for - "add delta profile on the floating popover icon so that I can access it easily"): the
+  // next two keys of the bottom row.
+  { key: 'optionDelta', letter: ',', code: 'Comma', digit: 8, label: 'Option Δ profile', title: 'Option delta profile on spot (CE / PE flow by spot price)' },
+  { key: 'futuresDelta', letter: '.', code: 'Period', digit: 9, label: 'Futures Δ profile', title: 'Futures delta profile (footprint by price)' },
 ]
+const codeOf = (v) => v.code ?? `Key${v.letter}`
 export const QUICK_VIEW_KEYS_TEXT = QUICK_VIEWS.map((v) => v.letter).join(' ')
 
-/** The quick view a key press opens (Z X C V B N M alone; or the old Ctrl + Shift + 1 - 7, top row or numpad), else null.
+/** The quick view a key press opens (Z X C V B N M , . alone; or the old Ctrl + Shift + 1 - 9, top row or numpad), else null.
  *  A letter typed in a box is the box's, never a quick view. (The page also leaves them alone while its order ticket is
  *  open - its own C / P pick the option.) */
 export function quickViewForKey(e) {
   if (e.metaKey || e.repeat) return null
   if (!e.altKey && !e.ctrlKey && !e.shiftKey) {
     if (isTypingField(e.target)) return null
-    return QUICK_VIEWS.find((v) => e.code === `Key${v.letter}`) ?? null
+    return QUICK_VIEWS.find((v) => e.code === codeOf(v)) ?? null
   }
   if (e.ctrlKey && e.shiftKey && !e.altKey) return QUICK_VIEWS.find((v) => e.code === `Digit${v.digit}` || e.code === `Numpad${v.digit}`) ?? null
   return null

@@ -1,4 +1,4 @@
-// The OI Replay quick views (quickViews.js): Z X C V B N M alone open the seven popups (the old Ctrl + Shift + 1 - 7, top
+// The OI Replay quick views (quickViews.js): Z X C V B N M , . alone open the nine popups (the old Ctrl + Shift + 1 - 9, top
 // row or numpad, too); anything else - a letter with Ctrl / Alt / Cmd / Shift (copy, paste, the browser's keys), a letter
 // typed in a box, a key held down (repeat), another letter - opens nothing.
 import { test } from 'node:test'
@@ -9,19 +9,27 @@ const key = (code, mods = {}) => ({ code, ctrlKey: true, shiftKey: true, altKey:
 
 const plain = (code, mods = {}) => ({ code, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...mods })
 
-test('Z X C V B N M alone open the seven quick views: Day OI, OI charts, GEX, straddle, futures, OI heatmap, premium', () => {
+test('Z X C V B N M , . alone open the nine quick views: Day OI, OI charts, GEX, straddle, futures, OI heatmap, premium, the two delta profiles', () => {
   assert.deepEqual(QUICK_VIEWS.map((v) => [v.letter, v.key]), [
     ['Z', 'dayOi'], ['X', 'oiCharts'], ['C', 'gex'], ['V', 'straddle'], ['B', 'futures'], ['N', 'oiHeatmap'], ['M', 'premium'],
+    [',', 'optionDelta'], ['.', 'futuresDelta'],
   ])
-  for (const v of QUICK_VIEWS) assert.equal(quickViewForKey(plain(`Key${v.letter}`)).key, v.key)
+  for (const v of QUICK_VIEWS) assert.equal(quickViewForKey(plain(v.code ?? `Key${v.letter}`)).key, v.key)
+  // The delta profiles: the comma and the full stop - not with Ctrl / Shift (Shift + . is ">"), not typed in a box.
+  assert.equal(quickViewForKey(plain('Comma')).key, 'optionDelta')
+  assert.equal(quickViewForKey(plain('Period')).key, 'futuresDelta')
+  assert.equal(quickViewForKey(plain('Period', { shiftKey: true })), null)
+  assert.equal(quickViewForKey(plain('Comma', { ctrlKey: true })), null)
+  assert.equal(quickViewForKey(plain('Period', { target: { tagName: 'INPUT', type: 'number' } })), null)
+  assert.equal(quickViewForKey(plain('Slash')), null)
   // Not from a box being typed in; a checkbox or a switch holding the focus is fine.
   assert.equal(quickViewForKey(plain('KeyZ', { target: { tagName: 'INPUT', type: 'text' } })), null)
   assert.equal(quickViewForKey(plain('KeyZ', { target: { tagName: 'TEXTAREA' } })), null)
   assert.equal(quickViewForKey(plain('KeyZ', { target: { tagName: 'INPUT', type: 'checkbox' } })).key, 'dayOi')
 })
 
-test('the old Ctrl + Shift + 1 - 7 still open the same views', () => {
-  assert.deepEqual(QUICK_VIEWS.map((v) => v.digit).sort(), [1, 2, 3, 4, 5, 6, 7])
+test('the old Ctrl + Shift + 1 - 9 still open the same views', () => {
+  assert.deepEqual(QUICK_VIEWS.map((v) => v.digit).sort(), [1, 2, 3, 4, 5, 6, 7, 8, 9])
   for (const v of QUICK_VIEWS) {
     assert.equal(quickViewForKey(key(`Digit${v.digit}`)).key, v.key)
     assert.equal(quickViewForKey(key(`Numpad${v.digit}`)).key, v.key)
@@ -33,7 +41,7 @@ test('nothing else opens one', () => {
   assert.equal(quickViewForKey(key('Digit1', { ctrlKey: false })), null)
   assert.equal(quickViewForKey(key('Digit1', { altKey: true })), null)
   assert.equal(quickViewForKey(key('Digit1', { metaKey: true })), null)
-  assert.equal(quickViewForKey(key('Digit8')), null)
+  assert.equal(quickViewForKey(key('Digit0')), null)
   assert.equal(quickViewForKey(key('KeyB')), null)
   // A letter with Ctrl (copy / paste / undo, the browser's new window), Alt, Shift or Cmd; held down; another letter; S
   // (the order ticket's sell).
