@@ -851,6 +851,40 @@ test('S-R walls near ATM - divergence: price moved >= A % but the band\'s PE −
   }
 })
 
+test('OI added this much % in the last N min - OI since open, Total OI and the cumulative Δ lines, in % of the OI then', () => {
+  // Chain-wide OI 4 cr a side. From 40 to 50 the puts add 10L (2.5% of PE OI) - since the open and in the totals alike.
+  const rise = (i) => (i < 40 ? 0 : i < 50 ? (i - 40) * 1e5 : 10e5)
+  const d = fakeDay({ oi: (i) => ({ ce: 0, pe: rise(i) }), tot: (i) => ({ ce: 4e7, pe: 4e7 + rise(i) }) })
+  for (const id of ['oiOpen', 'totalOi']) {
+    assert.ok(holds(d, id, 'peAddedPct', 50, 10, 2.5) && !holds(d, id, 'peAddedPct', 50, 10, 2.6), `${id}: 10L of 4 cr = 2.5%`)
+    assert.ok(holds(d, id, 'peAddedPct', 50, 5, 1.2) && !holds(d, id, 'peAddedPct', 50, 5, 1.3), `${id}: the last 5 min only - 5L = 1.25%`)
+    assert.ok(!holds(d, id, 'ceAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 30, 10, 0), `${id}: calls added nothing; nothing before 40`)
+    assert.ok(holds(d, id, 'peAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 70, 10, 0), `${id}: 0 = any addition; none from 50 on`)
+  }
+  // Puts shed instead: not "added".
+  const shed = fakeDay({ oi: (i) => ({ ce: 0, pe: -rise(i) }), tot: (i) => ({ ce: 4e7, pe: 4e7 - rise(i) }) })
+  assert.ok(!holds(shed, 'oiOpen', 'peAddedPct', 50, 10, 0) && !holds(shed, 'totalOi', 'peAddedPct', 50, 10, 0))
+  // The cumulative lines: the Net (CE − PE) up 16L over the look-back = 2% of CE + PE OI (8 cr); the PE line down 8L = 2% of PE OI.
+  const cum = fakeDay({ netCum: (i) => (i < 40 ? 0 : i < 50 ? (i - 40) * 1.6e5 : 16e5), peCum: (i) => (i < 40 ? 0 : i < 50 ? -(i - 40) * 0.8e5 : -8e5) })
+  assert.ok(holds(cum, 'cumNet', 'upPct', 50, 10, 2) && !holds(cum, 'cumNet', 'upPct', 50, 10, 2.1) && !holds(cum, 'cumNet', 'downPct', 50, 10, 0))
+  assert.ok(holds(cum, 'cumPe', 'downPct', 50, 10, 2) && !holds(cum, 'cumPe', 'downPct', 50, 10, 2.1) && !holds(cum, 'cumPe', 'upPct', 50, 10, 0))
+  // No total OI read (a day before the totals load): never.
+  assert.ok(!holds(fakeDay({ netCum: (i) => i * 1e5, tot: () => ({ ce: 0, pe: 0 }) }), 'cumNet', 'upPct', 50, 10, 0))
+  // The line: its % (1 by default) and look-back kept, said, and mirrored to the other side with the same numbers.
+  assert.deepEqual(cleanLine({ id: 'oiOpen', value: 'peAddedPct' }), { id: 'oiOpen', value: 'peAddedPct', join: 'and', param: 1, windowMin: DEFAULT_WINDOW })
+  assert.equal(cleanLine({ id: 'totalOi', value: 'ceAddedPct', param: 80 }).param, 50)
+  const line = cleanLine({ id: 'oiOpen', value: 'peAddedPct', param: 2, windowMin: 15 })
+  assert.match(lineText(line), /^OI since open \(chain-wide\): PE OI added \(put writing - bullish\) by ≥ 2% of OI \(last 15 min\)$/)
+  assert.deepEqual(mirrorLines([line]), [{ ...line, value: 'ceAddedPct' }])
+  assert.deepEqual(mirrorLines([{ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }]), [{ id: 'cumNet', value: 'downPct', param: 2, windowMin: 15 }])
+  assert.match(lineText({ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }), /Net \(CE − PE\) cumulative Δ: Rose by a % of the OI \(call writers gaining - bearish\) by ≥ 2% of OI \(last 15 min\)$/)
+  // Through the engine: the puts' 2.5% in 10 min is the rule's signal (bullish); the mirror (calls added) never.
+  const sig = ruleSignals(d, lines([{ id: 'totalOi', value: 'peAddedPct', param: 2, windowMin: 10 }], 'buyCE', { mirror: true }))
+  assert.equal(sig.length, 1)
+  assert.equal(sig[0].side, 'rule')
+  assert.ok(sig[0].i > 40 && sig[0].i <= 50, `signal at ${sig[0].i}`)
+})
+
 test('logic typed in the box redraws the builder: every condition once, AND before OR, brackets as written; what cannot be read says why', () => {
   const L = (value) => ({ line: { id: 'vwap', value, join: 'and', param: 0 } })
   const five = { op: 'or', not: false, items: [L('above'), L('below'), L('crossedAbove'), L('crossedBelow'), L('nearAbove')].map((x, k) => (k === 4 ? { line: { id: 'prevPoc', value: 'above', join: 'and', param: 0 } } : x)) }
