@@ -1,5 +1,5 @@
 import { useRef, useState } from 'react'
-import { AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
+import { AlignLeftOutlined, AlignRightOutlined, AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
 import { useSideNavInset, useViewport } from './useScreen.js'
 import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabFromAnchor, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
@@ -9,7 +9,7 @@ import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabFromAnchor,
 // so it shows there too - `enabled` (the page's "Quick button" tick) turns it off. It starts at the BOTTOM LEFT of the
 // page, right of the sidebar (fabDefault); where it is dropped is `anchor` - its distance from the nearest corner
 // (fabAnchor), kept by the page, so the same place reads right on a phone and on a monitor.
-const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined }
+const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined, optionDelta: AlignLeftOutlined, futuresDelta: AlignRightOutlined }
 // Over the floating panels (900+) and the replay bar, under the popups (1000).
 const FAB_Z = 960
 const ACCENT = '#1677ff'

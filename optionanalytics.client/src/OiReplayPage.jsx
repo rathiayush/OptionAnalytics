@@ -5273,7 +5273,7 @@ export default function OiReplayPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [])
-  // The quick views' keys - Z X C V B N M alone (or the old Ctrl + Shift + 1 - 7) open one, the same again closes it,
+  // The quick views' keys - Z X C V B N M , . alone (or the old Ctrl + Shift + 1 - 9) open one, the same again closes it,
   // another switches. Not while the order ticket (its C / P pick the option) or the order review is open.
   useEffect(() => {
     const onKey = (e) => {
@@ -6554,7 +6554,7 @@ export default function OiReplayPage() {
                     <Button size="small" type={quickView === v.key ? 'primary' : 'default'} onClick={() => setQuickView(v.key)}>{v.letter} · {v.label}</Button>
                   </Tooltip>
                 ))}
-                <Tooltip title="The same seven views from a small round button floating over the page - at the bottom left, drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
+                <Tooltip title="The same views from a small round button floating over the page - at the bottom left, drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
                   <Checkbox checked={quickFabOn} onChange={(e) => setQuickFabOn(e.target.checked)}>Quick button</Checkbox>
                 </Tooltip>
                 <Tooltip title="On a replayed day, the replay controls (Start / Pause, Reset, the slider, the speed) as a slim bar floating at the bottom of the window once the Spot card's own controls are scrolled out of sight - the same controls, so either works.">
@@ -7330,6 +7330,20 @@ export default function OiReplayPage() {
               <GexCard
                 days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
                 expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+              />
+            )}
+            {/* The delta profile cards' own components, with the page's inputs - their settings (timeframe, rows, previous
+                day, levels) are the cards' own kept choices, so the popup opens as the card is set. */}
+            {quickView === 'optionDelta' && (
+              <OptionDeltaProfileCard
+                cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
+                underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`quick-${underlying}-${result.date}`}
+              />
+            )}
+            {quickView === 'futuresDelta' && (
+              <FuturesDeltaProfileCard
+                futuresBars={deltaFuturesBars} asOfMs={asOfMs} underlying={underlying} date={result.date} isLive={isLive}
+                dayKey={`quick-${underlying}-${result.date}`}
               />
             )}
           </ChartGrow>

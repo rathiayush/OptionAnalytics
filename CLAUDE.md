@@ -328,18 +328,21 @@ When adding or changing a strategy:
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   a SINGLE KEY (no Ctrl / Alt / Shift - the user's ask; Alt was tried first): Z Day OI since the open, X the OI totals
   charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart, N the OI change heatmap and totals, M the option
-  premium charts (ATM by default) - the bottom row of the keyboard (the same again or Esc closes, another letter switches;
+  premium charts (ATM by default), and (asked for - "add delta profile on the floating popover icon so that I can access it
+  easily") , the option delta profile on spot and . the futures delta profile (`code` Comma / Period - Shift + . is not
+  one) - the bottom row of the keyboard (the same again or Esc closes, another key switches;
   not from a box being typed in, not a key held down, not while the order ticket or its review is open - the ticket's own
   C / P pick the option). With Ctrl / Cmd a letter stays the browser's (Ctrl + C copies, Ctrl + N a new window). B is
-  Futures, so the order ticket's BUY is F1 only (S / F2 still sell). The old Ctrl + Shift + 1 - 7 (`digit`) still open
+  Futures, so the order ticket's BUY is F1 only (S / F2 still sell). The old Ctrl + Shift + 1 - 9 (`digit`) still open
   the same views. Or the "Quick view" buttons
   under "Sections shown" - shown even when the card is hidden. The popup renders the card's OWN content (the page's
   `dayOiContent` / `premiumPickers` / `premiumCharts` elements, `OiChangeHeatmapSection` with no `alerts` - so no
   second set of alerts - `StraddleCard`, `GexCard` on the shared `useGexDays`, `OiTotalsChartsPopup`, the futures card's `futuresControls` / `futuresContent` -
-  its DOM button stays on the card), live with the page
+  its DOM button stays on the card - and `OptionDeltaProfileCard` / `FuturesDeltaProfileCard` with the cards' own inputs
+  and kept settings), live with the page
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: it starts at the BOTTOM LEFT of the page, right of the sidebar (`fabDefault`,
-  `useSideNavInset` in `useScreen.js` - never over the menu), dragged anywhere (kept on the screen), a tap opens the seven
+  `useSideNavInset` in `useScreen.js` - never over the menu), dragged anywhere (kept on the screen), a tap opens the nine
   views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. Where it was dropped is
   kept as its distance from the NEAREST CORNER (`fabAnchor` / `fabFromAnchor`, `optionanalytics.oiReplay.quickFabAnchor`)
   - an account preference, so a phone and a monitor share it: kept in pixels from the top left (the old
@@ -863,7 +866,9 @@ When adding or changing a strategy:
   `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
   add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 24 rules from the page's own conditions in
   seven families (`TEMPLATE_FAMILIES` - delta profile, in order (THEN), trend, reversal, breakout, options & volatility,
-  premium selling). The DELTA PROFILE four (asked for - "add strategy for delta profile ... previous day's highest buy and
+  premium selling), each read through a different lens (positioning, flow, dealer gamma, volatility, auction structure,
+  momentum, the premiums' own tape, the option delta profile), written for the bullish side with the Mirror on, with its
+  `idea` (why) and its own `settings` (timeframe, SL / target, trail / time stop - what it does not name is OFF). The DELTA PROFILE four (asked for - "add strategy for delta profile ... previous day's highest buy and
   sell, check what's best we can do"; `PREV_DAY` = "Profile of: Days before", 1 day): yesterday's option delta profile's
   MOST BOUGHT row (bullish option flow piled up - support) and MOST SOLD row (bearish - resistance) read four ways -
   `dpBuyersDefend` (a dip into the most-bought row closing back above it, today's flow at the price buying; mirror the
@@ -874,10 +879,7 @@ When adding or changing a strategy:
   without each part (`tests/signal-templates.test.mjs`). They read the session before each day: the run, a background run
   and the live scan load it for the rule (`deltaDaysNeeded`); Compare all puts it on the days loaded first
   (`attachDeltaPast` - the run's own days not asked again; stopped at the first failure, the days left said under the
-  table). Unmeasured here (no market data in the repo) - Compare all on real days ranks them.
-  each read through a different lens (positioning, flow, dealer gamma, volatility, auction structure, momentum, the
-  premiums' own tape), written for the bullish side with the Mirror on, with its `idea` (why) and its own `settings`
-  (timeframe, SL / target, trail / time stop - what it does not name is OFF). The rule card's "Templates" dropdown (grouped,
+  table). Unmeasured here (no market data in the repo) - Compare all on real days ranks them. The rule card's "Templates" dropdown (grouped,
   searchable, each with its idea) LOADS one onto the page - its rule and levels (`withTemplate`: the page's index, lots,
   charges, max trades, cooldown, day limits and expiry-day choice kept) - to run and edit like any rule; "Undo" puts back
   what was there. "Compare all" (`compareTemplates` / `templateRow`) runs every template over the days the PAGE'S run
