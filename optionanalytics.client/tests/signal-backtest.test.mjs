@@ -861,9 +861,15 @@ test('OI added this much % in the last N min - OI since open, Total OI and the c
     assert.ok(!holds(d, id, 'ceAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 30, 10, 0), `${id}: calls added nothing; nothing before 40`)
     assert.ok(holds(d, id, 'peAddedPct', 50, 10, 0) && !holds(d, id, 'peAddedPct', 70, 10, 0), `${id}: 0 = any addition; none from 50 on`)
   }
-  // Puts shed instead: not "added".
+  // Puts shed instead: not "up" - "down" by 10L of 4 cr = 2.5%; the calls did neither.
   const shed = fakeDay({ oi: (i) => ({ ce: 0, pe: -rise(i) }), tot: (i) => ({ ce: 4e7, pe: 4e7 - rise(i) }) })
-  assert.ok(!holds(shed, 'oiOpen', 'peAddedPct', 50, 10, 0) && !holds(shed, 'totalOi', 'peAddedPct', 50, 10, 0))
+  for (const id of ['oiOpen', 'totalOi']) {
+    assert.ok(!holds(shed, id, 'peAddedPct', 50, 10, 0) && !holds(d, id, 'peShedPct', 50, 10, 0), `${id}: up is not down`)
+    assert.ok(holds(shed, id, 'peShedPct', 50, 10, 2.5) && !holds(shed, id, 'peShedPct', 50, 10, 2.6) && !holds(shed, id, 'ceShedPct', 50, 10, 0), `${id}: PE down 2.5%`)
+    // The last 1 minute: 1L of 4 cr = 0.25%.
+    assert.ok(holds(shed, id, 'peShedPct', 45, 1, 0.25) && !holds(shed, id, 'peShedPct', 45, 1, 0.3), `${id}: the last minute`)
+  }
+  assert.deepEqual(mirrorLines([{ id: 'totalOi', value: 'peShedPct', param: 1, windowMin: 1 }]), [{ id: 'totalOi', value: 'ceShedPct', param: 1, windowMin: 1 }])
   // The cumulative lines: the Net (CE − PE) up 16L over the look-back = 2% of CE + PE OI (8 cr); the PE line down 8L = 2% of PE OI.
   const cum = fakeDay({ netCum: (i) => (i < 40 ? 0 : i < 50 ? (i - 40) * 1.6e5 : 16e5), peCum: (i) => (i < 40 ? 0 : i < 50 ? -(i - 40) * 0.8e5 : -8e5) })
   assert.ok(holds(cum, 'cumNet', 'upPct', 50, 10, 2) && !holds(cum, 'cumNet', 'upPct', 50, 10, 2.1) && !holds(cum, 'cumNet', 'downPct', 50, 10, 0))
@@ -874,10 +880,10 @@ test('OI added this much % in the last N min - OI since open, Total OI and the c
   assert.deepEqual(cleanLine({ id: 'oiOpen', value: 'peAddedPct' }), { id: 'oiOpen', value: 'peAddedPct', join: 'and', param: 1, windowMin: DEFAULT_WINDOW })
   assert.equal(cleanLine({ id: 'totalOi', value: 'ceAddedPct', param: 80 }).param, 50)
   const line = cleanLine({ id: 'oiOpen', value: 'peAddedPct', param: 2, windowMin: 15 })
-  assert.match(lineText(line), /^OI since open \(chain-wide\): PE OI added \(put writing - bullish\) by ≥ 2% of OI \(last 15 min\)$/)
+  assert.match(lineText(line), /^OI since open \(chain-wide\): PE OI increased \(put writing - bullish\) by ≥ 2% of OI \(last 15 min\)$/)
   assert.deepEqual(mirrorLines([line]), [{ ...line, value: 'ceAddedPct' }])
   assert.deepEqual(mirrorLines([{ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }]), [{ id: 'cumNet', value: 'downPct', param: 2, windowMin: 15 }])
-  assert.match(lineText({ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }), /Net \(CE − PE\) cumulative Δ: Rose by a % of the OI \(call writers gaining - bearish\) by ≥ 2% of OI \(last 15 min\)$/)
+  assert.match(lineText({ id: 'cumNet', value: 'upPct', param: 2, windowMin: 15 }), /Net \(CE − PE\) cumulative Δ: Increased \(call writers gaining - bearish\) by ≥ 2% of OI \(last 15 min\)$/)
   // Through the engine: the puts' 2.5% in 10 min is the rule's signal (bullish); the mirror (calls added) never.
   const sig = ruleSignals(d, lines([{ id: 'totalOi', value: 'peAddedPct', param: 2, windowMin: 10 }], 'buyCE', { mirror: true }))
   assert.equal(sig.length, 1)

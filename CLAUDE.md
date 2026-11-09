@@ -675,8 +675,10 @@ When adding or changing a strategy:
   which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all seven
   lines (the S-R walls near ATM's two too). ADDED THIS MUCH % IN THE LAST N MIN (asked for - "OI total, OI since open, OI
   cumulative net CE − PE: add an indicator like added this much % in last n min"; `ADDED` / `addedPctHolds`): OI since
-  open and Total OI CE vs PE - "PE / CE OI added" (`peAddedPct` / `ceAddedPct`, the mirror the other side) - and the CE /
-  PE / Net cumulative Δ - "Rose / Fell by a % of the OI" (`upPct` / `downPct`): the line's move over the look-back in % of
+  open and Total OI CE vs PE - "PE / CE OI increased" (`peAddedPct` / `ceAddedPct`) and, asked for next ("increased or
+  decreased in min"), "PE / CE OI decreased" (`peShedPct` / `ceShedPct` - unwinding; `PCT_CHANGE_OPTIONS`, the mirror
+  the other side's same move) - and the CE / PE / Net cumulative Δ - "Increased / Decreased" (`upPct` / `downPct`); the
+  look-back 1 - 60 min (1 = the last minute): the line's move over the look-back in % of
   the OI at the look-back's start (the side's chain-wide total, `tot`; CE + PE for the Net) - as Total CE / PE OI's
   "Increased by" reads it; "by ≥" 1% by default, 0 = any move that way, up to 50. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
   as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from

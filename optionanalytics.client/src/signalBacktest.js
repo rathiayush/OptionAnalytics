@@ -699,6 +699,16 @@ function addedPctHolds(change, base, up, p) {
   return moved > 0 && (moved / base) * 100 >= (p ?? 0) - 1e-9
 }
 const totalAt = (d, k, side) => { const x = d.tot?.[k]; return !x ? NaN : side === 'net' ? x.ce + x.pe : x[side] }
+// OI since open's and Total OI's "INCREASED / DECREASED by % in the last N min" (asked for - "total OI and since open OI
+// ... the % change ... increased or decreased in min"; the look-back 1 - 60 min): each side up (added) or down (shed), in
+// % of its total OI at the look-back's start; the mirror is the other side's same move - put writing <-> call writing,
+// puts unwinding <-> calls unwinding.
+const PCT_CHANGE_OPTIONS = [
+  opt('peAddedPct', 'PE OI increased (put writing - bullish)', 'ceAddedPct', ADDED),
+  opt('ceAddedPct', 'CE OI increased (call writing - bearish)', 'peAddedPct', ADDED),
+  opt('peShedPct', 'PE OI decreased (puts unwinding - bearish)', 'ceShedPct', ADDED),
+  opt('ceShedPct', 'CE OI decreased (calls unwinding - bullish)', 'peShedPct', ADDED),
+]
 // "by ≥ %" of the decay-only line - a straddle runs further from it than from its VWAP.
 const OVER_WIDE = { param: pctParam('by ≥', 0, 50, 0.5) }
 const TOTAL_MOVE = { windowed: true, param: pctParam('by', 0.2, 20, 0.05) }
@@ -868,8 +878,8 @@ function cumCondition(line, group, meaning) {
       opt('divBull', 'Bullish divergence: price fell, the line did not follow', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, the line did not follow', 'divBull', DIVERGENCE),
       // Added this much % in the look-back: the line's move, in % of the OI it is of (CE / PE total, CE + PE for the Net).
-      opt('upPct', `Rose by a % of the OI (${meaning.up})`, 'downPct', ADDED),
-      opt('downPct', `Fell by a % of the OI (${meaning.down})`, 'upPct', ADDED),
+      opt('upPct', `Increased (${meaning.up})`, 'downPct', ADDED),
+      opt('downPct', `Decreased (${meaning.down})`, 'upPct', ADDED),
     ],
     // "by ≥ %" = how far past 0 (or past the level broken) the line is now, in % of its range so far.
     test: (d, i, v, w, p, p2) => {
@@ -1247,9 +1257,8 @@ export const RULE_CONDITIONS = [
       // PE − CE added follows price when the OI confirms it (puts written into a rise, calls into a fall).
       opt('divBull', 'Bullish divergence: price fell, PE − CE added did not fall with it', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, PE − CE added did not rise with it', 'divBull', DIVERGENCE),
-      // Added this much % in the look-back: what each side added since the open grew by, in % of its OI then.
-      opt('peAddedPct', 'PE OI added (put writing - bullish)', 'ceAddedPct', ADDED),
-      opt('ceAddedPct', 'CE OI added (call writing - bearish)', 'peAddedPct', ADDED),
+      // % change in the look-back (1 - 60 min): what each side added (up) or shed (down) since the open, in % of its OI then.
+      ...PCT_CHANGE_OPTIONS,
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => d.oi[k].pe - d.oi[k].ce
@@ -1262,9 +1271,9 @@ export const RULE_CONDITIONS = [
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
-        case 'peAddedPct': case 'ceAddedPct': {
-          const side = v === 'peAddedPct' ? 'pe' : 'ce', back = Math.max(0, i - w)
-          return addedPctHolds(d.oi[i]?.[side] - d.oi[back]?.[side], totalAt(d, back, side), true, p)
+        case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
+          const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
+          return addedPctHolds(d.oi[i]?.[side] - d.oi[back]?.[side], totalAt(d, back, side), v.endsWith('AddedPct'), p)
         }
         default: return false
       }
@@ -1285,9 +1294,8 @@ export const RULE_CONDITIONS = [
       // Total PE − CE follows price when the OI confirms it (puts written into a rise, calls into a fall).
       opt('divBull', 'Bullish divergence: price fell, total PE − CE did not fall with it', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, total PE − CE did not rise with it', 'divBull', DIVERGENCE),
-      // Added this much % in the look-back: the side's total OI grew by, in % of itself then.
-      opt('peAddedPct', 'PE OI added (put writing - bullish)', 'ceAddedPct', ADDED),
-      opt('ceAddedPct', 'CE OI added (call writing - bearish)', 'peAddedPct', ADDED),
+      // % change in the look-back (1 - 60 min): the side's total OI up / down, in % of itself then.
+      ...PCT_CHANGE_OPTIONS,
     ],
     test: (d, i, v, w, p, p2) => {
       const gap = (k) => { const x = d.tot?.[k]; return x && x.ce > 0 && x.pe > 0 ? x.pe - x.ce : NaN }
@@ -1300,9 +1308,9 @@ export const RULE_CONDITIONS = [
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
-        case 'peAddedPct': case 'ceAddedPct': {
-          const side = v === 'peAddedPct' ? 'pe' : 'ce', back = Math.max(0, i - w)
-          return addedPctHolds(totalAt(d, i, side) - totalAt(d, back, side), totalAt(d, back, side), true, p)
+        case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
+          const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
+          return addedPctHolds(totalAt(d, i, side) - totalAt(d, back, side), totalAt(d, back, side), v.endsWith('AddedPct'), p)
         }
         default: return false
       }
