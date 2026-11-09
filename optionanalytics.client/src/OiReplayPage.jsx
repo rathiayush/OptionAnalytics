@@ -6,6 +6,7 @@ import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, newReplayOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts, stepReplayOiBreakAlerts } from './oiLevelBreaks.js'
 import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend, withOrderFlowRows } from './oiTotalsHeatmap.js'
+import { bucketPricing, weightByMoneyness } from './oiMoneyness.js'
 import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
@@ -585,6 +586,22 @@ function sliceMatrixWindow(matrix, windowMinutes) {
   const perStrikeChange = new Map()
   for (const [strike, byBucket] of matrix.perStrikeChange) perStrikeChange.set(strike, new Map([...byBucket].filter(([t]) => t > from)))
   return { buckets: matrix.buckets.filter((t) => t > from), perStrikeChange }
+}
+
+// The OI totals card's "Moneyness (Δ-weighted)" tick (oiMoneyness.js) - an account preference like every other.
+const STORED_TOTALS_MONEYNESS = 'optionanalytics.oiReplay.totalsMoneyness'
+function storedTotalsMoneyness() {
+  try { return JSON.parse(window.localStorage.getItem(STORED_TOTALS_MONEYNESS)) === true } catch { return false }
+}
+
+// The totals' per-strike changes (the last `windowMinutes`, null = the day) - and, by moneyness, each change x its
+// strike's option delta at the bucket (bucketPricing / weightByMoneyness); off, exactly the plain changes.
+function totalsChanges(ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, moneyness) {
+  const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+  const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+  if (!moneyness) return { ce, pe }
+  const pricing = bucketPricing(ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes)
+  return { ce: weightByMoneyness(ce, pricing, true), pe: weightByMoneyness(pe, pricing, false) }
 }
 
 function bucketOf(chartTime, minutes) {
@@ -1760,7 +1777,7 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // Heatmap, popup) live here. Also the External page's, which shows its two parts in separate tabs: `show` 'strikes' = the
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
-export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null, orderFlow = null }) {
+export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null, orderFlow = null, moneynessOption = false }) {
   // The futures order flow rows under the totals - live only (OI Replay's own flow; the External page passes none).
   const totalsOrderFlow = live ? orderFlow : null
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
@@ -1774,6 +1791,10 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
   const [totalsView, setTotalsView] = usePersistedState('optionanalytics.oiReplay.totalsView', 'numbers')
   // The totals as charts, in a popup (the "Charts" button by Numbers / Heatmap).
   const [totalsChartsOpen, setTotalsChartsOpen] = useState(false)
+  // The totals BY MONEYNESS (oiMoneyness.js) - each strike's OI change x its option delta - when ticked; off by default,
+  // and only where it is offered (OI Replay - `moneynessOption`; the External page as it was).
+  const [moneynessTicked, setMoneyness] = usePersistedState(STORED_TOTALS_MONEYNESS, false)
+  const moneyness = moneynessOption && !!moneynessTicked
   // The S/R break and 🎯 alerts' settings (the page's - useOiBreakAlertSettings), shown with the totals.
   const alertUnderlying = alerts?.underlying ?? null
   const breakAlertsOn = !!alerts?.on
@@ -1823,6 +1844,11 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
             <Button size="small" icon={<LineChartOutlined />} onClick={() => setTotalsChartsOpen(true)}>Charts</Button>
           </Tooltip>
           <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
+          {moneynessOption && (
+            <Tooltip title="Moneyness: each strike's OI change counts by its option DELTA - a call's N(d1), a put's N(−d1), worked out from the chain's own premiums (the forward by put-call parity, the move priced by the ATM straddle) at the end of each bucket. OI added at the money counts about half, in the money nearly all, far out of the money little - the delta-adjusted OI added, shown as Δ-weighted contracts. Off: every contract counts the same, as before. The S/R and 🎯 alerts keep reading the plain OI.">
+              <Checkbox checked={moneyness} onChange={(e) => setMoneyness(e.target.checked)}>Moneyness (Δ-weighted)</Checkbox>
+            </Tooltip>
+          )}
           {alertUnderlying && (
             <Tooltip title={'Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts\' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the strategy scanner\'s switches. A replayed day raises them too, on the replay clock (no Telegram). Which ones pop up on this page: "Alerts" in the controls at the top - 🎯 and the CE / PE breaks by default.'}>
               <Space size={4}>
@@ -1880,16 +1906,16 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
         </Space>
         <OiTotalsChartsPopup
           open={totalsChartsOpen} onClose={() => setTotalsChartsOpen(false)} ceByStrike={ceByStrike} peByStrike={peByStrike}
-          strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={dayKey}
+          strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} dayKey={dayKey} moneyness={moneyness}
           extra={<HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />}
         />
         <br />
         <Tooltip title="Whole band summed per bucket. Δ = OI added or removed in that bucket; cumulative = running total since the first bucket; Net = CE − PE. Green = bullish: PE added, CE removed, net negative (PE writers ahead). Red = bearish: CE added, PE removed, net positive (CE writers ahead). A cumulative's figure shows who is ahead on the day, its shade what that column did - green on a red shade is weakening.">
-          <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ{totalsOrderFlow?.length ? ' · futures order flow Δ' : ''}</Text>
+          <Text strong style={{ fontSize: 12 }}>Totals: CE, PE and Net (CE − PE) — Δ and cumulative Δ{moneyness ? ' · by moneyness (Δ-weighted)' : ''}{totalsOrderFlow?.length ? ' · futures order flow Δ' : ''}</Text>
         </Tooltip>
         {totalsView === 'numbers'
-          ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} />
-          : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} />}
+          ? <OiTotalsNumbers ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} moneyness={moneyness} />
+          : <OiTotalsHeatmap ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={strikes} asOfMs={asOfMs} timeframeMinutes={heatmapTimeframeMinutes} live={live} orderFlow={totalsOrderFlow} moneyness={moneyness} />}
       </div>
   )
   return (
@@ -1915,12 +1941,11 @@ function fmtOiNum(v) {
 // The totals as NUMBERS: the same six rows as the heatmap below it (CE, PE and net CE − PE; each bucket's
 // change and the running total), one column per time bucket, newest on the left - read off the figures
 // instead of a colour.
-export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null }) {
+export function OiTotalsNumbers({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null, moneyness = false }) {
   const { buckets, rows, estimated } = useMemo(() => {
-    const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
-    const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+    const { ce, pe } = totalsChanges(ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, moneyness)
     return withFlow(buildOiTotalsRows(ce, pe), orderFlow, timeframeMinutes, asOfMs)
-  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow])
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow, moneyness])
   const shownRows = totalsRowsOf(rows)
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   if (buckets.length === 0) return <Empty description="No OI data yet." />
@@ -2115,30 +2140,31 @@ function useServerOiBreakAlerts(underlying, onFirst) {
 }
 
 // The same totals as charts for the whole day so far, in a popup (OiTotalsCharts.jsx) - worked out only while it is open.
-export function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra }) {
+// `moneyness` - the totals card's tick; not given (the X quick view), the tick as kept when the popup opens.
+export function OiTotalsChartsPopup({ open, onClose, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, dayKey, extra, moneyness: givenMoneyness }) {
+  const moneyness = useMemo(() => (givenMoneyness ?? (open ? storedTotalsMoneyness() : false)), [givenMoneyness, open])
   const totals = useMemo(() => {
     if (!open) return null
-    const ce = buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
-    const pe = buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes).perStrikeChange
+    const { ce, pe } = totalsChanges(ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, null, moneyness)
     return buildOiTotalsRows(ce, pe)
-  }, [open, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes])
+  }, [open, ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, moneyness])
   return (
     <OiTotalsChartsModal
-      open={open} onClose={onClose} totals={totals} dayKey={`${dayKey}-${timeframeMinutes}`} extra={extra}
+      open={open} onClose={onClose} totals={totals} dayKey={`${dayKey}-${timeframeMinutes}${moneyness ? '-m' : ''}`}
+      extra={moneyness ? <>{extra}<Tag color="blue" style={{ margin: 0 }}>by moneyness (Δ-weighted)</Tag></> : extra}
       format={fmtOiNum} bullish={OI_BULLISH_COLOR} bearish={OI_BEARISH_COLOR}
     />
   )
 }
 
-export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null }) {
+export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, live = false, windowMinutes = null, orderFlow = null, moneyness = false }) {
   const canvasRef = useRef(null)
   const scrollRef = useRef(null)
   const [hover, setHover] = useState(null)
   const { buckets, rows, estimated } = useMemo(() => {
-    const ce = sliceMatrixWindow(buildOiChangeMatrix(ceByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
-    const pe = sliceMatrixWindow(buildOiChangeMatrix(peByStrike, strikes, asOfMs, timeframeMinutes), windowMinutes).perStrikeChange
+    const { ce, pe } = totalsChanges(ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, moneyness)
     return withFlow(buildOiTotalsRows(ce, pe), orderFlow, timeframeMinutes, asOfMs)
-  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow])
+  }, [ceByStrike, peByStrike, strikes, asOfMs, timeframeMinutes, windowMinutes, orderFlow, moneyness])
   const shownRows = totalsRowsOf(rows)
   const columns = useMemo(() => [...buckets].reverse(), [buckets])
   const formatBucketTime = istTimeFormatter
@@ -6829,7 +6855,7 @@ export default function OiReplayPage() {
                 <OiChangeHeatmapSection
                   ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                   lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`${underlying}-${result.date}`} show="totals" alerts={oiBreakAlertSettings}
-                  spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow}
+                  spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow} moneynessOption
                 />
               </Card>
               </LiveSection>
@@ -7305,7 +7331,7 @@ export default function OiReplayPage() {
               <OiChangeHeatmapSection
                 ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs} live={isLive}
                 lastOiChangeMs={lastOiChangeMs} nowMs={nowTick} dayKey={`quick-${underlying}-${result.date}`} show="totals+strikes"
-                spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow}
+                spotBars={oneMinBars} step={step} orderFlow={totalsOrderFlow} moneynessOption
               />
             )}
             {quickView === 'premium' && (

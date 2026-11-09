@@ -164,6 +164,19 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; with Telegram on, the page sends it itself only when the server is not
   covering the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+- OI Replay's OI totals BY MONEYNESS (asked for - "we are calculating net CE − PE; instead can we have moneyness and then
+  calculate delta? When a checkbox is ticked moneyness is included, else the same as today"): the OI totals card's
+  "Moneyness (Δ-weighted)" tick (`optionanalytics.oiReplay.totalsMoneyness`, OFF by default - off, the card is exactly as
+  before; offered by OI Replay's totals card and the N quick view only - `moneynessOption`; the External page's section
+  has no tick): each strike's OI change in a bucket x its option DELTA at the bucket's end - a call's N(d1), a put's
+  N(−d1) (`oiMoneyness.js` - `bucketPricing` / `weightByMoneyness`, `totalsChanges` in `OiReplayPage`), read off the
+  chain's OWN premiums with no IV field or expiry: the forward by put-call parity at the strike whose call and put are
+  closest, the move priced (σ√T) from that strike's straddle (`straddleMove`, Black-76 `bsStraddle`), a strike's premium
+  carried from its last reading, 1/2 before any pair is priced; only the change is weighted (no OI change, nothing added
+  however far spot moved); nothing after the clock (`tests/oi-moneyness.test.mjs`). The CE / PE / Net Δ and cumulative Δ
+  (Numbers, Heatmap, the Charts popup - tagged - and the X quick view's charts, which read the tick as kept when opened)
+  follow it; the S/R and 🎯 alerts, the Signal backtest and the server keep reading the plain OI. With Σ 3 expiries the
+  deltas are the current expiry's.
 - OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
   (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
   default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,
