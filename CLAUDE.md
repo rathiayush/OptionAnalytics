@@ -673,7 +673,12 @@ When adding or changing a strategy:
   the same numbers. OI SINCE OPEN and TOTAL OI CE vs PE take the same divergence (asked for - "add this bullish div signal
   in total oi and oi since open as well so we can apply filter"): their line is PE − CE (added since the open / total),
   which follows price (puts written into a rise, calls into a fall) - `divergenceHolds`, one function for all seven
-  lines (the S-R walls near ATM's two too). A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
+  lines (the S-R walls near ATM's two too). ADDED THIS MUCH % IN THE LAST N MIN (asked for - "OI total, OI since open, OI
+  cumulative net CE − PE: add an indicator like added this much % in last n min"; `ADDED` / `addedPctHolds`): OI since
+  open and Total OI CE vs PE - "PE / CE OI added" (`peAddedPct` / `ceAddedPct`, the mirror the other side) - and the CE /
+  PE / Net cumulative Δ - "Rose / Fell by a % of the OI" (`upPct` / `downPct`): the line's move over the look-back in % of
+  the OI at the look-back's start (the side's chain-wide total, `tot`; CE + PE for the Net) - as Total CE / PE OI's
+  "Increased by" reads it; "by ≥" 1% by default, 0 = any move that way, up to 50. A condition's SECOND NUMBER (`param2`) is held to its range by `cleanLine`, passed to the test, shown
   as a second box on the row and in `lineText`), 🎯, the OI S-R walls (near the support / resistance, broke through - and SINCE THE MORNING, asked for: "highest S-R wall from
   morning or lowest OI wall": near / broke above the HIGHEST resistance and near / broke below the LOWEST support the walls
   have been at since the open, and near / broke the STRONGEST of each - the minute's wall with the most call / put OI so
