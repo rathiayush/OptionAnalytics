@@ -773,7 +773,7 @@ When adding or changing a strategy:
   the signal skipped "no X minute"), ITS ATM, step, premiums and expiry (the Expiry day choice reads the TRADED options'),
   its lot size (`engineSettings`); the entry time stays the signal's; each trade carries `tradeIndex` (`optionName` -
   "SENSEX 82000 CE" in the trades, the CSV, the live alerts). No day of it = every signal skipped "no X data" (`dayOutcome`:
-  the day not run, "X: <why>"). Each day loads BOTH indices - the page (`results[].tradeDay`, Compare all 20 too), the
+  the day not run, "X: <why>"). Each day loads BOTH indices - the page (`results[].tradeDay`, Compare all too), the
   background job (a trade day that failed on the way tried once more) and the live scan (today's day of every index wanted,
   read once a round; a strategy whose traded index was not read waits for the next round, the others go on). The day chart
   shows the TRADED index by default ("SENSEX" / "NIFTY (signal)" / the signal's futures / Option - the traded index's
@@ -861,15 +861,27 @@ When adding or changing a strategy:
   run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
   loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
   `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
-  add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 20 rules from the page's own conditions in
-  six families (`TEMPLATE_FAMILIES` - in order (THEN), trend, reversal, breakout, options & volatility, premium selling),
+  add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 24 rules from the page's own conditions in
+  seven families (`TEMPLATE_FAMILIES` - delta profile, in order (THEN), trend, reversal, breakout, options & volatility,
+  premium selling). The DELTA PROFILE four (asked for - "add strategy for delta profile ... previous day's highest buy and
+  sell, check what's best we can do"; `PREV_DAY` = "Profile of: Days before", 1 day): yesterday's option delta profile's
+  MOST BOUGHT row (bullish option flow piled up - support) and MOST SOLD row (bearish - resistance) read four ways -
+  `dpBuyersDefend` (a dip into the most-bought row closing back above it, today's flow at the price buying; mirror the
+  most-sold row rejected, selling), `dpSellersBroken` (a cross above the most-sold row, today's net flow bullish, over
+  VWAP, trailed), `dpFailedBreak` (under the most-bought row THEN back over it within 30 min - trapped sellers) and
+  `dpSellPut` (over the most-bought row, today's net flow bullish, sideways 30 min, the straddle under its decay line -
+  sell the put; the flow keeps the two sides apart between the rows); each fires on its case LONG and mirrored SHORT and not
+  without each part (`tests/signal-templates.test.mjs`). They read the session before each day: the run, a background run
+  and the live scan load it for the rule (`deltaDaysNeeded`); Compare all puts it on the days loaded first
+  (`attachDeltaPast` - the run's own days not asked again; stopped at the first failure, the days left said under the
+  table). Unmeasured here (no market data in the repo) - Compare all on real days ranks them.
   each read through a different lens (positioning, flow, dealer gamma, volatility, auction structure, momentum, the
   premiums' own tape), written for the bullish side with the Mirror on, with its `idea` (why) and its own `settings`
   (timeframe, SL / target, trail / time stop - what it does not name is OFF). The rule card's "Templates" dropdown (grouped,
   searchable, each with its idea) LOADS one onto the page - its rule and levels (`withTemplate`: the page's index, lots,
   charges, max trades, cooldown, day limits and expiry-day choice kept) - to run and edit like any rule; "Undo" puts back
-  what was there. "Compare all 20" (`compareTemplates` / `templateRow`) runs every template over the days the PAGE'S run
-  loaded (no load - the prepared days; one template a tick, a progress bar) through the same engine and report, ranked by
+  what was there. "Compare all" (`compareTemplates` / `templateRow`) runs every template over the days the PAGE'S run
+  loaded (no load but the delta templates' session before - the prepared days; one template a tick, a progress bar) through the same engine and report, ranked by
   net (a table; on a phone a block each - a table hid the names under its pinned column), each with Load & edit. They are
   starting points, not measured edges - the ranking says so. `tests/signal-templates.test.mjs` (every template whole - no
   condition dropped, its logic read, a side for the mirror, its levels in range; a row = that template's own report).

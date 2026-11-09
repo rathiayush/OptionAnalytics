@@ -597,7 +597,7 @@ export default function SignalBacktestPage() {
   const [saveOpen, setSaveOpen] = useState(false)
 
   // The 20 TEMPLATES (signalTemplates.js): one loaded puts its rule and its own levels on the page (Undo puts back what was
-  // there); "Compare all 20" runs every one over the days this page has loaded and ranks them - each through the same engine.
+  // there); "Compare all" runs every one over the days this page has loaded and ranks them - each through the same engine.
   const [undoTemplate, setUndoTemplate] = useState(null)
   const applyTemplate = (id, quiet = false) => {
     const tpl = templateById(id)
@@ -629,6 +629,20 @@ export default function SignalBacktestPage() {
     const token = ++compareToken.current
     const settings = runSettings
     setCompare({ status: 'running', rows: [], done: 0, total: RULE_TEMPLATES.length, days: results.length, underlying: settings.underlying })
+    // The delta profile templates read the session before each day: put on the days loaded first (`attachDeltaPast` - the
+    // run's own days are not asked again, so mostly the first day's session before). Stopped at the first that fails - never
+    // a request a day failing; those templates then read nothing on the days left (said under the table).
+    const deltaNeed = Math.max(0, ...RULE_TEMPLATES.map((t) => deltaDaysNeeded(t.rule)))
+    let pastMissing = null
+    if (deltaNeed > 0) {
+      setCompare((c) => ({ ...c, loadingPast: true }))
+      for (let k = 0; k < results.length; k++) {
+        const past = await attachDeltaPast(results[k].day, settings.underlying, deltaNeed).catch((err) => ({ ok: false, reason: String(err?.message ?? err) }))
+        if (compareToken.current !== token) return
+        if (!past.ok) { pastMissing = { days: results.length - k, reason: past.reason }; break }
+      }
+      setCompare((c) => ({ ...c, loadingPast: false, pastMissing }))
+    }
     const rows = []
     for (const t of RULE_TEMPLATES) {
       // One template at a time, the page drawn between them.
@@ -1031,7 +1045,12 @@ export default function SignalBacktestPage() {
             extra={<Button size="small" type="text" icon={<CloseOutlined />} onClick={closeCompare} aria-label="Close the comparison" />}
           >
             {compare.status === 'running'
-              ? <Progress percent={Math.round((compare.done / Math.max(1, compare.total)) * 100)} size="small" format={() => `${compare.done} / ${compare.total}`} />
+              ? (
+                  <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                    {compare.loadingPast && <Text type="secondary" style={{ fontSize: 12 }}>Loading the session before each day for the delta profile templates…</Text>}
+                    <Progress percent={Math.round((compare.done / Math.max(1, compare.total)) * 100)} size="small" format={() => `${compare.done} / ${compare.total}`} />
+                  </Space>
+                )
               : (
                   <Space direction="vertical" size={8} style={{ width: '100%' }}>
                     {/* On a phone a block a template (a table there hid the names under its pinned column). */}
@@ -1079,6 +1098,11 @@ export default function SignalBacktestPage() {
                         },
                       ]}
                     />
+                    )}
+                    {compare.pastMissing && (
+                      <Text type="warning" style={{ fontSize: 12 }}>
+                        The session before could not be loaded for {compare.pastMissing.days} day{compare.pastMissing.days === 1 ? '' : 's'} ({compare.pastMissing.reason}) - the delta profile templates took no trades there. Compare again to retry.
+                      </Text>
                     )}
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       Each template with its own timeframe and SL / target / trail; the lots, charges, max trades, cooldown, day limits

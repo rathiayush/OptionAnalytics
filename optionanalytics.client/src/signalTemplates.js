@@ -1,8 +1,9 @@
-// The Signal backtest's 20 TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and add it in dropdown
+// The Signal backtest's TEMPLATES - 20, and 4 more on the option delta profile (asked for - "be a non linear thinker ... create top 20 strategy and add it in dropdown
 // ... so that u run those as well i can modify"): ready rules built from the page's own conditions, each read through a
 // different lens - positioning (OI), flow (cumulative Δ), dealer hedging (GEX), volatility (the straddle), auction structure
 // (yesterday's profile, the IB, pivots / CPR), momentum (EMA / RSI) and the option premiums' own tape - and some through
-// several at once. Each is written for the BULLISH side with the Mirror on (the bearish side read the other way round),
+// several at once - and the OPTION DELTA PROFILE (asked for next - "add strategy for delta profile ... previous day's highest
+// buy and sell"): yesterday's most bought / most sold rows. Each is written for the BULLISH side with the Mirror on (the bearish side read the other way round),
 // with its own timeframe and SL / target / trail; loading one puts it on the page to run and change like any rule. They
 // are starting points to measure, not measured edges: `compareTemplates` runs all of them over the days loaded, each
 // through the same engine and report as the page (`tests/signal-templates.test.mjs`).
@@ -16,6 +17,7 @@ const THEN = (within, ...items) => group('then', items, { within })
 const nest = (g) => ({ group: g })
 
 export const TEMPLATE_FAMILIES = [
+  { id: 'delta', name: 'Delta profile (yesterday\'s buy / sell rows)' },
   { id: 'sequence', name: 'In order (THEN)' },
   { id: 'trend', name: 'Trend' },
   { id: 'reversal', name: 'Reversal' },
@@ -26,10 +28,43 @@ export const TEMPLATE_FAMILIES = [
 
 // The levels a template sets when it is loaded (what it does not name is off: no trail, no time stop).
 const LEVELS = { levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0 }
+// The option delta profile a line reads: the PREVIOUS DAY's ("Profile of: Days before", 1 day - fixed all day, known before
+// the open) or TODAY's so far (developing).
+const PREV_DAY = { param3: 1, param4: 1 }
+const TODAY = { param3: 1, param4: 0 }
 
-/** The 20 templates: { id, family, name, idea, rule: { tree, action, mirror }, settings: { timeframe, slPct, targetPct,
+/** The templates: { id, family, name, idea, rule: { tree, action, mirror }, settings: { timeframe, slPct, targetPct,
  *  trailGap?, trailStart?, timeStopMin? } }. */
 export const RULE_TEMPLATES = [
+  // DELTA PROFILE: yesterday's option delta profile on spot (OI Replay's card) - its MOST BOUGHT row, where yesterday's
+  // bullish option flow (calls bought / puts sold) piled up - a support its buyers have a position to defend - and its
+  // MOST SOLD row, where the bearish flow did - resistance. Read four ways: the level holds, it breaks, a break of it fails,
+  // a quiet market sits on it. They read the session before each day: the page's run, Compare all, a background run and the
+  // live scan load it for them.
+  {
+    id: 'dpBuyersDefend', family: 'delta', name: 'Yesterday\'s most-bought row holds',
+    idea: 'Yesterday\'s bullish option flow piled up at one price row - its buyers have a position to defend there. Price dips into that row and closes back above it while today\'s option flow at the price is buying too: support defended, taken quickly with a time stop. Mirror: rejected at yesterday\'s most-sold row with selling at the price.',
+    rule: { tree: ALL(L('odpBuy', 'heldAbove', { param: 0.05, windowMin: 10, ...PREV_DAY }), L('odpDelta', 'buying', TODAY)), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 40, timeStopMin: 45 },
+  },
+  {
+    id: 'dpSellersBroken', family: 'delta', name: 'Through yesterday\'s most-sold row',
+    idea: 'Yesterday\'s bearish option flow was heaviest at one row - the sellers\' line. A close above it, with today\'s net option flow bullish and price over VWAP, says they were absorbed: the breakout, carried by a trail. Mirror: a break below yesterday\'s most-bought row with today\'s flow bearish, under VWAP.',
+    rule: { tree: ALL(L('odpSell', 'crossedAbove', { windowMin: 10, ...PREV_DAY }), L('odpDelta', 'netPositive', TODAY), L('vwap', 'above')), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 25, targetPct: 60, trailGap: 20, trailStart: 30 },
+  },
+  {
+    id: 'dpFailedBreak', family: 'delta', name: 'Failed break of yesterday\'s buyers',
+    idea: 'Price breaks below yesterday\'s most-bought row, then closes back above it within 30 minutes - the breakdown failed and the sellers who chased it are trapped under the buyers\' level. Mirror: a failed break above yesterday\'s most-sold row.',
+    rule: { tree: THEN(30, L('odpBuy', 'crossedBelow', { windowMin: 10, ...PREV_DAY }), L('odpBuy', 'crossedAbove', { windowMin: 5, ...PREV_DAY })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 45 },
+  },
+  {
+    id: 'dpSellPut', family: 'delta', name: 'Quiet over yesterday\'s buyers: sell the put',
+    idea: 'Price holding over yesterday\'s most-bought row with today\'s net option flow bullish, sideways for 30 minutes, the straddle under its decay-only line (IV being sold): the buyers\' row is a floor under a quiet market - sell the ATM put, the time stop caps the stay. Mirror: under yesterday\'s most-sold row with the flow bearish, sell the call.',
+    rule: { tree: ALL(L('odpBuy', 'above', { param: 0.05, ...PREV_DAY }), L('odpDelta', 'netPositive', TODAY), L('spotMove', 'sideways', { param: 0.15, windowMin: 30 }), L('straddle', 'belowDecay')), action: 'sellPE', mirror: true },
+    settings: { timeframe: 5, slPct: 40, targetPct: 60, timeStopMin: 90 },
+  },
   {
     id: 'oiFlowReclaim', family: 'sequence', name: 'OI flip → divergence → EMA reclaim',
     idea: 'Writers switch sides first (PE overtakes CE since the open), the OI flow then refuses to follow a dip (bullish divergence), and price confirms by losing and reclaiming its 20 EMA - three different witnesses, in that order, within an hour.',
