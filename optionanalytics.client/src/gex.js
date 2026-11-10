@@ -71,8 +71,7 @@ const YEAR_MS = 365 * 24 * 3600_000
 
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN
 const pdf = (x) => Math.exp(-x * x / 2) / SQRT_2PI
-/** The standard normal CDF (also read by oiMoneyness.js). */
-export function cdf(x) {
+function cdf(x) {
   const t = 1 / (1 + 0.2316419 * Math.abs(x))
   const tail = pdf(x) * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
   return x >= 0 ? 1 - tail : tail
