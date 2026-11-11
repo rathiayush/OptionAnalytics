@@ -20,6 +20,8 @@ MODEL="${OA_MODEL:-qwen2.5:14b}"
 SERVER_LOG=/tmp/oa-server.log
 UI_LOG=/tmp/oa-ui.log
 
+# The project targets .NET 8: use the 8 installed in ~/.dotnet (Microsoft's dotnet-install script) ahead of any newer system .NET.
+if [ -x "$HOME/.dotnet/dotnet" ]; then export DOTNET_ROOT="$HOME/.dotnet"; export PATH="$HOME/.dotnet:$PATH"; fi
 export PATH="$PATH:/usr/local/share/dotnet"
 # Node comes from nvm (a script does not read ~/.zshrc).
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" >/dev/null 2>&1

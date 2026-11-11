@@ -1045,7 +1045,7 @@ When adding or changing a strategy:
   how many later days agree on their own; the later days' top / bottom fifth (win % of the trades, or the average move);
   what holds first. Under 6 days there is no split (a warning); under 10 later days it says "a hint, not proof". "Dataset
   CSV" = the whole table (`rowsCsv` - a row a candle, a column a feature and a label) for a spreadsheet or your own model.
-  Not in it: the order flow's footprint delta and the book heatmap (kept 30 days only) and the market profile's TPOs. It
+  Not in it: the order flow's footprint delta and the book heatmap (kept about a year - 252 trading days - and only from when the server began recording them) and the market profile's TPOs. It
   places nothing, feeds no strategy; a reading that holds is built as a rule and run through the backtest like any other.
   IN THE BACKGROUND (asked for - "this feature finder should also work on background jobs"): a background run has a KIND
   (`kind` - "backtest", the default, or "features"; `SignalBacktestJobService.Kinds`; a run saved before reads as a
@@ -1172,7 +1172,7 @@ When adding or changing a strategy:
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
   came back as the candle estimate, which has no imbalances at all). One gzip JSON per contract and day
   (`{UNDERLYING}/{securityId}/{yyyy-MM-dd}.json.gz`, heatmap rows as [row, qty]; ~4 MB a full day), the newest
-  `OrderFlow:DaysOnDisk` dates (30) kept; written on ONE background queue (never on an engine's lock or the tick path), a
+  `OrderFlow:DaysOnDisk` dates (252 trading days - about ONE YEAR, asked for - kept, a few GB at most, only memory's newest 3 and a few read-back days in RAM; written on ONE background queue (never on an engine's lock or the tick path), a
   day read back kept for the next asks. TODAY is checkpointed every `CheckpointInterval` (5 min) and at shutdown, and a new
   engine starts from it (`NewEngine` -> `ImportDay`): a deploy mid-session keeps the morning exact - only the minutes the
   server was down are missing, and the first tick after sets a new baseline (no giant print). `OrderFlowDayStoreTests.cs`.
@@ -1224,9 +1224,9 @@ When adding or changing a strategy:
   (it used to finish "done" with an empty file). The volume-profile readings need volume: the near futures' (only for days Dhan still holds - the
   last couple of months) or the index's (from January 2026), so they are blank for older days; the market profile and the option delta profile
   are there for every day.
-- .NET 11 changed `(decimal)aDouble` / `(decimal)aFloat` to keep the EXACT binary value (a feed price 101.60f became
+- The project targets .NET 8 (`net8.0`; it was on 11 for a while). On this Mac .NET 8 is in `~/.dotnet` beside the system .NET 11 (RUNNING.md section 10). .NET 11 changed `(decimal)aDouble` / `(decimal)aFloat` to keep the EXACT binary value (a feed price 101.60f became
   101.59999847412109375, an IV 12.34 became 12.3399999...); .NET 8 rounded to 15 / 7 significant digits. Every double / float
-  that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast
+  that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast (it gives the same numbers on 8 and on 11)
   (`DecimalConversionTests.cs`).
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode, or a saved Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`);

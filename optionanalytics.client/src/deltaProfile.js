@@ -5,7 +5,7 @@
 //
 //  - FUTURES (`futuresDeltaProfile`): the Order Flow server's footprint - each minute's buy and sell volume AT EACH PRICE
 //    (the aggressor side of every trade, OrderFlowEngine), added up by price row; a minute the server did not record
-//    (a restart part way, or a day older than its 30 days on disk) is its estimate from Dhan's 1-minute candles, spread
+//    (a restart part way, or a day older than its ~1 year (252 trading days) on disk) is its estimate from Dhan's 1-minute candles, spread
 //    over the minute's range - marked, never mistaken for traded sides.
 //  - OPTIONS ON THE SPOT CHART (`optionDeltaProfile`): options have no trade-by-trade side either, so each strike's
 //    1-minute bar gives one the dashboard's way (optionFlow.js - the Option CDV's own formula): buy minus sell from

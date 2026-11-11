@@ -152,3 +152,11 @@ The "Analyse with AI" buttons exist only when the server says it runs locally. I
 `LocalTools` follows `IsLocal` when it is not set - but `IsLocal: true` also makes OI Replay read past days from the stored database ONLY (never
 Dhan), and with no database every day fails ("Stored data is not configured"). So on a machine with no database keep `IsLocal` false and set
 `LocalTools` true. A deployment sets neither: the AI buttons and their endpoints do not exist there.
+
+## 10. .NET version
+The project targets **.NET 8** (`net8.0`). This Mac also has .NET 11 in `/usr/local/share/dotnet`, which has no 8 runtime, so .NET 8 is installed beside it in
+`~/.dotnet` (`dotnet-install.sh --channel 8.0 --install-dir ~/.dotnet`). `./run.sh` and the VS Code launch / build task use it. In a plain terminal:
+```bash
+export DOTNET_ROOT="$HOME/.dotnet" PATH="$HOME/.dotnet:$PATH"
+cd /Users/ayush/GitHub/OptionAnalytics/OptionAnalytics.Server && dotnet run --launch-profile http
+```

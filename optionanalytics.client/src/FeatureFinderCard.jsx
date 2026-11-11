@@ -233,7 +233,7 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
           look at how many later days agree, and at the top / bottom fifth. A reading that holds is a candidate for a rule:
           build it in the rule builder and run it through the backtest with charges. The CSV is the whole table (a row a
           candle, a column a reading and what came next) for a spreadsheet or your own model. The order flow (the
-          footprint&apos;s delta, the book heatmap) is not in it: the server keeps those days for 30 days only. Run in the
+          footprint&apos;s delta, the book heatmap) is not in it: the server keeps those days for about a year (252 trading days), from when it began recording them. Run in the
           background, it takes up to 1,500 days - more days, a fairer check.
         </Text>
       </FoldText>

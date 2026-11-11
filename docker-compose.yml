@@ -53,7 +53,7 @@ services:
       Storage__TradeSettingsPath: /app/data/trade-settings.csv
       Storage__RiskSettingsPath: /app/data/risk-settings.csv
       # The order flow days the server recorded live (one gzip JSON per contract and day, the newest
-      # OrderFlow:DaysOnDisk dates) - past days replay exactly, today carries on through a deploy.
+      # OrderFlow:DaysOnDisk dates - 252 trading days, about one year, a few GB at most) - past days replay exactly, today carries on through a deploy.
       Storage__OrderFlowPath: /app/data/order-flow
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}

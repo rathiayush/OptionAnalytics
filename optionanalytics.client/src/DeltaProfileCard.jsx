@@ -435,8 +435,8 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           live, read again each minute. Minutes the server did not record live are estimated from 1-minute candles (tagged).
           DAYS: the day so far with the sessions before it added up (a composite - the levels several days defended);
           &quot;Previous day&quot; ticked = the sessions BEFORE the day only (each day&apos;s own near futures), drawn over the
-          day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price. The server keeps the last 30 days it
-          recorded; an older day is its estimate from 1-minute candles. LEVELS: the volume profile&apos;s POC (solid), VAH /
+          day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price. The server keeps about a year (252 trading days) of
+          what it recorded; an older day is its estimate from 1-minute candles. LEVELS: the volume profile&apos;s POC (solid), VAH /
           VAL (dashed) and ONE HVN / LVN (dotted), as the Profiles page draws them; &quot;most bought / sold&quot; = the rows
           with the largest buying / selling.
         </Text>

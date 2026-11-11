@@ -17,7 +17,7 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 ///
 /// DISK (Storage:OrderFlowPath - the persistent volume; none configured = memory only, as before): every day kept, ONE GZIP
 /// JSON FILE PER CONTRACT AND DAY ({root}/{UNDERLYING}/{securityId}/{yyyy-MM-dd}.json.gz, the contract's name beside them),
-/// the newest OrderFlow:DaysOnDisk dates (default 30) - so a deploy / restart no longer turns every past day into an
+/// the newest OrderFlow:DaysOnDisk dates (default 252 - about ONE YEAR of trading days, ~2 - 4 MB a contract and day) - so a deploy / restart no longer turns every past day into an
 /// estimate. TODAY is saved too while it is recorded (OrderFlowService's checkpoints, every few minutes and at shutdown) and
 /// read back into the new engine at start (LoadSaved -> OrderFlowEngine.ImportDay), so a deploy mid-session keeps the
 /// morning exact; only the minutes the server was down are missing.
@@ -39,6 +39,9 @@ public sealed class OrderFlowDayStore : IDisposable
     private readonly ConcurrentDictionary<string, SortedDictionary<DateOnly, OrderFlowEngine>> _days = new(StringComparer.OrdinalIgnoreCase);
     // Days read back from disk (not in memory's newest few) - the last few asked for.
     private readonly ConcurrentDictionary<(string Key, DateOnly Date), (OrderFlowEngine Engine, long At)> _loaded = new();
+    /// <summary>Trading days kept on disk by default: about one year (asked for - "cache last 1 year"). Only memory's newest
+    /// few days and the last few read back are held in RAM, so a longer history costs disk, not memory.</summary>
+    public const int DefaultDaysOnDisk = 252;
     private long _loadClock;
 
     public OrderFlowDayStore(IConfiguration? configuration = null, ILogger<OrderFlowDayStore>? logger = null)
@@ -49,7 +52,7 @@ public sealed class OrderFlowDayStore : IDisposable
     {
         _logger = (ILogger?)logger ?? NullLogger.Instance;
         _maxDays = Math.Clamp(configuration?.GetValue("OrderFlow:DaysInMemory", 3) ?? 3, 0, 30);
-        _daysOnDisk = Math.Clamp(configuration?.GetValue("OrderFlow:DaysOnDisk", 30) ?? 30, 1, 400);
+        _daysOnDisk = Math.Clamp(configuration?.GetValue("OrderFlow:DaysOnDisk", DefaultDaysOnDisk) ?? DefaultDaysOnDisk, 1, 400);
         var root = configuration?["Storage:OrderFlowPath"];
         if (string.IsNullOrWhiteSpace(root)) return;
         try
