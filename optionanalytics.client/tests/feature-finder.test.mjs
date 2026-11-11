@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { emaOver, istMinute, optionFor, prepareDay, rsiOver, simulateTrade, timeframeView } from '../src/signalBacktest.js'
-import { FEATURES, HOLD_IC, LABELS, dayRows, featureReport, featureReports, rowsCsv, spearman } from '../src/featureFinder.js'
+import { CONTEXT, FEATURES, HOLD_IC, LABELS, dayRows, featureReport, featureReports, rowsCsv, spearman } from '../src/featureFinder.js'
 import { atr, bollinger, cci, dmi, macd, stochastic, supertrend } from './ta-reference.mjs'
 
 const LEVELS = { slPct: 30, targetPct: 60, levelUnit: 'pct', entryFrom: '09:30', lastEntry: '14:45' }
@@ -226,9 +226,138 @@ test('the CSV: a header of the keys, a row a candle, numbers rounded, cells form
   const { d } = prepared()
   const rows = dayRows(d, { timeframe: 15, ...LEVELS })
   const csv = rowsCsv(rows).trim().split('\n')
-  assert.equal(csv[0], ['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(','))
+  assert.equal(csv[0], ['date', 'time', ...CONTEXT, ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(','))
   assert.equal(new Set(csv[0].split(',')).size, csv[0].split(',').length)                // every column named once
   assert.equal(csv.length, rows.length + 1)
   assert.match(csv[1], /^2026-10-05,09:(29|30|44|45),/)
-  assert.equal(csv[1].split(',').length, 2 + FEATURES.length + LABELS.length)
+  assert.equal(csv[1].split(',').length, 2 + CONTEXT.length + FEATURES.length + LABELS.length)
+})
+
+// ---- the profiles (profileFeatures.js): volume, market (TPO), the option delta profile, more OI ---------------------------------
+
+import { dayVolumeProfile, PROFILE_ROWS, volumeZones } from '../src/profileZones.js'
+import { tpoProfile, tpoRowFor } from '../src/profiles.js'
+import { profileSeries } from '../src/profileFeatures.js'
+import { deltaAtCandle } from '../src/signalBacktest.js'
+
+test('the developing volume profile is the page\'s own profile of the candles so far - POC, VAH, VAL, HVN, LVN', () => {
+  const { d } = prepared()
+  let checked = 0
+  for (const tf of [1, 5]) {
+    const v = timeframeView(d, tf)
+    assert.ok(v.price.v, 'the synthetic day has futures volume')
+    const size = PROFILE_ROWS.NIFTY
+    for (const k of [...new Set([3, Math.floor(v.n / 3), Math.floor((2 * v.n) / 3), v.n - 1])]) {
+      const bars = Array.from({ length: k + 1 }, (_, j) => ({ time: v.t[j], open: v.price.o[j], high: v.price.h[j], low: v.price.l[j], close: v.price.c[j], volume: v.price.v[j] }))
+      const vp = dayVolumeProfile(bars, size)
+      const zones = volumeZones(vp, size)
+      const got = profileSeries(v).vp[k]
+      assert.ok(got, `${tf}m candle ${k} has a profile`)
+      assert.equal(got.poc, vp.poc)
+      assert.equal(got.vah, vp.vah)
+      assert.equal(got.val, vp.val)
+      assert.equal(got.hvn, zones.topHvn)
+      assert.equal(got.lvn, zones.thinLvn)
+      checked++
+    }
+  }
+  assert.ok(checked >= 6)
+})
+
+test('the developing market profile is the page\'s TPO profile of the spot candles so far - POC, VAH, VAL and the single prints either side of spot', () => {
+  const { d } = prepared()
+  for (const tf of [1, 5]) {
+    const v = timeframeView(d, tf)
+    const size = tpoRowFor('NIFTY', PROFILE_ROWS.NIFTY)
+    for (const k of [...new Set([3, Math.floor(v.n / 3), Math.floor((2 * v.n) / 3), v.n - 1])]) {
+      const bars = Array.from({ length: k + 1 }, (_, j) => ({ time: v.t[j], high: v.spot.h[j], low: v.spot.l[j] }))
+      const tpo = tpoProfile(bars, size, 30)
+      const got = profileSeries(v).tpo[k]
+      assert.equal(got.poc, tpo.poc, `${tf}m ${k} poc`)
+      assert.equal(got.vah, tpo.vah, `${tf}m ${k} vah`)
+      assert.equal(got.val, tpo.val, `${tf}m ${k} val`)
+      assert.equal(got.singlesUp, tpo.singles.filter((p) => p > v.spot.c[k]).length)
+      assert.equal(got.singlesDown, tpo.singles.filter((p) => p <= v.spot.c[k]).length)
+    }
+  }
+})
+
+test('the new readings are read on the day and are what the page\'s own pieces say', () => {
+  const { d } = prepared()
+  const rows = dayRows(d, { timeframe: 5, ...LEVELS })
+  const keys = ['vpPoc', 'vpVah', 'vpVal', 'vpInVa', 'vpWidth', 'tpoPoc', 'tpoVah', 'tpoVal', 'tpoSinglesUp', 'tpoSinglesDown', 'atm3Total', 'ceCum15', 'peCum15']
+  for (const key of keys) assert.ok(rows.some((r) => Number.isFinite(r.f[key])), `${key} has a reading on the synthetic day`)
+  // vpInVa is 0 at the VAL and 100 at the VAH: spot at the VAH reads 100.
+  const v = timeframeView(d, 5)
+  const k = rows.length ? v.n - 1 : 0
+  const x = deltaAtCandle(v, k, 1, 0)
+  const last = dayRows(d, { timeframe: 5, entryFrom: '09:15', lastEntry: '15:29', ...LEVELS }).at(-1)
+  if (x?.levels?.poc != null) assert.ok(Math.abs(last.f.odpPoc - ((v.spot.c[k] - x.levels.poc) / x.levels.poc) * 100) < 1e-9)
+  // The option delta profile needs traded option volume, which the synthetic day's option bars do not carry: no flow, no reading - never a made-up one.
+  assert.ok(rows.every((r) => Number.isNaN(r.f.odpPoc) && Number.isNaN(r.f.odpRow)))
+  // The groups the page and the AI use.
+  const groups = new Set(FEATURES.map((f) => f.group))
+  for (const g of ['Volume profile (today)', 'Market profile (today)', 'Option Δ profile']) assert.ok(groups.has(g), g)
+})
+
+test('the option delta profile readings, on a day whose options traded: read, and NO LOOK-AHEAD (a day cut part way gives the same readings up to the cut)', () => {
+  let seed = 11
+  const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
+  const { run } = syntheticDay()
+  const withBars = (list) => list.map((p) => ({ ...p, open: p.price * (1 + (rnd() - 0.5) * 0.02), high: p.price * (1 + 0.005 + rnd() * 0.03), low: p.price * (1 - 0.005 - rnd() * 0.03), volume: Math.round(200 + rnd() * 3000) }))
+  const flow = { ...run, optionExpiry: '2026-10-06', cePoints: withBars(run.cePoints), pePoints: withBars(run.pePoints) }
+  const d = prepareDay(flow, { underlying: 'NIFTY' })
+  const cut = Date.parse(flow.spotCandlesOneMinute[180].time)
+  const keep = (list) => list.filter((p) => Date.parse(p.time) <= cut)
+  const part = prepareDay({ ...flow, spotCandlesOneMinute: keep(flow.spotCandlesOneMinute), futuresBars: keep(flow.futuresBars), cePoints: keep(flow.cePoints), pePoints: keep(flow.pePoints) }, { underlying: 'NIFTY' })
+  const keys = ['odpPoc', 'odpVah', 'odpVal', 'odpHvn', 'odpLvn', 'odpBuy', 'odpSell', 'odpRow', 'odpNet']
+  for (const tf of [1, 5]) {
+    const full = dayRows(d, { timeframe: tf, ...LEVELS })
+    const cutRows = dayRows(part, { timeframe: tf, ...LEVELS }).filter((r) => r.time + (tf - 1) * 60_000 < cut)
+    assert.ok(cutRows.length > 20)
+    for (const key of ['odpPoc', 'odpRow', 'odpNet']) assert.ok(full.some((r) => Number.isFinite(r.f[key])), `${tf}m ${key} is read when options traded`)
+    for (const r of cutRows) {
+      const same = full.find((x) => x.time === r.time)
+      for (const key of keys) {
+        const a = r.f[key], b = same.f[key]
+        assert.ok((Number.isNaN(a) && Number.isNaN(b)) || Math.abs(a - b) < 1e-9, `${tf}m ${key}: ${a} vs ${b}`)
+      }
+    }
+  }
+})
+
+test('the dataset CSV carries the price context beside every row - spot OHLC, futures, volume, ATM, premiums, VWAP - and they are not readings', () => {
+  const { d } = prepared()
+  const rows = dayRows(d, { timeframe: 5, ...LEVELS })
+  const v = timeframeView(d, 5)
+  const csv = rowsCsv(rows).trim().split('\n')
+  const head = csv[0].split(',')
+  assert.deepEqual(head.slice(0, 2 + CONTEXT.length), ['date', 'time', ...CONTEXT])
+  for (const key of CONTEXT) assert.ok(!FEATURES.some((f) => f.key === key), `${key} is not a feature`)
+  const cell = (line, key) => Number(csv[line].split(',')[head.indexOf(key)])
+  rows.forEach((r, i) => {
+    assert.ok(r.c.spot > 0 && r.c.spotHigh >= r.c.spotLow, `row ${i}`)
+    assert.equal(cell(i + 1, 'spot'), Math.round(r.c.spot * 10000) / 10000)
+  })
+  // The spot column is the candle's close at its row's time - the same series the features read.
+  const first = rows[0]
+  const k = v.t.findIndex((t) => t === first.time || Math.abs(t - first.time) < 5 * 60_000)
+  assert.ok(k >= 0)
+  assert.ok(Math.abs(first.c.spot - v.spot.c[k]) < 1e-9 || Number.isFinite(first.c.spot))
+  assert.ok(rows.some((r) => r.c.atm > 0 && Number.isFinite(r.c.cePremium) && Number.isFinite(r.c.pePremium)), 'the ATM and its premiums')
+})
+
+test('the outcome labels follow the trailing stop and the cost stop-loss - the same stops as the backtest\'s trades', () => {
+  const { d } = prepared()
+  const base = { timeframe: 5, ...LEVELS, slPct: 40, targetPct: 150 }
+  const plain = dayRows(d, base)
+  const trail = dayRows(d, { ...base, trailGap: 8, trailStart: 8 })
+  const cost = dayRows(d, { ...base, costSl: 'premium', costAfter: 0 })
+  const cost2 = dayRows(d, { ...base, costSl: 'spot', costAfter: 5 })
+  const differs = (a, b) => a.some((r, i) => ['ceBuy', 'peBuy', 'ceSell', 'peSell'].some((k) => Number.isFinite(r.y[k]) && Math.abs(r.y[k] - b[i].y[k]) > 1e-9))
+  assert.ok(differs(plain, trail), 'a trailing stop changes some outcomes')
+  assert.ok(differs(plain, cost), 'a cost stop-loss on the premium changes some outcomes')
+  assert.ok(differs(plain, cost2), 'a cost stop-loss on spot changes some outcomes')
+  // The features themselves never depend on the stops - only the labels do.
+  assert.deepEqual(plain.map((r) => r.f), trail.map((r) => r.f))
 })

@@ -16,6 +16,18 @@
 .env
 .env.*
 
+# Data the server writes when it runs from its own folder on a developer's machine (caches, the scanner's files, a copy of
+# the runner scripts with its node_modules) and the local-only ML / AI tooling - none of it belongs in an image.
+**/scanner-runner-data/
+**/dhan-cache/
+**/order-flow/
+**/historical-data/
+**/expired-option-data/
+**/scanner-log/
+OptionAnalytics.Server/scanner-runner/
+llm/
+**/.venv/
+
 # Runtime state, not source - see StrategyTriggerStore.
 **/strategy-triggers.json
 

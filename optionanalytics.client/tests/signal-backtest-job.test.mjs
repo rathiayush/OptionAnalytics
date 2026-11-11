@@ -16,7 +16,7 @@ import {
   backtestReport, cleanBacktestSettings, dayOutcome, daySource, defaultRunName, engineSettings, featureRunHead, featureTradeText, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead,
   reportReplacer, reportReviver, runRange, withIndexLevels,
 } from '../src/signalBacktestJob.js'
-import { dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
+import { CONTEXT, dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
 
 const { run } = syntheticDay()
 const BASE = Date.parse('2026-10-05T00:00:00Z')
@@ -513,6 +513,17 @@ test('the FEATURE FINDER in the background: the page\'s table of the same days a
   const rows = dates.filter((d) => d !== HOLIDAY).flatMap((date) => dayRows(prepareDay(runFor(date), { underlying: 'NIFTY', prevProfile: PREV }), engine))
   assert.ok(rows.length > 9 * 50)
   assert.equal(readFileSync(csv, 'utf8'), rowsCsv(rows))
+  // The capture holds the spot price and the context beside every reading - real numbers, a row a candle.
+  {
+    const [head, ...lines] = readFileSync(csv, 'utf8').trim().split('\n')
+    const cols = head.split(',')
+    assert.deepEqual(cols.slice(0, 2 + CONTEXT.length), ['date', 'time', ...CONTEXT])
+    assert.equal(lines.length, rows.length)
+    const at = (line, name) => Number(line.split(',')[cols.indexOf(name)])
+    assert.ok(lines.every((l) => at(l, 'spot') > 0 && at(l, 'spotHigh') >= at(l, 'spotLow')), 'every row has the spot price')
+    assert.ok(lines.filter((l) => at(l, 'atm') > 0).length > lines.length * 0.9, 'the ATM strike is there')
+    assert.ok(lines.filter((l) => Number.isFinite(at(l, 'cePremium'))).length > lines.length * 0.5, 'the ATM premiums are there')
+  }
   const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
   assert.equal(result.ok, true)
   assert.equal(result.kind, 'features')
@@ -612,4 +623,14 @@ test('up to 1 500 weekdays in the background, the latest of a longer range', () 
   assert.equal(all.length, 1500)
   assert.equal(all.at(-1), '2026-10-23')
   assert.equal(all[0] > '2020-11-01' && all[0] < '2021-01-31', true, all[0])     // about 5.75 years of weekdays
+})
+
+test('a capture where NOT ONE day could be read FAILS with the reason - it is not an empty "done"', async (t) => {
+  const dates = ['2026-10-12', '2026-10-13', '2026-10-14']
+  const reason = 'Stored data is not configured on this server (no NiftyDataCollector database connection)'
+  const { code, result } = await runJob(t, { kind: 'features', dates, handle: () => [200, { success: false, error: reason }] })
+  assert.equal(code, 1)
+  assert.equal(result.ok, false)
+  assert.match(result.error, /^No day could be captured - 3 of 3 failed, 3 of them: Stored data is not configured/)
+  assert.equal(result.features.rows, 0)
 })

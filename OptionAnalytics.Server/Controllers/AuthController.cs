@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using OptionAnalytics.Server.Auth;
+using OptionAnalytics.Server.Services;
 using OptionAnalytics.Server.Services.Visitors;
 
 namespace OptionAnalytics.Server.Controllers;
@@ -23,11 +24,14 @@ public sealed class AuthController : ControllerBase
     private readonly ILogger<AuthController> _logger;
     private readonly VisitRecorder? _visits;
 
-    public AuthController(AuthService auth, ILogger<AuthController> logger, VisitRecorder? visits = null)
+    private readonly AppEnvironment? _appEnvironment;
+
+    public AuthController(AuthService auth, ILogger<AuthController> logger, VisitRecorder? visits = null, AppEnvironment? appEnvironment = null)
     {
         _auth = auth;
         _logger = logger;
         _visits = visits;
+        _appEnvironment = appEnvironment;
     }
 
     public sealed record LoginRequest(string? Email, string? Password);
@@ -59,7 +63,7 @@ public sealed class AuthController : ControllerBase
 
         _logger.LogInformation("{Email} logged in as {Role}.", email, role);
         _visits?.Record(HttpContext, "login", account: email, role: role);
-        return Ok(new { email, role });
+        return Ok(new { email, role, isLocal = _appEnvironment?.LocalTools == true });
     }
 
     [HttpPost("logout")]
@@ -88,6 +92,8 @@ public sealed class AuthController : ControllerBase
     public IActionResult Me()
     {
         if (User.Identity?.IsAuthenticated != true) return Unauthorized();
-        return Ok(new { email = User.Identity.Name, role = User.FindFirstValue(ClaimTypes.Role) });
+        // isLocal: the server runs on a developer's machine (Environment:LocalTools, which follows Environment:IsLocal) - the "Analyse with AI" buttons
+        // are shown only then.
+        return Ok(new { email = User.Identity.Name, role = User.FindFirstValue(ClaimTypes.Role), isLocal = _appEnvironment?.LocalTools == true });
     }
 }

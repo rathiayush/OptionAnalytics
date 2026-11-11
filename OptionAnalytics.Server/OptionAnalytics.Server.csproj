@@ -6,6 +6,15 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <!-- The folders the server WRITES to when it runs from this folder (every Storage:* path defaults to one next to the project; all gitignored):
+       the ML models and their reports, the scanner's data, the order flow days, caches, preferences ... The Web SDK counts every .json under the
+       project as a project file, so a model written while a build runs ("could not copy ... because it was not found") broke the build, and
+       their sizes were copied into bin/. They are data, never part of the build. -->
+  <ItemGroup>
+    <Content Remove="scanner-runner-data/**;order-flow/**;historical-data/**;expired-option-data/**;scanner-log/**;dhan-cache/**;preferences/**;paper-positions/**;visitor-log/**;geo/**;dataprotection-keys/**" />
+    <None Remove="scanner-runner-data/**;order-flow/**;historical-data/**;expired-option-data/**;scanner-log/**;dhan-cache/**;preferences/**;paper-positions/**;visitor-log/**;geo/**;dataprotection-keys/**" />
+  </ItemGroup>
+
   <!-- Stamped fresh on every `dotnet publish` (Docker's own build stage runs one - see the
        Dockerfile), read back at runtime by GET /api/version. Answers "did my last redeploy
        actually pick up the latest code" directly, from the running process itself, rather than by
@@ -34,6 +43,8 @@
        supplies these as environment variables instead - see docker-compose.yml. -->
   <ItemGroup>
     <Content Update="appsettings.Local.json" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
+  </ItemGroup>
+  <ItemGroup>
   </ItemGroup>
 
   <!-- Builds the React client and publishes its output as the app's wwwroot, so the production app

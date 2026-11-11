@@ -999,7 +999,7 @@ function deltaRead(d, p3, p4) {
   return kept.get(key)
 }
 /** The profile at candle k - from the minutes up to its close (`d.t[k]`, its last minute). */
-const deltaAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4), d.t[k]) : null)
+export const deltaAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4), d.t[k]) : null)
 const deltaLevel = (key, name, short, mirror = null) => ({
   ...levelCondition({ id: `odp${key[0].toUpperCase()}${key.slice(1)}`, group: 'DeltaProfile', name, short: `option Δ ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
   ...(mirror ? { mirror } : {}),

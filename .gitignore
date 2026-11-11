@@ -63,3 +63,9 @@ OptionAnalytics.Server/wwwroot/*
 
 # The server-side scanner bundle (npm run build:runner) - published next to the server, never committed.
 optionanalytics.client/dist-runner/
+
+# Created next to the project when the server runs locally (Storage:* defaults).
+/OptionAnalytics.Server/risk-settings.csv
+/OptionAnalytics.Server/trade-settings.csv
+/OptionAnalytics.Server/scanner-runner-data/
+

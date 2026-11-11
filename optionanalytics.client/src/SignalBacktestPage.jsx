@@ -19,6 +19,8 @@ import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
 import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
 import { FeatureFinderCard, StoredFeatureFinderCard } from './FeatureFinderCard.jsx'
+import { AiAnalyse } from './AiAnalyse.jsx'
+import { backtestReportText, compareText } from './llmAnalysis.js'
 import { DATE_INPUT_FORMATS, isPastDay, rangePresets, withRangeEnd } from './backtestDates.js'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
@@ -1042,7 +1044,12 @@ export default function SignalBacktestPage() {
         {compare.status !== 'idle' && (
           <Card
             size="small" title={`${RULE_TEMPLATES.length} templates on the ${compare.days} day${compare.days === 1 ? '' : 's'} loaded${compare.underlying ? ` · ${compare.underlying}` : ''}`}
-            extra={<Button size="small" type="text" icon={<CloseOutlined />} onClick={closeCompare} aria-label="Close the comparison" />}
+            extra={(
+              <Space size={6}>
+                {compare.status === 'done' && <AiAnalyse buildText={() => compareText(compare.rows, { underlying: compare.underlying })} title="AI analysis - Compare all" />}
+                <Button size="small" type="text" icon={<CloseOutlined />} onClick={closeCompare} aria-label="Close the comparison" />
+              </Space>
+            )}
           >
             {compare.status === 'running'
               ? (
@@ -1181,7 +1188,12 @@ export default function SignalBacktestPage() {
             )}
             <Card
               size="small" title={head}
-              extra={<Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>}
+              extra={(
+                <Space size={10} wrap>
+                  <AiAnalyse buildText={() => backtestReportText(report, shown.settings)} title="AI analysis - this run" />
+                  <Text strong style={{ color: pnlColor(report.all.net) }}>{rupees(report.all.net)} · {report.all.trades} trades · {num(report.all.winRate, 0)}% win</Text>
+                </Space>
+              )}
             >
               <Table size="small" pagination={false} scroll={{ x: 1200 }} columns={summaryColumns} dataSource={sides.length > 1 ? [report.all, ...report.rows] : report.rows} />
             </Card>

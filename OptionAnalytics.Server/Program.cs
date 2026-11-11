@@ -360,6 +360,9 @@ builder.Services.AddHostedService<OptionAnalytics.Server.Services.Visitors.GeoDb
 // The daily loss limit (default ₹20,000) - Dhan's P&L based exit set every day, plus a watch here that exits
 // everything and turns Dhan's kill switch on at the limit (KillSwitchService; risk-settings.csv).
 builder.Services.AddSingleton<RiskSettingsStore>();
+// AI analysis of a run's report by a LOCAL model (Ollama) - LlmAnalysisService / LlmController. A singleton on purpose: it
+// holds the one-at-a-time lock, and its HttpClient lives as long as it does.
+builder.Services.AddSingleton(sp => new OptionAnalytics.Server.Services.LlmAnalysisService(new HttpClient(), sp.GetRequiredService<IConfiguration>()));
 // The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
 builder.Services.AddSingleton<StrategyTuningService>();
 // The Signal backtest's background runs (scanner-runner/signal-backtest.mjs) - a queue worked one at a time, now or at a
