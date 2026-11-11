@@ -121,8 +121,8 @@ public static class EmaCrossoverDetector
             string? direction = null;
             if (fastEma[i].Ema is { } fastRaw && slowEma[i].Ema is { } slowRaw && fastRaw != slowRaw)
             {
-                var fast = (decimal)fastRaw;
-                var slow = (decimal)slowRaw;
+                var fast = DecimalConversion.FromDouble(fastRaw);
+                var slow = DecimalConversion.FromDouble(slowRaw);
                 var close = closedBars[i].Close;
                 if (fast > slow) { if (close > fast && close > slow) direction = "Bullish"; }
                 else { if (close < fast && close < slow) direction = "Bearish"; }

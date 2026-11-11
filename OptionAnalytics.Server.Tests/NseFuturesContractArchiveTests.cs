@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using OptionAnalytics.Server.Dhan;
 
 namespace OptionAnalytics.Server.Tests;
@@ -39,7 +40,7 @@ FinInstrmId,UndrlygFinInstrmId,FinInstrmNm,TckrSymb,XpryDt,StrkPric,OptnTp,PrtdT
     [InlineData(1, 0.01)]
     [InlineData(0, 0)]
     public void ScripMasterTickSize_IsInPaise(double paise, double rupees) =>
-        Assert.Equal((decimal)rupees, DhanSymbology.TickSizeFromScripMaster((decimal)paise));
+        Assert.Equal(DecimalConversion.FromDouble(rupees), DhanSymbology.TickSizeFromScripMaster(DecimalConversion.FromDouble(paise)));
 
     [Fact]
     public void OnlyNseIndexUnderlyingsAreCovered()

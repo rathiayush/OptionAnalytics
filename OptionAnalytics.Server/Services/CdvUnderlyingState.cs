@@ -434,7 +434,7 @@ public sealed class CdvUnderlyingState
         var delta = isCall
             ? 1.0 / (1.0 + Math.Exp(8.5 * moneyness))
             : -1.0 / (1.0 + Math.Exp(-8.5 * moneyness));
-        return (decimal)Math.Abs(delta);
+        return DecimalConversion.FromDouble(Math.Abs(delta));
     }
 
     /// <summary>Seeds one strike's own historical premium+volume bars, called once per strike by
@@ -783,7 +783,7 @@ public sealed class CdvUnderlyingState
             Volume = 0,
         }).ToList();
 
-        return quotes.GetEma(LookbackSmoothLen).Select(r => r.Ema is { } e ? (decimal?)(decimal)e : null).ToList();
+        return quotes.GetEma(LookbackSmoothLen).Select(r => r.Ema is { } e ? (decimal?)DecimalConversion.FromDouble(e) : null).ToList();
     }
 
     internal static LookbackChange ComputeLookbackChange(IReadOnlyList<decimal?> emaSeries, int barsAgo)

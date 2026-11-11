@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using System.Buffers.Binary;
 using System.Globalization;
 using OptionAnalytics.Server.Dhan;
@@ -62,14 +63,14 @@ public sealed class DhanTickPacketParserTests
         var result = Assert.Single(parsed);
         Assert.Equal(DhanPacketKind.Full, result.Kind);
         Assert.Equal(securityId, result.SecurityId);
-        Assert.Equal((decimal)lastPrice, result.LastPrice);
+        Assert.Equal(DecimalConversion.FromSingle(lastPrice), result.LastPrice);
         Assert.Equal((long)volume, result.Volume);
-        Assert.Equal((decimal)open, result.Open);
-        Assert.Equal((decimal)close, result.Close);
-        Assert.Equal((decimal)high, result.High);
-        Assert.Equal((decimal)low, result.Low);
-        Assert.Equal((decimal)bestBid, result.BestBidPrice);
-        Assert.Equal((decimal)bestAsk, result.BestAskPrice);
+        Assert.Equal(DecimalConversion.FromSingle(open), result.Open);
+        Assert.Equal(DecimalConversion.FromSingle(close), result.Close);
+        Assert.Equal(DecimalConversion.FromSingle(high), result.High);
+        Assert.Equal(DecimalConversion.FromSingle(low), result.Low);
+        Assert.Equal(DecimalConversion.FromSingle(bestBid), result.BestBidPrice);
+        Assert.Equal(DecimalConversion.FromSingle(bestAsk), result.BestAskPrice);
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(epochSeconds) - TimeSpan.FromHours(5.5), result.ExchangeTimestamp);
     }
 

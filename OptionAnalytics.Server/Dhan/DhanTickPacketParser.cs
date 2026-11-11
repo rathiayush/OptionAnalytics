@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using System.Buffers.Binary;
 
 namespace OptionAnalytics.Server.Dhan;
@@ -252,7 +253,7 @@ public static class DhanTickPacketParser
     {
         var value = BinaryPrimitives.ReadSingleLittleEndian(bytes);
         if (float.IsNaN(value) || float.IsInfinity(value) || value <= 0f) return 0m;
-        return value > 1e12f ? 0m : (decimal)value;
+        return value > 1e12f ? 0m : DecimalConversion.FromSingle(value);
     }
 
     /// <summary>Dhan's own docs (Ticker "Bytes 13-16"/Quote+Full "Bytes 15-18", both "Last Trade

@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using System.Globalization;
 using System.Text.Json;
 
@@ -176,7 +177,7 @@ public sealed class DhanOptionChainQuotes
         // Percent, the same scale the rolling-option IV this app already shows uses. 0 means Dhan
         // couldn't solve it (no trade yet, deep OTM) - treated as missing, never a real zero IV.
         decimal? impliedVolatility = leg.TryGetProperty("implied_volatility", out var iv) && iv.ValueKind == JsonValueKind.Number && iv.GetDouble() > 0
-            ? (decimal)iv.GetDouble()
+            ? DecimalConversion.FromDouble(iv.GetDouble())
             : null;
 
         return (lastPrice, openInterest, impliedVolatility);

@@ -118,7 +118,7 @@ public sealed class ExpiredOptionBacktestServiceFlowChainTests
     {
         var moneyness = (double)((strike - spot) / spot);
         var delta = isCall ? 1.0 / (1.0 + Math.Exp(8.5 * moneyness)) : -1.0 / (1.0 + Math.Exp(-8.5 * moneyness));
-        return (decimal)Math.Abs(delta);
+        return DecimalConversion.FromDouble(Math.Abs(delta));
     }
 
     [Fact]
