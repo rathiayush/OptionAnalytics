@@ -8,6 +8,7 @@ import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
 import { bidShare, heatmapPriceRange, rowDeltas, unfinishedRevisits } from './orderFlowMath.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
+import { footprintTextLayout } from './footprintText.js'
 
 const { Text } = Typography
 
@@ -181,6 +182,23 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
     const clip = (x, y, w, h) => { ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip() }
     const textSize = Math.min(12, Math.floor(rowH - 2))
     const showText = rowH >= 10
+    // How the rows are written (footprintText.js): sell x buy (and the row delta) at the largest font the WIDEST number on
+    // screen fits, else the row delta alone across the cells, else colours only - never numbers running into each other.
+    let sell10 = 0, buy10 = 0, delta10 = 0
+    if (showText) {
+      const widths = new Map()
+      const w10 = (t) => { let w = widths.get(t); if (w == null) { w = ctx.measureText(t).width; widths.set(t, w) } return w }
+      ctx.font = `600 10px ${FONT}`
+      for (const bar of visible) {
+        for (const level of bar.levels) {
+          sell10 = Math.max(sell10, w10(formatVolume(level.sell, lotSize, showLots)))
+          buy10 = Math.max(buy10, w10(formatVolume(level.buy, lotSize, showLots)))
+          if (rowDelta) delta10 = Math.max(delta10, w10(rowDeltaText(level.buy - level.sell, lotSize, showLots)))
+        }
+      }
+    }
+    const rowText = footprintTextLayout({ colWidth, rowDelta, size: textSize, deltaSize: Math.min(textSize, 11), sell10, buy10, delta10, showText })
+    const { deltaOnly } = rowText
 
     // Price grid + axis
     ctx.font = `11px ${FONT}`
@@ -204,8 +222,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       // Cells, candle and markers stay inside the plot; the strip below only inside the bars' width.
       clip(0, FP_TOP, barsW, plotH)
       const cellX = x0 + 15
-      const deltaW = rowDelta ? rowDeltaWidth(colWidth) : 0
-      const cellW = Math.max(8, (colWidth - 19 - deltaW) / 2)
+      const { cellW, deltaW } = rowText
       const cellsW = cellW * 2 + deltaW
       const maxSide = Math.max(1, ...bar.levels.map((l) => Math.max(l.buy, l.sell)))
       const deltas = rowDelta ? rowDeltas(bar.levels) : null
@@ -229,12 +246,14 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         const imb = bar.imbalances?.get(level.price)
         const sellStack = stackedSell.has(level.price)
         const buyStack = stackedBuy.has(level.price)
-        ctx.fillStyle = sellStack ? STACK_SELL_FILL : imb === 'sell' ? SELL_FILL : `rgba(239,83,80,${0.06 + 0.32 * (level.sell / maxSide)})`
-        ctx.fillRect(cellX, top + 0.5, cellW - 1, rowH - 1)
-        ctx.fillStyle = buyStack ? STACK_BUY_FILL : imb === 'buy' ? BUY_FILL : `rgba(38,166,154,${0.06 + 0.32 * (level.buy / maxSide)})`
-        ctx.fillRect(cellX + cellW, top + 0.5, cellW - 1, rowH - 1)
-        if (showText) {
-          ctx.font = `${imb ? '600 ' : ''}${textSize}px ${FONT}`
+        if (!deltaOnly) {
+          ctx.fillStyle = sellStack ? STACK_SELL_FILL : imb === 'sell' ? SELL_FILL : `rgba(239,83,80,${0.06 + 0.32 * (level.sell / maxSide)})`
+          ctx.fillRect(cellX, top + 0.5, cellW - 1, rowH - 1)
+          ctx.fillStyle = buyStack ? STACK_BUY_FILL : imb === 'buy' ? BUY_FILL : `rgba(38,166,154,${0.06 + 0.32 * (level.buy / maxSide)})`
+          ctx.fillRect(cellX + cellW, top + 0.5, cellW - 1, rowH - 1)
+        }
+        if (rowText.mode === 'full') {
+          ctx.font = `${imb ? '600 ' : ''}${rowText.size}px ${FONT}`
           ctx.textBaseline = 'middle'
           ctx.fillStyle = imb === 'sell' || sellStack ? '#fff' : '#e8c6c6'
           ctx.textAlign = 'right'
@@ -250,8 +269,17 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
           const dx = cellX + cellW * 2
           ctx.fillStyle = d > 0 ? `rgba(38,166,154,${0.1 + 0.55 * strength})` : d < 0 ? `rgba(239,83,80,${0.1 + 0.55 * strength})` : 'rgba(255,255,255,0.04)'
           ctx.fillRect(dx, top + 0.5, deltaW - 1, rowH - 1)
-          if (showText) {
-            ctx.font = `${strength >= 0.6 ? '600 ' : ''}${Math.min(textSize, 11)}px ${FONT}`
+          // Delta only: the sell / buy cells gave way - an imbalance (or a stacked row) keeps a mark on its own edge.
+          if (deltaOnly && (imb === 'sell' || sellStack)) {
+            ctx.fillStyle = sellStack ? STACK_SELL_FILL : SELL_FILL
+            ctx.fillRect(dx, top + 0.5, 3, rowH - 1)
+          }
+          if (deltaOnly && (imb === 'buy' || buyStack)) {
+            ctx.fillStyle = buyStack ? STACK_BUY_FILL : BUY_FILL
+            ctx.fillRect(dx + deltaW - 4, top + 0.5, 3, rowH - 1)
+          }
+          if (rowText.mode !== 'none') {
+            ctx.font = `${strength >= 0.6 ? '600 ' : ''}${rowText.deltaSize}px ${FONT}`
             ctx.textBaseline = 'middle'
             ctx.textAlign = 'center'
             ctx.fillStyle = d > 0 ? '#dff5f1' : d < 0 ? '#fbdcdb' : AXIS_COLOR
@@ -337,15 +365,21 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.fillRect(x0 + 1, stripY, colWidth - 2, FP_STRIP_H - 4)
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
+      // Each line with its label while it fits the bar, else the number alone (the colour still tells the line), never
+      // over the next bar's.
+      const stripText = (label, value, y) => {
+        const room = colWidth - 4
+        ctx.fillText(ctx.measureText(`${label} ${value}`).width <= room ? `${label} ${value}` : value, x0 + colWidth / 2, y, room)
+      }
       ctx.font = `600 12px ${FONT}`
       ctx.fillStyle = bar.delta >= 0 ? UP_COLOR : DOWN_COLOR
-      ctx.fillText(`Δ ${bar.delta >= 0 ? '+' : ''}${formatVolume(bar.delta, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 9)
+      stripText('Δ', `${bar.delta >= 0 ? '+' : ''}${formatVolume(bar.delta, lotSize, showLots)}`, stripY + 9)
       ctx.font = `600 11px ${FONT}`
       ctx.fillStyle = (bar.cvd ?? 0) >= 0 ? '#7fd8cf' : '#f4a09e'
-      ctx.fillText(`ΣΔ ${(bar.cvd ?? 0) >= 0 ? '+' : ''}${formatVolume(bar.cvd ?? 0, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 23)
+      stripText('ΣΔ', `${(bar.cvd ?? 0) >= 0 ? '+' : ''}${formatVolume(bar.cvd ?? 0, lotSize, showLots)}`, stripY + 23)
       ctx.font = `11px ${FONT}`
       ctx.fillStyle = AXIS_COLOR
-      ctx.fillText(`Vol ${formatVolume(bar.volume, lotSize, showLots)}`, x0 + colWidth / 2, stripY + 37)
+      stripText('Vol', formatVolume(bar.volume, lotSize, showLots), stripY + 37)
       if (colWidth >= 56 || k % 2 === 0) ctx.fillText(IST_HHMM.format(new Date(bar.time)), x0 + colWidth / 2, height - FP_TIME_H / 2)
       ctx.textAlign = 'left'
       ctx.strokeStyle = GRID_COLOR
@@ -1038,11 +1072,6 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       )}
     </div>
   )
-}
-
-// The footprint's row delta column: about 30% of the cells' width, 28 - 52 px.
-function rowDeltaWidth(colWidth) {
-  return Math.max(28, Math.min(52, Math.round((colWidth - 19) * 0.3)))
 }
 
 // A row's delta as the column writes it: + / − and the volume (lots when shown in lots), 0 bare.
