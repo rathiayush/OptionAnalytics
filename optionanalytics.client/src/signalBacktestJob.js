@@ -7,8 +7,9 @@
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
-  prepareDay, ruleText, simulateDay, summarize,
+  orderFlowNeeded, prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
+import { FLOW_BOOK, FLOW_NONE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import { summedExpiries } from './expirySum.js'
 import { cachedDay, loadOptionDay, optionDayKey, rememberDay, walkPastSessions } from './deltaProfileDays.js'
@@ -74,7 +75,7 @@ export async function loadExpiryChains(getJson, u, date, { live = false } = {}) 
  * says which (`sumExpiries` - the dates). A day whose other expiries cannot be loaded does not run (it would be another
  * strategy's numbers).
  */
-export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false, deltaDays = 0 } = {}) {
+export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false, deltaDays = 0, orderFlow = FLOW_NONE } = {}) {
   const get = fetchImpl ?? globalThis.fetch
   const timeout = new AbortController()
   const timer = setTimeout(() => timeout.abort('timeout'), timeoutMs)
@@ -108,7 +109,9 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     // Its option flow kept for the next day's walk back (the option delta profile's days before) - asked of no one again.
     rememberDay(optionDayKey(underlying, seriesFlag(underlying), date), { date, items: day.odm, candles: dayCandles(day) })
     const past = await attachDeltaPast(day, underlying, deltaDays, { fetch: get })
-    return past.ok ? day : { ok: false, date, reason: past.reason, retry: true, dhanCalls }
+    if (!past.ok) return { ok: false, date, reason: past.reason, retry: true, dhanCalls }
+    const flow = await attachOrderFlow(day, underlying, orderFlow, { fetch: get, signal: timeout.signal })
+    return flow.ok ? day : { ok: false, date, reason: flow.reason, retry: true, dhanCalls }
   } catch (err) {
     if (signal?.aborted) throw err
     return { ok: false, date, reason: timeout.signal.aborted ? 'took too long to load' : String(err?.message ?? err), retry: true }
@@ -137,6 +140,37 @@ export async function attachDeltaPast(day, underlying, count, { fetch: fetchImpl
   day.odmPast = found.sessions.map((x) => x.items)
   day.odmPastWanted = count
   return { ok: true }
+}
+
+/**
+ * The FUTURES ORDER FLOW a rule reads (`orderFlowNeeded` - its futures Δ / cumulative Δ, FLOW_BOOK with the liquidity
+ * heatmap): the Order Flow page's day of the date (`orderFlowUrl` - the server's recorded day, else its estimate from the
+ * 1-minute candles) laid on the day's minutes as `flow` (`orderFlowMinutes` - each minute from data up to its end; `asOfMs`
+ * - the live scan's clock). Done once a day (a later rule needing the book asks again). { ok } - also when the server has
+ * no order flow for the day (a 404: the day keeps `flow.missing` - its order flow lines never hold, the report lists it) -
+ * or { ok: false, reason, retry } when it failed on the way (a server error, the network: the day is not run this time).
+ */
+export async function attachOrderFlow(day, underlying, need, { fetch: fetchImpl, signal, asOfMs = null, date = null } = {}) {
+  if (!day?.ok || !(need > FLOW_NONE) || (day.flow && (day.flowWanted ?? 0) >= need)) return { ok: true }
+  const get = fetchImpl ?? globalThis.fetch
+  try {
+    const r = await get(orderFlowUrl(underlying, date ?? day.date, need), signal ? { signal } : undefined)
+    const body = await r.json().catch(() => null)
+    if (r.status === 404 || (r.ok && !Array.isArray(body?.bars))) {
+      day.flow = { missing: body?.error ?? 'no order flow for the day' }
+    } else if (!r.ok) {
+      return { ok: false, reason: `futures order flow: ${body?.error ?? `HTTP ${r.status}`}`, retry: true }
+    } else {
+      day.flow = orderFlowMinutes(body, day.t, { asOfMs, book: need >= FLOW_BOOK })
+    }
+    day.flowWanted = need
+    // A timeframe's candles were cut from the day before its order flow was on it: cut again.
+    day.views?.clear?.()
+    return { ok: true }
+  } catch (err) {
+    if (signal?.aborted) throw err
+    return { ok: false, reason: `futures order flow: ${String(err?.message ?? err)}`, retry: true }
+  }
 }
 
 const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(`${v}T00:00:00Z`))
@@ -235,6 +269,9 @@ export function dayOutcome(date, day, engine, tradeDay = null) {
     date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
     // How many sessions before the day the option delta profile had (null: none asked for).
     deltaPast: Array.isArray(day.odmPast) ? day.odmPast.length : null,
+    // The futures order flow (null: not asked for): 'none' (the server had none), else where it came from ('live' =
+    // recorded, 'estimated' = from the 1-minute candles, 'truedata'), the minutes estimated and whether there was a book.
+    ...(day.flow ? { flow: day.flow.missing ? 'none' : day.flow.source, flowEstimated: day.flow.estimated ?? 0, flowBook: Boolean(day.flow.book) } : { flow: null }),
     limit: dayLimit ?? null, trades,
     signals: { rule: signals.filter((x) => x.strategy === 'rule').length, mirror: signals.filter((x) => x.strategy === 'mirror').length },
   }
@@ -282,6 +319,9 @@ export function backtestReport(outcomes, settings) {
   const readsPrev = rule.lines.some((l) => GROUP_OF[l.id] === 'PrevProfile')
   const readsPivots = rule.lines.some((l) => GROUP_OF[l.id] === 'Pivots')
   const deltaNeed = deltaDaysNeeded(rule)
+  const flowNeed = orderFlowNeeded(rule)
+  // A day outcome kept before the order flow (an older background run) has no `flow` - not listed.
+  const flowDays = flowNeed > FLOW_NONE ? okDays.filter((o) => o.flow != null) : []
   return {
     trades, rows, all, dayRows, lines, okDays: okDays.length, sides,
     failed: days.filter((o) => !o.ok).map((o) => ({ date: o.date, reason: o.reason })),
@@ -290,6 +330,11 @@ export function backtestReport(outcomes, settings) {
     noPivots: readsPivots ? okDays.filter((o) => o.pivots === false).map((o) => o.date) : [],
     // The option delta profile's days before: the days that had fewer than the rule reads (the data starts later).
     noDeltaPast: deltaNeed > 0 ? okDays.filter((o) => o.deltaPast != null && o.deltaPast < deltaNeed).map((o) => o.date) : [],
+    // The futures order flow: days the server had none of (its lines never held), days whose Δ was estimated (all of it -
+    // not recorded - or the minutes before the recording began) and, when the rule reads the heatmap, days with no book.
+    noFlow: flowDays.filter((o) => o.flow === 'none').map((o) => o.date),
+    flowEstimated: flowDays.filter((o) => o.flow !== 'none' && (o.flow === 'estimated' || o.flowEstimated > 0)).map((o) => o.date),
+    noBook: flowNeed >= FLOW_BOOK ? flowDays.filter((o) => o.flow !== 'none' && !o.flowBook).map((o) => o.date) : [],
   }
 }
 

@@ -34,6 +34,7 @@ import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
 import { PROFILE_ROWS, pastSessionsNeeded } from './profileZones.js'
+import { FLOW_BOOK, FLOW_DELTA, FLOW_NONE, flowView } from './orderFlowFeatures.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -428,6 +429,8 @@ export function timeframeView(d, tf = 1) {
     spot: candles(d.spot), price: candles(d.price),
     breaks: toCandles(reads.breaks), hp: toCandles(reads.hp),
     ib: d.ib ? { ...d.ib, done: candleOf[d.ib.done] } : null,
+    // The futures order flow (put on by the loader when the rule reads it - attachOrderFlow): a candle's Δ its minutes'.
+    flow: d.flow ? flowView(d.flow, first, last) : d.flow,
   }
   d.views.set(m, view)
   return view
@@ -1043,6 +1046,247 @@ const DELTA_CONDITIONS = [
   },
 ]
 const GROUP_OF_DELTA = new Set(DELTA_CONDITIONS.map((c) => c.id))
+
+// THE FUTURES ORDER FLOW (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal
+// backtest as well"): the Order Flow page's day of the near futures, put on the day by the loader when the rule reads it
+// (`attachOrderFlow` - `orderFlowNeeded`), minute by minute from data up to each minute's end (orderFlowFeatures.js):
+//   FUTURES Δ - a candle's aggressor buy − sell volume (its minutes' added), its volume, and the futures' own candle;
+//   FUTURES CUMULATIVE Δ (CVD) - the running Δ from 09:15, read as the OI cumulative Δ lines are (its range so far);
+//   the LIQUIDITY HEATMAP - the Order Flow page's liquidity map at each minute's end: its read (absorption / exhaustion at
+//   a wall, a wall broken or pulled, a vacuum, a drift), the nearest bid / offer wall that STAYED in the book, the thin
+//   zones and the book's lean near the price - all on the FUTURES' prices (the heatmap is the futures' book).
+// A day the server did not record has its Δ ESTIMATED from 1-minute candles and NO book: the heatmap lines never hold on
+// it (the report lists those days); a day whose order flow could not be read at all has none of them (listed too).
+const flowOf = (d) => (d?.flow && !d.flow.missing ? d.flow : null)
+const fmtLots = (q, lot) => {
+  if (!finite(q)) return '—'
+  const v = q / (lot > 0 ? lot : 1), a = Math.abs(v), sign = v > 0 ? '+' : v < 0 ? '−' : ''
+  return `${sign}${a >= 1e5 ? `${(a / 1e5).toFixed(1)}L` : a >= 1e3 ? `${(a / 1e3).toFixed(1)}k` : Math.round(a)}`
+}
+// Some candle k in the last `w` candles (k >= 0) where f(k) holds.
+const anyIn = (i, w, f) => { for (let k = i; k > i - w && k >= 0; k--) if (f(k)) return true; return false }
+const X_AVG = { param: { label: '≥', unit: '× the average', default: 2, min: 1, max: 10, step: 0.5 } }
+const GREW = { param: { label: 'by ≥', unit: '% (last 2 min v 10)', default: 25, min: 0, max: 500, step: 5 } }
+const SHRANK = { param: { label: 'by ≥', unit: '% (last 2 min v 10)', default: 40, min: 0, max: 100, step: 5 } }
+const OF_VOL = { param: { label: 'by ≥', unit: '% of its volume', default: 0, min: 0, max: 100, step: 1 } }
+const FLOW_CONDITIONS = [
+  {
+    id: 'futDelta', group: 'OrderFlow', name: "Futures Δ (the candle's buy − sell)",
+    options: [
+      opt('buyers', "Buyers ahead: the candle's Δ positive", 'sellers', OF_VOL), opt('sellers', "Sellers ahead: the candle's Δ negative", 'buyers', OF_VOL),
+      opt('sumBuyers', 'Buyers ahead over the look-back (Δ added up)', 'sumSellers', { ...W, ...OF_VOL }),
+      opt('sumSellers', 'Sellers ahead over the look-back (Δ added up)', 'sumBuyers', { ...W, ...OF_VOL }),
+      opt('bigBuy', 'Big buying: a candle’s Δ ≥ N × the average |Δ| before it', 'bigSell', { ...W, ...X_AVG }),
+      opt('bigSell', 'Big selling: a candle’s Δ ≤ −N × the average |Δ| before it', 'bigBuy', { ...W, ...X_AVG }),
+      opt('absorbSell', 'Selling absorbed: Δ negative, the candle closed UP (bullish)', 'absorbBuy', { ...W, ...OF_VOL }),
+      opt('absorbBuy', 'Buying absorbed: Δ positive, the candle closed DOWN (bearish)', 'absorbSell', { ...W, ...OF_VOL }),
+    ],
+    // "by ≥ %": |Δ| of the candle's volume (of the look-back's volume for the sum).
+    test: (d, i, v, w, p) => {
+      const f = flowOf(d)
+      if (!f) return false
+      const lead = (dl, vl, up) => finite(dl) && vl > 0 && (up ? dl > 0 : dl < 0) && Math.abs(dl) >= frac(p) * vl
+      // The average |Δ| of the day's candles before k (at least 5 of them).
+      const avgBefore = (k) => {
+        let s = 0, c = 0
+        for (let j = 0; j < k; j++) if (finite(f.delta[j])) { s += Math.abs(f.delta[j]); c++ }
+        return c >= 5 ? s / c : NaN
+      }
+      switch (v) {
+        case 'buyers': return lead(f.delta[i], f.vol[i], true)
+        case 'sellers': return lead(f.delta[i], f.vol[i], false)
+        case 'sumBuyers': case 'sumSellers': {
+          let dl = 0, vl = 0, seen = false
+          for (let k = i; k > i - w && k >= 0; k--) if (finite(f.delta[k])) { dl += f.delta[k]; vl += f.vol[k]; seen = true }
+          return seen && lead(dl, vl, v === 'sumBuyers')
+        }
+        case 'bigBuy': case 'bigSell': {
+          const up = v === 'bigBuy'
+          return anyIn(i, w, (k) => { const a = avgBefore(k), x = f.delta[k]; return a > 0 && finite(x) && (up ? x >= p * a : x <= -p * a) })
+        }
+        case 'absorbSell': case 'absorbBuy': {
+          const bull = v === 'absorbSell'
+          return anyIn(i, w, (k) => f.fc[k] > 0 && (bull ? f.fc[k] > f.fo[k] : f.fc[k] < f.fo[k]) && lead(f.delta[k], f.vol[k], !bull))
+        }
+        default: return false
+      }
+    },
+    show: (d, i) => { const f = flowOf(d); return f ? `fut Δ ${fmtLots(f.delta[i], f.lotSize)} lots (vol ${fmtLots(f.vol[i], f.lotSize).replace('+', '')})${f.est[i] ? ' est.' : ''}` : 'fut Δ —' },
+  },
+  {
+    id: 'futCvd', group: 'OrderFlow', name: 'Futures cumulative Δ (CVD)',
+    options: [
+      opt('positive', 'Positive (buyers ahead since 09:15)', 'negative', PAST), opt('negative', 'Negative (sellers ahead since 09:15)', 'positive', PAST),
+      opt('turnedPositive', 'Turned −ve → +ve', 'turnedNegative', { ...W, ...PAST }), opt('turnedNegative', 'Turned +ve → −ve', 'turnedPositive', { ...W, ...PAST }),
+      opt('flipPositive', 'Negative since the morning, then turned +ve', 'flipNegative', { ...W, ...PAST, ...HELD }),
+      opt('flipNegative', 'Positive since the morning, then turned −ve', 'flipPositive', { ...W, ...PAST, ...HELD }),
+      opt('rising', 'Rising (buyers pressing)', 'falling', TOL), opt('falling', 'Falling (sellers pressing)', 'rising', TOL),
+      opt('stable', 'Stable (moved under the tolerance of its range)', 'stable', TOL),
+      opt('newHigh', 'At a new high of the day (in the look-back)', 'newLow', { ...W, ...PAST }), opt('newLow', 'At a new low of the day (in the look-back)', 'newHigh', { ...W, ...PAST }),
+      // The CVD rises with price when the flow confirms a move: price moved >= `param` %, the CVD followed by less than
+      // `param2` % of its range so far (or went the other way).
+      opt('divBull', 'Bullish divergence: price fell, the CVD did not follow', 'divBear', DIVERGENCE),
+      opt('divBear', 'Bearish divergence: price rose, the CVD did not follow', 'divBull', DIVERGENCE),
+      opt('upPct', 'Increased (buyers pressing)', 'downPct', ADDED), opt('downPct', 'Decreased (sellers pressing)', 'upPct', ADDED),
+    ],
+    test: (d, i, v, w, p, p2) => {
+      const f = flowOf(d)
+      if (!f) return false
+      const series = f.cvd
+      const x = (k) => series[k]
+      switch (v) {
+        case 'positive': return series[i] > 0 && atLeast(pastPct(x, i), p)
+        case 'negative': return series[i] < 0 && atLeast(pastPct(x, i), p)
+        case 'turnedPositive': return crossed(x, i, w, true) && atLeast(pastPct(x, i), p)
+        case 'turnedNegative': return crossed(x, i, w, false) && atLeast(pastPct(x, i), p)
+        case 'flipPositive': return flippedAfterHeld(x, d.t, i, w, true, p2) && atLeast(pastPct(x, i), p)
+        case 'flipNegative': return flippedAfterHeld(x, d.t, i, w, false, p2) && atLeast(pastPct(x, i), p)
+        case 'rising': return lineMove(series, i, w, p) === 1
+        case 'falling': return lineMove(series, i, w, p) === -1
+        case 'stable': return lineMove(series, i, w, p) === 0
+        case 'newHigh': case 'newLow': {
+          // A candle in the look-back set the day's highest (lowest) CVD so far - beyond every candle before the look-back,
+          // by ≥ `p` % of its range so far.
+          const up = v === 'newHigh'
+          let best = up ? -Infinity : Infinity, lo = Infinity, hi = -Infinity
+          const start = Math.max(0, i - w + 1)
+          for (let k = 0; k <= i; k++) {
+            if (!finite(series[k])) continue
+            lo = Math.min(lo, series[k]); hi = Math.max(hi, series[k])
+            if (k < start) best = up ? Math.max(best, series[k]) : Math.min(best, series[k])
+          }
+          if (!finite(best)) return false
+          const by = frac(p) * (hi - lo)
+          for (let k = start; k <= i; k++) {
+            if (!finite(series[k])) continue
+            if (up ? series[k] > best && series[k] - best >= by : series[k] < best && best - series[k] >= by) return true
+          }
+          return false
+        }
+        case 'divBull': case 'divBear': return divergenceHolds(d, x, i, w, 1, v === 'divBull', p, p2)
+        case 'upPct': case 'downPct': return pctChangeHolds(series[i], series[Math.max(0, i - w)], v === 'upPct', p)
+        default: return false
+      }
+    },
+    show: (d, i) => { const f = flowOf(d); return f ? `fut CVD ${fmtLots(f.cvd[i], f.lotSize)} lots` : 'fut CVD —' },
+  },
+  {
+    // The liquidity map's read at a candle (any minute of it - a read is known at the minute it is made): what the Order
+    // Flow page's liquidity map says now - in the look-back.
+    id: 'liqRead', group: 'OrderFlow', name: "Liquidity heatmap: the liquidity map's read",
+    options: [
+      opt('absorbBid', 'Absorption at a bid wall (sellers absorbed - bullish)', 'absorbAsk', W),
+      opt('absorbAsk', 'Absorption at an offer wall (buyers absorbed - bearish)', 'absorbBid', W),
+      opt('exhaustBid', 'Selling exhausting into a bid wall (bullish)', 'exhaustAsk', W),
+      opt('exhaustAsk', 'Buying exhausting into an offer wall (bearish)', 'exhaustBid', W),
+      opt('breakAsk', 'Offer wall broken / being eaten (bullish)', 'breakBid', W),
+      opt('breakBid', 'Bid wall broken / being eaten (bearish)', 'breakAsk', W),
+      opt('pulledAsk', 'Offer wall pulled - it was not real (bullish)', 'pulledBid', W),
+      opt('pulledBid', 'Bid wall pulled - it was not real (bearish)', 'pulledAsk', W),
+      opt('vacuumUp', 'In a thin (low-liquidity) zone, flow / book pointing up', 'vacuumDown', W),
+      opt('vacuumDown', 'In a thin (low-liquidity) zone, flow / book pointing down', 'vacuumUp', W),
+      opt('driftUp', 'Between the walls, the book and Δ leaning up', 'driftDown', W),
+      opt('driftDown', 'Between the walls, the book and Δ leaning down', 'driftUp', W),
+      opt('bullish', 'Any bullish read', 'bearish', W), opt('bearish', 'Any bearish read', 'bullish', W),
+    ],
+    test: (d, i, v, w) => {
+      const f = flowOf(d)
+      if (!f?.codes) return false
+      const BULL = ['absorbBid', 'exhaustBid', 'breakAsk', 'pulledAsk', 'vacuumUp', 'driftUp']
+      const BEAR = ['absorbAsk', 'exhaustAsk', 'breakBid', 'pulledBid', 'vacuumDown', 'driftDown']
+      const wanted = v === 'bullish' ? BULL : v === 'bearish' ? BEAR : [v]
+      return anyIn(i, w, (k) => wanted.some((c) => f.codes[k]?.has(c)))
+    },
+    show: (d, i) => { const f = flowOf(d); const x = f?.liq?.[i]; return x ? `liquidity: ${x.state ?? 'no read'}` : 'liquidity map —' },
+  },
+  {
+    // The nearest bid wall under the price and offer wall over it (walls that STAYED in the book over the last 10 minutes),
+    // on the futures' own candles.
+    id: 'liqWalls', group: 'OrderFlow', name: 'Liquidity heatmap: bid / offer walls',
+    options: [
+      opt('nearBid', 'A bid wall (support) close under the price', 'nearAsk', NEAR(0.1)), opt('nearAsk', 'An offer wall (resistance) close over the price', 'nearBid', NEAR(0.1)),
+      opt('heldBid', 'Touched a bid wall, closed back above (support held)', 'heldAsk', NEAR(0.05)),
+      opt('heldAsk', 'Touched an offer wall, closed back below (resistance held)', 'heldBid', NEAR(0.05)),
+      opt('brokeAsk', 'Broke above an offer wall (resistance gave way)', 'brokeBid', { ...W, ...OVER }),
+      opt('brokeBid', 'Broke below a bid wall (support gave way)', 'brokeAsk', { ...W, ...OVER }),
+      // Its size over the last 2 minutes against its 10-minute average (the liquidity map's "building" = 25% more,
+      // "pulling" = 40% less - the defaults).
+      opt('bidBuilding', 'The nearest bid wall building (growing)', 'askBuilding', GREW), opt('askBuilding', 'The nearest offer wall building (growing)', 'bidBuilding', GREW),
+      opt('askPulling', 'The nearest offer wall pulling (shrinking - bullish)', 'bidPulling', SHRANK), opt('bidPulling', 'The nearest bid wall pulling (shrinking - bearish)', 'askPulling', SHRANK),
+      opt('bidBigger', 'The nearest bid wall bigger than the nearest offer wall', 'askBigger', LEAD),
+      opt('askBigger', 'The nearest offer wall bigger than the nearest bid wall', 'bidBigger', LEAD),
+    ],
+    test: (d, i, v, w, p) => {
+      const f = flowOf(d)
+      if (!f) return false
+      const at = (k, side) => (k >= 0 ? f.liq[k]?.[side] ?? null : null)
+      const c = f.fc
+      const x = f.liq[i]
+      switch (v) {
+        case 'nearBid': case 'nearAsk': {
+          // Within `p` % of the futures' close: anywhere in the look-back.
+          const side = v === 'nearBid' ? 'sup' : 'res'
+          return anyIn(i, w, (k) => { const wl = at(k, side); return wl != null && c[k] > 0 && Math.abs(c[k] - wl.price) <= frac(p) * c[k] })
+        }
+        case 'heldBid': case 'heldAsk': {
+          const up = v === 'heldBid'
+          let hit = -1
+          for (let k = i; k > i - w && k >= 1 && hit < 0; k--) {
+            const wl = at(k - 1, up ? 'sup' : 'res')
+            if (wl && c[k] > 0 && (up ? f.fl[k] <= wl.price * (1 + frac(p)) && c[k] > wl.price : f.fh[k] >= wl.price * (1 - frac(p)) && c[k] < wl.price)) hit = k
+          }
+          if (hit < 0) return false
+          const lv = at(hit - 1, up ? 'sup' : 'res').price
+          return up ? c[i] > lv : c[i] < lv
+        }
+        case 'brokeAsk': return brokeLevel(c, (k) => at(k, 'res')?.price ?? null, i, w, true, p)
+        case 'brokeBid': return brokeLevel(c, (k) => at(k, 'sup')?.price ?? null, i, w, false, p)
+        case 'bidBuilding': return finite(x?.sup?.ratio) && x.sup.ratio >= 1 + frac(p) - 1e-9
+        case 'askBuilding': return finite(x?.res?.ratio) && x.res.ratio >= 1 + frac(p) - 1e-9
+        case 'askPulling': return finite(x?.res?.ratio) && x.res.ratio <= 1 - frac(p) + 1e-9
+        case 'bidPulling': return finite(x?.sup?.ratio) && x.sup.ratio <= 1 - frac(p) + 1e-9
+        case 'bidBigger': case 'askBigger': {
+          if (!x?.sup || !x?.res) return false
+          const [a, b] = v === 'bidBigger' ? [x.sup.size, x.res.size] : [x.res.size, x.sup.size]
+          return a > b && b > 0 && (a - b) / b >= frac(p)
+        }
+        default: return false
+      }
+    },
+    show: (d, i) => {
+      const x = flowOf(d)?.liq?.[i]
+      if (!x) return 'walls —'
+      const wall = (wl, name) => (wl ? `${name} ${fmtP(wl.price)} (${wl.lots} lots, ${wl.trend})` : `no ${name}`)
+      return `${wall(x.sup, 'bid wall')} · ${wall(x.res, 'offer wall')}`
+    },
+  },
+  {
+    // The book near the price (the latest snapshot, within 10 rows either side - the liquidity map's lean) and the thin
+    // zones the price can run through.
+    id: 'liqLean', group: 'OrderFlow', name: 'Liquidity heatmap: the book near the price',
+    options: [
+      opt('bidHeavy', 'Bids outweigh offers near the price', 'askHeavy', { param: { label: '≥', unit: '% of the book', default: 60, min: 50, max: 95, step: 1 } }),
+      opt('askHeavy', 'Offers outweigh bids near the price', 'bidHeavy', { param: { label: '≥', unit: '% of the book', default: 60, min: 50, max: 95, step: 1 } }),
+      opt('thinAbove', 'A thin (low-liquidity) zone just above - room to run up', 'thinBelow', { param: pctParam('within', 0.05, 2, 0.01) }),
+      opt('thinBelow', 'A thin (low-liquidity) zone just below - room to fall', 'thinAbove', { param: pctParam('within', 0.05, 2, 0.01) }),
+    ],
+    test: (d, i, v, w, p) => {
+      const f = flowOf(d)
+      const x = f?.liq?.[i]
+      if (!x) return false
+      switch (v) {
+        case 'bidHeavy': return x.lean != null && x.lean * 100 >= p - 1e-9
+        case 'askHeavy': return x.lean != null && (1 - x.lean) * 100 >= p - 1e-9
+        case 'thinAbove': return x.thinUp != null && f.fc[i] > 0 && x.thinUp <= frac(p) * f.fc[i]
+        case 'thinBelow': return x.thinDown != null && f.fc[i] > 0 && x.thinDown <= frac(p) * f.fc[i]
+        default: return false
+      }
+    },
+    show: (d, i) => { const x = flowOf(d)?.liq?.[i]; return x?.lean != null ? `book ${Math.round(x.lean * 100)}% bids near the price` : 'book —' },
+  },
+]
+const FLOW_IDS = new Set(FLOW_CONDITIONS.map((c) => c.id))
+const BOOK_IDS = new Set(['liqRead', 'liqWalls', 'liqLean'])
 const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, level: (d) => d.prevVp?.[key] })
 // A pivot point of the previous session's high / low / close (`pivotLevels`) - read on spot, fixed all day. Its mirror is
 // the level on the other side (R1 <-> S1; P stays P).
@@ -1579,6 +1823,7 @@ export const RULE_CONDITIONS = [
     show: (d) => (d.pivots ? `CPR ${fmtP(d.pivots.bc)} - ${fmtP(d.pivots.tc)} (${d.pivots.widthPct.toFixed(2)}%)` : 'CPR —'),
   },
   ...DELTA_CONDITIONS,
+  ...FLOW_CONDITIONS,
 ]
 // Lines saved while the volume profile levels were today's developing ones (POC / HVN / LVN): read as the previous
 // day's same level - the levels are the previous day's now, on request.
@@ -2510,4 +2755,12 @@ export function tradesCsv(trades) {
 export function deltaDaysNeeded(rule) {
   const lines = normalizeRule(rule).lines
   return lines.reduce((most, l) => Math.max(most, deltaPastOfLine(l)), 0)
+}
+
+/** What a rule reads of the futures order flow (the loader puts it on each day - `attachOrderFlow`): FLOW_NONE, FLOW_DELTA
+ *  (the futures Δ / cumulative Δ) or FLOW_BOOK (the liquidity heatmap too - the footprint and book in the Order Flow
+ *  page's rows). The mirror's lines read the same. */
+export function orderFlowNeeded(rule) {
+  const lines = normalizeRule(rule).lines
+  return lines.reduce((most, l) => Math.max(most, BOOK_IDS.has(l.id) ? FLOW_BOOK : FLOW_IDS.has(l.id) ? FLOW_DELTA : FLOW_NONE), FLOW_NONE)
 }

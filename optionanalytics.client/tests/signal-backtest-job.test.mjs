@@ -18,7 +18,7 @@ import {
 } from '../src/signalBacktestJob.js'
 import { CONTEXT, dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
 
-const { run } = syntheticDay()
+const { run, minuteBars } = syntheticDay()
 const BASE = Date.parse('2026-10-05T00:00:00Z')
 // The synthetic day moved to `date`, its prices bent a little per day so the days differ.
 function runFor(date) {
@@ -633,4 +633,61 @@ test('a capture where NOT ONE day could be read FAILS with the reason - it is no
   assert.equal(result.ok, false)
   assert.match(result.error, /^No day could be captured - 3 of 3 failed, 3 of them: Stored data is not configured/)
   assert.equal(result.features.rows, 0)
+})
+
+// The futures order flow of a day as the Order Flow page's day sends it: the synthetic footprint minutes moved to `date`.
+const flowFor = (date) => {
+  const shift = Date.parse(`${date}T00:00:00Z`) - BASE
+  return { meta: { lotSize: 65 }, rowSize: 1000, source: 'live', heatmap: [], backfill: [], bars: minuteBars.map((b) => ({ ...b, time: new Date(Date.parse(b.time) + shift).toISOString() })) }
+}
+
+test('the futures order flow in the background: each day with its order flow when the rule reads it - the page\'s report', async (t) => {
+  const settings = cleanBacktestSettings({
+    underlying: 'NIFTY', from: DATES[0], to: DATES.at(-1), maxTradesPerDay: 5, cooldownMin: 0, timeStopMin: 30,
+    rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'futCvd', value: 'rising', param: 5, windowMin: 10 } }] }, action: 'buyCE', mirror: true },
+  })
+  // One router for the job's server and the page's loader.
+  const route = (url) => {
+    const date = url.searchParams.get('date') ?? url.pathname.match(/\/day\/(\d{4}-\d{2}-\d{2})$/)?.[1]
+    if (url.pathname.endsWith('/previous-day-volume-profile')) return [200, PREV]
+    if (url.pathname === '/api/oi-replay/NIFTY/run') return date === HOLIDAY ? [200, { success: false, error: 'holiday' }] : [200, runFor(date)]
+    if (url.pathname.startsWith('/api/order-flow/NIFTY/day/')) return date === '2026-10-23' ? [404, { error: 'No NIFTY futures contract found' }] : [200, flowFor(date)]
+    return [404, { error: 'not mocked' }]
+  }
+  const asked = []
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, 'http://x')
+    asked.push(url.pathname)
+    const [status, body] = route(url)
+    res.writeHead(status, { 'content-type': 'application/json' })
+    res.end(JSON.stringify(body))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  t.after(() => server.close())
+  const dir = mkdtempSync(join(tmpdir(), 'oa-sbt-flow-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const out = join(dir, 'result.json')
+  const script = fileURLToPath(new URL('../scanner-runner/signal-backtest.mjs', import.meta.url))
+  const code = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script], {
+      env: { ...process.env, RUNNER_BASE_URL: `http://127.0.0.1:${server.address().port}`, RUNNER_KEY: 'k-1', BACKTEST_OUT: out, BACKTEST_TODAY: '2026-10-26', BACKTEST_JOB: JSON.stringify(settings) },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    })
+    child.on('error', reject)
+    child.on('exit', resolve)
+  })
+  assert.equal(code, 0)
+  const result = JSON.parse(readFileSync(out, 'utf8'), reportReviver)
+  // The page's loader on the same answers.
+  const local = async (path) => { const [status, body] = route(new URL(path, 'http://x')); return { ok: status < 400, status, headers: { get: () => null }, json: async () => body } }
+  const engine = engineSettings(settings)
+  const outcomes = []
+  for (const date of DATES) outcomes.push(dayOutcome(date, await loadBacktestDay('NIFTY', date, { fetch: local, orderFlow: 1 }), engine))
+  const page = JSON.parse(JSON.stringify(backtestReport(outcomes, settings), reportReplacer), reportReviver)
+  assert.deepEqual(result.report, page)
+  assert.ok(page.trades.length > 0)
+  // Asked once a day it ran (not the holiday); the day with none listed, its order flow lines never holding.
+  assert.deepEqual(asked.filter((p) => p.startsWith('/api/order-flow/')).map((p) => p.slice(-10)), DATES.filter((d) => d !== HOLIDAY))
+  assert.deepEqual(page.noFlow, ['2026-10-23'])
+  assert.equal(page.dayRows.find((r) => r.date === '2026-10-23').trades, 0)
 })
