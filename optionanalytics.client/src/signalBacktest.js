@@ -639,6 +639,20 @@ function flippedAfterHeld(x, t, i, w, up, heldMin) {
   while (j >= 0 && finite(x(j)) && other(x(j))) j--
   return j + 1 <= k - 1 && t[k] - t[j + 1] >= heldMin * MIN
 }
+// HELD ALL DAY - SINCE THE MORNING (asked for - "PE > CE since morning check, in total OI, since open OI and cumulative
+// OI"): `x` (a function of the candle) on `up`'s side (> 0) / the other (< 0) at EVERY reading from the first one that was
+// not level up to candle i - never behind, never back to level. Readings with no value (before a line's first bucket, a
+// gap) are skipped; level readings before the first are too (OI since open starts at 0). False with no such reading yet.
+function heldAllDay(x, i, up) {
+  let started = false
+  for (let k = 0; k <= i; k++) {
+    const v = x(k)
+    if (!finite(v) || (v === 0 && !started)) continue
+    if (up ? !(v > 0) : !(v < 0)) return false
+    started = true
+  }
+  return started
+}
 // A level known at the candle before (`level(k - 1)`) closed through by `c` in the window - up or down - and still
 // through, by at least `p` % of the level now (0 = any).
 function brokeLevel(c, level, i, w, up, p = 0) {
@@ -1498,6 +1512,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...LEAD }),
       opt('peFlip', 'CE ahead since the morning, then PE crossed above', 'ceFlip', { ...W, ...LEAD, ...HELD }),
       opt('ceFlip', 'PE ahead since the morning, then CE crossed above', 'peFlip', { ...W, ...LEAD, ...HELD }),
+      // Ahead ALL DAY: at every reading since the morning (the first that was not level), never behind - "by ≥ %" now.
+      opt('peAllDay', 'PE ahead of CE all day (since the morning, never behind)', 'ceAllDay', LEAD),
+      opt('ceAllDay', 'CE ahead of PE all day (since the morning, never behind)', 'peAllDay', LEAD),
       // PE − CE added follows price when the OI confirms it (puts written into a rise, calls into a fall).
       opt('divBull', 'Bullish divergence: price fell, PE − CE added did not fall with it', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, PE − CE added did not rise with it', 'divBull', DIVERGENCE),
@@ -1514,6 +1531,8 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'peAllDay': return heldAllDay(gap, i, true) && lead()
+        case 'ceAllDay': return heldAllDay(gap, i, false) && lead()
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
           const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
@@ -1535,6 +1554,9 @@ export const RULE_CONDITIONS = [
       opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...TOTAL_LEAD }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...TOTAL_LEAD }),
       opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
       opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...TOTAL_LEAD, ...HELD }),
+      // Above ALL DAY: at every reading since the morning, never below - "by ≥ %" now.
+      opt('peAllDay', 'PE above CE all day (since the morning, never below)', 'ceAllDay', TOTAL_LEAD),
+      opt('ceAllDay', 'CE above PE all day (since the morning, never below)', 'peAllDay', TOTAL_LEAD),
       // Total PE − CE follows price when the OI confirms it (puts written into a rise, calls into a fall).
       opt('divBull', 'Bullish divergence: price fell, total PE − CE did not fall with it', 'divBear', DIVERGENCE),
       opt('divBear', 'Bearish divergence: price rose, total PE − CE did not rise with it', 'divBull', DIVERGENCE),
@@ -1551,6 +1573,8 @@ export const RULE_CONDITIONS = [
         case 'ceCross': return crossed(gap, i, w, false) && lead()
         case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && lead()
         case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && lead()
+        case 'peAllDay': return heldAllDay(gap, i, true) && lead()
+        case 'ceAllDay': return heldAllDay(gap, i, false) && lead()
         case 'divBull': case 'divBear': return divergenceHolds(d, gap, i, w, 1, v === 'divBull', p, p2)
         case 'peAddedPct': case 'ceAddedPct': case 'peShedPct': case 'ceShedPct': {
           const side = v.startsWith('pe') ? 'pe' : 'ce', back = Math.max(0, i - w)
@@ -1569,6 +1593,38 @@ export const RULE_CONDITIONS = [
   cumCondition('ce', 'OI', { up: 'call writing - bearish', down: 'calls unwinding - bullish' }),
   cumCondition('pe', 'OI', { up: 'put writing - bullish', down: 'puts unwinding - bearish' }),
   cumCondition('net', 'OI', { up: 'call writers gaining - bearish', down: 'put writers gaining - bullish' }),
+  {
+    // The OI totals' two cumulative lines against each other (asked for - "PE > CE and vice versa ... since morning"): the
+    // PE cumulative Δ (puts added near ATM since the open) over / under the CE one - the same reading as the Net (CE − PE)
+    // line under / over 0, said as CE vs PE. "by ≥ %" = how far apart they are NOW, in % of the gap's own range so far.
+    id: 'cumCePe', group: 'OI', name: 'OI cumulative Δ: CE vs PE (the OI totals card)',
+    options: [
+      opt('peAbove', 'PE cumulative Δ above CE (puts written ahead - bullish)', 'ceAbove', PAST),
+      opt('ceAbove', 'CE cumulative Δ above PE (calls written ahead - bearish)', 'peAbove', PAST),
+      opt('peCross', 'PE crossed above CE', 'ceCross', { ...W, ...PAST }), opt('ceCross', 'CE crossed above PE', 'peCross', { ...W, ...PAST }),
+      opt('peFlip', 'CE above since the morning, then PE crossed above', 'ceFlip', { ...W, ...PAST, ...HELD }),
+      opt('ceFlip', 'PE above since the morning, then CE crossed above', 'peFlip', { ...W, ...PAST, ...HELD }),
+      opt('peAllDay', 'PE above CE all day (since the morning, never below)', 'ceAllDay', PAST),
+      opt('ceAllDay', 'CE above PE all day (since the morning, never below)', 'peAllDay', PAST),
+    ],
+    test: (d, i, v, w, p, p2) => {
+      if (!d.ceCum || !d.peCum) return false
+      const gap = (k) => d.peCum[k] - d.ceCum[k]
+      const far = () => atLeast(pastPct(gap, i), p)
+      switch (v) {
+        case 'peAbove': return gap(i) > 0 && far()
+        case 'ceAbove': return gap(i) < 0 && far()
+        case 'peCross': return crossed(gap, i, w, true) && far()
+        case 'ceCross': return crossed(gap, i, w, false) && far()
+        case 'peFlip': return flippedAfterHeld(gap, d.t, i, w, true, p2) && far()
+        case 'ceFlip': return flippedAfterHeld(gap, d.t, i, w, false, p2) && far()
+        case 'peAllDay': return heldAllDay(gap, i, true) && far()
+        case 'ceAllDay': return heldAllDay(gap, i, false) && far()
+        default: return false
+      }
+    },
+    show: (d, i) => `cum Δ CE ${finite(d.ceCum?.[i]) ? fmtL(d.ceCum[i]) : '—'} · PE ${finite(d.peCum?.[i]) ? fmtL(d.peCum[i]) : '—'}`,
+  },
   {
     id: 'hp', group: 'OI', name: '🎯 High probability',
     options: [opt('bullish', 'Bullish 🎯', 'bearish', W), opt('bearish', 'Bearish 🎯', 'bullish', W)],
