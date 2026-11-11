@@ -1033,7 +1033,7 @@ When adding or changing a strategy:
   of the same timeframe (`previousDayBars` keeps its highs / lows too) as the rule builder's RSI / EMAs are; price vs VWAP
   in deviations (`vwapSd` - the futures' volume-weighted), the candle's volume vs the day's average (`price.v`), the
   basis, the gap, where spot is in yesterday's range, the ATM CE / PE premium's own VWAP and RSI (`premiumCandles` /
-  `premiumRsi`), the straddle's 15-min change, days to expiry and the weekday - 66 in all. Each indicator is held to
+  `premiumRsi`), the straddle's 15-min change, days to expiry and the weekday - 66 of the 95; the other 29 (asked for - "market profile and volume profile, LVN HVN VAL VAH POC + OI details, cumulative delta, delta profile, futures profile ... use all of these"; `profileFeatures.js`, FEATURES in `featureFinder.js`) are the DEVELOPING profiles of the day so far, each built only from the candles up to its own (`tests/feature-finder.test.mjs` checks every one against the page's own `dayVolumeProfile` / `volumeZones` / `tpoProfile` built from scratch, and a day cut part way against the whole day's): the VOLUME profile of the day (the near futures' volume, else the index's) as spot's distance in % from its POC / VAH / VAL / HVN / LVN plus where spot sits in the value area and its width; the MARKET (TPO) profile's POC / VAH / VAL and the single prints above / below spot; OI Replay's OPTION DELTA PROFILE's POC / VAH / VAL / HVN / LVN / most bought / most sold row, the delta in spot's row and the profile's net (`deltaAtCandle`); yesterday's HVN / LVN; the 5-minute change of the ATM +/- 1 / 2 strikes' OI, ATM +/- 3, and the CE / PE cumulative Delta's 15-minute move. A dataset made before them lacks those columns - run the Feature finder again for them. Each indicator is held to
   values worked out by hand (a straight line, a steady trend, a zig-zag) AND to an independent Pine-style reference
   (`tests/ta-reference.mjs`) on random markets with gaps and flat stretches (`tests/ta-indicators.test.mjs`); the
   features to the reference on the warmed-up candles. Not in the rule builder (yet) - a reading that holds there is a
@@ -1045,7 +1045,7 @@ When adding or changing a strategy:
   how many later days agree on their own; the later days' top / bottom fifth (win % of the trades, or the average move);
   what holds first. Under 6 days there is no split (a warning); under 10 later days it says "a hint, not proof". "Dataset
   CSV" = the whole table (`rowsCsv` - a row a candle, a column a feature and a label) for a spreadsheet or your own model.
-  Not in it: the order flow's footprint delta and the book heatmap (kept 30 days only) and the market profile's TPOs. It
+  Not in it: the order flow's footprint delta and the book heatmap (kept about a year - 252 trading days - and only from when the server began recording them) and the market profile's TPOs. It
   places nothing, feeds no strategy; a reading that holds is built as a rule and run through the backtest like any other.
   IN THE BACKGROUND (asked for - "this feature finder should also work on background jobs"): a background run has a KIND
   (`kind` - "backtest", the default, or "features"; `SignalBacktestJobService.Kinds`; a run saved before reads as a
@@ -1172,7 +1172,7 @@ When adding or changing a strategy:
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
   came back as the candle estimate, which has no imbalances at all). One gzip JSON per contract and day
   (`{UNDERLYING}/{securityId}/{yyyy-MM-dd}.json.gz`, heatmap rows as [row, qty]; ~4 MB a full day), the newest
-  `OrderFlow:DaysOnDisk` dates (30) kept; written on ONE background queue (never on an engine's lock or the tick path), a
+  `OrderFlow:DaysOnDisk` dates (252 trading days - about ONE YEAR, asked for - kept, a few GB at most, only memory's newest 3 and a few read-back days in RAM; written on ONE background queue (never on an engine's lock or the tick path), a
   day read back kept for the next asks. TODAY is checkpointed every `CheckpointInterval` (5 min) and at shutdown, and a new
   engine starts from it (`NewEngine` -> `ImportDay`): a deploy mid-session keeps the morning exact - only the minutes the
   server was down are missing, and the first tick after sets a new baseline (no giant print). `OrderFlowDayStoreTests.cs`.
@@ -1196,6 +1196,38 @@ When adding or changing a strategy:
   dashboard). `BacktestService` and its `IBacktestStrategy` strategies STAY: they are what the armed Triggers run
   (`StrategyTriggerHostedService` - `RunStrategy` / `ReplayForStrategy`, in memory) and their list is
   `GET /api/triggers/strategies` (admin, the Triggers page). The Expired Backtest and Signal backtest pages are separate.
+- AI ANALYSIS of a run (asked for - "integrate everything into our system, we should be able to analyse every run";
+  `LlmAnalysisService`, `LlmController` `/api/llm` - `GET status`, `POST analyse`; the page's `AiAnalyse.jsx`, the texts in
+  `llmAnalysis.js`): an "Analyse with AI" button on the Signal backtest report (a page run and an opened background run -
+  the same card), on the Feature finder (page run and background run - `FeatureReportBody`) and on Compare all. The page turns
+  the report into compact TEXT (`backtestReportText` / `featureReportText` / `compareText` - every figure is one the report
+  holds, nothing is worked out for the model, `MAX_TEXT_CHARS` cuts a huge one) and a LOCAL model (Ollama, `Llm:BaseUrl`
+  default http://localhost:11434, `Llm:Model` default qwen2.5:14b, `Llm:Enabled`) reads it - nothing leaves the machine. The
+  system prompt forbids inventing numbers and asks for what holds / what is noise / ONE rule to backtest / what would drop
+  it; the answer is a LEAD, never a signal: it feeds no strategy, alert or order. The model is picked from the INSTALLED ones
+  (`GET /api/tags` - never an arbitrary name), one analysis at a time (a 14 - 27B model fills the memory; a crowd gets 429),
+  the report is cut at `Llm:MaxChars` (60 000). Admin / User only - External and the Runner key are denied by default
+  (`ExternalAccessTests` checks the route). Nothing polls: status is asked when the dialog opens. Production's Docker has no
+  Ollama, so there the status says "not running" and the button explains it. `LlmAnalysisServiceTests.cs` (a fake Ollama),
+  `tests/llm-analysis.test.mjs`. `llm/analyse.mjs` is the same thing from a terminal for any report file.
+  LOCAL ONLY: the AI analysis is behind `AppEnvironment.LocalTools` (`Environment:LocalTools`, which FOLLOWS `Environment:IsLocal` unless set itself - a
+  deployment, with neither set and ASPNETCORE_ENVIRONMENT=Production, has it OFF). It is its own switch because IsLocal also makes past days
+  come from the stored database ONLY (never Dhan), so a machine with no database sets IsLocal false and LocalTools true.
+  `[LocalOnly]` is a RESOURCE filter - it answers 404 before the controller is built - on `LlmController.Analyse`; `GET status` says "not available";
+  `GET /api/auth/me` and the login answer carry `isLocal` (= LocalTools) and every "Analyse with AI" button shows only then (`AiAnalyse`).
+  Nothing runs at startup, no hosted service, no timer (`LocalToolsTests`: the gate in every combination). The .dockerignore keeps `llm/` out of an image.
+- The dataset CSV (a Feature finder run's `{id}.features.csv` - Signal backtest, "Run in background" with "Feature finder": it needs NO rule or
+  condition) carries CONTEXT columns right after `date,time` - `CONTEXT` in `featureFinder.js`: the candle's spot open / high / low / close, the near
+  futures' close, volume, the ATM strike, the ATM CE / PE premium and the VWAP level (`vwapLevel` - not `vwap`, which is a reading) - then every
+  reading, then the labels (what happened after - never an input of anything). The context is for READING the file (a spreadsheet, a chart, the AI,
+  a model of your own): a price LEVEL is not comparable day to day. A Feature finder run in which not one day could be read FAILS with the reason
+  (it used to finish "done" with an empty file). The volume-profile readings need volume: the near futures' (only for days Dhan still holds - the
+  last couple of months) or the index's (from January 2026), so they are blank for older days; the market profile and the option delta profile
+  are there for every day.
+- The project targets .NET 8 (`net8.0`; it was on 11 for a while). On this Mac .NET 8 is in `~/.dotnet` beside the system .NET 11 (RUNNING.md section 10). .NET 11 changed `(decimal)aDouble` / `(decimal)aFloat` to keep the EXACT binary value (a feed price 101.60f became
+  101.59999847412109375, an IV 12.34 became 12.3399999...); .NET 8 rounded to 15 / 7 significant digits. Every double / float
+  that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast (it gives the same numbers on 8 and on 11)
+  (`DecimalConversionTests.cs`).
 - Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
   Live (Dhan) mode, or a saved Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`);
   alerts and the default auto trade are paper.

@@ -5,7 +5,9 @@ import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
 import { MAX_BACKGROUND_DAYS } from './signalBacktest.js'
 import { defaultRunName, featureTradeText, runRange } from './signalBacktestJob.js'
-import { afterTheClose, cancelRun, deleteRun, downloadFeaturesCsv, queueRun } from './signalBacktestQueue.js'
+import { afterTheClose, cancelRun, deleteRun, downloadFeaturesCsv, queueRun, runResult } from './signalBacktestQueue.js'
+import { AiAnalyse } from './AiAnalyse.jsx'
+import { storedRunText } from './llmAnalysis.js'
 
 // The Signal backtest's BACKGROUND runs, on the page: queue one (now, after the close or at a time - the server runs it,
 // SignalBacktestJobService, one at a time, the browser can be closed), the list of runs with their state and progress, and
@@ -207,6 +209,12 @@ function Actions({ job: j, viewingIds, busy, onOpen, onUse, onCancel, onDelete }
         <Tooltip title="The whole table - a row a candle, a column a reading and what came next - for a spreadsheet or your own model.">
           <Button size="small" icon={<DownloadOutlined />} loading={saving} onClick={csv}>CSV</Button>
         </Tooltip>
+      )}
+      {j.state === 'done' && (
+        <AiAnalyse
+          buildText={async () => storedRunText(await runResult(j.id))} title={`AI analysis - ${j.name ?? 'background run'}`}
+          label="Analyse"
+        />
       )}
       <Tooltip title="Put this run's index, days, rule and settings on the page.">
         <Button size="small" onClick={() => onUse(j)}>Use settings</Button>

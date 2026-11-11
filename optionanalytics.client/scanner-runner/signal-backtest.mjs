@@ -163,6 +163,15 @@ async function features(dates) {
     closeSync(fd)
   }
   renameSync(`${CSV}.tmp`, CSV)
+  // Not one day captured: that is a FAILED run, not an empty "done" one (a dataset with no rows would look like a capture and teach a model nothing).
+  if (!tables.length) {
+    const reasons = new Map()
+    for (const reason of failed.values()) reasons.set(reason, (reasons.get(reason) ?? 0) + 1)
+    const [top, count] = [...reasons.entries()].sort((a, b) => b[1] - a[1])[0] ?? ['no day was asked', 0]
+    const error = `No day could be captured - ${failed.size} of ${dates.length} failed${count ? `, ${count} of them: ${top}` : ''}`
+    write({ ok: false, kind: 'features', settings, dates, startedUtc, finishedUtc: new Date().toISOString(), error, features: { rows: 0, okDays: 0, failed: dates.filter((d) => failed.has(d)).map((date) => ({ date, reason: failed.get(date) })) } })
+    process.exit(1)
+  }
   progress({ stage: 'done', done: dates.length, total: dates.length, rows, okDays: tables.length, sources: sourceCounts() })
   write({
     ok: true, kind: 'features', settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(),

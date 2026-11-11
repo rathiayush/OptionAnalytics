@@ -370,7 +370,8 @@ export function featureTradeText(s) {
   const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
   const strike = s.moneyness ? `${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : 'ATM'
   const timeStop = s.timeStopMin > 0 ? ` · out after ${s.timeStopMin} min` : ''
-  return `${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''} · ${strike} CE / PE bought: SL ${level(s.slPct)} · target ${level(s.targetPct)}${trailText(s)}${timeStop}`
+  const cost = s.costSl ? ` · cost SL (${s.costSl}${s.costAfter > 0 ? ` after +${s.costAfter}${s.costSl === 'spot' ? ' pts' : unit}` : ''})` : ''
+  return `${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''} · ${strike} CE / PE bought: SL ${level(s.slPct)} · target ${level(s.targetPct)}${trailText(s)}${cost}${timeStop}`
 }
 
 /** A Feature finder run's heading: the index, the days run and their range, and `featureTradeText`. */

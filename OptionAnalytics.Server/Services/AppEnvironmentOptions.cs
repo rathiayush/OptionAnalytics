@@ -16,4 +16,9 @@ public sealed class AppEnvironmentOptions
     /// auto-detection - e.g. if a real deployment ever doesn't set ASPNETCORE_ENVIRONMENT the way
     /// this app's own docker-compose.yml/Dockerfile currently do.</summary>
     public bool? IsLocal { get; set; }
+
+    /// <summary>Whether this server shows the LOCAL TOOLS - the AI analysis of a run (a local model). null (the default) follows <see cref="IsLocal"/>. It is its own setting because IsLocal also changes where past
+    /// days come from (the stored database only, never Dhan - a machine with no database then cannot load a day at all): a developer's
+    /// machine with no database sets IsLocal false and this true.</summary>
+    public bool? LocalTools { get; set; }
 }

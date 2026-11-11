@@ -11,8 +11,12 @@ public sealed class AppEnvironment
 {
     public bool IsLocal { get; }
 
+    /// <summary>The AI analysis and the ML models exist here (Environment:LocalTools - else IsLocal).</summary>
+    public bool LocalTools { get; }
+
     public AppEnvironment(IHostEnvironment environment, IOptions<AppEnvironmentOptions> options)
     {
         IsLocal = options.Value.IsLocal ?? environment.IsDevelopment();
+        LocalTools = options.Value.LocalTools ?? IsLocal;
     }
 }

@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using System.Buffers.Binary;
 
 namespace OptionAnalytics.Server.Dhan;
@@ -85,7 +86,7 @@ public static class DhanDepthPacketParser
                 var quantity = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(at + 8, 4));
                 var orders = BinaryPrimitives.ReadUInt32LittleEndian(message.Slice(at + 12, 4));
                 if (!double.IsFinite(price) || price <= 0 || price > 1e9) continue;
-                levels.Add(new DepthLevel(Math.Round((decimal)price, 2), quantity, (int)Math.Min(orders, int.MaxValue)));
+                levels.Add(new DepthLevel(Math.Round(DecimalConversion.FromDouble(price), 2), quantity, (int)Math.Min(orders, int.MaxValue)));
             }
 
             result.Add(new DepthSidePacket(securityId, segment, code == BidCode, levels.ToArray(), rowsInHeader ? TwoHundredLevelCount : LevelCount));

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Progress, Select, Space, Table, Tag, Typography } from 'antd'
 import { CloseOutlined, CloudServerOutlined, DownloadOutlined } from '@ant-design/icons'
 import { DOWN_COLOR, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
+import { AiAnalyse } from './AiAnalyse.jsx'
+import { featureReportText } from './llmAnalysis.js'
 import { FoldText } from './FoldText.jsx'
 import { HOLD_IC, LABELS, dayRows, featureReport, rowsCsv } from './featureFinder.js'
 import { cleanBacktestSettings, featureRunHead } from './signalBacktestJob.js'
@@ -108,6 +110,7 @@ export function FeatureFinderCard({ days, settings, underlying, onClose, onBackg
         : report && (
           <FeatureReportBody
             report={report} target={shownTarget} setTarget={setTarget} rows={state.rows.length} onDownload={download}
+            info={{ underlying, timeframe: tf }}
             extra={onBackground && backgroundDays > 0 && (
               <Button size="small" icon={<CloudServerOutlined />} onClick={onBackground}>
                 In the background · {backgroundDays} day{backgroundDays === 1 ? '' : 's'}
@@ -145,7 +148,7 @@ export function StoredFeatureFinderCard({ run, onDownload, onClose }) {
           </FoldText>
         )}
         {report
-          ? <FeatureReportBody report={report} target={shownTarget} setTarget={setTarget} rows={f.rows ?? 0} onDownload={download} downloading={saving} />
+          ? <FeatureReportBody report={report} target={shownTarget} setTarget={setTarget} rows={f.rows ?? 0} onDownload={download} downloading={saving} info={{ underlying: settings.underlying, timeframe: settings.timeframe }} />
           : <Alert type="warning" showIcon message="This run kept no report for that label." />}
       </Space>
     </Card>
@@ -154,7 +157,7 @@ export function StoredFeatureFinderCard({ run, onDownload, onClose }) {
 
 /** The report of one label, the label picker, the dataset button and how to read it - the page's card and a background
  *  run's alike. `rows` - the dataset's rows; `extra` - more buttons beside the dataset's. */
-function FeatureReportBody({ report, target, setTarget, rows, onDownload, downloading = false, extra = null }) {
+function FeatureReportBody({ report, target, setTarget, rows, onDownload, downloading = false, extra = null, info = {} }) {
   const phone = useMediaQuery('(max-width: 640px)')
   const held = report.features.filter((f) => f.holds).length
   const label = LABELS.find((l) => l.key === target)?.name
@@ -166,6 +169,7 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
         <Button size="small" icon={<DownloadOutlined />} onClick={onDownload} loading={downloading} disabled={!rows}>
           Dataset CSV ({rows.toLocaleString('en-IN')} rows)
         </Button>
+        <AiAnalyse buildText={() => featureReportText(report, target, info)} title="AI analysis - Feature finder" />
         {extra}
       </Space>
       {report.split
@@ -229,7 +233,7 @@ function FeatureReportBody({ report, target, setTarget, rows, onDownload, downlo
           look at how many later days agree, and at the top / bottom fifth. A reading that holds is a candidate for a rule:
           build it in the rule builder and run it through the backtest with charges. The CSV is the whole table (a row a
           candle, a column a reading and what came next) for a spreadsheet or your own model. The order flow (the
-          footprint&apos;s delta, the book heatmap) is not in it: the server keeps those days for 30 days only. Run in the
+          footprint&apos;s delta, the book heatmap) is not in it: the server keeps those days for about a year (252 trading days), from when it began recording them. Run in the
           background, it takes up to 1,500 days - more days, a fairer check.
         </Text>
       </FoldText>

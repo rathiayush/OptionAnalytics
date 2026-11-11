@@ -41,6 +41,12 @@ expired-option-data/
 # ScannerLogStore's CSVs (see Storage:ScannerLogPath) - the scanner's record, kept on the server.
 scanner-log/
 order-flow/
+# DhanDataCache (Storage:DhanCachePath) - every past Dhan day, NSE and scrip-master files; up to 10 GB, re-fetchable.
+dhan-cache/
+# Other server data folders that default to the project folder when run locally.
+/OptionAnalytics.Server/scanner-runner/
+/OptionAnalytics.Server/preferences/
+/OptionAnalytics.Server/paper-positions/
 visitor-log/
 geo/
 live-time-exits.json
@@ -57,3 +63,9 @@ OptionAnalytics.Server/wwwroot/*
 
 # The server-side scanner bundle (npm run build:runner) - published next to the server, never committed.
 optionanalytics.client/dist-runner/
+
+# Created next to the project when the server runs locally (Storage:* defaults).
+/OptionAnalytics.Server/risk-settings.csv
+/OptionAnalytics.Server/trade-settings.csv
+/OptionAnalytics.Server/scanner-runner-data/
+

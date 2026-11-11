@@ -12,7 +12,8 @@
 // real one, so only what holds on the later days is worth turning into a rule - and that rule then goes through the
 // backtest, with charges, like any other. Pure: no page, no network.
 
-import { clockMinute, emaSeries, istMinute, optionFor, premiumCandles, premiumRsi, rsiSeries, simulateTrade, timeframeView } from './signalBacktest.js'
+import { clockMinute, deltaAtCandle, emaSeries, istMinute, optionFor, premiumCandles, premiumRsi, rsiSeries, simulateTrade, timeframeView } from './signalBacktest.js'
+import { profileSeries } from './profileFeatures.js'
 import { atr, bollinger, cci, dmi, macd, stochastic, supertrend } from './taIndicators.js'
 
 const MIN = 60_000
@@ -184,6 +185,64 @@ export const FEATURES = [
   { key: 'expiry', group: 'When', name: "Options' expiry day (1 = yes)", read: (d) => (d.isExpiry ? 1 : 0) },
   { key: 'daysToExpiry', group: 'When', name: "Days to the options' expiry", read: (d) => (d.expiry ? (Date.parse(`${d.expiry}T00:00:00Z`) - Date.parse(`${d.date}T00:00:00Z`)) / 864e5 : NaN) },
   { key: 'weekday', group: 'When', name: 'Day of the week (1 Monday - 5 Friday)', read: (d) => new Date(`${d.date}T00:00:00Z`).getUTCDay() },
+  // Yesterday's high / low volume nodes (known before the open)
+  { key: 'prevHvn', group: 'Profile & pivots', name: "Spot vs yesterday's HVN %", read: (d, i) => pct(d.spot.c[i], d.prevVp?.hvn) },
+  { key: 'prevLvn', group: 'Profile & pivots', name: "Spot vs yesterday's LVN %", read: (d, i) => pct(d.spot.c[i], d.prevVp?.lvn) },
+  // The VOLUME profile of the day so far (the futures' volume when the day has it, else the index's) - developing, from the candles up to this one
+  { key: 'vpPoc', group: 'Volume profile (today)', name: "Spot vs today's POC %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).vp[i]?.poc) },
+  { key: 'vpVah', group: 'Volume profile (today)', name: "Spot vs today's VAH %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).vp[i]?.vah) },
+  { key: 'vpVal', group: 'Volume profile (today)', name: "Spot vs today's VAL %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).vp[i]?.val) },
+  { key: 'vpHvn', group: 'Volume profile (today)', name: "Spot vs today's HVN %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).vp[i]?.hvn) },
+  { key: 'vpLvn', group: 'Volume profile (today)', name: "Spot vs today's LVN %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).vp[i]?.lvn) },
+  { key: 'vpInVa', group: 'Volume profile (today)', name: "Where spot is in today's value area (0 VAL - 100 VAH)", read: (d, i) => {
+    const v = profileSeries(d).vp[i]
+    return v && v.vah > v.val ? ((d.spot.c[i] - v.val) / (v.vah - v.val)) * 100 : NaN
+  } },
+  { key: 'vpWidth', group: 'Volume profile (today)', name: "Today's value area width % of price", read: (d, i) => {
+    const v = profileSeries(d).vp[i]
+    return v && d.spot.c[i] > 0 ? ((v.vah - v.val) / d.spot.c[i]) * 100 : NaN
+  } },
+  // The MARKET (TPO) profile of the day so far on the spot candles
+  { key: 'tpoPoc', group: 'Market profile (today)', name: "Spot vs today's TPO POC %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).tpo[i]?.poc) },
+  { key: 'tpoVah', group: 'Market profile (today)', name: "Spot vs today's TPO VAH %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).tpo[i]?.vah) },
+  { key: 'tpoVal', group: 'Market profile (today)', name: "Spot vs today's TPO VAL %", read: (d, i) => pct(d.spot.c[i], profileSeries(d).tpo[i]?.val) },
+  { key: 'tpoSinglesUp', group: 'Market profile (today)', name: 'Single-print rows above spot (count)', read: (d, i) => profileSeries(d).tpo[i]?.singlesUp ?? NaN },
+  { key: 'tpoSinglesDown', group: 'Market profile (today)', name: 'Single-print rows below spot (count)', read: (d, i) => profileSeries(d).tpo[i]?.singlesDown ?? NaN },
+  // OI Replay's OPTION DELTA PROFILE on the spot chart, the day so far (the card's levels and the flow at the price)
+  ...['poc', 'vah', 'val', 'hvn', 'lvn', 'buy', 'sell'].map((level) => ({
+    key: `odp${level[0].toUpperCase()}${level.slice(1)}`, group: 'Option Δ profile', name: `Spot vs the option Δ profile's ${level === 'buy' ? 'most bought row' : level === 'sell' ? 'most sold row' : level.toUpperCase()} %`,
+    read: (d, i) => pct(d.spot.c[i], deltaAtCandle(d, i, 1, 0)?.levels?.[level]),
+  })),
+  { key: 'odpRow', group: 'Option Δ profile', name: 'Option Δ in the row spot is in (% of the largest row; + buying)', read: (d, i) => {
+    const x = deltaAtCandle(d, i, 1, 0)
+    return x && x.maxAbsDelta > 0 ? (x.rowDelta(d.spot.c[i]) / x.maxAbsDelta) * 100 : NaN
+  } },
+  { key: 'odpNet', group: 'Option Δ profile', name: "The option Δ profile's net (CE − PE) % of its volume", read: (d, i) => {
+    const x = deltaAtCandle(d, i, 1, 0)
+    return x && x.volume > 0 ? (x.delta / x.volume) * 100 : NaN
+  } },
+  // More OI: how the strikes around ATM changed lately, and the cumulative Δ of each side
+  { key: 'atm1Chg5', group: 'OI', name: 'S-R walls ATM ± 1: PE − CE OI added in the last 5 min %', read: (d, i) => {
+    const a = d.atmOi?.[i]?.[1], b = d.atmOi?.[back(d, i, 5)]?.[1]
+    return a && b ? lead(a.ce - b.ce, a.pe - b.pe) : NaN
+  } },
+  { key: 'atm2Chg5', group: 'OI', name: 'S-R walls ATM ± 2: PE − CE OI added in the last 5 min %', read: (d, i) => {
+    const a = d.atmOi?.[i]?.[2], b = d.atmOi?.[back(d, i, 5)]?.[2]
+    return a && b ? lead(a.ce - b.ce, a.pe - b.pe) : NaN
+  } },
+  { key: 'atm3Total', group: 'OI', name: 'S-R walls ATM ± 3: PE over CE total OI %', read: (d, i) => { const x = d.atmOi?.[i]?.[3]; return x ? leadOfLower(x.ce, x.pe) : NaN } },
+  { key: 'atm3Open', group: 'OI', name: 'S-R walls ATM ± 3: PE − CE added since open %', read: (d, i) => { const x = d.atmOi?.[i]?.[3]; return x ? lead(x.dce, x.dpe) : NaN } },
+  ...['ceCum', 'peCum'].map((line) => ({
+    key: `${line}15`, group: 'Cumulative Δ', name: `${line === 'ceCum' ? 'CE' : 'PE'} cumulative Δ: move over 15 min (% of its range)`,
+    read: (d, i) => {
+      const s = d[line]
+      const j = back(d, i, 15)
+      if (!s || !fin(s[i]) || !fin(s[j])) return NaN
+      let lo = Infinity, hi = -Infinity
+      for (let k = 0; k <= i; k++) if (fin(s[k])) { lo = Math.min(lo, s[k]); hi = Math.max(hi, s[k]) }
+      return hi > lo ? ((s[i] - s[j]) / (hi - lo)) * 100 : 0
+    },
+  })),
 ]
 
 /** What happened after the candle (`key`, its name): spot `minutes` later; the highest / lowest spot in the next `extreme`
@@ -225,6 +284,20 @@ function spotExtreme(d1, m, minutes, up) {
  * features (read at the candle's close) and labels (after it). `levels` - the trade's { slPct, targetPct, levelUnit,
  * trailGap, trailStart, timeStopMin, moneyness, entryFrom, lastEntry } (the page's).
  */
+/** The CONTEXT columns beside every row of the dataset CSV (asked for - "a csv which captures all the data and the spot price"): the
+ *  candle's spot OHLC, the near futures' close and volume, the ATM strike, the ATM CE / PE premium and the VWAP, as at the candle's
+ *  close. They are for READING the file (a spreadsheet, a chart, the AI) - never inputs of a model: a price LEVEL is not
+ *  comparable from one day to the next (the ML engine leaves them out - `MlDataset.NotFeatures`). */
+export const CONTEXT = ['spotOpen', 'spotHigh', 'spotLow', 'spot', 'futures', 'volume', 'atm', 'cePremium', 'pePremium', 'vwapLevel']
+function contextOf(d, k) {
+  const v = (x) => (fin(x) ? x : NaN)
+  return {
+    spotOpen: v(d.spot.o[k]), spotHigh: v(d.spot.h[k]), spotLow: v(d.spot.l[k]), spot: v(d.spot.c[k]),
+    futures: d.priceSource === 'futures' ? v(d.price.c[k]) : NaN, volume: v(d.price.v?.[k]), atm: v(d.atm?.[k]),
+    cePremium: v(premium(d, 'ce', k).c[k]), pePremium: v(premium(d, 'pe', k).c[k]), vwapLevel: v(d.vwap?.[k]),
+  }
+}
+
 export function dayRows(day, { timeframe = 5, ...levels } = {}) {
   if (!day?.ok) return []
   const d1 = day
@@ -235,13 +308,15 @@ export function dayRows(day, { timeframe = 5, ...levels } = {}) {
   const trade = {
     slPct: levels.slPct ?? 0, targetPct: levels.targetPct ?? 0, levelUnit: levels.levelUnit ?? 'pct',
     trailGap: levels.trailGap ?? 0, trailStart: levels.trailStart ?? 0, timeStopMin: levels.timeStopMin ?? 0, squareOff: levels.squareOff ?? '15:10',
+    // The Cost SL once in profit (spot or premium) - the outcome each moment is judged with follows the same stops as the backtest's trades.
+    costSl: levels.costSl ?? '', costAfter: levels.costAfter ?? 0,
   }
   const rows = []
   for (let k = 0; k < d.n; k++) {
     const m = at(k)
     const minute = istMinute(d1.t[m])
     if (minute < from || minute > last) continue
-    const row = { date: d1.date, time: d1.t[m], expiry: Boolean(d1.isExpiry), f: {}, y: {} }
+    const row = { date: d1.date, time: d1.t[m], expiry: Boolean(d1.isExpiry), f: {}, y: {}, c: contextOf(d, k) }
     for (const f of FEATURES) { const v = f.read(d, k); row.f[f.key] = fin(v) ? v : NaN }
     const spot = d1.spot.c[m]
     for (const l of LABELS) {
@@ -412,11 +487,11 @@ export function rowsCsv(rows) {
   return `${csvHeader()}${csvLines(rows)}`
 }
 /** The CSV's header line (with its newline). */
-export const csvHeader = () => `${['date', 'time', ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(',')}\n`
+export const csvHeader = () => `${['date', 'time', ...CONTEXT, ...FEATURES.map((f) => f.key), ...LABELS.map((l) => l.key)].join(',')}\n`
 /** The CSV's lines for `rows` (each with its newline) - a background run writes a day's at a time. */
 export function csvLines(rows) {
   let out = ''
-  for (const r of rows) out += `${[r.date, istClock(r.time), ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(',')}\n`
+  for (const r of rows) out += `${[r.date, istClock(r.time), ...CONTEXT.map((k) => r.c?.[k] ?? NaN), ...FEATURES.map((f) => r.f[f.key]), ...LABELS.map((l) => r.y[l.key])].map(cell).join(',')}\n`
   return out
 }
 

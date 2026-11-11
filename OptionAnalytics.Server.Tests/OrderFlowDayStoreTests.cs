@@ -22,9 +22,9 @@ public sealed class OrderFlowDayStoreTests : IDisposable
         try { Directory.Delete(_root, recursive: true); } catch { /* temp */ }
     }
 
-    private OrderFlowDayStore Store(int daysOnDisk = 30) => new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+    private OrderFlowDayStore Store(int? daysOnDisk = 30) => new(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
     {
-        ["Storage:OrderFlowPath"] = _root, ["OrderFlow:DaysOnDisk"] = daysOnDisk.ToString(),
+        ["Storage:OrderFlowPath"] = _root, ["OrderFlow:DaysOnDisk"] = daysOnDisk?.ToString(),
     }).Build(), NullLogger<OrderFlowDayStore>.Instance, startWriter: false);
 
     private static SpotTick Tick(decimal price, long volume, decimal bid, decimal ask) =>
@@ -109,6 +109,19 @@ public sealed class OrderFlowDayStoreTests : IDisposable
         foreach (var offset in new[] { 0, 1, 2 }) store.Add(RecordedDay(T0.AddDays(offset)).ExportDay()!);
         store.FlushForTests();
         Assert.Equal(new[] { new DateOnly(2026, 10, 7), new DateOnly(2026, 10, 6) }, Store().Days("NIFTY").Select(d => d.Date));
+    }
+
+    [Fact]
+    public void By_default_about_one_year_of_trading_days_are_kept_on_disk()
+    {
+        Assert.Equal(252, OrderFlowDayStore.DefaultDaysOnDisk);
+        var store = Store(daysOnDisk: null);   // nothing configured: the default
+        // A day at a time, as the server records them (the writer's queue holds 64 days at most).
+        for (var offset = 0; offset < 254; offset++) { store.Add(RecordedDay(T0.AddDays(offset)).ExportDay()!); store.FlushForTests(); }
+        var kept = Store(daysOnDisk: null).Days("NIFTY").Select(d => d.Date).ToList();
+        Assert.Equal(252, kept.Count);
+        Assert.Equal(DateOnly.FromDateTime(T0.AddDays(253).Date), kept.Max());   // the newest stay
+        Assert.Equal(DateOnly.FromDateTime(T0.AddDays(2).Date), kept.Min());     // the two oldest went
     }
 
     [Fact]

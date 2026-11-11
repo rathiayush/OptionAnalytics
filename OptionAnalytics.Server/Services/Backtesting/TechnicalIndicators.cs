@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Services;
 using OptionAnalytics.Server.Models;
 using Skender.Stock.Indicators;
 
@@ -53,7 +54,7 @@ public static class TechnicalIndicators
     public static IReadOnlyList<bool?> RsiBullish(IReadOnlyList<Candle> bars, int period, decimal bullThreshold, decimal bearThreshold)
     {
         var results = ToQuotes(bars).GetRsi(Math.Max(2, period)).ToList();
-        return results.Select(r => r.Rsi is not { } v ? (bool?)null : (decimal)v >= bullThreshold ? true : (decimal)v <= bearThreshold ? false : (bool?)null).ToList();
+        return results.Select(r => r.Rsi is not { } v ? (bool?)null : DecimalConversion.FromDouble(v) >= bullThreshold ? true : DecimalConversion.FromDouble(v) <= bearThreshold ? false : (bool?)null).ToList();
     }
 
     // ---- ADX + DMI: direction comes from +DI vs -DI (which side of the move is winning), ADX
@@ -77,7 +78,7 @@ public static class TechnicalIndicators
         return results.Select(r =>
         {
             if (r.Adx is not { } adxRaw || r.Pdi is not { } pdi || r.Mdi is not { } mdi) return (bool?)null;
-            var adx = (decimal)adxRaw;
+            var adx = DecimalConversion.FromDouble(adxRaw);
             if (adx < minStrength) return null; // trending too weakly to trust either DI's lead
             if (pdi > mdi) return true;
             if (mdi > pdi) return false;
