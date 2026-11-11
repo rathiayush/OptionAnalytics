@@ -60,6 +60,7 @@ import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { CardFitBox, ChartGrow, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
+import { ABSORPTION_TIMEFRAMES, absorptionMarkers, oiAbsorptionEvents } from './oiAbsorption.js'
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
@@ -964,7 +965,9 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
   return `${prefix} ${oiBarText(t)} ${strike} (${formatOiMillions(oi)} OI${iv != null ? `, IV ${iv.toFixed(1)}` : ''}${delta ? `, ${delta}` : ''}, ${sr})${staleTag}`
 }
 
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null }) {
+// `markers` - lightweight-charts series markers on the candles (OI Replay's absorption / exhaustion reads - oiAbsorption.js);
+// only those on a candle drawn are set.
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null, markers = EMPTY_ARRAY }) {
   // In a dashboard card the trader has sized, the height the card's fit gives it (useFitHeight); anywhere else - a
   // floating panel, the review popup - the height the caller asked for. `extraHeight` on top: what lines its bottom
   // up with the charts beside it (useEvenChartBottoms).
@@ -975,6 +978,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  const markersRef = useRef(null)
   // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
   // ([height] only), so a new onStrikeClick/step on every render (step rarely changes; onStrikeClick
   // is an inline arrow function at the call site) must not tear down and recreate the whole chart.
@@ -1047,6 +1051,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    markersRef.current = createSeriesMarkers(seriesRef.current, [])
     profilePrimitiveRef.current = new VolumeProfilePrimitive()
     seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
 
@@ -1093,6 +1098,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       chartRef.current = null
       seriesRef.current = null
       vwapSeriesRef.current = null
+      markersRef.current = null
       profilePrimitiveRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
@@ -1108,6 +1114,13 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
     if (!seriesRef.current) return
     seriesRef.current.setData(bars)
   }, [bars])
+
+  // The markers on candles there are (a marker's candle not drawn yet - a timeframe just changed - waits for it).
+  useEffect(() => {
+    if (!markersRef.current) return
+    const times = markers?.length ? new Set(bars.map((b) => b.time)) : null
+    markersRef.current.setMarkers(times ? markers.filter((m) => times.has(m.time)) : EMPTY_ARRAY)
+  }, [markers, bars])
 
   // Fed only while checked, empty otherwise - on the candles' own times (chartVwap): a 1-minute /
   // multi-day VWAP series adds time points the candles do not have and squeezes them into a corner.
@@ -5563,6 +5576,15 @@ export default function OiReplayPage() {
   // user's own "switch ... if true show top 5 else all wall" ask, off shows every real wall in the
   // whole fetched band instead (see ReplayChart's own top5Only doc comment).
   const [top5WallsOnly, setTop5WallsOnly] = usePersistedState('optionanalytics.oiReplay.top5WallsOnly', true)
+  // ABSORPTION / EXHAUSTION BY OI on the spot chart (oiAbsorption.js) - a tick, off by default, and the timeframe its
+  // candles are read on (its own - the chart's candles may be another). Worked out only while ticked: the completed candles
+  // up to the clock (live, the forming minute left out), each against the option OI written near the money in it.
+  const [showOiAbsorption, setShowOiAbsorption] = usePersistedState('optionanalytics.oiReplay.oiAbsorption', false)
+  const [oiAbsorptionTf, setOiAbsorptionTf] = usePersistedState('optionanalytics.oiReplay.oiAbsorptionTf', 5)
+  const oiAbsorption = useMemo(() => (showOiAbsorption && result?.success
+    ? oiAbsorptionEvents({ spotBars: oneMinBars.slice(0, visibleCount), ceByStrike, peByStrike, step, timeframe: oiAbsorptionTf, asOfMs: isLive ? null : asOfMs, live: isLive })
+    : EMPTY_ARRAY), [showOiAbsorption, result?.success, oneMinBars, visibleCount, ceByStrike, peByStrike, step, oiAbsorptionTf, isLive, asOfMs])
+  const oiAbsorptionMarks = useMemo(() => (oiAbsorption.length ? absorptionMarkers(oiAbsorption, timeframe) : EMPTY_ARRAY), [oiAbsorption, timeframe])
   // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
   // the candles. On by default; unticked shows the full labels. Remembered in this browser.
   const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, true)
@@ -5910,6 +5932,7 @@ export default function OiReplayPage() {
           height={spotChartHeight}
           extraHeight={spotFloating ? 0 : chartExtras[0]}
           profileBars={spotProfileBars}
+          markers={oiAbsorptionMarks}
         />
       </ChartErrorBoundary>
     )
@@ -6007,6 +6030,15 @@ export default function OiReplayPage() {
         <Tooltip title="Wall labels show only the strike, Δ since the open and S-R - shorter, so they cover less of the chart.">
           <Checkbox checked={wallLabelsShort} onChange={(e) => setWallLabelsShort(e.target.checked)}>Δ and S-R only</Checkbox>
         </Tooltip>
+        <Tooltip title="Marks on the spot chart where the option writers' OI near the money (ATM ± 2) and price disagree, read on the candles of the timeframe picked. ABSORPTION (ABS): heavy OI written on one side (2x a typical candle's) while price goes nowhere (body under half a typical range) - puts written: bullish ▲ (support), calls written: bearish ▼ (resistance). EXHAUSTION (EXH): a new 10-candle high on OI closing with no puts written - bearish ▼, the rally is short covering; a new 10-candle low with no calls written - bullish ▲. Completed candles only, from the 6th of the day; nothing after the replay clock.">
+          <Checkbox checked={showOiAbsorption} onChange={(e) => setShowOiAbsorption(e.target.checked)}>Absorption / exhaustion (OI)</Checkbox>
+        </Tooltip>
+        {showOiAbsorption && (
+          <Select
+            size="small" value={oiAbsorptionTf} onChange={setOiAbsorptionTf} style={{ width: 96 }} aria-label="Absorption / exhaustion timeframe"
+            options={ABSORPTION_TIMEFRAMES.map((m) => ({ value: m, label: `on ${m} min` }))}
+          />
+        )}
       </Space>
       {oiShiftAlerts && activeAlerts.length > 0 && (
         <Alert
@@ -6020,6 +6052,27 @@ export default function OiReplayPage() {
       {spotFloating
         ? <div ref={floatingChartBoxRef} style={{ flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>{spotChart}</div>
         : spotChart}
+      {showOiAbsorption && (
+        <FoldText
+          id="oiReplay.oiAbsorption" label="absorption / exhaustion reads" style={{ marginTop: 6 }}
+          summary={(
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              OI absorption / exhaustion on {oiAbsorptionTf} min: {oiAbsorption.length
+                ? `${oiAbsorption.length} so far · last ${istTimeFormatter(oiAbsorption.at(-1).time)} - ${oiAbsorption.at(-1).text}`
+                : 'none yet (read from the 6th completed candle)'}
+            </Text>
+          )}
+        >
+          <Space direction="vertical" size={2}>
+            {oiAbsorption.length === 0 && <Text type="secondary" style={{ fontSize: 12 }}>None yet on {oiAbsorptionTf} min (read from the 6th completed candle).</Text>}
+            {oiAbsorption.slice().reverse().map((e) => (
+              <Text key={`${e.time}-${e.kind}-${e.side}`} style={{ fontSize: 12, color: e.side === 'bull' ? UP_COLOR : DOWN_COLOR }}>
+                {istTimeFormatter(e.time)}–{istTimeFormatter(e.time + oiAbsorptionTf * 60)} · {e.text}
+              </Text>
+            ))}
+          </Space>
+        </FoldText>
+      )}
     </>
   )
 

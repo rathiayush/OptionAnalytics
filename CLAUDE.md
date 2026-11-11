@@ -164,6 +164,22 @@ When adding or changing a strategy:
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; with Telegram on, the page sends it itself only when the server is not
   covering the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+- OI Replay's ABSORPTION / EXHAUSTION BY OI on the spot chart (asked for - "absorption and exhaustion by OI on spot ...
+  when this checkbox is ticked show, otherwise hide ... select the timeframe on which it will identify"; `oiAbsorption.js` -
+  `oiAbsorptionEvents` / `absorptionMarkers`): the spot card's "Absorption / exhaustion (OI)" tick
+  (`optionanalytics.oiReplay.oiAbsorption`, OFF by default - off nothing is worked out or drawn) and its own timeframe, 1 /
+  3 / 5 / 15 min (`optionanalytics.oiReplay.oiAbsorptionTf`, 5 - the chart's candles may be another): each COMPLETED candle
+  of it (live, the forming minute left out; replayed, nothing after the clock) against the option OI written near the money
+  in it (ATM ± 2 strikes of the candle's close, the same strikes at both ends; with Σ 3 expiries the summed OI) - Wyckoff's
+  effort vs result. ABSORPTION: heavy OI on one side (>= 2x a typical candle's - the larger side's |change| averaged over
+  the candles before it) and ahead of the other, while the body stays under half a typical range - puts written = bullish
+  (▲ ABS under the candle), calls = bearish (▼ over it). EXHAUSTION: a new 10-candle high on the band's OI falling (>= 0.5x
+  typical) with no puts written = bearish (▼ EXH - the rally is covering), a new low with no calls written = bullish (▲).
+  From the 6th candle; each read from readings up to its candle's end, so a candle's read never changes. Markers on the spot
+  chart's own candle holding the read's last minute (`ReplayChart`'s `markers` - the External page passes none), and a
+  folded line under the chart (the last read; opened, the day's). It feeds no strategy or alert
+  (`tests/oi-absorption.test.mjs` - each read on its case, both sides, not without each part, the timeframes, a cut part
+  way = the whole day's up to it).
 - OI Replay's ATM straddle card (`StraddleCard.jsx`, `straddle.js`) draws the two straddle charts the option tools draw
   (Sensibull's "Auto ATM" and a fixed strike), each against the VWAP of its combined premium from a set time (09:15 by
   default, "From"): AUTO ATM - the strike nearest the expiry's futures price (a weekly has none: the synthetic one,
