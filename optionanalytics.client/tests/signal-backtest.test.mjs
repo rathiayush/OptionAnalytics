@@ -1632,3 +1632,34 @@ test('S-R walls near ATM: CE vs PE total OI and added since open - above, crosse
   assert.deepEqual(mirrorLines([{ id: 'atmOiOpen', value: 'peCross', param3: 2, windowMin: 10 }]), [{ id: 'atmOiOpen', value: 'ceCross', param3: 2, windowMin: 10 }])
   assert.match(cond('atmOi').show(d, 70, { param3: 1 }), /ATM ± 1 total CE \+20\.0L · PE \+30\.0L/)
 })
+
+test('PE > CE ALL DAY (since the morning, never behind) - OI since open, Total OI and the OI cumulative Δ; and the cumulative CE vs PE', () => {
+  // OI since open: level at the open, PE ahead from minute 3 on - except a dip at 60 where CE got ahead for a minute.
+  const added = (i) => (i < 3 ? { ce: 0, pe: 0 } : i === 60 ? { ce: 120, pe: 100 } : { ce: 100, pe: 130 })
+  const oi = fakeDay({ oi: added })
+  assert.ok(holds(oi, 'oiOpen', 'peAllDay', 40) && holds(oi, 'oiOpen', 'peAllDay', 59))
+  assert.ok(!holds(oi, 'oiOpen', 'peAllDay', 60) && !holds(oi, 'oiOpen', 'peAllDay', 90))   // behind once: no longer "all day"
+  assert.ok(holds(oi, 'oiOpen', 'peAhead', 90) && !holds(oi, 'oiOpen', 'ceAllDay', 40))     // ahead now, but not all day
+  assert.ok(!holds(oi, 'oiOpen', 'peAllDay', 2))                                              // nothing but level yet
+  // "by ≥ %" is the lead now (30 / 230 = 13%).
+  assert.ok(holds(oi, 'oiOpen', 'peAllDay', 40, 5, 12) && !holds(oi, 'oiOpen', 'peAllDay', 40, 5, 14))
+  // The mirror: CE ahead all day.
+  const calls = fakeDay({ oi: (i) => (i < 3 ? { ce: 0, pe: 0 } : { ce: 150, pe: 100 }) })
+  assert.ok(holds(calls, 'oiOpen', 'ceAllDay', 200) && !holds(calls, 'oiOpen', 'peAllDay', 200))
+  // Total OI: PE above CE from the first reading - until CE goes above at 120.
+  const tot = fakeDay({ tot: (i) => (i < 120 ? { ce: 4e7, pe: 4.4e7 } : { ce: 4.6e7, pe: 4.4e7 }) })
+  assert.ok(holds(tot, 'totalOi', 'peAllDay', 119) && !holds(tot, 'totalOi', 'peAllDay', 120) && !holds(tot, 'totalOi', 'ceAllDay', 150))
+  assert.ok(holds(tot, 'totalOi', 'peAllDay', 100, 5, 9) && !holds(tot, 'totalOi', 'peAllDay', 100, 5, 11))   // 10% over CE
+  // The OI cumulative Δ: no line before the first bucket (skipped), then PE over CE all day - CE crosses above at 200.
+  const cum = fakeDay({ ceCum: (i) => (i < 5 ? NaN : i < 200 ? 50 * i : 300 * i), peCum: (i) => (i < 5 ? NaN : 100 * i) })
+  assert.ok(holds(cum, 'cumCePe', 'peAllDay', 150) && holds(cum, 'cumCePe', 'peAbove', 150) && !holds(cum, 'cumCePe', 'ceAbove', 150))
+  assert.ok(!holds(cum, 'cumCePe', 'peAllDay', 4))                                            // no reading yet
+  assert.ok(holds(cum, 'cumCePe', 'ceCross', 202) && holds(cum, 'cumCePe', 'ceFlip', 202) && holds(cum, 'cumCePe', 'ceAbove', 260))
+  assert.ok(!holds(cum, 'cumCePe', 'peAllDay', 200) && !holds(cum, 'cumCePe', 'ceAllDay', 260))
+  // The same reading as the Net (CE − PE) cumulative Δ under / over 0.
+  const net = fakeDay({ ceCum: (i) => 50 * i, peCum: (i) => 100 * i, netCum: (i) => -50 * i })
+  for (const i of [10, 100, 300]) assert.equal(holds(net, 'cumCePe', 'peAbove', i), holds(net, 'cumNet', 'negative', i))
+  // In words, and mirrored.
+  assert.match(lineText(cleanLine({ id: 'totalOi', value: 'peAllDay', param: 5 })), /^Total OI: CE vs PE \(the Total OI chart\): PE above CE all day \(since the morning, never below\) by ≥ 5%$/)
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'cumCePe', value: 'peAllDay' }), cleanLine({ id: 'oiOpen', value: 'ceAllDay' })]).map((l) => l.value), ['ceAllDay', 'peAllDay'])
+})

@@ -667,7 +667,15 @@ When adding or changing a strategy:
   default, = since the open - the day's FIRST flip (every reading from the first that was not level on the other side;
   OI since open starts level), N = at least N minutes straight right before the flip (an earlier flip allowed); with the
   crosses' own "by ≥ %"; the box says "min = since open" at 0 (`param2.after`), the words "held since the open" /
-  "held ≥ N min before" (`param2.text`). THE S-R WALLS NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3, CE cross
+  "held ≥ N min before" (`param2.text`). AHEAD ALL DAY (asked for - "in total OI, since open OI and cumulative OI: PE > CE
+  since morning check, and PE > CE and vice versa"): OI since open, Total OI CE vs PE and the OI cumulative Δ's CE vs PE
+  each have "PE ahead / above CE all day (since the morning, never behind)" and the CE mirror (`peAllDay` / `ceAllDay`,
+  `heldAllDay`: on that side at EVERY reading from the first that was not level up to the candle - behind once, or back to
+  level, and it no longer holds that day; readings with no value - before the first bucket, a gap - skipped), with the
+  crosses' "by ≥ %" read now. The OI totals card's two cumulative lines AGAINST EACH OTHER are their own condition, "OI
+  cumulative Δ: CE vs PE" (`cumCePe`, the gap PE cum − CE cum): PE above CE / CE above PE, crossed, held then flipped
+  (`HELD`) and all day, "by ≥ %" of the gap's own range so far (`PAST`) - the same reading as the Net (CE − PE) line under /
+  over 0, said as CE vs PE (`tests/signal-backtest.test.mjs`). THE S-R WALLS NEAR ATM (asked for - "S-R walls total CE PE ATM ± 1, 2, 3, CE cross
   PE - and since open too"): two conditions, "S-R walls ATM ±: total OI (CE vs PE)" (`atmOi`) and "... since open (CE vs PE
   added)" (`atmOiOpen`), on the strikes ATM ± N of each minute (`param3` "ATM ±", 0 - `ATM_OI_MAX` 5, default 1): their CE
   (R) and PE (S) OI added up - the spot chart's walls' own OI - or what each added since the open (a strike from its own
