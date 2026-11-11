@@ -7,7 +7,7 @@
 # separate stage here, so `docker build` and a plain `dotnet publish` produce the same thing - which
 # means Node has to be present in the SDK stage.
 
-FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 ARG NODE_MAJOR=20
 
 RUN apt-get update \
@@ -35,7 +35,7 @@ COPY . .
 # dist/ into wwwroot - see the csproj. npm ci above means that install is a no-op cache hit.
 RUN dotnet publish OptionAnalytics.Server/OptionAnalytics.Server.csproj -c Release -o /app/publish
 
-FROM mcr.microsoft.com/dotnet/aspnet:11.0 AS runtime
+FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
 
 # The aspnet runtime image ships no HTTP client at all, and the HEALTHCHECK below needs one to
 # actually hit the app - without this it could only test that the dotnet binary exists, which tells
