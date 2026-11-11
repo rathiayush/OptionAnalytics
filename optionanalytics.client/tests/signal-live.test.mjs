@@ -10,10 +10,10 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { prepareDay, simulateDay } from '../src/signalBacktest.js'
-import { cleanBacktestSettings, engineSettings } from '../src/signalBacktestJob.js'
+import { attachOrderFlow, cleanBacktestSettings, engineSettings } from '../src/signalBacktestJob.js'
 import { completedRun, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, liveTrade, prepareLiveDay, tradeRow } from '../src/signalLive.js'
 
-const { run } = syntheticDay()          // 2026-10-05, 09:15 - 14:15
+const { run, minuteBars } = syntheticDay()          // 2026-10-05, 09:15 - 14:15
 const DATE = '2026-10-05'
 const MIN = 60_000
 const at = (hhmm) => Date.parse(`${DATE}T${hhmm}:00+05:30`)
@@ -141,7 +141,10 @@ const SUM_MONTHLY = sumChain(2, '2026-10-27')
 const withVolume = (list, up) => list.map((p, k) => ({ ...p, open: p.price, high: p.price * (up ? 1.01 : 1.04), low: p.price * (up ? 0.96 : 0.99), volume: 100 + (k % 9) * 50 }))
 const PAST_RUN = { ...run, optionExpiry: '2026-10-06', cePoints: withVolume(run.cePoints, true), pePoints: withVolume(run.pePoints, false) }
 
-async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, bandsOk = true, pastOk = true }) {
+// Today's futures order flow as the Order Flow page's day sends it - the synthetic day's footprint minutes.
+const FLOW_DAY = { meta: { lotSize: 75 }, rowSize: 1000, source: 'live', bars: minuteBars, heatmap: [], backfill: [] }
+
+async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, bandsOk = true, pastOk = true, flowOk = true }) {
   const asked = []
   const posted = []
   const server = createServer((req, res) => {
@@ -159,6 +162,7 @@ async function runLoop(nowIso, { strategies, runOk = true, sensexOk = true, band
       if (url.pathname === '/api/oi-replay/SENSEX/run') return sensexOk ? json(200, sensexRun) : json(503, { error: 'busy' })
       if (url.pathname.endsWith('/previous-day-volume-profile')) return json(200, { success: false })
       if (url.pathname === '/api/oi-replay/NIFTY/summed-expiries') return json(200, { current: '2026-10-06', next: '2026-10-13', monthly: '2026-10-27' })
+      if (url.pathname === `/api/order-flow/NIFTY/day/${DATE}`) return flowOk ? json(200, FLOW_DAY) : json(503, { error: 'busy' })
       if (url.pathname === '/api/oi-replay/NIFTY/expiry-band') {
         if (!bandsOk) return json(503, { error: 'busy' })
         const c = url.searchParams.get('expiryFlag') === 'MONTH' ? SUM_MONTHLY : SUM_NEXT
@@ -368,4 +372,33 @@ test('the option delta profile\'s days before live: walked back once for a strat
   // No strategy reading them: no day before asked.
   const plain = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })
   assert.deepEqual(plain.asked.filter((a) => a.path === '/api/oi-replay/NIFTY/run').map((a) => new URLSearchParams(a.search).get('date')), [DATE])
+})
+
+test('the futures order flow live: today\'s read once a round for a strategy reading it - the backtest of the day so far; a failure backed off', async () => {
+  // The futures cumulative Δ rising over 10 minutes (and, mirrored, falling): its trades are the day's up to noon.
+  const flowSettings = cleanBacktestSettings({
+    underlying: 'NIFTY', maxTradesPerDay: 3, cooldownMin: 0, timeStopMin: 30,
+    rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'futCvd', value: 'rising', param: 5, windowMin: 10 } }] }, action: 'buyCE', mirror: true },
+  })
+  const reading = { id: 's4', name: 'CVD', settings: flowSettings, sent: [], reported: false }
+  const noon = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, reading] })
+  assert.equal(noon.code, 0)
+  const flowAsks = noon.asked.filter((a) => a.path.startsWith('/api/order-flow/'))
+  assert.equal(flowAsks.length, 1)
+  assert.match(flowAsks[0].search, /rowSize=1000&minTradeLots=100000&heatmapColumns=50/)
+  assert.equal(flowAsks[0].key, 'k-9')
+  const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
+  await attachOrderFlow(day, 'NIFTY', 1, { fetch: async () => ({ ok: true, status: 200, json: async () => FLOW_DAY }), asOfMs: at('12:00') })
+  const expected = liveDayEvents(day, engineSettings(flowSettings)).events.map((e) => e.key)
+  assert.ok(expected.length > 0)
+  const events = (r, id) => r.posted.find((p) => p.path === '/api/signal-strategies/live/events' && p.body.strategyId === id)?.body.events ?? []
+  assert.deepEqual(events(noon, 's4').map((e) => e.key), expected)
+  // Not readable now: that strategy waits (backed off on its own), the other goes on.
+  const busy = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, reading], flowOk: false })
+  assert.ok(busy.posted.some((p) => p.body.strategyId === 's1'))
+  assert.ok(!busy.posted.some((p) => p.body.strategyId === 's4'))
+  assert.match(busy.log, /NIFTY order flow: today not read \(.*busy.*\) - again in 1 min/)
+  // No strategy reading it: not asked.
+  const plain = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })
+  assert.ok(!plain.asked.some((a) => a.path.startsWith('/api/order-flow/')))
 })

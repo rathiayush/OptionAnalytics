@@ -765,10 +765,36 @@ When adding or changing a strategy:
   again" when the rule now reads more than the run loaded, the report lists days with fewer (`noDeltaPast`). The background
   run and the day chart load them too; the LIVE SCAN walks them once an index a day (backed off on a failure - a strategy
   reading them waits, the others go on). `tests/signal-backtest-delta.test.mjs` (a clock = the minutes up to it, the levels,
-  the days before, the mirror, a live cut = the whole day's, the loader), `signal-live.test.mjs`. EVERY comparison takes a "by ≥ %"
+  the days before, the mirror, a live cut = the whole day's, the loader), `signal-live.test.mjs`. THE FUTURES ORDER FLOW
+  (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal backtest as well"; group
+  `OrderFlow`, `FLOW_CONDITIONS`; the data `orderFlowFeatures.js`): the Order Flow page's own day of the near futures
+  (`/api/order-flow/{u}/day/{date}`, `orderFlowUrl` - no prints; the Δ alone in one row a bar, with the heatmap in the Order
+  Flow page's default rows, NIFTY 1 / BANKNIFTY / SENSEX 5, and `FLOW_HEATMAP_COLUMNS` 750 snapshots - ~one per 30 s)
+  laid on the day's minutes (`orderFlowMinutes`, each from data up to its minute's end): FUTURES Δ (`futDelta` - the
+  candle's buy − sell, its minutes' added: buyers / sellers ahead by ≥ % of its volume, the same over the look-back, a big
+  candle ≥ N x the average |Δ| before it, selling absorbed = Δ negative on a candle that closed UP and the mirror), the
+  FUTURES CUMULATIVE Δ (`futCvd` - the running Δ from 09:15: sign, turned, flipped after the morning, rising / falling /
+  stable, a new high / low of the day, divergence - it FOLLOWS price - and % change, read as the OI cumulative Δ lines are)
+  and the LIQUIDITY HEATMAP read by the Order Flow page's `liquidityMap` at each minute's end (its 10-minute window of
+  snapshots and the minutes completed - nothing after the minute): `liqRead` - its read (absorption / exhaustion at a bid /
+  offer wall, a wall broken or pulled, a vacuum, a drift, any bullish / bearish read; events, so no number, in the
+  look-back), `liqWalls` - the nearest bid wall under / offer wall over the price that STAYED in the book (near it, touched
+  and held, broken, building / pulling by its last 2 min against its 10-min size, the bigger side), `liqLean` - the book's
+  lean within 10 rows and a thin zone just above / below; all on the FUTURES' own candles (the heatmap is the futures'
+  book). A timeframe's candle: Δ / volume its minutes' sums, CVD / walls its last minute's, a read in any minute of it
+  (`flowView`). Asked only when the rule reads it (`orderFlowNeeded`: none / Δ / book), once a day (`attachOrderFlow` - the
+  page's kept days get it after, a later rule needing the book asks again; the background run, the day chart and the LIVE
+  SCAN - today's from the server's memory, cut to the completed minutes, backed off on its own, a strategy reading it waits
+  - load it too). A day the server did not record live has its Δ ESTIMATED from 1-minute candles and NO book; a 404 = no
+  order flow (the day runs, those lines never hold); a server error = the day not run (retried). The report lists the days
+  with none (`noFlow`), an estimated Δ (`flowEstimated` - all of it, or the minutes before the recording began) and, the
+  heatmap read, no book (`noBook`). Live, the book's 750 snapshots are sampled from what the server holds at the time, so
+  a heatmap read can differ slightly from the same day backtested after the close. `tests/signal-backtest-flow.test.mjs`
+  (each condition both ways and not without its part, the liquidity map's own read, a cut part way = the whole day's, the
+  loader, the report), `-job` (the background run = the page's) and `signal-live.test.mjs`. EVERY comparison takes a "by ≥ %"
   (asked for - "add % for all even for crossing"), crossings and turns too, 0 = any (the default - a rule saved before
-  reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event) and the three
-  "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
+  reads as it did, `atLeast` / `frac`: a missing number is 0) and the mirror keeps it; only a 🎯 (an event), the liquidity
+  map's reads (events) and the three "inside" (the IB, the value area, the CPR) have none - RSI's number is its level (`tests/signal-backtest.test.mjs` holds the list). What the % is of: price v a level (VWAP, the OI /
   GEX walls broken - `brokeLevel(..., p)`, the IB, yesterday's levels and value area) the level; OI since open CE + PE
   added (`LEAD`, its crosses too); Total OI CE vs PE the lower line; a CUMULATIVE Δ line (positive / negative, turned,
   broke - the break keeps the `level` broken, `brokenLevel`) and the NET GEX (regime, turned) - no price - their own range
@@ -1045,7 +1071,7 @@ When adding or changing a strategy:
   how many later days agree on their own; the later days' top / bottom fifth (win % of the trades, or the average move);
   what holds first. Under 6 days there is no split (a warning); under 10 later days it says "a hint, not proof". "Dataset
   CSV" = the whole table (`rowsCsv` - a row a candle, a column a feature and a label) for a spreadsheet or your own model.
-  Not in it: the order flow's footprint delta and the book heatmap (kept about a year - 252 trading days - and only from when the server began recording them) and the market profile's TPOs. It
+  Not in it: the order flow's footprint delta and the book heatmap (kept about a year - 252 trading days - and only from when the server began recording them; the rule builder has them - THE FUTURES ORDER FLOW above) and the market profile's TPOs. It
   places nothing, feeds no strategy; a reading that holds is built as a rule and run through the backtest like any other.
   IN THE BACKGROUND (asked for - "this feature finder should also work on background jobs"): a background run has a KIND
   (`kind` - "backtest", the default, or "features"; `SignalBacktestJobService.Kinds`; a run saved before reads as a

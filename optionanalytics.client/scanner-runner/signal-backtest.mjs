@@ -22,7 +22,7 @@
 // Progress goes to stdout as lines "PROGRESS {json}".
 
 import { closeSync, openSync, renameSync, writeFileSync, writeSync } from 'node:fs'
-import { MAX_BACKGROUND_DAYS, backtestDays, deltaDaysNeeded } from '../src/signalBacktest.js'
+import { MAX_BACKGROUND_DAYS, backtestDays, deltaDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
 import { csvHeader, csvLines, dayRows, dayTable, featureReportsOfDays } from '../src/featureFinder.js'
 
@@ -95,11 +95,13 @@ async function main() {
   // Trading in another index: that index's day of the same date too (the trades are taken in it); a day either failed on
   // the way is tried once more.
   const deltaDays = deltaDaysNeeded(settings.rule)
+  // The futures order flow (Δ / cumulative Δ / liquidity heatmap), when the rule reads it - the Order Flow page's day.
+  const orderFlow = orderFlowNeeded(settings.rule)
   const runDay = async (date) => {
     // "Σ 3 expiries": the day's next and monthly expiries summed into its OI reads (loadBacktestDay) - the traded index's
     // day is read for its premiums only.
     // The option delta profile's days before, when the rule reads them (loadBacktestDay - each kept for the next day).
-    const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries, deltaDays })
+    const day = await load(settings.underlying, date, { timeoutMs: DAY_TIMEOUT_MS, sumExpiries: settings.sumExpiries, deltaDays, orderFlow })
     const tradeDay = settings.tradeIn && day.ok ? await load(settings.tradeIn, date, { timeoutMs: DAY_TIMEOUT_MS }) : null
     outcomes.set(date, dayOutcome(date, day, engine, tradeDay))
     return { retry: Boolean(day.retry || tradeDay?.retry), reason: day.ok ? tradeDay?.reason : day.reason }

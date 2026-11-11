@@ -11,8 +11,8 @@
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
 //   LIVE_NOW, LIVE_ONCE           (tests only) a fixed clock (ISO) and one round, then exit
 
-import { attachDeltaPast, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
-import { deltaDaysNeeded } from '../src/signalBacktest.js'
+import { attachDeltaPast, attachOrderFlow, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
+import { deltaDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
 import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -102,6 +102,9 @@ async function round(nowMs) {
   // The most sessions before today an index's strategies read on the option delta profile.
   const deltaNeed = new Map()
   for (const s of list) deltaNeed.set(s.clean.underlying, Math.max(deltaNeed.get(s.clean.underlying) ?? 0, deltaDaysNeeded(s.clean.rule)))
+  // What an index's strategies read of its futures order flow (Δ / cumulative Δ, the liquidity heatmap too).
+  const flowNeed = new Map()
+  for (const s of list) flowNeed.set(s.clean.underlying, Math.max(flowNeed.get(s.clean.underlying) ?? 0, orderFlowNeeded(s.clean.rule)))
   const days = new Map()
   const summedDays = new Map()
   for (const u of wanted) {
@@ -124,6 +127,20 @@ async function round(nowMs) {
           failed(deltaKey, err.message)
         }
       }
+      // Today's futures order flow (the server's memory - the Order Flow engine's day), cut to the completed minutes, for the
+      // strategies reading it - backed off on its own; a strategy reading it waits for the next round when it cannot be read.
+      const flowKey = `${u} order flow`
+      let flow = null
+      if ((flowNeed.get(u) ?? 0) > 0 && day.ok && (backoff.get(flowKey)?.until ?? 0) <= nowMs) {
+        try {
+          const r = await attachOrderFlow(day, u, flowNeed.get(u), { fetch: withKey, asOfMs: nowMs })
+          if (!r.ok) throw new Error(r.reason)
+          backoff.delete(flowKey)
+          flow = day.flow
+        } catch (err) {
+          failed(flowKey, err.message)
+        }
+      }
       // Its other expiries, for the strategies reading it with "Σ 3 expiries" - backed off on their own, so the index's
       // other strategies go on; a summing strategy waits for the next round when they cannot be read now.
       const sumKey = `${u} Σ 3 expiries`
@@ -133,7 +150,7 @@ async function round(nowMs) {
           if (!summed.ok) throw new Error(summed.reason)
           const sumDay = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs, expiryChains: summed.chains })
           backoff.delete(sumKey)
-          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}))
+          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}, flow ? { flow, flowWanted: day.flowWanted } : {}))
         } catch (err) {
           failed(sumKey, err.message)
         }
@@ -148,6 +165,7 @@ async function round(nowMs) {
       const day = (s.clean.sumExpiries ? summedDays : days).get(u)
       if (!day) continue
       if (deltaDaysNeeded(s.clean.rule) > 0 && !Array.isArray(day.odmPast)) continue
+      if (orderFlowNeeded(s.clean.rule) > 0 && !day.flow) continue
       // Trading in another index: its day too - not read this round, the strategy waits for the next.
       const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
       if (s.clean.tradeIn && !tradeDay) continue

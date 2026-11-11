@@ -8,9 +8,9 @@ import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
+  deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
-import { attachDeltaPast, backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
+import { attachDeltaPast, attachOrderFlow, backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { downloadFeaturesCsv, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
 import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
@@ -72,6 +72,7 @@ const GROUP_TITLE = {
   OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Options: "Option premium - the ATM strike's own chart (VWAP, EMA, RSI)", Straddle: 'ATM straddle', Profile: "Today's market profile",
   PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
   DeltaProfile: "Option delta profile on spot (OI Replay's card - its levels, the flow at the price)",
+  OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
 }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
 const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
@@ -325,7 +326,9 @@ function remember(key, day) {
 // `sumExpiries` - the day with its next and monthly expiries summed into the OI reads ("Σ 3 expiries"): its own day.
 // `deltaDays` - the sessions before it the rule's option delta profile reads, put on the day kept (`attachDeltaPast` - the
 // days of this run already loaded are not asked again); a day before that could not be loaded = the day not run this time.
-async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDays = 0 } = {}) {
+// `orderFlow` - what the rule reads of the futures order flow (`orderFlowNeeded`), put on the day kept once
+// (`attachOrderFlow`); failing on the way = the day not run this time.
+async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDays = 0, orderFlow = 0 } = {}) {
   const key = `${underlying}|${date}${sumExpiries ? '|Σ3' : ''}`
   const cached = PREPARED.has(key)
   const day = cached ? PREPARED.get(key) : await loadBacktestDay(underlying, date, { signal, timeoutMs: LOAD_TIMEOUT_MS, sumExpiries })
@@ -333,6 +336,8 @@ async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDay
   if (!cached && (day.ok || day.final)) remember(key, day.ok ? day : { ok: false, date, reason: day.reason })
   const past = await attachDeltaPast(day, underlying, deltaDays)
   if (!past.ok) return { day: { ok: false, date, reason: past.reason, retry: true }, cached }
+  const flow = await attachOrderFlow(day, underlying, orderFlow, { signal })
+  if (!flow.ok) return { day: { ok: false, date, reason: flow.reason, retry: true }, cached }
   return { day, cached }
 }
 
@@ -510,19 +515,20 @@ export default function SignalBacktestPage() {
     const ti = tradeIn
     const sum = sumExpiries
     const deltaDays = deltaDaysNeeded(rule)
+    const orderFlow = orderFlowNeeded(rule)
     const list = dates
     setViewing(null)
     // Where the days came from (asked about - "all the data is cached, why is it taking time?"): already prepared in this
     // tab, from the server's disk, or asked of Dhan - a day nothing has loaded before (the first time only).
     const startedMs = Date.now()
-    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, deltaDays, dates: list, done: 0, current: list[0] ?? null, results: [], sources: { disk: 0, dhan: 0, tab: 0 } })
+    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, deltaDays, orderFlow, dates: list, done: 0, current: list[0] ?? null, results: [], sources: { disk: 0, dhan: 0, tab: 0 } })
     const results = []
     for (let k = 0; k < list.length; k++) {
       setRun((r) => ({ ...r, current: list[k], done: k }))
       let source = null
       try {
         // The signal index's day - and, trading in another, that index's day of the same date (where the trades are taken).
-        const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum, deltaDays })
+        const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum, deltaDays, orderFlow })
         const trade = ti && day?.ok ? await loadDay(ti, list[k], controller.signal) : null
         results.push({ date: list[k], day, tradeDay: trade?.day ?? null, cached: Boolean(cached) })
         source = cached ? 'tab' : daySource(day)
@@ -706,6 +712,11 @@ export default function SignalBacktestPage() {
   const noPivots = report?.noPivots ?? []
   // Days whose option delta profile had fewer sessions before them than the rule reads.
   const noDeltaPast = report?.noDeltaPast ?? []
+  // The futures order flow: days with none, days whose Δ was estimated (not recorded live) and - the heatmap read - days with no book.
+  const noFlow = report?.noFlow ?? []
+  const flowEstimated = report?.flowEstimated ?? []
+  const noBook = report?.noBook ?? []
+  const dayList = (list) => list.map((date) => dayjs(date).format('D MMM')).join(' · ')
   const sides = report?.sides ?? ['rule']
   const sideTag = (id) => <Space size={6}><span style={{ width: 10, height: 10, borderRadius: 2, background: SIDE[id].color, display: 'inline-block' }} />{SIDE[id].name}</Space>
   const summaryColumns = [
@@ -826,6 +837,11 @@ export default function SignalBacktestPage() {
             {run.underlying && !viewing && deltaDaysNeeded(rule) > (run.deltaDays ?? 0) && (
               <Text type="warning" style={{ fontSize: 12 }}>
                 The rule reads the option delta profile of {deltaDaysNeeded(rule)} session{deltaDaysNeeded(rule) === 1 ? '' : 's'} before each day - the last run did not load them, so those lines do not hold below. Run again (the days already loaded are not asked again).
+              </Text>
+            )}
+            {run.underlying && !viewing && orderFlowNeeded(rule) > (run.orderFlow ?? 0) && (
+              <Text type="warning" style={{ fontSize: 12 }}>
+                The rule reads the futures order flow{orderFlowNeeded(rule) > 1 ? ' and its liquidity heatmap' : ''} - the last run did not load {orderFlowNeeded(rule) > 1 && (run.orderFlow ?? 0) > 0 ? 'the heatmap' : 'it'}, so those lines do not hold below. Run again (the days already loaded are not asked again).
               </Text>
             )}
             {run.underlying && !viewing && (run.underlying !== index || (run.tradeIn ?? '') !== tradeIn || Boolean(run.sumExpiries) !== sumExpiries) && (
@@ -1178,6 +1194,24 @@ export default function SignalBacktestPage() {
               <Alert
                 type="info" showIcon message={`Fewer sessions before ${noDeltaPast.length} day${noDeltaPast.length === 1 ? '' : 's'} than the rule's option delta profile reads`}
                 description={`${noDeltaPast.map((date) => dayjs(date).format('D MMM')).join(' · ')} - their profile is of the sessions found (the server's data starts later).`}
+              />
+            )}
+            {noFlow.length > 0 && (
+              <Alert
+                type="warning" showIcon message={`No futures order flow for ${noFlow.length} day${noFlow.length === 1 ? '' : 's'} - the rule's order flow lines never hold on ${noFlow.length === 1 ? 'it' : 'them'}`}
+                description={dayList(noFlow)}
+              />
+            )}
+            {flowEstimated.length > 0 && (
+              <Alert
+                type="info" showIcon message={`Futures Δ estimated on ${flowEstimated.length} day${flowEstimated.length === 1 ? '' : 's'}`}
+                description={`${dayList(flowEstimated)} - the server did not record ${flowEstimated.length === 1 ? 'it' : 'them'} live (or only part of the day): the Δ of those minutes is the Order Flow page's estimate from the 1-minute candles, not the traded side.`}
+              />
+            )}
+            {noBook.length > 0 && (
+              <Alert
+                type="info" showIcon message={`No liquidity heatmap for ${noBook.length} day${noBook.length === 1 ? '' : 's'} - the rule's heatmap lines never hold on ${noBook.length === 1 ? 'it' : 'them'}`}
+                description={`${dayList(noBook)} - the book is kept only for the days the server recorded live (about a year, from when it began recording).`}
               />
             )}
             {noPivots.length > 0 && (
