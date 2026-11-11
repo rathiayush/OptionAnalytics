@@ -1161,6 +1161,14 @@ When adding or changing a strategy:
   loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`. The Order Flow
   page's footprint "Delta per row" tick (`rowDelta`, `optionanalytics.orderFlow.rowDelta`, off by default - the cells as
   they were) adds a third column to every row: its buy - sell, green / red, shaded against the bar's largest (`rowDeltas`).
+  The numbers NEVER RUN INTO EACH OTHER (asked for - a phone's bars with the delta column on were unreadable: "if the area
+  is too small show delta only"; `footprintTextLayout` in `footprintText.js`, one choice for every bar on screen from the
+  WIDEST sell / buy / delta string, measured once): sell x buy (+ delta) at the largest font that fits, 12 down to 8 px (the
+  delta column widening from its 30% when its number needs it); else, with the delta column on, the ROW DELTA ALONE across
+  the cells (the sell / buy cells give way, an imbalance / stacked row keeps a mark on its edge, the hover still shows
+  every figure); else colours only - and a bar too narrow for two cells and the delta column shows the delta's colours
+  alone (they ran into the next bar). Text that fits as before is drawn exactly as before. The strip under the bars drops
+  its "Δ" / "ΣΔ" / "Vol" labels when they do not fit the bar (`tests/footprint-text.test.mjs`).
   AUCTIONS (the "Auctions" tick, on by default, `optionanalytics.orderFlow.auctions`; every footprint - the OI Replay
   review's too): each bar's high and low read on its sell (bid) x buy (ask) rows (`auctionOf`, in `analyzeBars`) - FINISHED
   (FA) = no selling at the top row (0 x N) / no buying at the bottom row (N x 0): that side ran out; UNFINISHED (UA) = both
