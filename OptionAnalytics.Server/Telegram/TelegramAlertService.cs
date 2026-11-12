@@ -7,18 +7,21 @@ namespace OptionAnalytics.Server.Telegram;
 /// thin wrapper, not a queue or retry pipeline - an alert is a "nice to know", not a trading
 /// action, so a failed send is logged and dropped rather than retried (an EMA crossover alert
 /// that arrives late or twice is far less useful than one dropped silently after a transient
-/// network blip).</summary>
+/// network blip). Every message is also kept as it went in the Telegram message log (TelegramMessageLog - sent, failed,
+/// or "off" when Telegram is not configured), which the Telegram signals page reads.</summary>
 public sealed class TelegramAlertService
 {
     private readonly HttpClient _httpClient;
     private readonly TelegramOptions _options;
     private readonly ILogger<TelegramAlertService> _logger;
+    private readonly TelegramMessageLog? _log;
 
-    public TelegramAlertService(HttpClient httpClient, IOptions<TelegramOptions> options, ILogger<TelegramAlertService> logger)
+    public TelegramAlertService(HttpClient httpClient, IOptions<TelegramOptions> options, ILogger<TelegramAlertService> logger, TelegramMessageLog? log = null)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
+        _log = log;
     }
 
     /// <summary>Whether a send would actually reach Telegram. Callers that do something
@@ -31,6 +34,7 @@ public sealed class TelegramAlertService
         if (!_options.IsConfigured)
         {
             _logger.LogDebug("Telegram alert skipped (Telegram:Enabled/BotToken/ChatId not configured): {Message}", message);
+            _log?.Record(message, "off");
             return;
         }
 
@@ -44,11 +48,14 @@ public sealed class TelegramAlertService
             {
                 var body = await response.Content.ReadAsStringAsync(cancellationToken);
                 _logger.LogWarning("Telegram alert failed (HTTP {Status}): {Body}", (int)response.StatusCode, Truncate(body));
+                _log?.Record(message, "failed");
             }
+            else _log?.Record(message, "sent");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Telegram alert failed to send.");
+            _log?.Record(message, "failed");
         }
     }
 

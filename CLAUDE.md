@@ -1110,6 +1110,41 @@ When adding or changing a strategy:
   server's disk, 3 asked of Dhan (the first time - kept on the server now)" - and the runs list says how many days a
   running job asked of Dhan. The OI break reads are worked out once a completed bucket (`completedBuckets` - the same
   results, `prepareDay` a little faster on 3 / 5 / 15-minute buckets).
+- ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
+  telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
+  `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures
+  (`OrderFlowService.EngineFor`), the engine's `AlertReads(afterSeq, minQty)` (the prints since the last look - trades carry
+  an increasing `Seq` - at least the big order size, and the icebergs) stepped by `OrderFlowAlertWatch`: an ICEBERG once,
+  when it has traded the set lots ("🧊 Iceberg NIFTY futures: hidden BUYER at the bid 24500 · 120 lots traded there (15 shown
+  at most) · 3 refills · still active · 10:00:02"); BIG ORDERS gathered, at most a message every `BigOrderGap` 20 s an index
+  (a channel takes ~20 a minute), each print a line ("BUY 150 lots @ 24512.5 · 10:00:01"), `MaxListed` 10 then "… and N
+  more". The icebergs sent are kept for the day (`order-flow-alerts-sent.json` under `Storage:ScannerRunnerPath`), so a
+  restart sends none twice; big orders start from the print the restart finds. The sizes per index (`OrderFlowAlertSettingsStore`,
+  `order-flow-alerts.json`, 100 / 100 lots by default, 0 = off): `GET /api/order-flow-alerts` (Admin / User), `PUT
+  /api/order-flow-alerts/{u}` (Admin only) - the Order Flow page's "Telegram (server)" boxes (`OrderFlowTelegramSettings.jsx`).
+  The page no longer sends its own iceberg Telegram (its switch and lots are gone - the server covers it, page open or
+  not). `OrderFlowTelegramAlertsTests.cs`.
+- EVERY TELEGRAM MESSAGE IS KEPT (`TelegramMessageLog`, `Storage:TelegramLogPath` - /app/data/telegram-log, in
+  docker-compose AND the Dockerfile): `TelegramAlertService.SendAsync` - the ONE place every message goes through, the
+  server's alerts and the pages' `POST /api/alerts/telegram` alike - writes each one as it goes: a CSV a day (IST), time IST /
+  UTC, status (`sent`, `failed`, `off` = Telegram not configured) and the text exactly as sent (newlines escaped on one
+  line), 400 days, at most 20 000 a day; never throws into the send. `GET /api/telegram-log?from&to` (Admin / User, 92 days a
+  request, the last 7 by default) gives them back as plain text. (A bot cannot read its own channel posts back, so the
+  copy is kept at the source.)
+- The TELEGRAM SIGNALS page (`/telegram-signals`, `TelegramSignalsPage.jsx`, the reading `telegramSignals.js`; asked for -
+  "a page which will read the messages and show me how the price reacts after those signals"): the server's log for a
+  range of days (Load messages) or a Telegram Desktop export of the channel (result.json, read in the browser -
+  `parseTelegramExport`, its `date_unixtime`) read as SIGNALS (`parseMessage` - the code's own texts: iceberg, big order (a
+  message of several prints = a signal each, at its own time), 🎯, OI S/R break, sudden OI wall, the scanner, paper / live
+  orders, saved strategies' entries, confluence, divergence, profile, price, trigger; exits and reports are kept apart
+  (`exit`, not a signal); its index named, else guessed from the price (a profile alert names only futures / spot); its
+  side - bullish / bearish / none) and the index's SPOT 1-minute bars of the day after each (`/api/oi-replay/{u}/spot-day` -
+  the server's memory / disk; each index and day once, kept for the tab - a past day): `reaction` - the price at the signal
+  (the close of the last minute completed by then, else its own minute's open), the move 5 / 15 / 30 / 60 min later IN THE
+  SIGNAL'S DIRECTION (a bearish signal that fell made +), the best / worst in the hour; `reactionSummary` per kind (average %
+  and points, how often it went its way, best / worst), sorted by the horizon picked; a row's day chart with every signal of
+  it marked; CSV. A click loads - nothing polls. Not admin-only. It feeds no strategy or alert
+  (`tests/telegram-signals.test.mjs` - the texts read from the senders themselves, `signalLive.js`'s included).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and
   visitors with no account (the login screen, `POST /api/auth/visit` from `visits.js`) - plus sign-ins, failed sign-ins and
   sign-outs, with the city / region / country of the connection (`VisitorLog`, `VisitRecorder`, one CSV file per IST day -
@@ -1228,7 +1263,7 @@ When adding or changing a strategy:
   ON A PHONE (asked for - "order flow is not mobile supportive"): the page is never wider than the screen
   (`.oa-of-page { overflow-x: clip }` in `index.css`) - the footprint legend's longest line did not wrap, the page came out
   wider than a phone, and iOS drew the WHOLE page shrunk with the ☰ off its edge; legend items now wrap inside the card.
-  Under 640 px (`useNarrow`) the less-used settings (imbalance, stack, big order, iceberg Telegram, the switches) fold
+  Under 640 px (`useNarrow`) the less-used settings (imbalance, stack, big order, the server's Telegram sizes, the switches) fold
   behind "Settings ▾" and the footprint legend to one line ("▸ Legend"), both remembered (`optionanalytics.orderFlow.
   settingsOpen` / `legendOpen`; a wide screen shows both always); the page's side padding is 8 px; inputs are 16 px
   (iOS zooms in on a smaller one when tapped and stays zoomed). The footprint's narrow mode (its own width < 640) draws

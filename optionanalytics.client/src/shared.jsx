@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
-  LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
+  LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SendOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
@@ -1110,6 +1110,7 @@ const NAV_ITEMS = [
   { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
+  { key: '/telegram-signals', label: 'Telegram signals', icon: <SendOutlined /> },
   { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
   { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
   { key: '/contracts', label: 'Contracts', icon: <FileTextOutlined /> },
