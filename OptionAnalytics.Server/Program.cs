@@ -28,6 +28,9 @@ builder.Services.AddSingleton<AppEnvironment>();
 // Every message it sends is kept as it went (TelegramMessageLog - the Telegram signals page reads it).
 builder.Services.AddSingleton<TelegramMessageLog>();
 builder.Services.AddHttpClient<TelegramAlertService>();
+// The Telegram signals page also reads the bot's channel straight from Telegram (a signed-in user account; the reader keeps no messages).
+builder.Services.AddSingleton<ITelegramUserClientFactory, WTelegramUserClientFactory>();
+builder.Services.AddSingleton<TelegramChannelReader>();
 
 builder.Services.AddSingleton<AuthService>();
 

@@ -49,6 +49,10 @@ dhan-cache/
 /OptionAnalytics.Server/paper-positions/
 visitor-log/
 geo/
+# Every Telegram message sent (TelegramMessageLog) and the Telegram signals page's SIGN-IN to read the channel
+# (TelegramChannelReader - a Telegram account's session: a secret, never committed).
+telegram-log/
+telegram-session/
 live-time-exits.json
 
 # Local deployment env (never commit)

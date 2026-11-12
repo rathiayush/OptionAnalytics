@@ -57,6 +57,8 @@ services:
       Storage__OrderFlowPath: /app/data/order-flow
       # Every Telegram message the server sent (a CSV a day, 400 days - TelegramMessageLog), read by the Telegram signals page.
       Storage__TelegramLogPath: /app/data/telegram-log
+      # The Telegram signals page's sign-in to READ the bot's channel from Telegram (a user account's session - TelegramChannelReader).
+      Storage__TelegramSessionPath: /app/data/telegram-session
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

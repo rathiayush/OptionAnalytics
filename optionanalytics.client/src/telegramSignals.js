@@ -194,31 +194,54 @@ export function reaction(signal, bars, { horizons = HORIZONS, window = REACTION_
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null)
 
+/** Pearson's correlation of two equal-length lists; null under 3 pairs or when either does not vary. */
+export function correlation(xs, ys) {
+  const n = Math.min(xs.length, ys.length)
+  if (n < 3) return null
+  const mx = mean(xs.slice(0, n)), my = mean(ys.slice(0, n))
+  let sxy = 0, sxx = 0, syy = 0
+  for (let k = 0; k < n; k++) {
+    const dx = xs[k] - mx, dy = ys[k] - my
+    sxy += dx * dy; sxx += dx * dx; syy += dy * dy
+  }
+  return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : null
+}
+
+function summaryRow(list, kind, label, horizons) {
+  const at = (h, f) => list.map((r) => f(r.reaction, h)).filter((v) => v != null && Number.isFinite(v))
+  const out = { kind, label, signals: list.length, bullish: list.filter((r) => r.dir > 0).length, bearish: list.filter((r) => r.dir < 0).length }
+  for (const h of horizons) {
+    const pts = at(h, (x) => x.signed[h])
+    out[`avgPct${h}`] = mean(at(h, (x) => x.pct[h]))
+    out[`avgPts${h}`] = mean(pts)
+    out[`hit${h}`] = pts.length ? (pts.filter((v) => v > 0).length / pts.length) * 100 : null
+    out[`n${h}`] = pts.length
+    // The signal's side (+1 / -1) against the raw move in % of the price: +1 = bullish ones always followed by the larger
+    // rises, 0 = the side says nothing about what came next, - = the opposite. Needs both sides among the signals.
+    const pairs = list.filter((r) => r.reaction.moves[h] != null && r.reaction.base > 0)
+    out[`corr${h}`] = correlation(pairs.map((r) => r.dir), pairs.map((r) => (r.reaction.moves[h] / r.reaction.base) * 100))
+  }
+  out.avgBest = mean(list.map((r) => r.reaction.best).filter((v) => v != null))
+  out.avgWorst = mean(list.map((r) => r.reaction.worst).filter((v) => v != null))
+  return out
+}
+
 /** The page's summary: per kind, the signals with a direction and a reaction - how many (bullish / bearish), the average
  *  move in their direction at each horizon (in % of the price, so indices can be put together, and in points), how often
- *  they went their way at each horizon, and the average best / worst in the hour. */
+ *  they went their way, the CORRELATION of their side with the move that followed (`corr{h}`), and the average best /
+ *  worst in the hour; with more than one kind, an "All signals" row (kind 'all') last. */
 export function reactionSummary(rows, { horizons = HORIZONS } = {}) {
   const byKind = new Map()
+  const all = []
   for (const r of rows) {
     if (!r.dir || !r.reaction) continue
     if (!byKind.has(r.kind)) byKind.set(r.kind, [])
     byKind.get(r.kind).push(r)
+    all.push(r)
   }
-  return SIGNAL_KINDS.filter((k) => byKind.has(k.id)).map((k) => {
-    const list = byKind.get(k.id)
-    const at = (h, f) => list.map((r) => f(r.reaction, h)).filter((v) => v != null && Number.isFinite(v))
-    const out = { kind: k.id, label: k.label, signals: list.length, bullish: list.filter((r) => r.dir > 0).length, bearish: list.filter((r) => r.dir < 0).length }
-    for (const h of horizons) {
-      const pts = at(h, (x) => x.signed[h])
-      out[`avgPct${h}`] = mean(at(h, (x) => x.pct[h]))
-      out[`avgPts${h}`] = mean(pts)
-      out[`hit${h}`] = pts.length ? (pts.filter((v) => v > 0).length / pts.length) * 100 : null
-      out[`n${h}`] = pts.length
-    }
-    out.avgBest = mean(list.map((r) => r.reaction.best).filter((v) => v != null))
-    out.avgWorst = mean(list.map((r) => r.reaction.worst).filter((v) => v != null))
-    return out
-  })
+  const out = SIGNAL_KINDS.filter((k) => byKind.has(k.id)).map((k) => summaryRow(byKind.get(k.id), k.id, k.label, horizons))
+  if (out.length > 1) out.push(summaryRow(all, 'all', 'All signals', horizons))
+  return out
 }
 
 /** The rows as CSV (a spreadsheet): time, index, kind, direction, price at the signal, the moves, best / worst, the text. */
