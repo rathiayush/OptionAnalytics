@@ -1124,6 +1124,19 @@ When adding or changing a strategy:
   /api/order-flow-alerts/{u}` (Admin only) - the Order Flow page's "Telegram (server)" boxes (`OrderFlowTelegramSettings.jsx`).
   The page no longer sends its own iceberg Telegram (its switch and lots are gone - the server covers it, page open or
   not). `OrderFlowTelegramAlertsTests.cs`.
+- TELEGRAM GETS ONLY THESE OI DIVERGENCE AND PROFILE-LEVEL SIGNALS (asked for - "remove telegram signal of oi divergence, hvn
+  lvn signals; only send signal for 15 min divergence, and lvn and poc signals, that is all"): OI DIVERGENCE (`OiDivergenceMonitor`)
+  is two reads - the 1-MINUTE one ("OiDivergence": three 1-minute closes in a row, MinMovePct 0.05) is the OI Replay page's popup
+  only (`Telegram` false - also the class default now), and the 15-MINUTE one ("OiDivergence15m", `DivergenceOptions.
+  FifteenMinuteDefaults` bound over by the section - BarMinutes 15, one candle, MinMovePct 0.10, cooldown 30 min, from the
+  09:30 candle): the last COMPLETED 15-minute candle of the session from 09:15 (`PriceOiDivergenceDetector.SessionCandles` -
+  a candle counts once its last minute closed; checked when the minute that completes one closes - `CompletesCandle`) closed
+  beyond the one before while the OI at the strike held, the OI read at each candle's END (its last minute - `BarMinutes`
+  in `Evaluate`; a 1-minute bar unchanged), to TELEGRAM as "[OI divergence 15m] <b>NIFTY</b> DISCOUNT zone" (`TelegramText`)
+  and to the page's popup ("· 15 min"). PROFILE LEVELS (`profileAlerts.js`): every level still pops up / chimes on the
+  pages and is logged by the server scanner, but only one naming a POC or an LVN - an LVN gap, a confluence with either -
+  goes to Telegram (`sendsProfileTelegram`, in `IndexScanner.checkProfileLevels` and the pages' `useProfileAlerts`); an HVN
+  or single prints alone do not. `PriceOiDivergenceTests.cs`, `tests/profile-alerts.test.mjs`, `tests/scanner-runner.test.mjs`.
 - EVERY TELEGRAM MESSAGE IS KEPT (`TelegramMessageLog`, `Storage:TelegramLogPath` - /app/data/telegram-log, in
   docker-compose AND the Dockerfile): `TelegramAlertService.SendAsync` - the ONE place every message goes through, the
   server's alerts and the pages' `POST /api/alerts/telegram` alike - writes each one as it goes: a CSV a day (IST), time IST /

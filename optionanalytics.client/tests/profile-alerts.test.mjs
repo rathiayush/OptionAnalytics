@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { profileLevels, shiftLevels, profileHits, profileAlertText, spotProfileLevels, alertOptions, newProfileWatch, watchProfiles, spotLevelsOf } from '../src/profileAlerts.js'
+import { profileLevels, shiftLevels, profileHits, profileAlertText, spotProfileLevels, alertOptions, newProfileWatch, watchProfiles, spotLevelsOf, sendsProfileTelegram } from '../src/profileAlerts.js'
 import { lowNodeGaps, profileGaps, sessionVolumeProfile, singlePrintGaps, tpoHighNodes, tpoProfile } from '../src/profiles.js'
 
 const vp = { poc: 24500, vah: 24600, val: 24400, hvn: [24700], lvn: [24550] }
@@ -236,3 +236,16 @@ test('the market profile\'s HVN: its strongest TPO-count peak that is not the PO
   assert.deepEqual(tpoHighNodes({ poc: 110, rows: [1, 2, 4, 8, 4, 2, 1].map((count, i) => ({ price: 95 + i * 5, count })) }), [])
   assert.deepEqual(tpoHighNodes({ poc: 100 }), [])
 })
+
+test('only a POC or an LVN goes to Telegram - an HVN or single prints alone stay in the app', () => {
+  const at = (labels) => ({ labels })
+  for (const labels of [['VP POC'], ['TPO POC'], ['VP LVN'], ['VP LVN gap'], ['TPO LVN gap'], ['Spot VP POC'], ['Spot TPO LVN gap'], ['VP HVN', 'TPO POC'], ['VP LVN gap', 'TPO single prints']])
+    assert.equal(sendsProfileTelegram(at(labels)), true, labels.join(' + '))
+  for (const labels of [['VP HVN'], ['TPO HVN'], ['VP HVN', 'TPO HVN'], ['TPO single prints'], ['Spot VP HVN'], []])
+    assert.equal(sendsProfileTelegram(at(labels)), false, labels.join(' + ') || 'none')
+  assert.equal(sendsProfileTelegram(null), false)
+  // On real levels: the POC and the LVN gap are sent, the HVN is not.
+  const levels = profileLevels({ poc: 24500, hvn: [24600], lvn: [] }, null, 5)
+  assert.deepEqual(levels.map((l) => [l.labels.join('+'), sendsProfileTelegram(l)]), [['VP POC', true], ['VP HVN', false]])
+})
+
