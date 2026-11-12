@@ -31,6 +31,9 @@ builder.Services.AddHttpClient<TelegramAlertService>();
 // The Telegram signals page also reads the bot's channel straight from Telegram (a signed-in user account; the reader keeps no messages).
 builder.Services.AddSingleton<ITelegramUserClientFactory, WTelegramUserClientFactory>();
 builder.Services.AddSingleton<TelegramChannelReader>();
+// Server first: the log's whole days, then the days fetched from Telegram before, then Telegram (kept once fetched).
+builder.Services.AddSingleton<TelegramDayCache>();
+builder.Services.AddSingleton<TelegramSignalMessages>();
 
 builder.Services.AddSingleton<AuthService>();
 

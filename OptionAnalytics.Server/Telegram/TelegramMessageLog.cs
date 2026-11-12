@@ -45,6 +45,38 @@ public sealed class TelegramMessageLog
         _logger = logger;
         _clock = clock ?? (() => DateTimeOffset.UtcNow);
         Directory.CreateDirectory(_root);
+        CoveredFrom = ReadOrMarkCoveredFrom();
+    }
+
+    /// <summary>Since when this log has been recording (`covered-from.txt`, written once when it first runs - on the volume,
+    /// so kept through restarts). A log that was already running before this mark existed counts from the day AFTER its
+    /// first file - that first day may have begun before it.</summary>
+    public DateTimeOffset CoveredFrom { get; }
+
+    /// <summary>Whether the log holds the whole of an IST day: it was recording before that day's 09:00 (the session opens at
+    /// 09:15), so every message the server sent that day is in it - the Telegram signals page then reads the day from here
+    /// and asks Telegram nothing.</summary>
+    public bool Covers(DateOnly day) => CoveredFrom <= IstClock.AtIstTime(day, 9 * 60);
+
+    private DateTimeOffset ReadOrMarkCoveredFrom()
+    {
+        var marker = Path.Combine(_root, "covered-from.txt");
+        try
+        {
+            if (File.Exists(marker) && DateTimeOffset.TryParse(File.ReadAllText(marker).Trim(), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var kept))
+                return kept;
+            var firstDay = Directory.EnumerateFiles(_root, "*.csv")
+                .Select(f => DateOnly.TryParseExact(Path.GetFileNameWithoutExtension(f), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? d : (DateOnly?)null)
+                .Where(d => d is not null).Min();
+            var from = firstDay is { } d0 ? IstClock.AtIstTime(d0.AddDays(1), 0) : _clock();
+            File.WriteAllText(marker, from.ToString("O", CultureInfo.InvariantCulture));
+            return from;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not read or write the Telegram message log's start mark - no day counts as whole.");
+            return DateTimeOffset.MaxValue;
+        }
     }
 
     private static string ResolveRoot(IHostEnvironment environment, IConfiguration configuration)
