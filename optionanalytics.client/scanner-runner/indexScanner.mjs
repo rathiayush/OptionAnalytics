@@ -14,7 +14,7 @@ import {
 } from '../src/scannerCore.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, orderFlowPushGap, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { defaultTradeLevels } from '../src/tradeDefaults.js'
-import { newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
+import { newProfileWatch, profileAlertText, profileLevels, sendsProfileTelegram, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
 import { tpoRowFor } from '../src/profiles.js'
 import {
   IST_OFFSET_SECONDS, OI_BREAK_ALERT_DEFAULTS, breakAlertKey, breakMeaning, breakText, chartTimeHHmm, fmtOiLakh, highProbabilityAlertKey, highProbabilityText,
@@ -227,7 +227,8 @@ export class IndexScanner {
   profileAlertsOn() { return { futures: true, spot: true, ...(this.config.profileAlerts ?? {}) } }
 
   // Price reaching a profile level - futures: the previous session's volume / market profile; spot: those less
-  // the futures premium, and the previous day's spot volume profile. Telegram, tagged [Server] - with no page open.
+  // the futures premium, and the previous day's spot volume profile. Telegram, tagged [Server] - with no page open -
+  // for a POC or an LVN only (sendsProfileTelegram); an HVN / single prints are logged, not sent.
   async checkProfileLevels(d) {
     const futures = d.prints.at(-1)?.price ?? d.view.meta?.lastPrice ?? null
     const spot = d.oi?.spot?.at(-1)?.close ?? null
@@ -239,7 +240,7 @@ export class IndexScanner {
     for (const { market, level, price } of hits) {
       const text = profileAlertText(level, price, `${this.underlying} ${market}`)
       this.io.log(`${this.underlying}: ${text}`)
-      if (cfg.telegram !== false) await this.io.telegram(`${TAG} 📊 ${text}`)
+      if (cfg.telegram !== false && sendsProfileTelegram(level)) await this.io.telegram(`${TAG} 📊 ${text}`)
     }
   }
 

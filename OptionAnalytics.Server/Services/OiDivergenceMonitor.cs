@@ -11,8 +11,11 @@ namespace OptionAnalytics.Server.Services;
 /// bar re-checks the underlying. Only completed minutes are read, and only OI seen up to the end of the
 /// last of them - nothing later than the moment the alert is about.
 ///
-/// The alert goes to Telegram and to every open page as "oiDivergenceAlert" (SpotHub); the OI Replay page
-/// shows it as a notification. Once per zone per underlying inside the cool-down.
+/// Two reads, each once per zone per underlying inside its cool-down, both to every open page as "oiDivergenceAlert"
+/// (SpotHub - the OI Replay page's popup): the 1-MINUTE one ("OiDivergence": three closes in a row) and the 15-MINUTE
+/// one ("OiDivergence15m": the last completed 15-minute candle - checked as each one completes). Only the 15-minute one
+/// goes to TELEGRAM (asked for - "only send signal for 15 min divergence"): each read's own `Telegram` switch, off for
+/// the 1-minute one by default.
 /// </summary>
 public sealed class OiDivergenceMonitor : BackgroundService
 {
@@ -21,9 +24,10 @@ public sealed class OiDivergenceMonitor : BackgroundService
     private readonly IHubContext<SpotHub> _hub;
     private readonly ILogger<OiDivergenceMonitor> _logger;
     private readonly DivergenceOptions _options;
+    private readonly DivergenceOptions _options15;
     private readonly object _lock = new();
     private readonly OiMinuteBook _book = new();
-    private readonly Dictionary<(string Underlying, string Zone), DateTimeOffset> _lastAlert = new();
+    private readonly Dictionary<(string Underlying, string Zone, int BarMinutes), DateTimeOffset> _lastAlert = new();
     private readonly LinkedList<PriceOiDivergence> _history = new();
 
     public OiDivergenceMonitor(SpotFeedHostedService spotFeed, TelegramAlertService telegram, IHubContext<SpotHub> hub,
@@ -34,7 +38,20 @@ public sealed class OiDivergenceMonitor : BackgroundService
         _hub = hub;
         _logger = logger;
         _options = configuration?.GetSection("OiDivergence").Get<DivergenceOptions>() ?? new DivergenceOptions();
+        _options15 = FifteenMinuteOptions(configuration);
     }
+
+    /// <summary>The 15-minute read's settings: its defaults with whatever "OiDivergence15m" sets over them.</summary>
+    internal static DivergenceOptions FifteenMinuteOptions(IConfiguration? configuration)
+    {
+        var options = DivergenceOptions.FifteenMinuteDefaults();
+        configuration?.GetSection("OiDivergence15m").Bind(options);
+        return options;
+    }
+
+    /// <summary>The Telegram text: "[OI divergence 15m] NIFTY DISCOUNT zone" and the read in words.</summary>
+    internal static string TelegramText(PriceOiDivergence found, int barMinutes) =>
+        $"[OI divergence{(barMinutes > 1 ? $" {barMinutes}m" : "")}] <b>{found.Underlying}</b> {found.Zone.ToUpperInvariant()} zone\n{found.Message}";
 
     public IReadOnlyList<PriceOiDivergence> Recent()
     {
@@ -44,7 +61,7 @@ public sealed class OiDivergenceMonitor : BackgroundService
     /// <summary>One option leg's OI as it ticks (the nearest listed expiry only).</summary>
     public void RecordOi(string underlying, string side, decimal strike, DateTimeOffset observedAt, long openInterest)
     {
-        if (!_options.Enabled) return;
+        if (!_options.Enabled && !_options15.Enabled) return;
         _book.Record(underlying, side, strike, observedAt, openInterest);
     }
 
@@ -52,9 +69,9 @@ public sealed class OiDivergenceMonitor : BackgroundService
     {
         // Background work: its Dhan calls are not sent outside market hours (MarketHours).
         using var background = MarketHours.BackgroundScope();
-        if (!_options.Enabled)
+        if (!_options.Enabled && !_options15.Enabled)
         {
-            _logger.LogInformation("OI divergence alerts are turned off (OiDivergence:Enabled = false).");
+            _logger.LogInformation("OI divergence alerts are turned off (OiDivergence:Enabled and OiDivergence15m:Enabled = false).");
             return Task.CompletedTask;
         }
         foreach (var (underlying, state) in _spotFeed.States)
@@ -70,25 +87,42 @@ public sealed class OiDivergenceMonitor : BackgroundService
     {
         try
         {
-            var found = PriceOiDivergenceDetector.Evaluate(underlying, state.GetClosedCandles(), state.Step, _book.Strikes(underlying),
-                (side, strike, minute) => _book.At(underlying, side, strike, minute, _options.MaxCarryMinutes), _options);
-            if (found is null) return;
-
-            lock (_lock)
-            {
-                if (_lastAlert.TryGetValue((underlying, found.Zone), out var at) && found.BarTime - at < TimeSpan.FromMinutes(_options.CooldownMinutes)) return;
-                _lastAlert[(underlying, found.Zone)] = found.BarTime;
-                _history.AddFirst(found);
-                while (_history.Count > 50) _history.RemoveLast();
-            }
-            _logger.LogInformation("OI divergence: {Message}", found.Message);
-            if (_options.Telegram) _ = _telegram.SendAsync($"[OI divergence] <b>{found.Underlying}</b> {found.Zone.ToUpperInvariant()} zone\n{found.Message}", cancellationToken);
-            _ = BroadcastAsync(found);
+            var closed = state.GetClosedCandles();
+            if (_options.Enabled) Raise(underlying, closed, state.Step, _options, cancellationToken);
+            // The 15-minute read: when the minute that just closed completes a 15-minute candle.
+            if (_options15.Enabled && closed.Count > 0 && CompletesCandle(closed[^1].Time, _options15.BarMinutes))
+                Raise(underlying, PriceOiDivergenceDetector.SessionCandles(closed, _options15.BarMinutes), state.Step, _options15, cancellationToken);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "OI divergence check for {Underlying} failed.", underlying);
         }
+    }
+
+    /// <summary>Whether a closed 1-minute bar is the last minute of a session candle of `barMinutes` (from 09:15 IST).</summary>
+    internal static bool CompletesCandle(DateTimeOffset minuteStart, int barMinutes)
+    {
+        var fromOpen = IstClock.MinutesOfDay(minuteStart) - (9 * 60 + 15);
+        return barMinutes <= 1 || (fromOpen >= 0 && fromOpen % barMinutes == barMinutes - 1);
+    }
+
+    private void Raise(string underlying, IReadOnlyList<Models.Candle> bars, decimal step, DivergenceOptions options, CancellationToken cancellationToken)
+    {
+        var found = PriceOiDivergenceDetector.Evaluate(underlying, bars, step, _book.Strikes(underlying),
+            (side, strike, minute) => _book.At(underlying, side, strike, minute, options.MaxCarryMinutes), options);
+        if (found is null) return;
+        var barMinutes = Math.Max(1, options.BarMinutes);
+        lock (_lock)
+        {
+            var key = (underlying, found.Zone, barMinutes);
+            if (_lastAlert.TryGetValue(key, out var at) && found.BarTime - at < TimeSpan.FromMinutes(options.CooldownMinutes)) return;
+            _lastAlert[key] = found.BarTime;
+            _history.AddFirst(found);
+            while (_history.Count > 50) _history.RemoveLast();
+        }
+        _logger.LogInformation("OI divergence ({Minutes} min bars): {Message}", barMinutes, found.Message);
+        if (options.Telegram) _ = _telegram.SendAsync(TelegramText(found, barMinutes), cancellationToken);
+        _ = BroadcastAsync(found);
     }
 
     private async Task BroadcastAsync(PriceOiDivergence alert)

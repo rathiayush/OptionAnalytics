@@ -106,10 +106,11 @@ export function parseMessage(rawText, time) {
     return one('oiBreak', dir)
   }
   if (/^\[Confluence\]/i.test(text)) return one('confluence', wordDir(text))
-  // The server's OI divergence (OiDivergenceMonitor / PriceOiDivergence): spot ran one way but the OI at the level held -
+  // The server's OI divergence (OiDivergenceMonitor / PriceOiDivergence - "[OI divergence 15m]" on Telegram now, the
+  // 15-minute read; "[OI divergence]" the 1-minute one sent before): spot ran one way but the OI at the level held -
   // a DISCOUNT zone (spot fell, the puts' support defended) is bullish, a PREMIUM zone (spot rose, the calls' resistance
   // defended) bearish; its price the level spot ran to.
-  if (/^\[OI divergence\]/i.test(text)) {
+  if (/^\[OI divergence[^\]]*\]/i.test(text)) {
     const dir = /\bDISCOUNT zone\b/i.test(text) ? 1 : /\bPREMIUM zone\b/i.test(text) ? -1 : wordDir(text)
     return one('divergence', dir, num(text.match(/\bmin to\s+([\d,.]+)/i)?.[1]))
   }

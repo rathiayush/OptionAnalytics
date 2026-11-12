@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Space, Switch, Tag, Tooltip, Typography, notification } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { chime, speak, telegram } from './alerts.js'
-import { levelWhere, newProfileWatch, profileAlertText, profileLevels, spotLevelsOf, spotProfileLevels, watchProfiles } from './profileAlerts.js'
+import { levelWhere, newProfileWatch, profileAlertText, profileLevels, sendsProfileTelegram, spotLevelsOf, spotProfileLevels, watchProfiles } from './profileAlerts.js'
 
 const { Text } = Typography
 const SETTINGS_KEY = 'optionanalytics.orderFlow.profileAlerts.v1'
@@ -83,7 +83,8 @@ export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, sp
       chime(up)
       const spoken = level.gap ? `${Math.round(level.low)} to ${Math.round(level.high)}` : Math.round(level.price)
       if (cfg.voice !== false) speak(`${level.confluence ? 'Profile confluence' : level.gap ? 'Profile gap' : 'Profile level'}. ${label} ${level.gap ? 'entered' : 'at'} ${level.labels.join(' and ')} ${spoken}.`)
-      if (cfg.telegram !== false && !serverCovers[market]) telegram(`📊 ${text}`)
+      // Telegram for a POC or an LVN only (sendsProfileTelegram) - every level still pops up and chimes here.
+      if (cfg.telegram !== false && !serverCovers[market] && sendsProfileTelegram(level)) telegram(`📊 ${text}`)
       notification.open({
         key: `profile-${market}-${underlying}-${level.id}`, placement: 'topRight', duration: 20,
         message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>📊 {label} · {level.gap ? 'entered ' : ''}{level.labels.join(' + ')} {levelWhere(level)}{level.confluence ? ' · confluence' : ''}</span>,
@@ -112,7 +113,7 @@ export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot,
         <Space size={4}><Switch size="small" checked={on.spot} onChange={(v) => change('spot', v)} disabled={!hasSpot} aria-label="Profile alerts spot" /><Text style={{ fontSize: 12 }}>Spot</Text></Space>
       </Tooltip>
       {(serverCovers?.futures || serverCovers?.spot) && (
-        <Tooltip title="The server scanner sends these alerts to Telegram even with no page open - this page only chimes and shows them.">
+        <Tooltip title="The server scanner sends these alerts to Telegram even with no page open - a POC or an LVN only (an HVN / single prints just chime and show here); this page only chimes and shows them.">
           <Tag color="success" style={{ fontSize: 11 }}>Telegram from the server</Tag>
         </Tooltip>
       )}

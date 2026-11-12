@@ -187,6 +187,18 @@ test('the server sends a profile-level alert when the futures reach the previous
   assert.match(alerts[0], new RegExp(`^\\[Server\\] 📊 NIFTY futures \\d+\\.\\d reached VP POC ${(top - 2).toFixed(1)} \\(profile level\\)`))
 })
 
+test('the server sends a POC or LVN profile alert to Telegram, an HVN one only to its log', async () => {
+  const io = fakeIo()
+  const scanner = new IndexScanner('NIFTY', io)
+  scanner.reset(DATE)
+  scanner.setConfig({ settings: { telegram: true }, profileAlerts: { spot: false } })
+  const top = Math.max(...path.slice(15, 120))
+  scanner.setData({ ...dataAt(at(15)), profile: { vp: { poc: null, vah: null, val: null, hvn: [top - 2], lvn: [] }, tpoPrev: null } })
+  await runDay(scanner, io, at(15), at(300))
+  assert.equal(io.telegrams.filter((m) => m.includes('📊')).length, 0, io.telegrams.join('\n'))
+  assert.ok(io.logs.some((m) => m.includes('reached VP HVN')), 'the HVN hit is still logged')
+})
+
 test('the Top 15 from the scanner log\'s signals', () => {
   const csv = ['key,date,underlying,strategy_id,status,r', 'a,d,NIFTY,wallBreak,win,2', 'b,d,NIFTY,wallBreak,loss,-1', 'c,d,NIFTY,buildUp,open,'].join('\n')
   const top = topFromSignalsCsv(csv)

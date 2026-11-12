@@ -4644,9 +4644,9 @@ export default function OiReplayPage() {
     return () => clearInterval(id)
   }, [isLive])
 
-  // Price moved for 3 minutes but the nearest strike's OI did not give way (the server's OiDivergenceMonitor,
-  // which also sends it to Telegram): a notification, a chime and the words - when "Premium / discount zone" is in the
-  // page's Alerts choice; the scanner's switches apply.
+  // Price moved but the nearest strike's OI did not give way (the server's OiDivergenceMonitor - over 3 one-minute bars,
+  // or a completed 15-minute candle; only the 15-minute read goes to Telegram): a notification, a chime and the words -
+  // when "Premium / discount zone" is in the page's Alerts choice; the scanner's switches apply.
   const handleDivergenceAlert = (alert) => {
     if (!alert?.zone || !alertTypesRef.current.includes('zone')) return
     let cfg = {}
@@ -4657,7 +4657,7 @@ export default function OiReplayPage() {
     if (cfg.voice !== false) speak(`${alert.underlying} ${discount ? 'discount' : 'premium'} zone. ${alert.side === 'PE' ? 'Put' : 'Call'} OI holding at ${alert.strike}.`)
     notification.open({
       key: `divergence-${alert.underlying}-${alert.zone}-${alert.barTime}`, placement: 'topRight', duration: 25,
-      message: <span style={{ color: discount ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>⚖ {alert.underlying} · {discount ? 'discount zone' : 'premium zone'} · {alert.side} {alert.strike}</span>,
+      message: <span style={{ color: discount ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>⚖ {alert.underlying} · {discount ? 'discount zone' : 'premium zone'}{alert.minutes >= 15 ? ` · ${alert.minutes} min` : ''} · {alert.side} {alert.strike}</span>,
       description: <span style={{ fontSize: 12 }}>{alert.message}</span>,
     })
   }

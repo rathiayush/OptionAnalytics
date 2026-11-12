@@ -108,6 +108,11 @@ export function profileHits(levels, previousPrice, price, armed, { tolerance, re
   return hits
 }
 
+/** Which levels go to TELEGRAM (asked for - "lvn and poc signals, that is all"): a level whose labels name a POC or an
+ *  LVN - an LVN gap too, and a confluence with either in it; an HVN or single prints alone stay the app's popup / chime
+ *  only. The server scanner and the pages both send through it. */
+export const sendsProfileTelegram = (level) => (level?.labels ?? []).some((l) => /\b(POC|LVN)\b/.test(l))
+
 /** Where a level is: its price, or a gap's low-high. */
 export const levelWhere = (level) => (level.gap ? `${level.low.toFixed(1)}-${level.high.toFixed(1)}` : level.price.toFixed(1))
 
