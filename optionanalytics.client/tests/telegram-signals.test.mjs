@@ -39,6 +39,16 @@ test('each message the code sends: its kind, direction and index', () => {
   assert.deepEqual(kindDir(entryText('VWAP flip', 'NIFTY', t)), ['strategy', -1, 'NIFTY'])
   assert.equal(read(exitText('VWAP flip', 'NIFTY', t))[0].kind, 'exit')
   // The server's own alerts.
+  // The server's OI divergence (PriceOiDivergence's own words): a discount zone bullish, a premium zone bearish - at the level.
+  const disc = read('[OI divergence] NIFTY DISCOUNT zone\nNIFTY spot fell 32.5 pts (0.13%) in 3 min to 24480.5, but PE OI at 24500 held (+0.4%, 1,234,500 → 1,239,000) - support being defended, a discount zone. Wait for a confirming candle before entering.')
+  assert.deepEqual([disc[0].kind, disc[0].dir, disc[0].index, disc[0].price], ['divergence', 1, 'NIFTY', 24480.5])
+  const prem = read('[OI divergence] BANKNIFTY PREMIUM zone\nBANKNIFTY spot rose 64 pts (0.12%) in 3 min to 55264, but CE OI at 55300 rose (+3.1%, 812,000 → 837,200) - resistance being defended, a premium zone. Wait for a confirming candle before entering.')
+  assert.deepEqual([prem[0].kind, prem[0].dir, prem[0].index, prem[0].price], ['divergence', -1, 'BANKNIFTY', 55264])
+  assert.ok(DEFAULT_KINDS.includes('divergence'))
+  // A trigger's follow-ups are its order closing / going out - exits, not new signals; its entry keeps its side.
+  assert.equal(read('[Trigger] EMA 9/21\n[SQUARED OFF] NIFTY25NOV24500CE\nFilled 75/75 at ~120.5 on attempt 1/5.')[0].kind, 'exit')
+  assert.equal(read('[Trigger] EMA 9/21\n[HEDGE CLOSE ORDER PLACED] NIFTY 24400 PE\nDhan order 1 (PENDING)')[0].kind, 'exit')
+  assert.deepEqual(kindDir('[Trigger] ▲ EMA 9/21\nNIFTY · 5m · ema-cross\nBullish — BUY CE 24500\nEntry: 10:15 IST @ 120.5'), ['trigger', 1, 'NIFTY'])
   assert.deepEqual(kindDir('[Confluence] NIFTY BULLISH confluence\nspot + ATM CE + ATM PE agree\nSpot: 24,512.30 · ATM 24500'), ['confluence', 1, 'NIFTY'])
   assert.deepEqual(kindDir('🔔 Price alert: BANKNIFTY futures fell to 55100 (now 55098.4)'), ['price', -1, 'BANKNIFTY'])
   // A profile alert names its market, not the index - its price says which; no direction (a level reached).

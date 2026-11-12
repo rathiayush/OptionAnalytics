@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, DatePicker, Empty, Input, Popconfirm, Progress, Segmented, Select, Space, Table, Tag, Tooltip, Typography, Upload } from 'antd'
-import { CloudDownloadOutlined, DownloadOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons'
+import { CloudDownloadOutlined, DownloadOutlined, UploadOutlined } from '@ant-design/icons'
 import { CandlestickSeries, CrosshairMode, createSeriesMarkers } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, useAuth, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
@@ -26,10 +26,23 @@ const pts = (v) => (v == null || !Number.isFinite(v) ? '…' : `${v > 0 ? '+' : 
 const pctText = (v) => (v == null || !Number.isFinite(v) ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(2)}%`)
 const color = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const SOURCES = [
-  { value: 'telegram', label: 'From Telegram' },
-  { value: 'server', label: "Server's log" },
+  { value: 'auto', label: 'Server + Telegram' },
   { value: 'file', label: 'Import file' },
 ]
+// Where each day came from (GET /api/telegram-history/signals) - said under the controls.
+const DAY_SOURCES = [
+  ['server', "from the server's log"],
+  ['cache', 'from the server (fetched from Telegram before)'],
+  ['telegram', 'fetched from Telegram now (kept on the server)'],
+  ['partial', 'only partly read (too many messages)'],
+  ['missing', 'not found'],
+]
+function daysText(days) {
+  if (!days?.length) return null
+  const parts = DAY_SOURCES.map(([id, words]) => [days.filter((d) => d.source === id).length, words]).filter(([n]) => n > 0).map(([n, words]) => `${n} ${words}`)
+  const note = days.find((d) => d.note)?.note
+  return { text: `${days.length} day${days.length === 1 ? '' : 's'}: ${parts.join(' · ')}`, note }
+}
 const corrText = (v) => (v == null || !Number.isFinite(v) ? null : `r ${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(2)}`)
 const DIR = { 1: { text: '▲ bullish', color: 'green' }, '-1': { text: '▼ bearish', color: 'red' }, 0: { text: '–', color: 'default' } }
 // Each index's spot day, kept for the tab (a past day never changes; today's is asked again with Load).
@@ -118,7 +131,7 @@ function TelegramConnect({ isAdmin, status, onStatus }) {
     )
   }
   if (!isAdmin) {
-    return <Alert type="info" showIcon message="Reading from Telegram is not connected" description={<>An admin connects a Telegram account that is in the channel, once, on this page. Meanwhile pick &quot;Server&apos;s log&quot;.{status.error ? ` (${status.error})` : ''}</>} />
+    return <Text type="secondary" style={{ fontSize: 12 }}>Telegram is not connected: the days the server has load as they are; for days it does not have, an admin connects Telegram once on this page.{status.error ? ` (${status.error})` : ''}</Text>
   }
   if (status.pending) {
     const password = status.pending === 'password'
@@ -137,8 +150,8 @@ function TelegramConnect({ isAdmin, status, onStatus }) {
   return (
     <Space direction="vertical" size={6} style={{ width: '100%' }}>
       <Text style={{ fontSize: 12 }}>
-        <Text strong style={{ fontSize: 12 }}>Connect Telegram</Text> - a bot can only send, so to read the channel the server signs in a Telegram account that is in
-        it, once{status.apiFromConfig ? '' : ' (api_id / api_hash: my.telegram.org → API development tools)'}. Only the bot&apos;s channel is ever read.
+        <Text strong style={{ fontSize: 12 }}>Connect Telegram</Text> - for the days the server does not have. A bot can only send, so to read the channel the server
+        signs in a Telegram account that is in it, once{status.apiFromConfig ? '' : ' (api_id / api_hash: my.telegram.org → API development tools)'}. Only the bot&apos;s channel is ever read.
       </Text>
       <Space wrap size={8}>
         {!status.apiFromConfig && <Input value={form.apiId} onChange={field('apiId')} placeholder="api_id" inputMode="numeric" style={{ width: 120, fontSize: 16 }} aria-label="api_id" />}
@@ -161,12 +174,12 @@ export default function TelegramSignalsPage() {
   const [kinds, setKinds] = usePersistedState('optionanalytics.telegramSignals.kinds', DEFAULT_KINDS)
   const [sentOnly, setSentOnly] = usePersistedState('optionanalytics.telegramSignals.sentOnly', false)
   const [horizon, setHorizon] = usePersistedState('optionanalytics.telegramSignals.horizon', 30)
-  const [from_, setFrom] = usePersistedState('optionanalytics.telegramSignals.source', 'telegram')
-  const src = SOURCES.some((x) => x.value === from_) ? from_ : 'telegram'
-  // The Telegram sign-in's status - asked when the page opens on "From Telegram" (a page load, not a timer).
+  const [from_, setFrom] = usePersistedState('optionanalytics.telegramSignals.source', 'auto')
+  const src = from_ === 'file' ? 'file' : 'auto'
+  // The Telegram sign-in's status - asked when the page opens on "Server + Telegram" (a page load, not a timer).
   const [tg, setTg] = useState(null)
   useEffect(() => {
-    if (src !== 'telegram' || tg) return undefined
+    if (src !== 'auto' || tg) return undefined
     let alive = true
     fetch('/api/telegram-history/status').then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
       .then((s) => { if (alive) setTg(s) })
@@ -199,11 +212,12 @@ export default function TelegramSignalsPage() {
     const token = ++run.current
     setError(null); setDays({}); setPickedKey(null); setProgress({ done: 0, total: 0, key: 'messages' })
     try {
-      const r = await fetch(src === 'telegram' ? `/api/telegram-history/messages?from=${from}&to=${to}` : `/api/telegram-log?from=${from}&to=${to}`)
+      // Server first: each day from the server's log, or a day fetched from Telegram before; Telegram only for the rest.
+      const r = await fetch(`/api/telegram-history/signals?from=${from}&to=${to}`)
       const body = await r.json().catch(() => null)
       if (!r.ok) throw new Error(body?.error ?? `HTTP ${r.status}`)
       if (run.current !== token) return
-      setSource({ source: src, name: `${body.from} – ${body.to}`, messages: body.messages ?? [] })
+      setSource({ source: 'auto', name: `${body.from} – ${body.to}`, messages: body.messages ?? [], days: body.days ?? [] })
       await loadPrices(body.messages ?? [], token)
     } catch (e) {
       if (run.current === token) { setError(e.message); setProgress(null) }
@@ -302,15 +316,14 @@ export default function TelegramSignalsPage() {
               says nothing, − = the move went the other way (it needs both bullish and bearish signals).
             </FoldText>
             <Segmented value={src} onChange={setFrom} options={SOURCES} />
-            {src === 'telegram' && <TelegramConnect isAdmin={isAdmin} status={tg} onStatus={setTg} />}
+            {src === 'auto' && <TelegramConnect isAdmin={isAdmin} status={tg} onStatus={setTg} />}
             <Space wrap size={8}>
               {src !== 'file' && <DatePicker.RangePicker
                 value={[dayjs(from), dayjs(to)]} allowClear={false} disabledDate={(d) => d.isAfter(dayjs(), 'day')}
                 onChange={(v) => setRange(v ? [v[0].format('YYYY-MM-DD'), v[1].format('YYYY-MM-DD')] : null)}
-                presets={[{ label: 'Today', value: [dayjs(), dayjs()] }, { label: 'Last 7 days', value: [dayjs().subtract(6, 'day'), dayjs()] }, { label: 'Last 30 days', value: [dayjs().subtract(29, 'day'), dayjs()] }, ...(src === 'server' ? [{ label: 'Last 90 days', value: [dayjs().subtract(89, 'day'), dayjs()] }] : [])]}
+                presets={[{ label: 'Today', value: [dayjs(), dayjs()] }, { label: 'Last 7 days', value: [dayjs().subtract(6, 'day'), dayjs()] }, { label: 'Last 30 days', value: [dayjs().subtract(29, 'day'), dayjs()] }, { label: 'Last 90 days', value: [dayjs().subtract(89, 'day'), dayjs()] }]}
               />}
-              {src === 'telegram' && <Button type="primary" icon={<CloudDownloadOutlined />} onClick={loadMessages} loading={progress != null && source?.source !== 'file'} disabled={!tg?.connected}>Fetch from Telegram</Button>}
-              {src === 'server' && <Button type="primary" icon={<ReloadOutlined />} onClick={loadMessages} loading={progress != null && source?.source !== 'file'}>Load server&apos;s log</Button>}
+              {src === 'auto' && <Button type="primary" icon={<CloudDownloadOutlined />} onClick={loadMessages} loading={progress != null && source?.source !== 'file'}>Load</Button>}
               {src === 'file' && (
                 <Upload accept=".json,application/json" showUploadList={false} beforeUpload={importFile}>
                   <Button type="primary" icon={<UploadOutlined />}>Import Telegram export (JSON)</Button>
@@ -324,10 +337,16 @@ export default function TelegramSignalsPage() {
                 mode="multiple" value={kinds} onChange={setKinds} style={{ minWidth: 280, maxWidth: '100%' }} maxTagCount="responsive" placeholder="Kinds"
                 options={SIGNAL_KINDS.map((k) => ({ value: k.id, label: `${k.label}${source ? ` (${counts.kinds[k.id] ?? 0})` : ''}` }))}
               />
-              {source?.source === 'server' && <Checkbox checked={sentOnly} onChange={(e) => setSentOnly(e.target.checked)}>Sent only</Checkbox>}
+              {source?.messages?.some((m) => m.status && m.status !== 'sent') && <Checkbox checked={sentOnly} onChange={(e) => setSentOnly(e.target.checked)}>Sent only</Checkbox>}
               <Space size={4}><Text style={{ fontSize: 12 }}>&quot;Its way&quot; at</Text><Segmented size="small" value={horizon} onChange={setHorizon} options={HORIZONS.map((h) => ({ value: h, label: `${h}m` }))} /></Space>
             </Space>
-            {source && <Text type="secondary" style={{ fontSize: 12 }}>{source.source === 'file' ? `Imported ${source.name}` : source.source === 'telegram' ? `From Telegram ${source.name}` : `The server's log ${source.name}`}: {source.messages.length} messages · {counts.all} signals · {rows.length} shown</Text>}
+            {source && <Text type="secondary" style={{ fontSize: 12 }}>{source.source === 'file' ? `Imported ${source.name}` : source.name}: {source.messages.length} messages · {counts.all} signals · {rows.length} shown</Text>}
+            {daysText(source?.days) && (
+              <Space direction="vertical" size={0}>
+                <Text type="secondary" style={{ fontSize: 12 }}>{daysText(source.days).text}</Text>
+                {daysText(source.days).note && <Text type="warning" style={{ fontSize: 12 }}>{daysText(source.days).note}</Text>}
+              </Space>
+            )}
             {progress && (progress.total > 0
               ? <Progress percent={Math.round((progress.done / progress.total) * 100)} size="small" format={() => `prices ${progress.done} / ${progress.total} days`} />
               : <Text type="secondary" style={{ fontSize: 12 }}>Loading the messages…</Text>)}

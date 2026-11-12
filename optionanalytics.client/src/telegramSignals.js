@@ -82,7 +82,9 @@ export function parseMessage(rawText, time) {
 
   // Exits, reports, results - no direction to measure.
   if (/^(✅|❌|⚠️|⚪|🔬)/u.test(text) || /\b(Paper exit|LIVE exit|Target hit|Stop loss hit|Trailing SL hit|Time exit|square-off)\b/i.test(text)
-    || /\bout of\b/i.test(text) || /\b(No trades today|Daily report|backtest done|Kill switch)\b/i.test(text)) return one('exit')
+    || /\bout of\b/i.test(text) || /\b(No trades today|Daily report|backtest done|Kill switch)\b/i.test(text)
+    // A trigger's follow-ups (StrategyTriggerHostedService): its order going out / closing, not a new signal.
+    || /\[(SQUARE OFF|SQUARED OFF|HEDGE CLOSE|ORDER (FILLED|CANCELLED|PARTIALLY|PLACED|REJECTED|UNMONITORED))/i.test(text)) return one('exit')
   if (/iceberg/i.test(text)) {
     const dir = /hidden\s+BUYER/i.test(text) ? 1 : /hidden\s+SELLER/i.test(text) ? -1 : 0
     return one('iceberg', dir, num(text.match(/\b(?:bid|offer)\s+([\d,.]+)/i)?.[1]))
@@ -104,7 +106,13 @@ export function parseMessage(rawText, time) {
     return one('oiBreak', dir)
   }
   if (/^\[Confluence\]/i.test(text)) return one('confluence', wordDir(text))
-  if (/^\[OI divergence\]/i.test(text)) return one('divergence', wordDir(text))
+  // The server's OI divergence (OiDivergenceMonitor / PriceOiDivergence): spot ran one way but the OI at the level held -
+  // a DISCOUNT zone (spot fell, the puts' support defended) is bullish, a PREMIUM zone (spot rose, the calls' resistance
+  // defended) bearish; its price the level spot ran to.
+  if (/^\[OI divergence\]/i.test(text)) {
+    const dir = /\bDISCOUNT zone\b/i.test(text) ? 1 : /\bPREMIUM zone\b/i.test(text) ? -1 : wordDir(text)
+    return one('divergence', dir, num(text.match(/\bmin to\s+([\d,.]+)/i)?.[1]))
+  }
   if (/Price alert/i.test(text)) return one('price', /\brose\b/i.test(text) ? 1 : /\bfell\b/i.test(text) ? -1 : 0, num(text.match(/\b(?:rose|fell) to\s+([\d,.]+)/i)?.[1]))
   if (/^📊/u.test(text)) {
     if (/\b(reached|entered)\b/i.test(text)) return one('profile', 0, num(text.match(/\b(?:futures|spot)\s+([\d,.]+)/i)?.[1]))

@@ -1129,8 +1129,19 @@ When adding or changing a strategy:
   server's alerts and the pages' `POST /api/alerts/telegram` alike - writes each one as it goes: a CSV a day (IST), time IST /
   UTC, status (`sent`, `failed`, `off` = Telegram not configured) and the text exactly as sent (newlines escaped on one
   line), 400 days, at most 20 000 a day; never throws into the send. `GET /api/telegram-log?from&to` (Admin / User, 92 days a
-  request, the last 7 by default) gives them back as plain text - the page's "Server's log" (asked for: "keep telegram
-  signal on server side as well").
+  request, the last 7 by default) gives them back as plain text (asked for: "keep telegram signal on server side as
+  well"). `covered-from.txt` marks since when it records (written once; a log from before the mark counts from the day after
+  its first file): `Covers(day)` = it was recording before that day's 09:00, so it holds the whole day.
+- THE PAGE'S LOAD IS SERVER FIRST (asked for - "server side + caching, if it is not there then telegram fetch";
+  `TelegramSignalMessages`, `GET /api/telegram-history/signals?from&to`, Admin / User, at most 92 days): each IST day from
+  the server's log when it `Covers` it (Telegram not asked), else from the days FETCHED FROM TELEGRAM BEFORE
+  (`TelegramDayCache` - one gzip JSON a day in `from-telegram/` under the log's folder, 400 days; an empty day - a weekend, a
+  holiday - kept empty), else FETCHED FROM TELEGRAM now (the reader below - only the days missing, consecutive ones in one
+  request of at most 31 days) and, a whole PAST day, kept - so a day is asked of Telegram once; today not kept (fetched
+  again until the log covers it); a fetch cut short at MaxMessages is "partial" and not kept. Telegram not connected / not
+  answering: those days "missing" with why (asked once a load), the rest still shown. Each day says where it came from
+  (`days: [{ date, source: server / cache / telegram / partial / missing, count, note }]`), each message its `status` (the
+  log's sent / failed / off; Telegram's "sent") - `TelegramSignalMessagesTests.cs`.
 - THE CHANNEL IS ALSO READ FROM TELEGRAM ITSELF (asked for - "we can fetch data from telegram right"; `TelegramChannelReader`,
   `TelegramHistoryController` `/api/telegram-history`): the Bot API can SEND but has no call that reads a chat's history (and
   a bot is never told of its own posts), so the server reads the channel through a Telegram USER account (MTProto -
@@ -1148,13 +1159,16 @@ When adding or changing a strategy:
   Telegram the server sends by itself (above) - nothing else moved server side.
 - The TELEGRAM SIGNALS page (`/telegram-signals`, `TelegramSignalsPage.jsx`, the reading `telegramSignals.js`; asked for -
   "a page which will read the messages and show me how the price reacts after those signals ... show correlation between
-  price and signals"): three sources (`optionanalytics.telegramSignals.source`) - FROM TELEGRAM (the default: the channel as
-  Telegram holds it, `/api/telegram-history/messages` - `TelegramConnect` on the page signs the account in, an admin's job;
-  others see whether it is connected), the SERVER'S LOG (`/api/telegram-log` - with each message's sent / failed / off) or a
-  Telegram Desktop export (result.json, read in the browser - `parseTelegramExport`, its `date_unixtime`) - read as SIGNALS (`parseMessage` - the code's own texts: iceberg, big order (a
+  price and signals"): two sources (`optionanalytics.telegramSignals.source`) - SERVER + TELEGRAM (the default: Load =
+  `/api/telegram-history/signals`, server first as above, a line saying how many days came from where and why any is
+  missing; `TelegramConnect` on the page signs the Telegram account in - an admin's job, others see whether it is
+  connected) or a Telegram Desktop export (result.json, read in the browser - `parseTelegramExport`, its `date_unixtime`) -
+  read as SIGNALS (`parseMessage` - the code's own texts: iceberg, big order (a
   message of several prints = a signal each, at its own time), 🎯, OI S/R break, sudden OI wall, the scanner, paper / live
-  orders, saved strategies' entries, confluence, divergence, profile, price, trigger; exits and reports are kept apart
-  (`exit`, not a signal); its index named, else guessed from the price (a profile alert names only futures / spot); its
+  orders, saved strategies' entries, confluence, OI DIVERGENCE (the server's "[OI divergence] … DISCOUNT zone" = bullish - spot
+  fell, the puts' support held - "PREMIUM zone" = bearish, at the level spot ran to; it read as no side before and was left
+  out of the summary), profile, price, trigger; exits and reports are kept apart (`exit`, not a signal - a trigger's
+  follow-ups "[SQUARED OFF]" / "[SQUARE OFF …]" / "[HEDGE CLOSE …]" / "[ORDER …]" too); its index named, else guessed from the price (a profile alert names only futures / spot); its
   side - bullish / bearish / none) and the index's SPOT 1-minute bars of the day after each (`/api/oi-replay/{u}/spot-day` -
   the server's memory / disk; each index and day once, kept for the tab - a past day): `reaction` - the price at the signal
   (the close of the last minute completed by then, else its own minute's open), the move 5 / 15 / 30 / 60 min later IN THE

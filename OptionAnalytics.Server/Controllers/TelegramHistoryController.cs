@@ -21,8 +21,13 @@ public sealed record TelegramCodeRequest(string? Value);
 public sealed class TelegramHistoryController : ControllerBase
 {
     private readonly TelegramChannelReader _reader;
+    private readonly TelegramSignalMessages _signals;
 
-    public TelegramHistoryController(TelegramChannelReader reader) => _reader = reader;
+    public TelegramHistoryController(TelegramChannelReader reader, TelegramSignalMessages signals)
+    {
+        _reader = reader;
+        _signals = signals;
+    }
 
     [HttpGet("status")]
     public async Task<IActionResult> Status(CancellationToken cancellationToken) => Ok(await _reader.StatusAsync(cancellationToken));
@@ -47,6 +52,20 @@ public sealed class TelegramHistoryController : ControllerBase
         {
             return Conflict(new { error = ex.Message });
         }
+    }
+
+    /// <summary>The Telegram signals page's load: the IST days from .. to (the last 7 by default, at most
+    /// TelegramSignalMessages.MaxDays) SERVER FIRST - each day from the server's log when it holds the whole day, else the
+    /// days fetched from Telegram before, else fetched from Telegram now (and kept): { from, to, days: [{ date, source, count,
+    /// note }], messages: [{ time, text, status, source }] }.</summary>
+    [HttpGet("signals")]
+    public async Task<IActionResult> Signals([FromQuery] string? from, [FromQuery] string? to, CancellationToken cancellationToken)
+    {
+        var today = IstClock.Today();
+        var end = ParseDay(to) ?? today;
+        var start = ParseDay(from) ?? end.AddDays(-6);
+        var read = await _signals.ReadAsync(start, end, cancellationToken);
+        return Ok(new { from = read.From, to = read.To, maxDays = TelegramSignalMessages.MaxDays, days = read.Days, messages = read.Messages });
     }
 
     [HttpPost("connect")]
