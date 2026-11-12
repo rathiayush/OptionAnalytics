@@ -1753,7 +1753,9 @@ const OI_TOTALS_ROWS = [
   { key: 'netDelta', label: 'Net Δ (CE − PE)', cum: false, gap: true },
   { key: 'netCum', label: 'Net cumulative (CE − PE)', cum: true, gap: false },
 ]
-// LIVE, after the OI net rows: the near futures' ORDER FLOW in the same buckets (withOrderFlowRows) - each bucket's delta
+// After the OI net rows - live, and on a REPLAYED day whose order flow the server has (its recorded day on disk, else the
+// estimate from the day's cached 1-minute candles, marked estimated): the near futures' ORDER FLOW in the same buckets
+// (withOrderFlowRows), the minutes up to the replay clock - each bucket's delta
 // (aggressor buy - sell volume) and the cumulative delta from the open, as on the Order Flow page and the futures chart's
 // Δ / ΣΔ panes. Green = buyers ahead, red = sellers; the cumulative's shade is what that bucket did, as the OI rows'.
 const ORDER_FLOW_TOTALS_ROWS = [
@@ -1761,7 +1763,7 @@ const ORDER_FLOW_TOTALS_ROWS = [
   { key: 'flowCum', label: 'Futures cumulative Δ', cum: true, gap: false, orderFlow: true },
 ]
 const totalsRowsOf = (rows) => (rows.flowCum ? [...OI_TOTALS_ROWS, ...ORDER_FLOW_TOTALS_ROWS] : OI_TOTALS_ROWS)
-// The OI totals with the order flow rows when there is a flow (live only - the caller passes none otherwise).
+// The OI totals with the order flow rows when there is a flow (OI Replay live and replayed; the External page passes none).
 const withFlow = (totals, orderFlow, timeframeMinutes, asOfMs) => (orderFlow?.length ? withOrderFlowRows(totals, orderFlow, timeframeMinutes * 60, asOfMs) : totals)
 const ESTIMATED_FLOW_NOTE = ' (estimated - the server recorded the futures only from part way through the day; the minutes before come from 1-minute candles)'
 const OI_TOTALS_ROW_HEIGHT = 24
@@ -1774,8 +1776,9 @@ const OI_TOTALS_LABEL_WIDTH = 190
 // explanation, legend and the CE / PE heatmaps of every strike; 'totals' = the totals and their charts; 'all' (OI Replay)
 // = both, as one card; 'totals+strikes' (the External page's OI totals tab) = the totals, then the strikes' heatmaps.
 export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStrike, asOfMs, live = false, lastOiChangeMs = null, nowMs = null, dayKey, show = 'all', alerts = null, spotBars = null, step = null, orderFlow = null }) {
-  // The futures order flow rows under the totals - live only (OI Replay's own flow; the External page passes none).
-  const totalsOrderFlow = live ? orderFlow : null
+  // The futures order flow rows under the totals - OI Replay's own flow, live and replayed (cut at the clock in
+  // withOrderFlowRows); the External page passes none.
+  const totalsOrderFlow = orderFlow
   // The bucket size - see HEATMAP_TIMEFRAME_OPTIONS' own doc comment for why it is independent of every other
   // timeframe picker on the page. Remembered for each place it is shown (the heatmap card, the totals card, the quick
   // view, the External page's tabs). The totals card's is the page's (`alerts` - useOiBreakAlertSettings): its alerts
@@ -4681,8 +4684,10 @@ export default function OiReplayPage() {
   // The futures delta panes, live: the engine's latest minutes ("orderFlowDelta") merged as they trade - the panes
   // reloaded the whole day once a minute. A minute missed (a slow or sleeping page, a reconnect), another contract or
   // another day loads the day again - once: pushes are not acted on while that load is on its way.
-  // Live, the OI totals' futures order flow rows read the same minutes - so live they are kept whatever the panes' switch.
-  const futuresFlowWanted = futuresDeltaOn || isLive
+  // The OI totals' futures order flow rows read the same minutes - so they are kept whatever the panes' switch live, and on
+  // a replayed day while the totals are on screen (their card or the N quick view - asked for: "in replay also show the
+  // futures cumulative delta if present").
+  const futuresFlowWanted = futuresDeltaOn || isLive || visibleSections.includes('oiTotals') || quickView === 'oiHeatmap'
   const deltaGroup = isLive && futuresFlowWanted && underlying ? `ofd:${underlying}` : null
   const futuresFlowRef = useRef(null)
   futuresFlowRef.current = futuresFlow
@@ -4905,12 +4910,13 @@ export default function OiReplayPage() {
     const id = isLive ? setInterval(() => load(true), 300_000) : null
     return () => { cancelled = true; if (id) clearInterval(id) }
   }, [futuresFlowWanted, flowDate, underlying, isLive, flowReload])
-  // The OI totals' futures order flow rows (withOrderFlowRows): live only, the same minutes as the panes - a day the
-  // server did not record live at all (source "estimated") marked estimated throughout.
+  // The OI totals' futures order flow rows (withOrderFlowRows): the same minutes as the panes, live and on a replayed day
+  // (the server's recorded day first - kept on disk - else its estimate from the day's cached candles; none = no rows) -
+  // a day the server did not record live at all (source "estimated") marked estimated throughout.
   const totalsOrderFlow = useMemo(() => {
-    if (!isLive || !futuresFlow?.bars?.length) return null
+    if (!futuresFlow?.bars?.length) return null
     return futuresFlow.source === 'estimated' ? futuresFlow.bars.map((b) => ({ ...b, estimated: true })) : futuresFlow.bars
-  }, [isLive, futuresFlow])
+  }, [futuresFlow])
   // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.
   const futuresDeltaBars = useMemo(() => {
     if (!futuresDeltaOn || !futuresFlow?.bars?.length || asOfMs == null) return null
