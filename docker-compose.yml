@@ -55,6 +55,8 @@ services:
       # The order flow days the server recorded live (one gzip JSON per contract and day, the newest
       # OrderFlow:DaysOnDisk dates - 252 trading days, about one year, a few GB at most) - past days replay exactly, today carries on through a deploy.
       Storage__OrderFlowPath: /app/data/order-flow
+      # Every Telegram message the server sent (a CSV a day, 400 days - TelegramMessageLog), read by the Telegram signals page.
+      Storage__TelegramLogPath: /app/data/telegram-log
       # SCANNER_RUNNER_ENABLED=false keeps it from starting (no server-side signals / paper trades).
       ScannerRunner__Enabled: ${SCANNER_RUNNER_ENABLED:-true}
 

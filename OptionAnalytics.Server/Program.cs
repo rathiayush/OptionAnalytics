@@ -25,6 +25,8 @@ builder.Services.Configure<HistoricalDataPrefetchOptions>(builder.Configuration.
 builder.Services.Configure<ExpiredOptionDataPrefetchOptions>(builder.Configuration.GetSection(ExpiredOptionDataPrefetchOptions.SectionName));
 builder.Services.Configure<AppEnvironmentOptions>(builder.Configuration.GetSection(AppEnvironmentOptions.SectionName));
 builder.Services.AddSingleton<AppEnvironment>();
+// Every message it sends is kept as it went (TelegramMessageLog - the Telegram signals page reads it).
+builder.Services.AddSingleton<TelegramMessageLog>();
 builder.Services.AddHttpClient<TelegramAlertService>();
 
 builder.Services.AddSingleton<AuthService>();
@@ -326,6 +328,10 @@ OptionAnalytics.Server.TrueData.TrueDataRegistration.AddTrueDataIfEnabled(builde
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowHistory>();
 builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowService>());
+// Icebergs and big orders to Telegram BY THE SERVER, with or without a page open, at the per-index thresholds an admin
+// sets on the Order Flow page (OrderFlowTelegramAlerts / OrderFlowAlertSettingsStore - order-flow-alerts.json).
+builder.Services.AddSingleton<OptionAnalytics.Server.Services.OrderFlow.OrderFlowAlertSettingsStore>();
+builder.Services.AddHostedService<OptionAnalytics.Server.Services.OrderFlow.OrderFlowTelegramAlerts>();
 
 // Keeps OI Replay's own "today, live" mode genuinely live over the same shared Dhan WS feed -
 // see OiReplayLiveFeedService's own doc comment.

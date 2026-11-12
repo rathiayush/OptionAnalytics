@@ -692,6 +692,22 @@ public sealed class OrderFlowEngine
         }
     }
 
+    /// <summary>What the server's Telegram watch reads (OrderFlowTelegramAlerts - icebergs and big orders, sent with or without
+    /// a page open): the prints after sequence `afterSeq` of at least `minQty` (oldest first, at most `max`), the day's
+    /// icebergs and the last print's sequence - copied under the lock, no book, no bars.</summary>
+    public OrderFlowAlertReads AlertReads(long afterSeq, long minQty, int max = 500)
+    {
+        lock (_lock)
+        {
+            var trades = new List<OrderFlowTrade>();
+            for (var i = _trades.Count - 1; i >= 0 && _trades[i].Seq > afterSeq; i--)
+                if (_trades[i].Quantity >= minQty) trades.Add(_trades[i]);
+            trades.Reverse();
+            if (trades.Count > max) trades = trades.GetRange(trades.Count - max, max);
+            return new OrderFlowAlertReads(_day == default ? null : _day, LotSize, _trades.Count > 0 ? _trades[^1].Seq : 0, trades, Icebergs());
+        }
+    }
+
     /// <summary>The DOM push: the whole book (all 200 levels per side when that feed streams), the
     /// day's traded volume at every price inside the book's range, and the latest prints.</summary>
     public OrderFlowDom Dom()
@@ -962,6 +978,9 @@ public sealed record OrderFlowDeltaMinute(DateTimeOffset Time, long Buy, long Se
 
 /// <summary>The delta push: the contract, its IST day, the engine's clock and its latest minutes (OrderFlowEngine.LiveDelta).</summary>
 public sealed record OrderFlowDeltaLive(string Underlying, uint SecurityId, DateOnly? Day, DateTimeOffset Time, IReadOnlyList<OrderFlowDeltaMinute> Minutes);
+
+/// <summary>What the Telegram watch reads - see OrderFlowEngine.AlertReads.</summary>
+public sealed record OrderFlowAlertReads(DateOnly? Day, int LotSize, long LastSeq, IReadOnlyList<OrderFlowTrade> Trades, IReadOnlyList<OrderFlowIceberg> Icebergs);
 
 /// <summary>The DOM ladder's push - see OrderFlowEngine.Dom.</summary>
 public sealed record OrderFlowDom(
