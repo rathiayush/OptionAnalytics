@@ -132,3 +132,21 @@ test('order flow rows: estimated minutes (the server recorded the day part way) 
   const mid = withOrderFlowRows(oiTotals(), flowMinutes.map((m, i) => (i === 3 ? { ...m, estimated: true } : m)), 180, T915 + 11 * MIN)
   assert.deepEqual([...mid.estimated.flowDelta], [col(3)])
 })
+
+test('order flow rows on a replayed day: at any clock, every bucket already finished reads as the whole day\'s', () => {
+  const totals = oiTotals()
+  const whole = withOrderFlowRows(totals, flowMinutes, 180)
+  for (let m = 0; m <= 13; m++) {
+    const clock = T915 + m * MIN                                         // the replay clock: the minute shown (counted whole)
+    const cut = withOrderFlowRows(totals, flowMinutes, 180, clock)
+    if (cut === totals) continue                                          // no column has a minute yet
+    for (const t of totals.buckets) {
+      if (t + 120 > chartSec(clock)) continue                             // its last minute not reached yet
+      assert.equal(cut.rows.flowDelta.get(t), whole.rows.flowDelta.get(t), `delta ${t} at ${m}`)
+      assert.equal(cut.rows.flowCum.get(t), whole.rows.flowCum.get(t), `cum ${t} at ${m}`)
+    }
+    // Nothing after the clock: the newest column's cumulative is the minutes up to the clock (its bucket's last is 09:26).
+    const known = flowMinutes.filter((x) => x.ms <= clock && x.ms < T915 + 12 * MIN).reduce((a, x) => a + x.delta, 0)
+    assert.equal(cut.rows.flowCum.get(col(9)), known, `newest at ${m}`)
+  }
+})
