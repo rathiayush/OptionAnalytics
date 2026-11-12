@@ -80,7 +80,8 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__VisitorLogPath=/app/data/visitor-log \
     Storage__GeoDbPath=/app/data/geo \
     Storage__OrderFlowPath=/app/data/order-flow \
-    Storage__TelegramLogPath=/app/data/telegram-log
+    Storage__TelegramLogPath=/app/data/telegram-log \
+    Storage__TelegramSessionPath=/app/data/telegram-session
 EXPOSE 8080
 
 # Create and chown the data directory BEFORE declaring it a volume. Docker discards changes made

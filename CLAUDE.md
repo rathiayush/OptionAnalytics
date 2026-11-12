@@ -1129,12 +1129,29 @@ When adding or changing a strategy:
   server's alerts and the pages' `POST /api/alerts/telegram` alike - writes each one as it goes: a CSV a day (IST), time IST /
   UTC, status (`sent`, `failed`, `off` = Telegram not configured) and the text exactly as sent (newlines escaped on one
   line), 400 days, at most 20 000 a day; never throws into the send. `GET /api/telegram-log?from&to` (Admin / User, 92 days a
-  request, the last 7 by default) gives them back as plain text. (A bot cannot read its own channel posts back, so the
-  copy is kept at the source.)
+  request, the last 7 by default) gives them back as plain text - the page's "Server's log" (asked for: "keep telegram
+  signal on server side as well").
+- THE CHANNEL IS ALSO READ FROM TELEGRAM ITSELF (asked for - "we can fetch data from telegram right"; `TelegramChannelReader`,
+  `TelegramHistoryController` `/api/telegram-history`): the Bot API can SEND but has no call that reads a chat's history (and
+  a bot is never told of its own posts), so the server reads the channel through a Telegram USER account (MTProto -
+  WTelegramClient, behind `ITelegramUserClient` so tests use a fake) that an ADMIN signs in ONCE on the page: api_id /
+  api_hash from my.telegram.org (or `Telegram:ApiId` / `Telegram:ApiHash` in the config - the hash a secret, environment only),
+  the phone, the code Telegram sends to its app, the 2-step password if the account has one (`POST connect` / `code` /
+  `logout`, Admin only; `GET status` / `GET messages?from&to`, Admin / User). ONLY `Telegram:ChatId` (the bot's own chat) is
+  ever read - a User never reaches the admin's other chats. The reader keeps NO messages: each Fetch asks Telegram for the
+  IST days picked (at most `MaxDays` 31, `MaxMessages` 20 000). What stays on the server is the SIGN-IN: WTelegram's session
+  (encrypted with the api hash) and `reader.json` (api id / hash unless configured, the phone) under
+  `Storage:TelegramSessionPath` (/app/data/telegram-session - docker-compose AND the Dockerfile; gitignored with
+  telegram-log/) - resumed after a restart with no code, dropped (and "connect again" said) when Telegram ended it, removed
+  by Log out (ended on Telegram's side too). The status never carries the hash, a code or the full phone (masked). One
+  request at a time; a click, nothing polls; no Dhan call. `TelegramChannelReaderTests.cs`. The ORDER FLOW alerts are the only
+  Telegram the server sends by itself (above) - nothing else moved server side.
 - The TELEGRAM SIGNALS page (`/telegram-signals`, `TelegramSignalsPage.jsx`, the reading `telegramSignals.js`; asked for -
-  "a page which will read the messages and show me how the price reacts after those signals"): the server's log for a
-  range of days (Load messages) or a Telegram Desktop export of the channel (result.json, read in the browser -
-  `parseTelegramExport`, its `date_unixtime`) read as SIGNALS (`parseMessage` - the code's own texts: iceberg, big order (a
+  "a page which will read the messages and show me how the price reacts after those signals ... show correlation between
+  price and signals"): three sources (`optionanalytics.telegramSignals.source`) - FROM TELEGRAM (the default: the channel as
+  Telegram holds it, `/api/telegram-history/messages` - `TelegramConnect` on the page signs the account in, an admin's job;
+  others see whether it is connected), the SERVER'S LOG (`/api/telegram-log` - with each message's sent / failed / off) or a
+  Telegram Desktop export (result.json, read in the browser - `parseTelegramExport`, its `date_unixtime`) - read as SIGNALS (`parseMessage` - the code's own texts: iceberg, big order (a
   message of several prints = a signal each, at its own time), 🎯, OI S/R break, sudden OI wall, the scanner, paper / live
   orders, saved strategies' entries, confluence, divergence, profile, price, trigger; exits and reports are kept apart
   (`exit`, not a signal); its index named, else guessed from the price (a profile alert names only futures / spot); its
@@ -1142,7 +1159,9 @@ When adding or changing a strategy:
   the server's memory / disk; each index and day once, kept for the tab - a past day): `reaction` - the price at the signal
   (the close of the last minute completed by then, else its own minute's open), the move 5 / 15 / 30 / 60 min later IN THE
   SIGNAL'S DIRECTION (a bearish signal that fell made +), the best / worst in the hour; `reactionSummary` per kind (average %
-  and points, how often it went its way, best / worst), sorted by the horizon picked; a row's day chart with every signal of
+  and points, how often it went its way, the CORRELATION `corr{h}` - Pearson's r of the signals' side, +1 / -1, with the raw
+  move in % of the price: needs both sides and 3+ signals - and best / worst) plus an "All signals" row (kind `all`, last),
+  the kinds sorted by the horizon picked; a row's day chart with every signal of
   it marked; CSV. A click loads - nothing polls. Not admin-only. It feeds no strategy or alert
   (`tests/telegram-signals.test.mjs` - the texts read from the senders themselves, `signalLive.js`'s included).
 - The visitor log (admin-only Visitors page, `GET /api/system/visitors`): every page a browser opens - every account and

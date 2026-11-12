@@ -13,5 +13,11 @@ public sealed class TelegramOptions
     public string ChatId { get; set; } = "";
     public string ApiBaseUrl { get; set; } = "https://api.telegram.org";
 
+    /// <summary>The Telegram signals page READS the channel through a Telegram USER account (the Bot API cannot read a
+    /// chat's history): its api_id / api_hash from my.telegram.org. Optional - an admin can enter them on the page instead
+    /// (TelegramChannelReader). ApiHash is a secret: config / environment only, never committed.</summary>
+    public int ApiId { get; set; }
+    public string ApiHash { get; set; } = "";
+
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(BotToken) && !string.IsNullOrWhiteSpace(ChatId);
 }

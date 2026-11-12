@@ -4,7 +4,7 @@
 // signal's direction; best / worst in the hour), the summary and the CSV.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_KINDS, HORIZONS, barsOf, dayKeysOf, messageIndex, messagesToSignals, parseMessage, parseTelegramExport, reaction, reactionSummary, reactionsCsv } from '../src/telegramSignals.js'
+import { DEFAULT_KINDS, HORIZONS, barsOf, dayKeysOf, messageIndex, messagesToSignals, parseMessage, parseTelegramExport, reaction, reactionSummary, reactionsCsv, correlation } from '../src/telegramSignals.js'
 import { entryText, exitText } from '../src/signalLive.js'
 
 const MIN = 60_000
@@ -118,4 +118,28 @@ test('the summary per kind and the CSV', () => {
   assert.equal(csv[0].split(',').slice(0, 6).join(','), 'time_ist,index,kind,direction,status,price_at_signal')
   assert.ok(csv[1].startsWith('2026-11-12 10:10:20,NIFTY,iceberg,bullish,,24518,10,30,60,120,10,30,60,120,'))
   assert.equal(csv.length, 4)
+})
+
+test('the correlation of a signal\'s side with the move after it, and the All signals row', () => {
+  assert.equal(Math.round(correlation([1, 2, 3], [2, 4, 6]) * 1e9) / 1e9, 1)
+  assert.equal(Math.round(correlation([1, 2, 3], [6, 4, 2]) * 1e9) / 1e9, -1)
+  assert.equal(correlation([1, 1, 1], [1, 2, 3]), null)                       // one side only: says nothing
+  assert.equal(correlation([1, -1], [1, -1]), null)                            // under 3
+  // A V: down 2 points a minute from 10:00 to 10:40, then up 2 a minute.
+  const v = barsOf({ bars: Array.from({ length: 120 }, (_, k) => { const c = 24500 + 2 * Math.abs(k - 40) - 80; return { time: new Date(at('10:00:00') + k * MIN).toISOString(), open: c, high: c + 1, low: c - 1, close: c } }) })
+  const row = (time, kind, dir) => ({ time: at(time), index: 'NIFTY', kind, dir, text: '', reaction: reaction({ time: at(time), dir }, v) })
+  // Bearish into the fall, bullish into the rise: the side matches what came next.
+  const right = [row('10:05:10', 'iceberg', -1), row('10:12:10', 'iceberg', -1), row('10:45:10', 'iceberg', 1), row('10:50:10', 'bigOrder', 1), row('10:08:10', 'bigOrder', -1)]
+  const [ice, big, every] = reactionSummary(right)
+  assert.ok(ice.corr5 > 0.9 && ice.corr15 > 0.9, `iceberg ${ice.corr5} ${ice.corr15}`)
+  assert.deepEqual([every.kind, every.signals, every.bullish, every.bearish], ['all', 5, 2, 3])
+  assert.ok(every.corr15 > 0.9)
+  assert.equal(big.signals, 2)
+  // The same signals with their sides the other way: the correlation turns negative.
+  const wrong = right.map((r) => ({ ...r, dir: -r.dir, reaction: reaction({ time: r.time, dir: -r.dir }, v) }))
+  const allWrong = reactionSummary(wrong).at(-1)
+  assert.ok(allWrong.corr15 < -0.9)
+  assert.ok(allWrong.hit15 < 50)
+  // One kind alone: no All row.
+  assert.equal(reactionSummary(right.filter((r) => r.kind === 'iceberg')).length, 1)
 })
