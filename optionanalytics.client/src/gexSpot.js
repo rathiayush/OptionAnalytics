@@ -76,3 +76,33 @@ export function wallRange(minute) {
   if (minute.spot < minute.putWall) return 'below'
   return 'inside'
 }
+
+/**
+ * The GEX LADDER of one minute (asked for - the GEX levels drawn "like" the order-book ladder beside the candles): each
+ * strike's call / put / net GEX (rupees per 1% move, gexDay's `strikes`) and OI, high to low, the strike step, the largest
+ * |call| / |put| (the bars' scale) and the minute's levels. Null without strikes.
+ */
+export function gexLadder(minute) {
+  if (!minute?.strikes?.length || !(minute.spot > 0)) return null
+  const rows = minute.strikes
+    .filter((r) => r.call != null || r.put != null)
+    .map((r) => ({ strike: r.strike, call: r.call ?? 0, put: r.put ?? 0, net: r.net ?? (r.call ?? 0) + (r.put ?? 0), ceOi: r.ceOi, peOi: r.peOi }))
+    .sort((a, b) => b.strike - a.strike)
+  if (!rows.length) return null
+  const gaps = rows.slice(1).map((r, i) => rows[i].strike - r.strike).filter((d) => d > 0)
+  const step = gaps.length ? Math.min(...gaps) : 0
+  return {
+    time: minute.time, spot: minute.spot, step, rows, net: minute.net,
+    maxAbs: Math.max(0, ...rows.map((r) => Math.max(Math.abs(r.call), Math.abs(r.put)))),
+    callWall: minute.callWall ?? null, putWall: minute.putWall ?? null, maxGamma: minute.maxGamma ?? null, flip: minute.flip ?? null,
+  }
+}
+
+/** The ladder's strike holding `price` (within half a strike step of it), or null. */
+export function ladderStrikeAt(ladder, price) {
+  if (!ladder || !Number.isFinite(price)) return null
+  const half = ladder.step > 0 ? ladder.step / 2 : Infinity
+  let best = null
+  for (const r of ladder.rows) if (Math.abs(r.strike - price) <= half && (best == null || Math.abs(r.strike - price) < Math.abs(best.strike - price))) best = r
+  return best
+}

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { GEX_SPOT_KEYS, gexLevelSeries, levelsAround, spotCandles, wallRange } from '../src/gexSpot.js'
+import { GEX_SPOT_KEYS, gexLadder, gexLevelSeries, ladderStrikeAt, levelsAround, spotCandles, wallRange } from '../src/gexSpot.js'
 
 // OI Replay's "GEX levels on spot" card (asked for - "on OI Replay show the GEX levels with the spot chart"): the levels
 // drawn through the day as each stood at that candle - read at the candle's last minute, never a later one.
@@ -72,4 +72,39 @@ test('the levels around spot, nearest first, and the range the walls fence in', 
   assert.equal(wallRange({ ...m, spot: 24890 }), 'below')
   assert.equal(wallRange({ ...m, putWall: null }), null)
   assert.deepEqual(levelsAround(null), [])
+})
+
+test('the GEX ladder of a minute: every strike high to low, its call / put GEX, the step, the scale and the levels', () => {
+  const minute = {
+    time: DAY, spot: 25060, net: 7e9, callWall: 25200, putWall: 25000, maxGamma: 25100, flip: 24980,
+    strikes: [
+      { strike: 25000, call: 1e9, put: -6e9, net: -5e9, ceOi: 100, peOi: 900 },
+      { strike: 25200, call: 8e9, put: -1e9, net: 7e9, ceOi: 1200, peOi: 50 },
+      { strike: 25100, call: 5e9, put: -4e9, net: 1e9, ceOi: 700, peOi: 600 },
+      { strike: 25150, call: null, put: null, net: 0 },               // nothing read there - left out
+      { strike: 25050, call: 2e9, put: null, net: 2e9, ceOi: 300 },     // calls only - puts 0
+    ],
+  }
+  const l = gexLadder(minute)
+  assert.deepEqual(l.rows.map((r) => r.strike), [25200, 25100, 25050, 25000])
+  assert.equal(l.step, 50)
+  assert.equal(l.maxAbs, 8e9)
+  assert.deepEqual([l.callWall, l.putWall, l.maxGamma, l.flip, l.spot], [25200, 25000, 25100, 24980, 25060])
+  assert.deepEqual(l.rows[2], { strike: 25050, call: 2e9, put: 0, net: 2e9, ceOi: 300, peOi: undefined })
+  // The strike under a price: within half a step, the nearest.
+  assert.equal(ladderStrikeAt(l, 25112).strike, 25100)
+  assert.equal(ladderStrikeAt(l, 25076).strike, 25100)
+  assert.equal(ladderStrikeAt(l, 25074).strike, 25050)
+  assert.equal(ladderStrikeAt(l, 25400), null)
+  assert.equal(gexLadder(null), null)
+  assert.equal(gexLadder({ spot: 25000, strikes: [] }), null)
+})
+
+test('the ladder shown is the clock\'s minute: what the candle series read last', () => {
+  const withStrikes = gex.map((m, i) => ({ ...m, strikes: [{ strike: 25000, call: i * 1e8, put: -1e8, net: i * 1e8 - 1e8 }, { strike: 25050, call: 1e8, put: -1e8, net: 0 }] }))
+  const shown = spotCandles(bars.slice(0, 13), 5)
+  const s = gexLevelSeries(withStrikes, shown, 5, { toMs, asOfMs: DAY + 12 * MIN })
+  const l = gexLadder(s.at.at(-1))
+  assert.equal(l.time, DAY + 12 * MIN)
+  assert.equal(l.rows.find((r) => r.strike === 25000).call, 12e8)
 })
