@@ -88,3 +88,26 @@ test('rowDeltas: each row is buy minus sell; the largest in size shades the rest
   assert.equal(rowDeltas([{ price: 1, buy: 10, sell: 10 }]).maxAbs, 1)   // all flat: no division by zero
   assert.equal(rowDeltas(null).byPrice.size, 0)
 })
+
+test('a replayed day with no order flow from the server: the run\'s futures candles estimated the server\'s way', async () => {
+  const { estimateFlowMinutes } = await import('../src/cvdBackfill.js')
+  const T = Date.parse('2026-11-13T03:45:00Z')
+  const c = (i, open, close, volume) => ({ time: new Date(T + i * 60_000).toISOString(), open, high: Math.max(open, close) + 1, low: Math.min(open, close) - 1, close, volume })
+  const candles = [c(0, 100, 102, 1000), c(1, 102, 102, 500), c(2, 102, 99, 2000), c(3, 99, 99, 0), c(4, 99, 100, 750)]
+  const m = estimateFlowMinutes(candles, { lotSize: 50 })
+  // The zero-volume minute is left out (as the server does); every minute marked estimated.
+  assert.equal(m.length, 4)
+  assert.ok(m.every((x) => x.estimated))
+  // Minute 0: change +2 over sigma 2 -> Phi(1) = 0.8413 -> buy round(841.3 / 50) x 50 = 850, sell 150 -> +700.
+  assert.equal(m[0].delta, 700)
+  // Minute 1: flat -> half and half: buy round(250 / 50) x 50 = 250 -> 0.
+  assert.equal(m[1].delta, 0)
+  // Minute 2: -3 over sigma sqrt((4 + 0 + 9) / 3) = 2.0817 -> Phi(-1.441) = 0.0748 -> buy 150, sell 1850 -> -1700.
+  assert.equal(m[2].delta, -1700)
+  // Each minute from it and those before only: the day cut part way gives the same minutes.
+  for (let k = 1; k <= candles.length; k++) {
+    const part = estimateFlowMinutes(candles.slice(0, k), { lotSize: 50 })
+    assert.deepEqual(part, m.slice(0, part.length))
+  }
+  assert.deepEqual(estimateFlowMinutes([]), [])
+})

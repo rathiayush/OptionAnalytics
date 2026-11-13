@@ -56,7 +56,7 @@ import { LivePositionsView, liveTradingApi } from './LiveTrading.jsx'
 import { StrikePicker, moneynessLabel } from './StrikePicker.jsx'
 import { DomDrawer } from './DomDrawer.jsx'
 import { volumeProfileFromCandles, aggregateBars as aggregateFootprintBars, analyzeBars } from './orderFlowMath.js'
-import { withBackfill, deltaMinutes, mergeDeltaPush } from './cvdBackfill.js'
+import { withBackfill, deltaMinutes, mergeDeltaPush, estimateFlowMinutes } from './cvdBackfill.js'
 import { FootprintChart } from './OrderFlowCharts.jsx'
 import { VolumeProfilePrimitive, setProfileLines } from './volumeProfilePrimitive.js'
 import { CardFitBox, ChartGrow, DashboardCard, useChartHeight, useFitHeight } from './DashboardCard.jsx'
@@ -4904,9 +4904,11 @@ export default function OiReplayPage() {
       // A live day the server started recording part way (a restart) comes with the minutes before as an estimate.
       .then((body) => {
         if (cancelled) return
-        setFuturesFlow(body ? { source: body.source, day: body.meta?.day ?? null, securityId: body.meta?.securityId ?? null, bars: deltaMinutes(body.bars, body.backfill) } : null)
+        // No answer (a 404 - the server could not read the day's candles either) is kept as FAILED: a replayed day then
+        // falls back on the run's own futures candles (runFlow below).
+        setFuturesFlow(body ? { source: body.source, day: body.meta?.day ?? null, securityId: body.meta?.securityId ?? null, bars: deltaMinutes(body.bars, body.backfill) } : { failed: true })
       })
-      .catch(() => { if (!cancelled) setFuturesFlow(null) })
+      .catch(() => { if (!cancelled) setFuturesFlow({ failed: true }) })
       .finally(() => { if (!cancelled) flowReloadingRef.current = false })
     load(flowReload > 0)
     const id = isLive ? setInterval(() => load(true), 300_000) : null
@@ -4915,26 +4917,36 @@ export default function OiReplayPage() {
   // The OI totals' futures order flow rows (withOrderFlowRows): the same minutes as the panes, live and on a replayed day
   // (the server's recorded day first - kept on disk - else its estimate from the day's cached candles; none = no rows) -
   // a day the server did not record live at all (source "estimated") marked estimated throughout.
+  // A REPLAYED day the order flow server has nothing for (asked for - "if the futures cumulative delta is present in replay
+  // show that as well"; its request failed, or the day came back empty): the run's own 1-minute futures candles - the same
+  // ones the server estimates from - estimated the server's way (estimateFlowMinutes), so the rows and the panes still
+  // show, marked estimated. Never live (the live day is the server's own).
+  const runFlow = useMemo(() => {
+    if (isLive || !futuresFlow || futuresFlow.bars?.length) return null
+    const bars = estimateFlowMinutes(result?.futuresBars, { lotSize: PAPER_TRADE_LOT_SIZE[underlying] ?? 1 })
+    return bars.length ? { source: 'estimated', fromRun: true, bars } : null
+  }, [isLive, futuresFlow, result?.futuresBars, underlying])
+  const flow = runFlow ?? futuresFlow
   const totalsOrderFlow = useMemo(() => {
-    if (!futuresFlow?.bars?.length) return null
-    return futuresFlow.source === 'estimated' ? futuresFlow.bars.map((b) => ({ ...b, estimated: true })) : futuresFlow.bars
-  }, [futuresFlow])
+    if (!flow?.bars?.length) return null
+    return flow.source === 'estimated' ? flow.bars.map((b) => ({ ...b, estimated: true })) : flow.bars
+  }, [flow])
   // Delta per futures candle (same buckets as the candles) up to the replay time, and its running sum.
   const futuresDeltaBars = useMemo(() => {
-    if (!futuresDeltaOn || !futuresFlow?.bars?.length || asOfMs == null) return null
+    if (!futuresDeltaOn || !flow?.bars?.length || asOfMs == null) return null
     const bucketSeconds = Math.max(1, futuresTimeframe) * 60
     const buckets = new Map()
-    for (const b of futuresFlow.bars) {
+    for (const b of flow.bars) {
       if (b.ms > asOfMs) continue // minutes revealed so far (a minute shows once the replay reaches its start, like the candles)
       const t = Math.floor(toChartTime(b.ms) / bucketSeconds) * bucketSeconds
       const bucket = buckets.get(t) ?? { delta: 0, estimated: true }
-      buckets.set(t, { delta: bucket.delta + b.delta, estimated: bucket.estimated && (b.estimated || futuresFlow.source === 'estimated') })
+      buckets.set(t, { delta: bucket.delta + b.delta, estimated: bucket.estimated && (b.estimated || flow.source === 'estimated') })
     }
     let cvd = 0
     return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, { delta, estimated }]) => { cvd += delta; return { time, delta, cvd, estimated } })
-  }, [futuresDeltaOn, futuresFlow, asOfMs, futuresTimeframe])
+  }, [futuresDeltaOn, flow, asOfMs, futuresTimeframe])
   // Where the live recording starts on a day whose earlier minutes are estimated (the server restarted part way).
-  const futuresFlowRecordedFrom = futuresFlow?.source !== 'estimated' ? futuresFlow?.bars?.find((b) => !b.estimated && b.ms <= (asOfMs ?? Infinity))?.ms ?? null : null
+  const futuresFlowRecordedFrom = flow?.source !== 'estimated' ? flow?.bars?.find((b) => !b.estimated && b.ms <= (asOfMs ?? Infinity))?.ms ?? null : null
   const futuresFlowHasEstimate = futuresDeltaBars?.some((b) => b.estimated) ?? false
   const futuresProfileRow = FUTURES_PROFILE_ROWS[underlying] ?? 5
   // The previous trading day's volume profile of the same futures contract (its bars from the server - Dhan, kept on
@@ -6386,7 +6398,9 @@ export default function OiReplayPage() {
             {futuresDeltaBars?.length > 0 && (
               <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
                 Below the candles: delta per candle (green buying / red selling, right axis) and cumulative delta from the open (yellow line, left axis, ΣΔ {futuresDeltaBars.at(-1).cvd >= 0 ? '+' : ''}{Math.round(futuresDeltaBars.at(-1).cvd).toLocaleString('en-IN')})
-                {futuresFlow?.source === 'estimated'
+                {flow?.fromRun
+                  ? ' - estimated from the day\'s 1-minute futures candles (the order flow server had nothing for this day)'
+                  : flow?.source === 'estimated'
                   ? ' - estimated from 1-minute candles (the order flow server did not see this day live)'
                   : futuresFlowHasEstimate && futuresFlowRecordedFrom != null
                     ? ` - estimated from 1-minute candles (fainter bars) until ${new Date(futuresFlowRecordedFrom).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })}, when the server started recording, from the live tick feed after`
