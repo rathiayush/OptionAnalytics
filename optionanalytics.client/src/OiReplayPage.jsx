@@ -41,6 +41,7 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
+import { GexSpotCard } from './GexSpotCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
@@ -735,6 +736,7 @@ const SECTION_OPTIONS = [
   { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'straddle', label: 'ATM straddle' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
+  { value: 'gexSpot', label: 'GEX levels on spot' },
   { value: 'futures', label: 'Futures' },
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
@@ -778,7 +780,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -4487,7 +4489,7 @@ export default function OiReplayPage() {
   // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
   const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
     expiry: result?.optionExpiry ?? null, live: isLive, chains: sumExtras?.chains ?? null,
-    enabled: visibleSections.includes('gex') || visibleSections.includes('entryChecklist') || quickView === 'gex',
+    enabled: visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex',
   })
   // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
   const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
@@ -7090,6 +7092,22 @@ export default function OiReplayPage() {
                   </Card>
                 </Col>
               </Row>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
+            {/* The GEX levels on the spot candles (GexSpotCard.jsx, gexSpot.js): the call / put walls, max gamma and the flip
+                as each stood at that candle, and the regime under them - the same day's GEX, up to the replay clock. */}
+            {visibleSections.includes('gexSpot') && (
+              <DashboardCard key="gexSpot" {...dash('gexSpot')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />GEX levels on spot (walls, max gamma, flip){isLive ? ' · live' : ''}</Space>}>
+                  <GexSpotCard
+                    days={gexDays} spotBars={deltaSpotBars} isLive={isLive}
+                    asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
+                    dayKey={`${underlying}-${result.date}`}
+                  />
+                </Card>
               </LiveSection>
               </DashboardCard>
             )}

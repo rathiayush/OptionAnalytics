@@ -25,6 +25,7 @@ import { withBackfill } from './cvdBackfill.js'
 import { DeltaRulesCard } from './OrderFlowDeltaRules.jsx'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
+import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
@@ -923,6 +924,13 @@ export default function OrderFlowPage() {
                     </Text>
                   )}
                 </Card>
+
+                {/* The book beside the futures candles (OrderBookChartCard.jsx, bookLadder.js): waiting per row, bought / sold,
+                    pulled, the nearest big buyers / sellers - at the page's clock. */}
+                <OrderBookChartCard
+                  view={view} underlying={underlying} rowSize={rowSize} lotSize={lotSize} showLots={showLots}
+                  clockMs={nowMs} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
+                />
 
                 <Card size="small" title="Liquidity map · support / resistance, zones, confluence, what is happening now" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>from the heatmap, OI walls, profiles and VWAP</Text>}>
                   <LiquidityMapCard map={liqMap} sudden={sudden} basis={basis} estimated={estimated} />
