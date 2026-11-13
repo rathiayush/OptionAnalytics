@@ -163,6 +163,36 @@ public sealed class SignalStrategyStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task The_list_shows_todays_trades_as_they_come_open_ones_counted_closed_ones_netted()
+    {
+        var store = Store();
+        var s = store.Create("me@x.com", Request("S"), Now).Strategy!;
+        JsonObject Row(string key, bool open, decimal net) => new()
+        {
+            ["key"] = key, ["status"] = open ? "open" : "closed", ["side"] = "rule", ["action"] = "BUY", ["option"] = "NIFTY 25000 CE",
+            ["entryTime"] = "10:01", ["entry"] = 100, ["net"] = open ? "" : net,
+        };
+        // Nothing today yet: no summary (yesterday's report alone is the last day).
+        await store.RecordDayAsync(s.Id, "2026-10-23", new JsonObject { ["trades"] = 4, ["net"] = 49680 }, new JsonArray(), "📊", Now);
+        var (last, _, today) = store.Glance(s.Id, "2026-10-26");
+        Assert.Equal("2026-10-23", last!["date"]);
+        Assert.Null(today);
+        // Today: a win, a loss and one still open - as each signal comes, before any report.
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent>
+        {
+            new("a|exit", "exit", "out", null, Row("a", open: false, 2300)), new("b|exit", "exit", "out", null, Row("b", open: false, -800.5m)),
+            new("c|entry", "entry", "in", null, Row("c", open: true, 0)),
+        }, Now);
+        (_, var events, today) = store.Glance(s.Id, "2026-10-26");
+        Assert.Equal(3, events);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 1, 2, 1, 1, 1499.5m), today);
+        // The open one closes: counted and netted.
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new("c|exit", "exit", "out", null, Row("c", open: false, 100)) }, Now);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 0, 3, 2, 1, 1599.5m), store.Glance(s.Id, "2026-10-26").Today);
+        Assert.Null(SignalStrategyStore.TodayOf("2026-10-27", []));
+    }
+
+    [Fact]
     public async Task The_days_report_is_written_once_and_replaced_when_posted_again()
     {
         var telegrams = new List<string>();

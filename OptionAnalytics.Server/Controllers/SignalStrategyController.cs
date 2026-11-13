@@ -36,7 +36,8 @@ public sealed class SignalStrategyController : ControllerBase
     private string? Scope => User.IsInRole(AuthRoles.Admin) ? null : Owner;
     private string Owner => User.Identity?.Name ?? "";
 
-    /// <summary>GET /api/signal-strategies - the strategies, with the last day reported and today's live events.</summary>
+    /// <summary>GET /api/signal-strategies - the strategies, with the last day reported, today's live events and today's
+    /// trades so far (`todayTrades`).</summary>
     [HttpGet("")]
     [Authorize(Roles = PageRoles)]
     public object List()
@@ -48,8 +49,8 @@ public sealed class SignalStrategyController : ControllerBase
             liveScan = _live.State,
             strategies = _store.List(Scope).Select(s =>
             {
-                var (last, events) = _store.Glance(s.Id, today);
-                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.LiveOrders, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events };
+                var (last, events, todayTrades) = _store.Glance(s.Id, today);
+                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.LiveOrders, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events, todayTrades };
             }),
         };
     }

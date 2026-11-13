@@ -1008,7 +1008,11 @@ When adding or changing a strategy:
   name, owner, index, the Live / Alerts / Daily report switches, times, the settings as one JSON cell; `CsvTable` - one
   line a row, formula-safe cells, written whole and moved into place); "Saved strategies" card (`SignalStrategiesCard.jsx`,
   `signalStrategiesApi.js`): Load (onto the page), Update (with the page's settings), the switches, History, Remove (with
-  its history); each account its own, an admin every account's (`SignalStrategyController`, `/api/signal-strategies`,
+  its history), and a TODAY column (asked for - "last day should show current day trades, not last day"; it was the last
+  day's report): the list's `todayTrades` (`SignalStrategyStore.Glance` / `TodayOf` - the trades file's rows of TODAY, written
+  as each signal comes: how many, how many still open, closed, won / lost and the closed ones' net) - "Today (Fri 13 Nov):
+  ₹X · N trades · K open", won / lost and today's alerts under it, "no trades yet" before the first; refreshed with the list
+  (each minute while one is live - a page timer); the days before are in History; each account its own, an admin every account's (`SignalStrategyController`, `/api/signal-strategies`,
   Admin / User; `/live...` the Runner key only - `SignalStrategyStoreTests.cs` checks every endpoint's roles). The DAILY
   LIVE SCAN (`SignalLiveHostedService` keeps `scanner-runner/signal-live.mjs` running - bundled by `vite.live.config.js`,
   published beside the others; "SignalLive:Enabled"): each minute of the session (IST weekdays 09:16 - 15:59) for every

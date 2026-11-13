@@ -205,19 +205,34 @@ export function StrategyHistoryModal({ strategy, onClose }) {
   )
 }
 
-function LastDay({ s, today }) {
-  const d = s.lastDay
+/** TODAY'S trades (asked for - "last day should show current day trades, not last day"): the server's summary of the
+ *  strategy's trades of today (`todayTrades` - its trades file, written as each signal comes): the closed trades' net, how
+ *  many, how many still open, won / lost - and today's alerts. Refreshed with the list (each minute while one is live). */
+function TodayCell({ s, today }) {
+  const t = s.todayTrades
+  const label = `Today (${dayjs(today ?? undefined).format('ddd D MMM')})`
+  const alerts = s.eventsToday > 0 ? `${s.eventsToday} alert${s.eventsToday === 1 ? '' : 's'}` : null
+  if (!t?.trades) {
+    return (
+      <Space direction="vertical" size={0}>
+        <Text type="secondary" style={{ fontSize: 12 }}>{s.live ? `${label}: no trades yet` : 'Not scanned live'}</Text>
+        {s.live && alerts && <Text type="secondary" style={{ fontSize: 11 }}>{alerts} so far</Text>}
+      </Space>
+    )
+  }
+  const detail = [t.closed > 0 ? `${t.wins} won · ${t.losses} lost` : null, alerts].filter(Boolean).join(' · ')
   return (
     <Space direction="vertical" size={0}>
-      {d
-        ? <Text style={{ fontSize: 12 }}>{dayjs(d.date).format('ddd D MMM')}: <Text strong style={{ color: pnlColor(num(d.net)) }}>{rupees(num(d.net))}</Text> · {d.trades} trade{d.trades === '1' ? '' : 's'}</Text>
-        : <Text type="secondary" style={{ fontSize: 12 }}>{s.live ? 'No day reported yet' : 'Not scanned live'}</Text>}
-      {s.live && s.eventsToday > 0 && <Text type="secondary" style={{ fontSize: 11 }}>Today ({dayjs(today).format('D MMM')}): {s.eventsToday} alert{s.eventsToday === 1 ? '' : 's'} so far</Text>}
+      <Text style={{ fontSize: 12 }}>
+        {label}: {t.closed > 0 ? <Text strong style={{ color: pnlColor(t.net) }}>{rupees(t.net)}</Text> : <Text type="secondary">₹0 closed</Text>}
+        {' · '}{t.trades} trade{t.trades === 1 ? '' : 's'}{t.open > 0 ? <Text style={{ color: '#faad14' }}> · {t.open} open</Text> : null}
+      </Text>
+      {detail && <Text type="secondary" style={{ fontSize: 11 }}>{detail}</Text>}
     </Space>
   )
 }
 
-/** The saved strategies: what each is, its live switches, its last day, and Load / Update / History / Remove. */
+/** The saved strategies: what each is, its live switches, today's trades, and Load / Update / History / Remove. */
 export function SavedStrategiesCard({ strategies, today, liveScan, refresh, pageSettings, onLoad, onSave }) {
   const auth = useAuth()
   const narrow = useMediaQuery('(max-width: 768px)')
@@ -311,7 +326,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       <div key={s.id} className="oa-bg-run">
         {what(s)}
         {switches(s)}
-        <LastDay s={s} today={today} />
+        <TodayCell s={s} today={today} />
         {actions(s)}
       </div>
     ))
@@ -320,12 +335,12 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       <Table
         size="small" rowKey="id" dataSource={strategies} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
         // FIXED layout: the columns keep their widths and the strategy takes the rest - with the auto layout a long rule
-        // stretched it and squeezed "Last day" to a letter a line.
+        // stretched it and squeezed "Today" to a letter a line.
         tableLayout="fixed" scroll={{ x: 1000 }}
         columns={[
           { title: 'Strategy', key: 'what', render: (_, s) => what(s) },
           { title: 'Live scan', key: 'live', width: 210, render: (_, s) => switches(s) },
-          { title: 'Last day', key: 'last', width: 230, render: (_, s) => <LastDay s={s} today={today} /> },
+          { title: 'Today', key: 'today', width: 230, render: (_, s) => <TodayCell s={s} today={today} /> },
           { title: '', key: 'actions', width: 300, render: (_, s) => actions(s) },
         ]}
       />

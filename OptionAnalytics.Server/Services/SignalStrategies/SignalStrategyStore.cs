@@ -313,15 +313,29 @@ public sealed class SignalStrategyStore
         }
     }
 
-    /// <summary>The last day reported and today's live events, for the list.</summary>
-    public (Dictionary<string, string>? LastDay, int EventsToday) Glance(string id, string today)
+    /// <summary>For the list: the last day reported, today's live events and TODAY'S TRADES (asked for - "last day should
+    /// show current day trades, not last day"): the trades file's rows of today - written as each signal comes, an entry's
+    /// row "open" until its exit's closed row is put over it - counted, and the closed ones' net added up (an open trade
+    /// has no net yet). Null when today has none.</summary>
+    public (Dictionary<string, string>? LastDay, int EventsToday, SignalStrategyToday? Today) Glance(string id, string today)
     {
         lock (_lock)
         {
             var last = CsvTable.Read(HistoryPath(id, "days")).OrderByDescending(r => r.GetValueOrDefault("date"), StringComparer.Ordinal).FirstOrDefault();
             var events = CsvTable.Read(HistoryPath(id, "events")).Count(r => r.GetValueOrDefault("date") == today);
-            return (last, events);
+            var trades = CsvTable.Read(HistoryPath(id, "trades")).Where(r => r.GetValueOrDefault("date") == today).ToList();
+            return (last, events, TodayOf(today, trades));
         }
+    }
+
+    internal static SignalStrategyToday? TodayOf(string today, IReadOnlyList<Dictionary<string, string>> rows)
+    {
+        if (rows.Count == 0) return null;
+        static decimal? Net(Dictionary<string, string> r) =>
+            decimal.TryParse(r.GetValueOrDefault("net"), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : null;
+        var closed = rows.Where(r => !string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase) && Net(r) is not null).ToList();
+        var nets = closed.Select(r => Net(r)!.Value).ToList();
+        return new SignalStrategyToday(today, rows.Count, rows.Count - closed.Count, closed.Count, nets.Count(n => n > 0), nets.Count(n => n < 0), nets.Sum());
     }
 
     private async Task NotifyAsync(string html)
@@ -334,6 +348,10 @@ public sealed class SignalStrategyStore
         catch (Exception ex) { _logger.LogWarning(ex, "Saved strategy: the Telegram message could not be sent."); }
     }
 }
+
+/// <summary>A strategy's trades today, as far as they have gone: how many, how many still open, closed, won / lost, and the
+/// closed ones' net (after charges).</summary>
+public sealed record SignalStrategyToday(string Date, int Trades, int Open, int Closed, int Wins, int Losses, decimal Net);
 
 /// <summary>A saved strategy: its name, owner, index, the live scan's switches, its settings (the page's) and whether it
 /// places LIVE Dhan orders (an admin's switch, off by default).</summary>
