@@ -1301,6 +1301,20 @@ When adding or changing a strategy:
   sides traded at the extreme - a dotted line runs on until a later bar trades back into that row (`unfinishedRevisits`),
   to the right edge while open; the other side alone there = neither. Not on an estimated day (its rows are a spread, not
   trades). `tests/order-flow-auction.test.mjs`.
+  THE LIQUIDITY HEATMAP (`DepthHeatmap` in `OrderFlowCharts.jsx` - the Order Flow page's and the External page's; asked
+  for - "can we improve the liquidity heatmap on the data we have captured"; the rules pure in `heatmapLayout.js`,
+  `tests/heatmap-layout.test.mjs`): each book column sits at its TIME and runs to the next (`columnSpans`) - the columns are
+  NOT evenly spaced (the loaded day is the server's sample of every 2 s snapshot, ~900 of them - ~12 s apart on a morning -
+  and the live feed adds one every 2 s), and drawn one width each the live part came out stretched against the time axis
+  while the prints, signals, icebergs and VWAP (drawn by time) drifted off the cells; now the cells, the price line, those
+  and the axis agree. A stretch with NO BOOK - a jump past max(5 x the spacing around it, 30 s) (a restart) or columns with
+  no levels (the depth feed reconnecting) - is hatched and named "no book", the price line broken across it, its hover
+  "No book recorded HH:MM:SS – HH:MM:SS" (it was a black stripe the price line ran across). The STACK / PULL / SWEEP / SPOOF
+  pills are placed strongest first and never over each other (`placeLabels` - above the anchor, else below; no room = a
+  small dot). The hover adds how long the level has rested (`restingSince` - back while that side held at least half its
+  size there, stopped by less, no book or a gap): "resting since 10:36:12 (10 min)" / "just placed" - a wall that stays vs
+  one flashed (a spoof). Drawing only: `liquidityMap` / `liquiditySignals` / `pullStackSignals` (what the strategies and the
+  Signal backtest read) are untouched.
   RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
   Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day

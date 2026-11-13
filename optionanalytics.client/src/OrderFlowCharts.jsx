@@ -7,6 +7,7 @@ import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
 import { bidShare, heatmapPriceRange, rowDeltas, unfinishedRevisits } from './orderFlowMath.js'
+import { columnAt, columnSpans, gapAt, placeLabels, restingSince } from './heatmapLayout.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
 import { footprintTextLayout } from './footprintText.js'
 
@@ -722,7 +723,12 @@ function heatColor(t) {
 
 // Depth heatmap: resting liquidity over time - each column is one book snapshot, each cell a price
 // row, brighter = more quantity resting there. The white line is the mid price; circles are large
-// prints (green buy / red sell, size by quantity); magenta lines are detected icebergs.
+// prints (green buy / red sell, size by quantity); magenta lines are detected icebergs. Each column sits at its TIME
+// and runs to the next (heatmapLayout.columnSpans - the columns are not evenly spaced: the loaded morning is a sample,
+// the live feed adds one every 2 s), so the cells, the price line, the prints, the signals, the icebergs, the VWAP and
+// the time axis all agree; a stretch with no book is drawn as such ("no book", the price line broken across it); the
+// signal pills never cover each other (placeLabels - the weaker ones a dot); the hover says how long the level has
+// rested (restingSince).
 export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], vwap = null, lotSize, showLots, height = 420 }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
@@ -738,6 +744,8 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
   const step = rowSize > 0 ? rowSize : 0.05
   const plotW = Math.max(0, width - HM_AXIS_W)
   const plotH = Math.max(50, height - HM_TIME_H)
+  // Where every column sits in time, and the stretches with no book - worked out once for the columns.
+  const timing = useMemo(() => columnSpans(columns), [columns])
 
   const layout = useMemo(() => {
     if (!width || columns.length === 0) return null
@@ -772,8 +780,15 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       rowH = vview.rowH
       nRows = Math.ceil(plotH / rowH) + 1
     }
-    return { visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, cap, t0: visible[0].t, t1: visible[visible.length - 1].t, start, end }
-  }, [columns, width, plotW, plotH, step, hview, vview])
+    // The visible columns' place in time: from the first one's time to where the last one runs to.
+    const spans = timing.spans.slice(start, start + visible.length)
+    const tStart = spans[0]?.start ?? visible[0].t
+    const tEnd = Math.max(tStart + 1, spans.at(-1)?.end ?? visible.at(-1).t)
+    const gaps = timing.gaps.filter((g) => g.end > tStart && g.start < tEnd)
+    return {
+      visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, cap, t0: tStart, t1: tEnd, start, end, spans, gaps,
+    }
+  }, [columns, width, plotW, plotH, step, hview, vview, timing])
 
   // Rows `factor` times taller around the price at height y (factor > 1 = zoom in); the top stays on a row.
   const zoomRowsAt = (factor, y = plotH / 2) => {
@@ -818,36 +833,68 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.fillText('Waiting for market depth…', 16, 30)
       return
     }
-    const { visible, mids, hiPad, nRows, rowH, colW, cap, t0, t1 } = layout
+    const { visible, mids, hiPad, nRows, rowH, cap, t0, t1, spans, gaps } = layout
     const rowTop = (p) => Math.round((hiPad - p) / step) * rowH
     const yPrice = (p) => ((hiPad + step - p) / step) * rowH - rowH / 2
-    const xTime = (t) => (t1 === t0 ? plotW : ((t - t0) / (t1 - t0)) * (plotW - colW) + colW / 2)
+    // Time to x: the columns, the price line, the prints, the signals, the icebergs, the VWAP and the axis alike.
+    const xTime = (t) => ((t - t0) / (t1 - t0)) * plotW
     // Zoomed or panned, nothing may spill onto the axes.
     ctx.save()
     ctx.beginPath(); ctx.rect(0, 0, plotW, plotH); ctx.clip()
 
     visible.forEach((c, i) => {
-      const x = i * colW
+      const span = spans[i]
+      if (!span || span.empty) return
+      const x = xTime(span.start)
+      const w = Math.max(0.6, xTime(span.end) - x)
       for (const side of [c.bids, c.asks]) {
         for (const [p, q] of side) {
           const top = rowTop(p)
           if (top < -rowH || top > plotH) continue
           ctx.fillStyle = heatColor(q / cap)
-          ctx.fillRect(x, top, colW + 0.6, rowH + 0.6)
+          ctx.fillRect(x, top, w + 0.6, rowH + 0.6)
         }
       }
     })
 
-    // Mid price
+    // No book recorded (a restart, the depth feed reconnecting): hatched and named, not a black stripe.
+    for (const g of gaps) {
+      const x0 = Math.max(0, xTime(g.start))
+      const x1 = Math.min(plotW, xTime(g.end))
+      if (x1 - x0 < 1) continue
+      ctx.fillStyle = '#151a25'
+      ctx.fillRect(x0, 0, x1 - x0, plotH)
+      ctx.save()
+      ctx.beginPath(); ctx.rect(x0, 0, x1 - x0, plotH); ctx.clip()
+      ctx.strokeStyle = '#2b3345'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      for (let k = x0 - plotH; k < x1; k += 8) { ctx.moveTo(k, plotH); ctx.lineTo(k + plotH, 0) }
+      ctx.stroke()
+      ctx.restore()
+      if (x1 - x0 >= 46) {
+        ctx.fillStyle = '#8c95a8'
+        ctx.font = `600 10px ${FONT}`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillText('no book', (x0 + x1) / 2, 14)
+        ctx.textAlign = 'left'
+      }
+    }
+
+    // Mid price - broken across a stretch with no book.
     ctx.strokeStyle = '#ffffffdd'
     ctx.lineWidth = 1.5
     ctx.beginPath()
     let started = false
     mids.forEach((m, i) => {
-      if (m == null) return
-      const x = i * colW + colW / 2
+      const span = spans[i]
+      if (m == null || !span || span.empty) { started = false; return }
+      const x = xTime((span.start + span.end) / 2)
       const y = yPrice(m)
-      if (!started) { ctx.moveTo(x, y); started = true } else ctx.lineTo(x, y)
+      const joined = started && i > 0 && spans[i - 1] && spans[i - 1].end >= span.start
+      if (!joined) ctx.moveTo(x, y); else ctx.lineTo(x, y)
+      started = true
     })
     ctx.stroke()
     ctx.lineWidth = 1
@@ -931,26 +978,35 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       Magnet: 'MAGNET', 'Wall absorption': 'ABS', 'Exhaustion into wall': 'EXH', Spoofing: 'SPOOF',
       'Liquidity pulled': 'PULL', 'Liquidity stacked': 'STACK', 'Buy sweep': 'SWEEP', 'Sell sweep': 'SWEEP',
     }
-    for (const sig of signals ?? []) {
-      if (sig.t < t0 || sig.t > t1) continue
-      const x = xTime(sig.t)
+    // Placed strongest first, none over another; the weaker ones with no room left are a dot (placeLabels).
+    ctx.font = `700 10px ${FONT}`
+    const pills = placeLabels((signals ?? []).flatMap((sig) => {
+      if (sig.t < t0 || sig.t > t1) return []
       const y = yPrice(sig.price)
-      if (y < 0 || y > plotH) continue
+      if (y < 0 || y > plotH) return []
       const label = `${SHORT[sig.kind] ?? sig.kind} ${sig.confidence}%`
-      ctx.font = `700 10px ${FONT}`
-      const w = ctx.measureText(label).width + 8
-      const px = Math.min(plotW - w - 1, Math.max(1, x - w / 2))
-      const py = Math.max(1, Math.min(plotH - 15, y - 20))
-      ctx.fillStyle = sig.bullish ? 'rgba(38,166,154,0.92)' : 'rgba(239,83,80,0.92)'
+      return [{ x: xTime(sig.t), y, w: ctx.measureText(label).width + 8, priority: sig.confidence ?? 0, label, bullish: sig.bullish }]
+    }), { width: plotW, height: plotH })
+    for (const p of pills) {
+      const fill = p.bullish ? 'rgba(38,166,154,0.92)' : 'rgba(239,83,80,0.92)'
+      if (p.dot) {
+        ctx.fillStyle = fill
+        ctx.strokeStyle = '#ffffffcc'
+        ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
+        continue
+      }
+      const { x: px, y: py, w } = p.pill
+      ctx.fillStyle = fill
       ctx.beginPath()
       if (ctx.roundRect) ctx.roundRect(px, py, w, 14, 3)
       else ctx.rect(px, py, w, 14)
       ctx.fill()
       ctx.strokeStyle = '#fff'
-      ctx.beginPath(); ctx.moveTo(x, py + 14); ctx.lineTo(x, y); ctx.stroke()
+      const below = py > p.y
+      ctx.beginPath(); ctx.moveTo(p.x, below ? py : py + 14); ctx.lineTo(p.x, p.y); ctx.stroke()
       ctx.fillStyle = '#fff'
       ctx.textBaseline = 'middle'
-      ctx.fillText(label, px + 4, py + 7.5)
+      ctx.fillText(p.label, px + 4, py + 7.5)
     }
 
     ctx.restore()
@@ -970,7 +1026,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     // two in view, evenly spaced times as before.
     const istSeconds = visible.map((c) => Math.floor(c.t / 1000) + IST_OFFSET_S)
     const spanS = (t1 - t0) / 1000
-    const checks = spanS > 0 ? checkpoints(istSeconds, checkpointStep((plotW - colW) / spanS)) : []
+    const checks = spanS > 0 ? checkpoints(istSeconds, checkpointStep(plotW / spanS)) : []
     if (checks.length >= 2) {
       for (const c of checks) ctx.fillText(c.label, Math.min(plotW - 20, Math.max(20, xTime((c.time - IST_OFFSET_S) * 1000))), plotH + HM_TIME_H / 2)
     } else {
@@ -984,18 +1040,32 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
   }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize])
 
   // The figures of the cell under a pointer (mouse hover or a finger's touch): its price, time, the bids and offers resting
-  // there; null off the plot.
+  // there and since when they have held at least half that size (restingSince); a stretch with no book says so; null off
+  // the plot.
   const hoverAt = (e) => {
     if (!layout) return null
     const rect = e.currentTarget.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
-    const col = layout.visible[Math.floor(x / layout.colW)]
-    if (!col || y < 0 || y > plotH) return null
+    if (x < 0 || x > plotW || y < 0 || y > plotH) return null
+    const t = layout.t0 + (x / plotW) * (layout.t1 - layout.t0)
+    const gap = gapAt(layout.gaps, t)
+    if (gap) return { x, y, gap }
+    const i = columnAt(layout.spans, t)
+    if (i == null) return null
+    const col = layout.visible[i]
     const row = Math.round((layout.hiPad - Math.floor(y / layout.rowH) * step) * 100) / 100
     const bid = col.bids.find((b) => b[0] === row)?.[1]
     const ask = col.asks.find((a) => a[0] === row)?.[1]
-    return { x, y, row, t: col.t, bid, ask }
+    const index = layout.start + i
+    const bidSince = bid != null ? restingSince(columns, index, 'bid', row, { spans: timing.spans })?.since : null
+    const askSince = ask != null ? restingSince(columns, index, 'ask', row, { spans: timing.spans })?.since : null
+    return { x, y, row, t: col.t, bid, ask, bidSince, askSince }
+  }
+  const restedText = (since, t) => {
+    if (since == null || t - since < 2000) return ' · just placed'
+    const s = Math.round((t - since) / 1000)
+    return ` · resting since ${IST_HHMMSS.format(new Date(since))} (${s >= 120 ? `${Math.round(s / 60)} min` : `${s} s`})`
   }
 
   return (
@@ -1049,14 +1119,23 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
         <Button size="small" onClick={() => zoomRowsAt(1.25)} aria-label="Heatmap zoom in (price)">↕+</Button>
         {(hview || vview) && <Button size="small" onClick={resetView} aria-label="Heatmap reset zoom">⟲ {hview?.endT != null ? 'Latest' : 'Reset'}</Button>}
       </div>
-      {hover && (hover.bid != null || hover.ask != null) && (
+      {hover?.gap && (
         <div style={{
-          position: 'absolute', left: Math.min(hover.x + 14, width - 190), top: Math.max(0, hover.y - 50), pointerEvents: 'none',
+          position: 'absolute', left: Math.min(hover.x + 14, width - 230), top: Math.max(0, hover.y - 40), pointerEvents: 'none',
+          background: '#141821ee', border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 9px', fontSize: 12, lineHeight: 1.5,
+        }}>
+          <div><b>No book recorded</b></div>
+          <div style={{ color: AXIS_COLOR }}>{IST_HHMMSS.format(new Date(hover.gap.start))} – {IST_HHMMSS.format(new Date(hover.gap.end))} (the server or its depth feed was away)</div>
+        </div>
+      )}
+      {hover && !hover.gap && (hover.bid != null || hover.ask != null) && (
+        <div style={{
+          position: 'absolute', left: Math.max(0, Math.min(hover.x + 14, width - 330)), top: Math.max(0, hover.y - 50), pointerEvents: 'none', maxWidth: 320,
           background: '#141821ee', border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 9px', fontSize: 12, lineHeight: 1.5,
         }}>
           <div><b>{priceText(hover.row)}</b> · {IST_HHMMSS.format(new Date(hover.t))}</div>
-          {hover.bid != null && <div style={{ color: UP_COLOR }}>Bids resting: {formatVolume(hover.bid, lotSize, showLots)}{showLots ? ' lots' : ''}</div>}
-          {hover.ask != null && <div style={{ color: DOWN_COLOR }}>Offers resting: {formatVolume(hover.ask, lotSize, showLots)}{showLots ? ' lots' : ''}</div>}
+          {hover.bid != null && <div style={{ color: UP_COLOR }}>Bids resting: {formatVolume(hover.bid, lotSize, showLots)}{showLots ? ' lots' : ''}<span style={{ color: AXIS_COLOR }}>{restedText(hover.bidSince, hover.t)}</span></div>}
+          {hover.ask != null && <div style={{ color: DOWN_COLOR }}>Offers resting: {formatVolume(hover.ask, lotSize, showLots)}{showLots ? ' lots' : ''}<span style={{ color: AXIS_COLOR }}>{restedText(hover.askSince, hover.t)}</span></div>}
           {(() => {
             // Bids minus offers at this price: which side is heavier, and by how much.
             const diff = (hover.bid ?? 0) - (hover.ask ?? 0)
