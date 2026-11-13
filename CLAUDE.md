@@ -277,8 +277,18 @@ When adding or changing a strategy:
   (`optionanalytics.oiReplay.gexSpotSign`), lines / strip ticked (`...gexSpotLines`, `...gexSpotRegime`); a line over the
   chart: the net GEX and regime, spot inside / above / below the walls (`wallRange`), each level's distance
   (`levelsAround`) and the GEX card's at-the-levels read (`gexLevelsNear`). Added ONCE to a saved "Sections shown" right
-  after the GEX card (`SECTION_ADDITIONS` version 5, `SECTIONS_VERSION` '5'). Nothing after the clock
-  (`tests/gex-spot.test.mjs` - a cut part way = the whole day for the candles finished). It feeds no strategy or alert.
+  after the GEX card (`SECTION_ADDITIONS` version 5, `SECTIONS_VERSION` '5'). THE GEX LADDER (asked for - "why are you
+  not showing GEX levels like these", the order-book ladder picture; the "GEX ladder" tick, on by default,
+  `...gexSpotLadder`): every strike's GEX at the clock beside the candles (`gexLadder` - the clock's minute's `strikes`;
+  `GexLadderPrimitive`, `GEX_LADDER_SHARE` of the plot, more on a phone): a row a strike (centred on it, a step tall), PUTS'
+  GEX left of the strike and CALLS' right, green = positive (dealers long gamma there) / red = negative, the ₹ Cr at the
+  bar's end where there is room, the call wall / put wall / max gamma rows outlined (tagged CW / PW / MG when the panel is
+  wide enough), the strike spot is at marked blue, the flip a dashed line across; the prices hold +/- 3 strikes around spot;
+  hovering a strike reads its call / put / net GEX and OI; with it on, the price axis keeps the levels' coloured values
+  but drops their captions (they sat over the call bars). Over the chart the HEADLINE numbers (the order-book card's look):
+  spot, call wall, put wall, flip, max gamma - each with its distance - and the net GEX. Nothing after the clock
+  (`tests/gex-spot.test.mjs` - a cut part way = the whole day for the candles finished; the ladder = the clock's minute).
+  It feeds no strategy or alert.
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
   `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and
   User only - the External account never reaches it, `ExternalAccessTests`): every `optionanalytics.*` localStorage key a
