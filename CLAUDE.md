@@ -267,6 +267,18 @@ When adding or changing a strategy:
   reads NOW (the read and the levels spot is at).
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
+- OI Replay's GEX LEVELS ON SPOT card (asked for - "on OI Replay show the GEX levels with the spot chart"; `gexSpot` -
+  `GexSpotCard.jsx`, the maths `gexSpot.js`): the spot candles of its own timeframe (1 / 3 / 5 / 15, default 5,
+  `optionanalytics.oiReplay.gexSpotTf`) with the CALL WALL, PUT WALL, MAX GAMMA and GAMMA FLIP drawn THROUGH the day as
+  step lines - each candle reads the GEX minute at its LAST minute, or the replay clock when that is earlier
+  (`gexLevelSeries`; a candle with no level breaks the line) - their values now on the price axis, and the net GEX's
+  regime as a strip under the candles (green dealers long gamma / red short). The GEX is the page's own `useGexDays`
+  (the GEX card's, Σ 3 expiries included; worked out while this card is shown too), its Sign picked on the card
+  (`optionanalytics.oiReplay.gexSpotSign`), lines / strip ticked (`...gexSpotLines`, `...gexSpotRegime`); a line over the
+  chart: the net GEX and regime, spot inside / above / below the walls (`wallRange`), each level's distance
+  (`levelsAround`) and the GEX card's at-the-levels read (`gexLevelsNear`). Added ONCE to a saved "Sections shown" right
+  after the GEX card (`SECTION_ADDITIONS` version 5, `SECTIONS_VERSION` '5'). Nothing after the clock
+  (`tests/gex-spot.test.mjs` - a cut part way = the whole day for the candles finished). It feeds no strategy or alert.
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
   `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and
   User only - the External account never reaches it, `ExternalAccessTests`): every `optionanalytics.*` localStorage key a
@@ -1315,6 +1327,22 @@ When adding or changing a strategy:
   size there, stopped by less, no book or a gap): "resting since 10:36:12 (10 min)" / "just placed" - a wall that stays vs
   one flashed (a spoof). Drawing only: `liquidityMap` / `liquiditySignals` / `pullStackSignals` (what the strategies and the
   Signal backtest read) are untouched.
+  CHART AND ORDER BOOK (asked for - "on Order Flow the liquidity heatmap on the futures chart, like the one I sent";
+  `OrderBookChartCard.jsx`, the reading `bookLadder.js`, the drawing `bookLadderPrimitive.js`; under the heatmap card): the
+  futures candles (own timeframe, 1 min by default - `optionanalytics.orderFlow.bookChartTf`; the newest ~70 shown, 36 on a
+  phone, until dragged) with the BOOK AT THE CLOCK standing beside them in rows of N points (NIFTY 5, BANKNIFTY / SENSEX
+  10 - `LADDER_ROWS`, picked per index, `...bookChartRows`; a whole number of the footprint's rows - `ladderRow`):
+  BUYERS left of the row's price - bids WAITING (solid green, their lots / qty at the bar's end) and BOUGHT there (the
+  light strip under it), SELLERS right of it - offers waiting (red) and SOLD; what was PULLED there as an orange dashed
+  outline running on past the bar; a BIG row (>= `BIG_FACTOR` 2.5x the median waiting row of its side) brighter. Over
+  the chart: the futures price, the book's lean within `ROWS_EACH` (12) rows, the NEAREST BIG BUYERS under the price and
+  BIG SELLERS over it (adjacent big rows one zone - `nearestZone`), also as faint bands across the candles and dashed
+  lines on the axis (no caption - it covered the ladder). Bought / sold = the footprint's 1-minute bars overlapping the
+  last `windowMin` minutes (1 / 2 / 5 / 10 / 15, default 5, `...bookChartWindow`); PULLED = a drop between two book
+  columns at a row AWAY from the touch in both (the PULL signals' rule) and still inside the newer book - a level that
+  fell off the far edge of the 200 levels as price moved is out of view, not cancelled (`pulledByRow`). Live the push's
+  whole book, replayed the column at the clock; nothing after the clock (`tests/book-ladder.test.mjs`). A day with no
+  depth (estimated / rebuilt) says so. Drawing only - it feeds no signal or strategy.
   RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
   Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day

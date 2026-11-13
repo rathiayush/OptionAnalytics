@@ -55,6 +55,7 @@ const CARD_ROWS = {
   optionFlow: 14,
   straddle: 19,
   gex: 19,
+  gexSpot: 22,
   ladder: 16,
   futures: 21,
   optionDeltaProfile: 20,
@@ -318,6 +319,8 @@ export const SECTION_ADDITIONS = [
   // The delta profiles (asked for - "add two more components on OI Replay").
   { version: 4, card: 'optionDeltaProfile', after: 'optionFlow' },
   { version: 4, card: 'futuresDeltaProfile', after: 'futures' },
+  // The GEX levels drawn on the spot candles (asked for - "on OI Replay show the GEX levels with the spot chart").
+  { version: 5, card: 'gexSpot', after: 'gex' },
 ]
 
 /** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
@@ -371,7 +374,7 @@ export const LAYOUT_VERSION = '2'
 // and bring back an OI totals card someone hid.
 // '4' added the two delta profiles (SECTION_ADDITIONS).
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '4'
+export const SECTIONS_VERSION = '5'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands
