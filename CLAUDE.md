@@ -156,7 +156,11 @@ When adding or changing a strategy:
   A replayed day reads the same `/api/order-flow/{u}/day/{date}` the futures chart's Δ panes do - the server's own order:
   its RECORDED day first (memory, then `OrderFlowDayStore` on disk - exact), else the estimate from the day's 1-minute
   futures candles, which the run already put on disk (`PastFuturesCandles` - the same files, so no Dhan call), marked
-  estimated throughout; none (a 404) = no rows. Loaded on a replayed day while the totals are on screen (the card or the N
+  estimated throughout; none (a 404 - the server could not read the day's candles either - or a day with no minutes) on a
+  REPLAYED day = the run's OWN 1-minute futures candles estimated the server's way (asked for again - "if the futures
+  cumulative delta is present in replay show that as well"; `estimateFlowMinutes` in `cvdBackfill.js` = `OrderFlowEstimator`:
+  bulk volume classification, Phi(change / RMS of the changes up to the minute), buy in whole lots - `runFlow`, the answer
+  kept as `{ failed: true }`), marked estimated ("from the day's 1-minute futures candles"); never live. Loaded on a replayed day while the totals are on screen (the card or the N
   quick view) or the panes' Δ switch is on (`futuresFlowWanted`), once a day - no timer; the minutes up to the replay clock
   (the minute shown counted whole, as the OI points and the panes are). Not on the External page (it passes no flow) -
   `tests/oi-totals-heatmap.test.mjs` (a cut at any clock = the whole day's for every bucket finished). A PAST DAY REPLAYED raises them too, on the replay's clock (`stepReplayOiBreakAlerts`: the end of
