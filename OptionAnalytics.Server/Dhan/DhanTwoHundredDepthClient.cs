@@ -12,7 +12,8 @@ namespace OptionAnalytics.Server.Dhan;
 ///
 /// Dhan drops the OLDEST socket once an account opens more than 5 (main market feed, order updates,
 /// 20-level depth and these all count), so this client is capped at OrderFlow:MaxTwoHundredDepth
-/// connections (default 2: NIFTY and BANKNIFTY futures), keeping the total at 4-5.
+/// connections (default 3: NIFTY and BANKNIFTY futures, and one contract the Order Flow page picks - the
+/// 20-level socket it replaced is no longer opened with OrderFlow:DepthMode "200"), keeping the total at 4-5.
 ///
 /// Each connection logs in through the URL, subscribes its instrument, and reconnects with backoff.
 /// Dhan pings every 10s and closes a socket that does not answer within 40s - ClientWebSocket answers
@@ -55,7 +56,7 @@ public sealed class DhanTwoHundredDepthClient : BackgroundService
         _options = options.Value;
         _session = session;
         _logger = logger;
-        _maxConnections = Math.Clamp(configuration?.GetValue("OrderFlow:MaxTwoHundredDepth", 2) ?? 2, 0, 3);
+        _maxConnections = Math.Clamp(configuration?.GetValue("OrderFlow:MaxTwoHundredDepth", 3) ?? 3, 0, 3);
     }
 
     public event Action<DepthSidePacket>? DepthUpdated;
