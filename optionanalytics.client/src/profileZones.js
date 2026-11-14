@@ -279,6 +279,18 @@ export function profileSessions({ today = [], past = [], days = 1, of = 'today' 
   return [...(n > 1 ? before.slice(-(n - 1)) : []), ...(today?.length ? [today] : [])]
 }
 
+/**
+ * The sessions OI Replay's DELTA PROFILE cards add up (asked for - "the futures delta profile should also go with the replay,
+ * it should not come all at once"): the day shown UP TO THE CLOCK always - the replay's minutes as they are played, live the
+ * day so far - so the profile moves with the replay; "Previous days" ticked puts the N sessions BEFORE the day under it (they
+ * were all before the clock), unticked the N - 1 before it (profileSessions). Ticked it used to be the sessions before the
+ * day ONLY: whole from the replay's first minute, and nothing of the day replayed ever came into it.
+ */
+export function deltaCardSessions({ today = [], past = [], days = 1, of = 'today' }) {
+  if (of !== 'previous') return profileSessions({ today, past, days, of })
+  return [...profileSessions({ past, days, of }), ...(today?.length ? [today] : [])]
+}
+
 /** How many sessions BEFORE the day a profile of `days` needs. */
 export const pastSessionsNeeded = (days, of) => Math.max(0, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1) - (of === 'previous' ? 0 : 1))
 

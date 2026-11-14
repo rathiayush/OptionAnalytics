@@ -209,3 +209,53 @@ test('a past day is asked once for the tab: kept when it came back with a sessio
   await cachedDay('k3', async () => { holidays++; return { date: 'h', items: [] } })
   assert.equal(holidays, 2)
 })
+
+// Asked for - "the futures delta profile should also go with the replay, it should not come all at once": the cards add the
+// day shown UP TO THE CLOCK always - "Previous days" ticked puts the sessions before it under it - and a replay at its start
+// borrows no other day's candles.
+import { deltaCardSessions } from '../src/profileZones.js'
+import { barsUpTo, cardCandleSource, scaleHolderCandle } from '../src/deltaProfile.js'
+
+test('the delta cards always add the day up to the clock - with "Previous days" ticked the sessions before go under it', () => {
+  const past = [['d1'], ['d2'], ['d3']]
+  const today = ['t1', 't2']
+  assert.deepEqual(deltaCardSessions({ today, past, days: 2, of: 'previous' }), [['d2'], ['d3'], today])
+  assert.deepEqual(deltaCardSessions({ today, past, days: 1, of: 'previous' }), [['d3'], today])
+  // Unticked as before (profileSessions): the day and the N - 1 before it.
+  assert.deepEqual(deltaCardSessions({ today, past, days: 2, of: 'today' }), [['d3'], today])
+  assert.deepEqual(deltaCardSessions({ today, past, days: 1, of: 'today' }), [today])
+  // At the replay's start (nothing of the day yet) ticked = the days before alone; then it grows minute by minute.
+  assert.deepEqual(deltaCardSessions({ today: [], past, days: 2, of: 'previous' }), [['d2'], ['d3']])
+})
+
+test('a ticked futures profile replayed: the day\'s minutes come in with the clock, the days before stay whole', () => {
+  const T = Date.parse('2026-10-26T03:45:00Z') // 09:15 IST
+  const MIN = 60_000
+  const bar = (ms, price, buy, sell) => ({ time: new Date(ms).toISOString(), levels: [{ price, buy, sell }] })
+  const before = [bar(T - 3 * 86_400_000, 100, 10, 2)]
+  const day = Array.from({ length: 30 }, (_, i) => bar(T + i * MIN, 110 + (i % 3), 5, 1))
+  const at = (clock) => futuresDeltaProfileOf(deltaCardSessions({ today: barsUpTo(day, clock), past: [before], days: 1, of: 'previous' }), { rowSize: 1 })
+  const start = at(T - MIN)
+  assert.equal(start.volume, 12, 'before the first minute: the day before only')
+  const volumes = [5, 10, 29].map((i) => at(T + i * MIN).volume)
+  assert.deepEqual(volumes, [12 + 6 * 6, 12 + 6 * 11, 12 + 6 * 30], 'each minute played adds its own bar')
+  // Nothing after the clock: the whole day given, cut at the clock = the minutes up to it.
+  assert.deepEqual(at(T + 10 * MIN), futuresDeltaProfileOf([before, day.slice(0, 11)], { rowSize: 1 }))
+})
+
+test('the candles: the day\'s, live before the open the session before, a replay before its first candle an invisible holder', () => {
+  const past = [{ date: '2026-10-23', candles: [{ time: 1, open: 1, high: 1, low: 1, close: 1 }] }]
+  const dayBars = [{ time: 5, open: 2, high: 2, low: 2, close: 2 }]
+  assert.deepEqual(cardCandleSource({ dayBars, past, isLive: false, date: '2026-10-26', price: 100 }), { bars: dayBars, standIn: null, holder: false })
+  assert.equal(cardCandleSource({ dayBars: [], past, isLive: true, date: '2026-10-26', price: 100 }).standIn, past[0])
+  const replay = cardCandleSource({ dayBars: [], past, isLive: false, date: '2026-10-26', price: 22742.5 })
+  assert.equal(replay.standIn, null, 'a replay never borrows the day before\'s whole candles')
+  assert.equal(replay.holder, true)
+  const h = replay.bars[0]
+  assert.equal(h.time, Date.parse('2026-10-26T03:45:00Z') / 1000 + 19800, 'at the day\'s 09:15 in chart time')
+  assert.deepEqual([h.open, h.high, h.low, h.close], [22742.5, 22742.5, 22742.5, 22742.5])
+  assert.equal(h.color, 'rgba(0, 0, 0, 0)')
+  assert.equal(scaleHolderCandle('2026-10-26', null), null)
+  assert.equal(scaleHolderCandle(null, 1), null)
+  assert.deepEqual(cardCandleSource({ dayBars: [], past: [], isLive: false, date: null, price: null }), { bars: [], standIn: null, holder: false })
+})

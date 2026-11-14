@@ -502,11 +502,16 @@ When adding or changing a strategy:
   them (`SECTION_ADDITIONS`, `withAddedSections`, `SECTIONS_VERSION` 4 - only the cards added since the version a choice was
   saved at, so one hidden since stays hidden; `tests/dashboard-layout.test.mjs`). PREVIOUS DAY / DAYS (asked for - "a
   checkbox to see the previous day's delta, and N days too"): each card's "Previous day" tick and Days (1 - 20, default 1,
-  unticked = as before) - the Profiles page's rule (`profileSessions` / `pastSessionsNeeded`): unticked = the day so far and
-  the N - 1 sessions before it, ticked = the N sessions BEFORE the day, a COMPOSITE added up price by price
+  unticked = as before): unticked = the day so far and the N - 1 sessions before it, ticked = the N sessions BEFORE the
+  day WITH THE DAY UP TO THE CLOCK ON TOP (`deltaCardSessions` in `profileZones.js` - asked for: "the futures delta profile
+  should also go with the replay, it should not come all at once"; ticked it was the sessions before ONLY - whole from the
+  replay's first minute, nothing of the day replayed ever came into it), a COMPOSITE added up price by price
   (`optionDeltaProfileOf` / `futuresDeltaProfileOf` take a list of sessions), drawn over the day's candles with the price
-  scale holding the whole profile (no minute of the day yet - live before the open - the latest session's candles stand
-  in, said on the card). The days before (`deltaProfileDays.js`, `usePastDeltaSessions`): weekdays walked back ONE REQUEST
+  scale holding the whole profile; the sessions line says "the day replayed up to HH:MM". No minute of the day yet: LIVE
+  (before the open) the latest session's candles stand in, said on the card; a REPLAYED day never borrows another day's
+  candles (its whole day at 09:15 read as the replay loaded all at once) - one invisible candle at its 09:15 holds the scale
+  (`cardCandleSource` / `scaleHolderCandle` in `deltaProfile.js`) and the day's candles come in as it plays
+  (`tests/delta-profile.test.mjs`). The days before (`deltaProfileDays.js`, `usePastDeltaSessions`): weekdays walked back ONE REQUEST
   AT A TIME, N + 10 at most - the options' from that day's run (`/api/oi-replay/{u}/run`, the charts' series), kept as its
   minutes (`optionDeltaMinutes`), the futures' from its Order Flow day (`FETCH_ROWS`, regrouped; the footprint IN LOTS of
   its own day's lot size - `footprintBars`); a day with no session (a run without success, a 404 - a holiday) stepped

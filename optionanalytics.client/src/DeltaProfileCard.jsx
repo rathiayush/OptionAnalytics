@@ -8,10 +8,10 @@ import { useChartUserControl } from './oiShared.jsx'
 import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { DeltaProfilePrimitive, PANEL_SHARE } from './deltaProfilePrimitive.js'
-import { OPTION_DELTA_SIDES, barsUpTo, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
+import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { EXTRA_WEEKDAYS, cachedDay, footprintBars, loadFuturesDay, loadOptionDay, optionDayKey, walkPastSessions } from './deltaProfileDays.js'
-import { MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, pastSessionsNeeded, profileSessions } from './profileZones.js'
+import { MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, deltaCardSessions, pastSessionsNeeded } from './profileZones.js'
 import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
 
 // OI Replay's two DELTA PROFILE cards (asked for - "like volume profile and market profile we need to build delta profile:
@@ -237,7 +237,8 @@ function usePastDeltaSessions(kind, underlying, dateKey, count, flag = '') {
 }
 
 // "Previous day" / "Days" of one card (kept per card): unticked = the day so far and the N - 1 sessions before it,
-// ticked = the N sessions before the day (profileSessions - the Profiles page's own rule). 1 day, unticked = the day alone.
+// ticked = the N sessions before the day with the day so far on top (deltaCardSessions - so the profile moves with the
+// replay either way). 1 day, unticked = the day alone.
 const DAY_CHOICES = Array.from({ length: MAX_PROFILE_DAYS }, (_, i) => i + 1)
 function useSessionChoice(id) {
   const [prev, setPrev] = usePersistedState(`optionanalytics.oiReplay.${id}Prev`, false)
@@ -256,7 +257,7 @@ function useSessionChoice(id) {
 
 const dayText = (d) => dayjs(d).format('DD MMM')
 // What the profile is of, the days before still loading, a day that could not be loaded (Retry) - nothing for the day alone.
-function SessionsLine({ choice, past, dates, standIn }) {
+function SessionsLine({ choice, past, dates, standIn, holder = false, upTo = null }) {
   if (choice.of === 'today' && choice.dayCount === 1) return null
   const found = past.sessions.length
   const cover = dates.length ? (dates.length === 1 ? dayjs(dates[0]).format('ddd DD MMM YYYY') : `${dayText(dates[0])} – ${dayjs(dates.at(-1)).format('DD MMM YYYY')} (${dates.length} sessions)`) : null
@@ -266,7 +267,9 @@ function SessionsLine({ choice, past, dates, standIn }) {
         {cover ? <>Profile of {cover}</> : null}
         {past.loading ? `${cover ? ' · ' : ''}loading the days before… ${found} of ${choice.pastCount}` : null}
         {!past.loading && !past.error && found < choice.pastCount ? ` · only ${found} session${found === 1 ? '' : 's'} found in the ${choice.pastCount + EXTRA_WEEKDAYS} weekdays before` : null}
+        {upTo ? ` · the day replayed up to ${upTo}` : null}
         {standIn ? ` · no minute of the day yet - the candles are ${dayjs(standIn.date).format('DD MMM')}'s` : null}
+        {holder ? ' · no candle of the day replayed yet - they come in as it plays' : null}
       </Text>
       {past.error ? (
         <Alert type="warning" showIcon style={{ padding: '4px 8px' }}
@@ -277,23 +280,28 @@ function SessionsLine({ choice, past, dates, standIn }) {
   )
 }
 
-// The day's candles, or - none of the day yet (live before the open) - the latest session before it as a stand-in, so the
-// profile has a price scale to stand on.
-function useCandles(dayBars, past, timeframe) {
-  const standIn = !dayBars?.length && past.sessions.length ? past.sessions.at(-1) : null
+// The day's candles (up to the clock), or - none of the day yet - LIVE before the open the latest session before it as a
+// stand-in, a REPLAYED day one invisible candle at its 09:15 (cardCandleSource): the profile has a price scale to stand on, and
+// a replay never shows another day's whole candles at its start (it read as the day replayed loaded all at once).
+function useCandles(dayBars, past, timeframe, { isLive = false, date = null, price = null } = {}) {
+  const source = useMemo(() => cardCandleSource({ dayBars, past: past.sessions, isLive, date, price }), [dayBars, past.sessions, isLive, date, price])
   const candles = useMemo(() => {
-    const bars = standIn ? standIn.candles.map((b) => ({ time: toChartTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })) : dayBars ?? NONE
+    if (source.holder) return source.bars
+    const bars = source.standIn ? source.standIn.candles.map((b) => ({ time: toChartTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })) : source.bars ?? NONE
     return candlesOf(bars, TIMEFRAMES.includes(timeframe) ? timeframe : 5)
-  }, [dayBars, standIn, timeframe])
-  return { candles, standIn }
+  }, [source, timeframe])
+  return { candles, standIn: source.standIn, holder: source.holder }
 }
+
+// The replay clock as HH:MM for the sessions line (null live - the day so far needs no clock).
+const clockText = (isLive, asOfMs) => (isLive || asOfMs == null ? null : istTimeFormatter(toChartTime(asOfMs)))
 
 /**
  * The OPTIONS' delta profile on the SPOT chart: `cePoints` / `pePoints` (the run's option bars, live ones added),
  * `spotBars` (the page's 1-minute spot bars in chart time, up to the clock), `asOfMs` (the clock), `underlying`, `date`
  * (the day shown, YYYY-MM-DD), `expiryFlag` (the run's series - the days before are of the same), `dayKey`.
  */
-export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, underlying, date, expiryFlag, dayKey }) {
+export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, underlying, date, expiryFlag, dayKey, isLive = false }) {
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.oiReplay.optionDeltaTf', 5)
   const [side, setSide] = usePersistedState('optionanalytics.oiReplay.optionDeltaSide', 'net')
   const shownSide = OPTION_DELTA_SIDES.some((s) => s.value === side) ? side : 'net'
@@ -304,13 +312,14 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const [hover, setHover] = useState(null)
   const lotSize = PAPER_TRADE_LOT_SIZE[underlying] ?? 1
   const spotMs = useMemo(() => (spotBars ?? []).map((b) => ({ time: fromChartTime(b.time) * 1000, open: b.open, high: b.high, low: b.low, close: b.close })), [spotBars])
-  const todayMinutes = useMemo(() => (choice.of === 'previous' ? NONE : optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs })), [cePoints, pePoints, spotMs, asOfMs, choice.of])
-  const sessions = useMemo(() => profileSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayMinutes, past.sessions, choice.dayCount, choice.of])
+  // The day up to the clock always - with "Previous days" ticked too - so the profile moves with the replay (deltaCardSessions).
+  const todayMinutes = useMemo(() => optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
+  const sessions = useMemo(() => deltaCardSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayMinutes, past.sessions, choice.dayCount, choice.of])
   const profile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide }), [sessions, rowSize, shownSide])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
-  const dates = [...past.sessions.map((d) => d.date), ...(choice.of === 'today' && todayMinutes.length ? [date] : [])]
-  const { candles, standIn } = useCandles(spotBars, past, timeframe)
+  const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length ? [date] : [])]
+  const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
   const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
   const soFar = choice.of === 'today' && choice.dayCount === 1
   return (
@@ -322,7 +331,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         {choice.control}
         {levelsTick}
       </Space>
-      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} />
+      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
         <>
           <Text style={{ fontSize: 12 }}>
@@ -335,7 +344,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
-        : <Alert type="info" showIcon message={choice.of === 'previous' ? 'No option bars with volume in the sessions before this day.' : 'No option bars with volume up to this minute yet.'} />}
+        : <Alert type="info" showIcon message={choice.of === 'previous' ? 'No option bars with volume in the sessions before this day or up to this minute.' : 'No option bars with volume up to this minute yet.'} />}
       <FoldText id="oiReplay.optionDeltaProfile" label="how to read this" className="oa-note">
         <Text type="secondary" style={{ fontSize: 12 }}>
           The spot candles with, at the right, the OPTIONS&apos; flow laid on the spot price rows they traded at: VOLUME = the
@@ -347,8 +356,9 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           buying (+) and selling (−). The amber row is the POC - where the most option volume traded - and its band across the
           candles; the value area&apos;s bars are brighter. Only the minutes up to the replay clock count; live, as they trade.
           DAYS: the day so far with the sessions before it added up (a composite - where the option flow sat over several
-          days); &quot;Previous day&quot; ticked = the sessions BEFORE the day only (each its own expiry&apos;s options, as
-          its replay shows them), drawn over the day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price.
+          days); &quot;Previous day&quot; ticked = the N sessions BEFORE the day (each its own expiry&apos;s options, as its
+          replay shows them) under the day up to the replay clock - so it still moves with the replay, the days before whole
+          from its start (they were all before it). A replay shows only its own day&apos;s candles, minute by minute.
           A day not loaded before comes from the server&apos;s disk, or Dhan once. LEVELS: the volume profile&apos;s POC
           (solid), VAH / VAL (dashed - the value area, 70% of the volume) and ONE HVN / LVN (dotted - the busiest row of
           the busy areas beside the POC, the thinnest of the thin areas inside the range), as the Profiles page draws them;
@@ -390,14 +400,15 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
   const choice = useSessionChoice('futuresDelta')
   const past = usePastDeltaSessions('futures', underlying, date, choice.pastCount)
   const [hover, setHover] = useState(null)
-  const day = useFuturesFootprintDay(underlying, choice.of === 'previous' ? null : date, isLive, rowSize)
-  const todayBars = useMemo(() => (choice.of === 'previous' ? NONE : barsUpTo(day.bars, asOfMs)), [day.bars, asOfMs, choice.of])
-  const sessions = useMemo(() => profileSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayBars, past.sessions, choice.dayCount, choice.of])
+  // The day up to the clock always - with "Previous days" ticked too - so the profile moves with the replay (deltaCardSessions).
+  const day = useFuturesFootprintDay(underlying, date, isLive, rowSize)
+  const todayBars = useMemo(() => barsUpTo(day.bars, asOfMs), [day.bars, asOfMs])
+  const sessions = useMemo(() => deltaCardSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayBars, past.sessions, choice.dayCount, choice.of])
   const profile = useMemo(() => futuresDeltaProfileOf(sessions, { rowSize }), [sessions, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
-  const dates = [...past.sessions.map((d) => d.date), ...(choice.of === 'today' && todayBars.length ? [date] : [])]
-  const { candles, standIn } = useCandles(futuresBars, past, timeframe)
+  const dates = [...past.sessions.map((d) => d.date), ...(todayBars.length ? [date] : [])]
+  const { candles, standIn, holder } = useCandles(futuresBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
   const soFar = choice.of === 'today' && choice.dayCount === 1
   return (
     <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -412,8 +423,12 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           </Tooltip>
         )}
       </Space>
-      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} />
-      {day.error && !day.bars.length ? <Alert type="warning" showIcon message="The futures footprint is not available" description={day.error} /> : null}
+      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayBars.length ? clockText(isLive, asOfMs) : null} />
+      {day.error && !day.bars.length
+        ? (profile.rows.length
+          ? <Text type="warning" style={{ fontSize: 12 }}>The day&apos;s own futures footprint is not available ({day.error}) - the sessions before it only.</Text>
+          : <Alert type="warning" showIcon message="The futures footprint is not available" description={day.error} />)
+        : null}
       {profile.rows.length && candles.length ? (
         <>
           <Text style={{ fontSize: 12 }}>
@@ -424,7 +439,7 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={1} deltaWord="Δ" />
         </>
       ) : day.loading || past.loading ? <Text type="secondary">{past.loading && !day.loading ? 'Loading the days before…' : 'Loading the futures footprint…'}</Text>
-        : !day.error ? <Text type="secondary">{choice.of === 'previous' ? 'No futures footprint in the sessions before this day.' : 'No futures footprint up to this minute yet.'}</Text> : null}
+        : !day.error ? <Text type="secondary">{choice.of === 'previous' ? 'No futures footprint in the sessions before this day or up to this minute.' : 'No futures footprint up to this minute yet.'}</Text> : null}
       <FoldText id="oiReplay.futuresDeltaProfile" label="how to read this" className="oa-note">
         <Text type="secondary" style={{ fontSize: 12 }}>
           The near futures&apos; candles with, at the right, the day&apos;s footprint added up by price row: VOLUME = the lots
@@ -434,8 +449,9 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           band across the candles; the value area&apos;s bars are brighter. Only the minutes up to the replay clock count;
           live, read again each minute. Minutes the server did not record live are estimated from 1-minute candles (tagged).
           DAYS: the day so far with the sessions before it added up (a composite - the levels several days defended);
-          &quot;Previous day&quot; ticked = the sessions BEFORE the day only (each day&apos;s own near futures), drawn over the
-          day&apos;s candles - yesterday&apos;s delta levels against today&apos;s price. The server keeps about a year (252 trading days) of
+          &quot;Previous day&quot; ticked = the N sessions BEFORE the day (each day&apos;s own near futures) under the day up to
+          the replay clock - so it still moves with the replay, the days before whole from its start (they were all before
+          it). A replay shows only its own day&apos;s candles, minute by minute. The server keeps about a year (252 trading days) of
           what it recorded; an older day is its estimate from 1-minute candles. LEVELS: the volume profile&apos;s POC (solid), VAH /
           VAL (dashed) and ONE HVN / LVN (dotted), as the Profiles page draws them; &quot;most bought / sold&quot; = the rows
           with the largest buying / selling.
