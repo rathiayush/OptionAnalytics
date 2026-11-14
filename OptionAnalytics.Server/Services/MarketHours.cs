@@ -119,6 +119,36 @@ public static class MarketHours
         else await next();
     });
 
+    // ---- Dhan's intraday candles: none at night (Dhan:IntradayQuietHours) ----------------------------------------------------
+
+    public const string IntradayChartsPath = "/charts/intraday";
+    public const string IntradayQuietPrefix = "Not sent: Dhan's intraday candles are not asked between ";
+
+    /// <summary>Why a call to `path` must not be sent at `now` under Dhan:IntradayQuietHours (e.g. "20:00-08:00"), else null:
+    /// a /charts/intraday call inside those IST hours, from anyone, for any day. Nothing else is held by it.</summary>
+    public static string? IntradayQuietReason(DateTimeOffset now, string path, string? quietHours)
+    {
+        if (!path.StartsWith(IntradayChartsPath, StringComparison.OrdinalIgnoreCase) || !TryQuietHours(quietHours, out var from, out var until)) return null;
+        var time = now.ToOffset(IstClock.Offset).TimeOfDay;
+        var quiet = from < until ? time >= from && time < until : time >= from || time < until;
+        return quiet ? $"{IntradayQuietPrefix}{from:hh\\:mm} and {until:hh\\:mm} IST (Dhan:IntradayQuietHours - the market is closed)." : null;
+    }
+
+    /// <summary>"HH:mm-HH:mm" -> the hours it names; false for an empty, malformed or zero-length setting (nothing held).</summary>
+    public static bool TryQuietHours(string? text, out TimeSpan from, out TimeSpan until)
+    {
+        from = until = default;
+        var parts = text?.Split('-', 2, StringSplitOptions.TrimEntries);
+        string[] formats = { @"h\:mm", @"hh\:mm" };
+        return parts is { Length: 2 }
+            && TimeSpan.TryParseExact(parts[0], formats, System.Globalization.CultureInfo.InvariantCulture, out from)
+            && TimeSpan.TryParseExact(parts[1], formats, System.Globalization.CultureInfo.InvariantCulture, out until)
+            && from != until && from < TimeSpan.FromDays(1) && until < TimeSpan.FromDays(1);
+    }
+
+    /// <summary>Whether a failure is IntradayQuietReason's refusal (no call made) - its callers log it quietly.</summary>
+    public static bool IsIntradayQuiet(string? error) => error?.StartsWith(IntradayQuietPrefix, StringComparison.Ordinal) == true;
+
     private sealed class Restore(bool before) : IDisposable
     {
         public void Dispose() => Background.Value = before;

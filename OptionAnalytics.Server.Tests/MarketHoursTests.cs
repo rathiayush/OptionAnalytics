@@ -143,13 +143,108 @@ public sealed class MarketHoursTests
         Assert.Equal(background ? "background" : "page", answer);
     }
 
-    private static DhanApiClient Client(CountingDhan dhan, DateTimeOffset now)
+    // ---- Dhan:IntradayQuietHours (asked for - "charts intraday call should not go after 8 pm and should start at 8 am") ----
+
+    [Theory]
+    [InlineData(23, 19, 59, true)]   // Friday evening: still goes
+    [InlineData(23, 20, 0, false)]   // 8 PM: stopped
+    [InlineData(23, 23, 30, false)]
+    [InlineData(24, 0, 0, false)]    // midnight
+    [InlineData(24, 7, 59, false)]
+    [InlineData(24, 8, 0, true)]     // 8 AM: goes again (a Saturday too - only the hours are held)
+    [InlineData(26, 12, 0, true)]    // Monday noon
+    public async Task Intraday_candles_are_not_asked_between_8_PM_and_8_AM_IST(int day, int hour, int minute, bool sent)
     {
-        var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c" });
+        foreach (var background in new[] { false, true })
+        {
+            var dhan = new CountingDhan();
+            var api = Client(dhan, Ist(day, hour, minute), "20:00-08:00");
+
+            DhanApiResponse response;
+            using (background ? MarketHours.BackgroundScope() : null)
+                response = await api.SendAsync(HttpMethod.Post, "/charts/intraday", new { }, "test", CancellationToken.None);
+
+            Assert.Equal(sent, response.Success);
+            Assert.Equal(sent ? 1 : 0, dhan.Sent);
+            if (!sent)
+            {
+                Assert.True(MarketHours.IsIntradayQuiet(response.ErrorMessage), response.ErrorMessage);
+                Assert.Contains("20:00 and 08:00 IST", response.ErrorMessage);
+                Assert.DoesNotContain(api.RateLimiter.RecentCalls(), c => c.Path == "/charts/intraday");
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData("/charts/rollingoption")]
+    [InlineData("/charts/historical")]
+    [InlineData("/positions")]
+    public async Task Only_the_intraday_candles_are_held_at_night(string path)
+    {
+        var dhan = new CountingDhan();
+        Assert.True((await Client(dhan, Ist(23, 21, 0), "20:00-08:00").SendAsync(HttpMethod.Post, path, new { }, "test", CancellationToken.None)).Success);
+        Assert.Equal(1, dhan.Sent);
+    }
+
+    [Fact]
+    public async Task A_past_day_asked_at_night_is_not_kept_and_is_asked_of_Dhan_from_8_AM()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), $"oa-quiet-{Guid.NewGuid():N}");
+        try
+        {
+            var cache = new DhanDataCache(dir, NullLogger<DhanDataCache>.Instance, () => new DateOnly(2026, 10, 24));
+            var night = new DhanHistoricalDataService(Client(new CountingDhan(), Ist(23, 21, 0), "20:00-08:00"), NullLogger<DhanHistoricalDataService>.Instance, cache);
+            var (none, error) = await night.GetIntradayCandlesAsync(13, "IDX_I", new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 22), 1, CancellationToken.None);
+            Assert.Empty(none);
+            Assert.True(MarketHours.IsIntradayQuiet(error), error);
+            Assert.Equal(0, cache.CountKept().Files);
+
+            var dhan = new CountingDhan(DayOfCandles(new DateOnly(2026, 10, 22)));
+            var morning = new DhanHistoricalDataService(Client(dhan, Ist(24, 8, 0), "20:00-08:00"), NullLogger<DhanHistoricalDataService>.Instance, cache);
+            var (candles, ok) = await morning.GetIntradayCandlesAsync(13, "IDX_I", new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 22), 1, CancellationToken.None);
+            Assert.Null(ok);
+            Assert.Equal(375, candles.Count);
+            Assert.Equal(1, dhan.Sent);
+            Assert.True(cache.CountKept().Files > 0, "the day Dhan sent is kept");
+        }
+        finally
+        {
+            if (Directory.Exists(dir)) Directory.Delete(dir, true);
+        }
+    }
+
+    [Theory]
+    [InlineData("20:00-08:00", true, 20, 8)]
+    [InlineData(" 8:00 - 20:00 ", true, 8, 20)]
+    [InlineData("", false, 0, 0)]
+    [InlineData(null, false, 0, 0)]
+    [InlineData("20:00", false, 0, 0)]
+    [InlineData("08:00-08:00", false, 0, 0)]
+    [InlineData("25:00-08:00", false, 0, 0)]
+    public void The_quiet_hours_setting_is_read_as_from_and_until(string? text, bool ok, int from, int until)
+    {
+        Assert.Equal(ok, MarketHours.TryQuietHours(text, out var f, out var u));
+        if (ok) Assert.Equal((TimeSpan.FromHours(from), TimeSpan.FromHours(until)), (f, u));
+        // No setting holds nothing.
+        Assert.Null(MarketHours.IntradayQuietReason(Ist(23, 23, 0), "/charts/intraday", ok ? null : text));
+    }
+
+    // A whole session of 1-minute index candles for `day` (09:15 - 15:29 IST), as Dhan's /charts/intraday answers.
+    private static string DayOfCandles(DateOnly day)
+    {
+        var open = new DateTimeOffset(day.Year, day.Month, day.Day, 9, 15, 0, IstClock.Offset).ToUnixTimeSeconds();
+        var times = Enumerable.Range(0, 375).Select(i => open + i * 60).ToList();
+        string Arr(Func<int, string> v) => "[" + string.Join(",", times.Select((_, i) => v(i))) + "]";
+        return $"{{\"open\":{Arr(_ => "100")},\"high\":{Arr(_ => "101")},\"low\":{Arr(_ => "99")},\"close\":{Arr(_ => "100.5")},\"volume\":{Arr(_ => "10")},\"timestamp\":{Arr(i => times[i].ToString())}}}";
+    }
+
+    private static DhanApiClient Client(CountingDhan dhan, DateTimeOffset now, string? intradayQuietHours = null)
+    {
+        var options = Options.Create(new DhanOptions { RestBaseUrl = "https://dhan.test", AccessToken = "t", ClientId = "c", IntradayQuietHours = intradayQuietHours });
         return new DhanApiClient(new HttpClient(dhan), options, new DhanSession(options), NullLogger<DhanApiClient>.Instance) { Clock = () => now };
     }
 
-    private sealed class CountingDhan : HttpMessageHandler
+    private sealed class CountingDhan(string answer = "[]") : HttpMessageHandler
     {
         private int _sent;
         public int Sent => _sent;
@@ -157,7 +252,7 @@ public sealed class MarketHoursTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref _sent);
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]", Encoding.UTF8, "application/json") });
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(answer, Encoding.UTF8, "application/json") });
         }
     }
 }

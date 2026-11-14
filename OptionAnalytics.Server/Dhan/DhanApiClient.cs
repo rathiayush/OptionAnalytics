@@ -249,6 +249,9 @@ public sealed class DhanApiClient
         // (/charts/...) and a page's own request still go.
         if (Services.MarketHours.BlockReason(Clock(), path) is { } closed)
             return new DhanApiResponse(false, HttpStatusCode.ServiceUnavailable, null, closed);
+        // Dhan's intraday candles at night (Dhan:IntradayQuietHours, 20:00 - 08:00 IST): not sent at all, whoever asks.
+        if (Services.MarketHours.IntradayQuietReason(Clock(), path, _options.IntradayQuietHours) is { } quiet)
+            return new DhanApiResponse(false, HttpStatusCode.ServiceUnavailable, null, quiet);
         var category = DhanRestRateLimiter.CategoryOf(method, path);
         var resilience = ResilienceContextPool.Shared.Get(cancellationToken);
         try

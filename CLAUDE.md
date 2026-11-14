@@ -106,7 +106,12 @@ When adding or changing a strategy:
   refreshes (the `X-Poll` header - `POLL_HEADERS` in `shared.jsx`), and `DhanApiClient` does not send a background polling
   call (positions, orders, the option chain / OI, quotes - everything but `/charts/...`) outside the window; the positions /
   orders refresh and the kill switch check also skip their rounds (`MarketHours.IsOpen`). Candle backfills (`/charts/...`)
-  are not polling and go at any hour, as do a page's first load or a click; token renewal has its own HttpClient. A new hosted service or page timer must do the same (`MarketHoursTests.cs`). What reached Dhan in the last 15 min: `GET /api/system/dhan-calls` (admin). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
+  are not polling and go at any hour, as do a page's first load or a click - EXCEPT `/charts/intraday` from 20:00 to 08:00 IST
+  (asked for - "charts intraday call should not go after 8 pm and should start at 8 am"; `Dhan:IntradayQuietHours`
+  "20:00-08:00" in appsettings.json, `MarketHours.IntradayQuietReason` in `DhanApiClient`): not sent at all, whoever asks
+  (a page, a hosted service, the server scanner) and for any day - it comes back "Not sent" (logged at Debug), is never
+  kept on disk (a failure), so a past day not on disk loads from 08:00; the other candle downloads still go; no setting =
+  none held (the tests' `DhanOptions`); token renewal has its own HttpClient. A new hosted service or page timer must do the same (`MarketHoursTests.cs`). What reached Dhan in the last 15 min: `GET /api/system/dhan-calls` (admin). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
   the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
   What NSE answers for a PAST day (the contract list - `NseFuturesContractArchive` - and an expired contract's 1-minute bars - `NseChartHistory`) is kept on
   disk too (`NseDayStore`, `{DhanCachePath}/nse`), and after NSE does not answer it is not asked again for 10 minutes (`NseBackoff`) - callers fall back at once
