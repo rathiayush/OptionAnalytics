@@ -14,8 +14,7 @@ namespace OptionAnalytics.Server.Dhan;
 /// Callers Subscribe what they need; the client connects once there is something to stream, logs in
 /// through the URL (token, clientId, authType=2), (re)subscribes everything on every connect, and
 /// reconnects with backoff. DepthUpdated runs on this socket's receive loop - handlers must be quick.
-/// OrderFlow:Depth20Enabled = false turns it off. With OrderFlow:DepthMode "200" (the default) order flow
-/// subscribes nothing here - it is on the 200-level feed only - so this socket is never opened; "20" uses it.
+/// OrderFlow:Depth20Enabled = false turns it off.
 /// </summary>
 public sealed class DhanDepthFeedClient : BackgroundService
 {
