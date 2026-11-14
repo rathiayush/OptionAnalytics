@@ -1,6 +1,7 @@
 import { Component, StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { ConfigProvider, theme } from 'antd'
+import { ConfigProvider } from 'antd'
+import { APP_THEME } from './appTheme.js'
 import { BrowserRouter } from 'react-router-dom'
 import './index.css'
 import App from './App.jsx'
@@ -82,7 +83,7 @@ class AppErrorBoundary extends Component {
 createRoot(document.getElementById('root')).render(
   <StrictMode>
     <AppErrorBoundary>
-      <ConfigProvider theme={{ algorithm: theme.darkAlgorithm, token: { colorBgContainer: '#15161c', colorBgLayout: '#0d0e12' } }}>
+      <ConfigProvider theme={APP_THEME}>
         <BrowserRouter>
           <App />
         </BrowserRouter>

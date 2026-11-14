@@ -430,6 +430,13 @@ When adding or changing a strategy:
   with their "Float" panel, are unchanged; not while that panel floats, never live. It starts right of the quick button
   while that sits in its row (`fabInBarRow`), at most 980 px wide, centred; the page keeps 72 px of room at its bottom
   for both. The "Replay bar" tick beside "Quick button" turns it off (`optionanalytics.oiReplay.replayBarOn`).
+- WHATEVER IS SELECTED IS BLUE (asked for - "whatever is selected show them blue, it looks confusing on the UI; check all
+  pages"): the app's ONE antd theme is `APP_THEME` in `appTheme.js` (main.jsx's ConfigProvider; a page's nested one - OI
+  Replay's `COMPACT_TEXT_THEME` - merges into it): every Segmented picker's selected item (index, Paper / Live, Buy / Sell,
+  CE / PE, ITM / ATM / OTM, timeframes...) is the dark primary `#1668dc` with white text - antd's dark theme marked it with a
+  grey a shade lighter than the rest - and so are the sidebar menu's page (Menu) and a dropdown's picked option (Select,
+  `#1554ad`, a deeper blue so a coloured CE / PE label still reads). Checkboxes, switches and primary-button toggles were
+  already that blue. A new picker needs nothing; never style a selection grey (`tests/app-theme.test.mjs`).
 - The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals, the scanner's,
   price / profile alerts, order errors) are set up ONCE in `main.jsx` (`notificationStack.jsx`, rules in
   `notificationStackRules.js`): STACKED - past `notificationStackThreshold` (1 on a phone, 3 wider) they fold into one pile,
