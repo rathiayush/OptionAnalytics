@@ -82,6 +82,13 @@ public sealed class DhanOptions
     /// setting at all.</summary>
     public int DataApiRequestsPerSecond { get; set; } = 5;
 
+    /// <summary>The hours, IST, in which NO /charts/intraday call is sent to Dhan: "HH:mm-HH:mm", across midnight when the
+    /// first is later ("20:00-08:00" in appsettings.json - asked for: "charts intraday call should not go after 8 pm and
+    /// should start at 8 am"); empty = none. Whoever asks - a page, a hosted service, the server scanner - and whatever day:
+    /// the call comes back "Not sent" (DhanApiClient, MarketHours.IntradayQuietReason) and, a failure, is never kept on disk,
+    /// so it is asked again from 08:00. The other candle downloads (/charts/rollingoption, /charts/historical) are not held.</summary>
+    public string? IntradayQuietHours { get; set; }
+
     public bool HasSession => !string.IsNullOrWhiteSpace(ClientId) && !string.IsNullOrWhiteSpace(AccessToken);
 
     /// <summary>True when everything TOTP auto-login needs is configured. Checked before

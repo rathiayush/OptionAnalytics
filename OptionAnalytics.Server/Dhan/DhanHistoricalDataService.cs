@@ -319,7 +319,7 @@ public sealed class DhanHistoricalDataService
         if (!response.Success)
         {
             LoadProgress.Error($"✗ Dhan: {what} - {response.ErrorMessage ?? $"HTTP {(int)response.StatusCode}"}");
-            _logger.Log(failureLevel, "Request for {What} ({From}..{To}) failed - {Error}", what, span.From, span.To, response.ErrorMessage);
+            _logger.Log(Services.MarketHours.IsIntradayQuiet(response.ErrorMessage) ? LogLevel.Debug : failureLevel, "Request for {What} ({From}..{To}) failed - {Error}", what, span.From, span.To, response.ErrorMessage);
             var error = string.IsNullOrWhiteSpace(response.ErrorMessage) ? $"HTTP {(int)response.StatusCode}" : response.ErrorMessage;
             response.Dispose();
             return (parts, error);
