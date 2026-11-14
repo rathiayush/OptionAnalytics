@@ -1296,7 +1296,12 @@ When adding or changing a strategy:
   "tick-by-tick event based") - the Full packet carries LTP, LTQ (the LAST trade's quantity only), LTT (whole seconds), ATP
   (float32 - too coarse to recover a second's average price), the day's volume, the book's total buy / sell QUANTITY (resting
   orders, never trades - not read as delta), OI and 5 levels; the 20 / 200-level depth feeds (NSE only; 200 = one instrument a
-  socket) carry the book alone, no trades. So one packet's volume is often many trades, at several prices, both ways, and
+  socket) carry the book alone, no trades. THE BOOK IS THE 200-LEVEL ONE (asked for - "wherever we are using 20 level depth use
+  200 depth"; `OrderFlowService.SubscribeDepthAsync`): with `OrderFlow:DepthMode` "200", the default, every NSE futures contract
+  order flow tracks - the nearest and one the page picks - is on the 200-level feed and NEVER the 20-level one (the 90 s
+  "no 200-level book yet" fallback is gone - it also fired before the open and at night, when no book comes, and kept the
+  20-level socket all day); no 200-level connection free = the Full packet's 5 levels. `OrderFlow:MaxTwoHundredDepth` 3 by
+  default (was 2 - the freed 20-level socket), "20" / "5" still choose those feeds (`OrderFlowDepthFeedTests.cs`). So one packet's volume is often many trades, at several prices, both ways, and
   the rule in use gives ALL of it its last trade's side and price. The comparison rule "LTQ + book" (`RuleLtqBook`,
   `LtqBookDelta` / `BookTaken`, the card's own column; a day saved before it keeps the other three and shows "—"; a minute
   restored from such a checkpoint and traded on shows none) gives only the last trade (the LTQ, held to the packet's volume)
