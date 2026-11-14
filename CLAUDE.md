@@ -374,6 +374,27 @@ When adding or changing a strategy:
   "Liquidity map" card - the per-strike imbalance / zone / bias table - was removed on request, code and all; a saved
   layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which strategies read, is a
   different thing and stays.)
+- OI Replay's SCREENS (asked for - "if there are multiple tabs open on OI Replay all tabs will be synced when the checkbox is
+  ticked ... so many components, I need to see them on different screens"): the existing SYNC switch (`replaySync.jsx`,
+  `optionanalytics.replaySync.enabled` - one switch for every page, off by default; BroadcastChannel, nothing through the
+  server) now also keeps OI REPLAY TABS together, not only OI Replay with the Order Flow page: the day, Go Live and play /
+  pause / seek / speed as before, and between OI Replay tabs only a "view" message (`announceView` - delivered to the same
+  page's tabs, the Order Flow page never sees it) for what is replayed: the INDEX (a replayed day: that index's day at the
+  same minute, as the page's own picker - `pickUnderlying`), WEEKLY / MONTHLY (`pickExpiryFlag`), the LIVE EXPIRY
+  (`pickLiveExpiryFlag`) and Σ 3 EXPIRIES (`pickSumExpiries` / `applySumExpiries`) - sent only by the user's own pick, so a
+  follower never echoes. An OI Replay tab's day / state messages carry its expiry choices too: a joining or following tab
+  takes them first and applies the message again once they have landed (`flagFirst`, the pending re-apply also on
+  `expiryFlag` / `liveExpiryFlag`), so the day loads with the same expiry; a replayed day of another expiry is another day
+  to load (`otherExpiry`, `followDay`'s key with the expiry). A LIVE tab has no clock to reply with, so a joining tab of the
+  same page that replays nothing yet is told its index / expiry / Σ (`view` on `useReplaySync`). Each tab has a SCREEN -
+  `?screen=N` in the address, 2 - `MAX_SCREENS` 9, none = the main screen (`screenFromSearch`) - and keeps its OWN cards:
+  "Sections shown", the grid layout, the sized cards and Free placement under `screenKey` (the main screen's keys
+  unchanged, another's `.screenN` - account preferences like every other, `migrateSavedDashboard(screen)` on its own
+  keys). "＋ Screen" beside Sync opens the next free screen in a new window (`nextScreen`) and turns Sync on; a "Screen N"
+  tag names a screen other than the main one, and the Sync tag lists every peer by page and screen (`peerName` - "⇄ OI
+  Replay Screen 2 2026-10-05"). The chart timeframe and everything else on a card stay each screen's own.
+  `tests/dashboard-layout.test.mjs` (the screen helpers); checked with two real tabs (the day, the clock, Σ, Monthly, the
+  index, live and joining).
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   a SINGLE KEY (no Ctrl / Alt / Shift - the user's ask; Alt was tried first): Z Day OI since the open, X the OI totals
   charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart, N the OI change heatmap and totals, M the option

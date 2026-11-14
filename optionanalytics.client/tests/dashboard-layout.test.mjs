@@ -298,3 +298,19 @@ test('cards added since a "Sections shown" was saved come in ONCE - by the versi
   assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'optionDeltaProfile'])
   assert.equal(withAddedSections(null, '3'), null)
 })
+
+test('OI Replay screens: ?screen=N keeps a window\'s own cards under its own keys; the main screen\'s keys are unchanged', async () => {
+  const { MAX_SCREENS, nextScreen, screenFromSearch, screenKey, STORED_SECTIONS, STORED_LAYOUT } = await import('../src/dashboardLayout.js')
+  assert.equal(screenFromSearch(''), 1)
+  assert.equal(screenFromSearch('?screen=2'), 2)
+  assert.equal(screenFromSearch('?foo=1&screen=9'), 9)
+  for (const bad of ['?screen=1', '?screen=0', '?screen=-3', `?screen=${MAX_SCREENS + 1}`, '?screen=2.5', '?screen=abc', null, undefined]) assert.equal(screenFromSearch(bad), 1, String(bad))
+  // The main screen reads and writes exactly what it always did; another screen its own.
+  assert.equal(screenKey(STORED_SECTIONS, 1), STORED_SECTIONS)
+  assert.equal(screenKey(STORED_LAYOUT, 3), `${STORED_LAYOUT}.screen3`)
+  assert.ok(screenKey(STORED_SECTIONS, 2).startsWith('optionanalytics.'), 'kept for the account like every other preference')
+  // The next free screen.
+  assert.equal(nextScreen([1]), 2)
+  assert.equal(nextScreen([1, 2, 4]), 3)
+  assert.equal(nextScreen(Array.from({ length: MAX_SCREENS }, (_, i) => i + 1)), null)
+})

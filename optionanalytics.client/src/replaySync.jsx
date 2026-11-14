@@ -18,6 +18,13 @@ import { LAST_CLOCK_KEY, lastClockRecord, readLastClock } from './replayClockSto
 // is live too; one that is not replaying anything follows the other onto its day as soon as they
 // connect.
 //
+// Several OI REPLAY tabs (asked for - "if there are multiple tabs open on OI Replay all tabs will be synced when the
+// checkbox is ticked ... I need to see the components on different screens") sync the same way, with the same switch: the
+// day, Live, play / pause / seek / speed as above, and - between OI Replay tabs only - a "view" message for the choices
+// that pick WHAT is replayed: the index, Weekly / Monthly, the live expiry and Σ 3 expiries (sent when the user changes one;
+// the joining reply carries them too). Each tab says which SCREEN it is (`label` - OI Replay's ?screen=N), shown in the
+// others' "synced with" tag.
+//
 // Both pages speak in the same terms:
 //   ms      - the replay clock (epoch ms): everything that had happened by then is shown; a minute
 //             bar counts once it has COMPLETED (its start + 60s <= ms).
@@ -59,10 +66,16 @@ const tabId = Math.random().toString(36).slice(2)
 // Returns { userAction, announceDay, peers, leading }: call userAction() in every handler where the
 // USER moved the replay (play, seek, speed - the new state is sent once it has rendered), and
 // announceDay({ underlying, date, live }) where the user picked a day or went live.
-export function useReplaySync({ enabled, active, kind, state, onRemote }) {
+// label: this tab's name for the others' tag ("Screen 2"); sent with every message.
+// announceView(view): an OI Replay tab's own pick of index / expiry / Σ - delivered to the other OI Replay tabs only.
+// view: what this page replays (OI Replay's index / expiry / Σ) - told to a joining tab of the same page that is replaying
+// nothing yet while this one is live (a live tab has no clock to reply with).
+export function useReplaySync({ enabled, active, kind, state, onRemote, label = null, view = null }) {
   const channelRef = useRef(null)
   const stateRef = useRef(state)
   stateRef.current = state
+  const viewRef = useRef(view)
+  viewRef.current = view
   const activeRef = useRef(active)
   activeRef.current = active
   const onRemoteRef = useRef(onRemote)
@@ -76,7 +89,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
   const post = (reason) => {
     const current = stateRef.current
     if (!channelRef.current || !activeRef.current || !current?.date) return
-    channelRef.current.postMessage({ type: 'state', reason, from: tabId, kind, ...current })
+    channelRef.current.postMessage({ type: 'state', reason, from: tabId, kind, label, ...current })
   }
 
   useEffect(() => {
@@ -90,12 +103,21 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
         setPeers((prev) => Object.fromEntries(Object.entries(prev).filter(([from]) => from !== data.from)))
         return
       }
-      setPeers((prev) => ({ ...prev, [data.from]: { kind: data.kind, date: data.date, underlying: data.underlying, live: !!data.live, seen: Date.now() } }))
+      setPeers((prev) => ({ ...prev, [data.from]: { kind: data.kind, label: data.label ?? null, date: data.date, underlying: data.underlying, live: !!data.live, seen: Date.now() } }))
+      // Another tab of the SAME page changed what it replays (index / expiry / Σ): only that page understands it.
+      if (data.type === 'view') {
+        if (data.kind === kind) onRemoteRef.current?.(data)
+        return
+      }
       // A page joining asks where everyone is. A page with no replay of its own (e.g. a page on Live)
       // asks the joiner instead - so whichever side is replaying leads the other onto its day.
       if (data.type === 'hello') {
         if (activeRef.current && stateRef.current?.date) post('reply')
-        else channel.postMessage({ type: 'need', from: tabId, kind })
+        else {
+          channel.postMessage({ type: 'need', from: tabId, kind })
+          // A new screen of this page (replaying nothing yet) joining a live one: what is shown here - index, expiry, Σ.
+          if (data.kind === kind && !data.date && stateRef.current?.live && viewRef.current) channel.postMessage({ type: 'view', from: tabId, kind, label, ...viewRef.current })
+        }
         return
       }
       if (data.type === 'need') { post('reply'); return }
@@ -110,7 +132,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
       if (data.reason === 'user') { leadingRef.current = false; setLeading(false) }
       onRemoteRef.current?.(data)
     }
-    channel.postMessage({ type: 'hello', from: tabId, kind, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live })
+    channel.postMessage({ type: 'hello', from: tabId, kind, label, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live })
     const heartbeat = setInterval(() => {
       if (leadingRef.current && stateRef.current?.playing) post('tick')
       setPeers((prev) => {
@@ -120,7 +142,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
       })
     }, HEARTBEAT_MS)
     // Peers keep each other listed even while paused.
-    const presence = setInterval(() => channel.postMessage({ type: 'presence', from: tabId, kind, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live }), PEER_TIMEOUT_MS / 2)
+    const presence = setInterval(() => channel.postMessage({ type: 'presence', from: tabId, kind, label, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live }), PEER_TIMEOUT_MS / 2)
     const bye = () => channel.postMessage({ type: 'bye', from: tabId, kind })
     window.addEventListener('pagehide', bye)
     return () => {
@@ -139,7 +161,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
 
   // The other page's "synced with" tag follows a change of day here at once, not at the next presence.
   useEffect(() => {
-    channelRef.current?.postMessage({ type: 'presence', from: tabId, kind, date: state?.date, underlying: state?.underlying, live: !!state?.live })
+    channelRef.current?.postMessage({ type: 'presence', from: tabId, kind, label, date: state?.date, underlying: state?.underlying, live: !!state?.live })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [on, state?.date, state?.underlying, state?.live])
 
@@ -162,10 +184,16 @@ export function useReplaySync({ enabled, active, kind, state, onRemote }) {
     if (!on || !channelRef.current || !underlying || (!live && !date)) return
     leadingRef.current = !live
     setLeading(!live)
-    channelRef.current.postMessage({ type: 'day', from: tabId, kind, underlying, date: live ? null : date, live })
+    channelRef.current.postMessage({ type: 'day', from: tabId, kind, label, underlying, date: live ? null : date, live })
   }
 
-  return { userAction, announceDay, peers: Object.values(peers), leading: on && leading, on }
+  // The user changed what this page replays (an OI Replay tab's index / expiry / Σ): the other tabs of this page follow.
+  const announceView = (view) => {
+    if (!on || !channelRef.current || !view) return
+    channelRef.current.postMessage({ type: 'view', from: tabId, kind, label, ...view })
+  }
+
+  return { userAction, announceDay, announceView, peers: Object.values(peers), leading: on && leading, on }
 }
 
 // The option list for a speed select, with `value` added when it is not one of `options` (a speed
@@ -176,23 +204,28 @@ export function withSpeedOption(options, value, toOption) {
 
 const PAGE_NAMES = { oi: 'OI Replay', of: 'Order Flow' }
 
-// The global Sync switch plus who this page is synced with. `mismatch`: a short note when the other
-// page is on a different day/underlying (shown instead of the peer list).
-export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = null }) {
-  const others = sync.peers.filter((p) => p.kind !== kind)
+// A peer's name in the tag: the page, and its screen when it has one ("OI Replay Screen 2").
+export const peerName = (p) => `${PAGE_NAMES[p.kind] ?? p.kind}${p.label ? ` ${p.label}` : ''}`
+
+// The global Sync switch plus who this page is synced with - the other page and the other tabs of this one (OI Replay's
+// screens). `mismatch`: a short note when the other page is on a different day/underlying (shown instead of the peer list).
+// `extra`: anything to show beside the switch (OI Replay's "New screen").
+export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = null, extra = null }) {
   const other = kind === 'oi' ? 'Order Flow' : 'OI Replay'
+  const sameToo = kind === 'oi' ? ' and every other OI Replay tab / window (its screens)' : ''
   return (
     <Space size={6} wrap align="center">
-      <Tooltip title={`Play, pause, seek, speed and the day move together with the ${other} page in another tab or window: picking a date, Load day or Go Live here loads the same there. One switch for both pages.`}>
+      <Tooltip title={`Play, pause, seek, speed and the day move together with the ${other} page${sameToo}: picking a date, Load day or Go Live here loads the same there.${kind === 'oi' ? ' Between OI Replay tabs the index, Weekly / Monthly, the live expiry and Σ 3 expiries follow too - each tab keeps its own cards.' : ''} One switch for every page.`}>
         <Space size={4}>
           <Switch size="small" checked={enabled} onChange={onChange} aria-label="Replay sync" />
           <Typography.Text style={{ fontSize: 12 }}>Sync</Typography.Text>
         </Space>
       </Tooltip>
+      {extra}
       {enabled && mismatch && <Tag color="warning" style={{ margin: 0 }}>{mismatch}</Tag>}
-      {enabled && !mismatch && (others.length
-        ? <Tag color="cyan" style={{ margin: 0 }}>⇄ {others.map((p) => `${PAGE_NAMES[p.kind] ?? p.kind}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
-        : <Tag style={{ margin: 0 }}>Open the {other} page in another tab</Tag>)}
+      {enabled && !mismatch && (sync.peers.length
+        ? <Tag color="cyan" style={{ margin: 0 }}>⇄ {sync.peers.map((p) => `${peerName(p)}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
+        : <Tag style={{ margin: 0 }}>Open the {other} page{kind === 'oi' ? ' or another OI Replay screen' : ''} in another tab</Tag>)}
     </Space>
   )
 }
