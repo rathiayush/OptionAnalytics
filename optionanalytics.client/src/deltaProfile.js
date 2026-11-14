@@ -216,6 +216,30 @@ export function futuresDeltaProfile(bars, { asOfMs = null, rowSize = 5 } = {}) {
   return futuresDeltaProfileOf([barsUpTo(bars, asOfMs)], { rowSize })
 }
 
+/**
+ * A REPLAYED day before its first candle (the clock at 09:15) has no candles to stand the profile on - a chart with none has
+ * no price scale - and borrowing the session before's whole day of candles (as live before the open does) read as the day
+ * replayed shown all at once. One INVISIBLE candle at the day's 09:15 holds the scale instead: `date` YYYY-MM-DD, `price` (the
+ * profile's POC); chart time (IST-shifted seconds, as the page's bars). Null without either.
+ */
+export function scaleHolderCandle(date, price) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date ?? '') || !Number.isFinite(price)) return null
+  const time = Math.floor(Date.parse(`${date}T09:15:00+05:30`) / 1000) + 5.5 * 3600
+  const none = 'rgba(0, 0, 0, 0)'
+  return { time, open: price, high: price, low: price, close: price, color: none, borderColor: none, wickColor: none }
+}
+
+/** The candles a delta profile card draws: the day's (up to the clock), else - live before the open only - the latest
+ *  session before it (`standIn`, its whole day: a stand-in, said on the card), else - a replayed day before its first
+ *  candle - the invisible scale holder. */
+export function cardCandleSource({ dayBars, past, isLive, date, price }) {
+  if (dayBars?.length) return { bars: dayBars, standIn: null, holder: false }
+  const standIn = isLive && past?.length ? past.at(-1) : null
+  if (standIn) return { bars: null, standIn, holder: false }
+  const holder = scaleHolderCandle(date, price)
+  return { bars: holder ? [holder] : [], standIn: null, holder: !!holder }
+}
+
 /** The minute bars up to the clock (`asOfMs` - its minute counts; null: all). */
 export function barsUpTo(bars, asOfMs = null) {
   const clock = asOfMs == null ? null : minuteOf(asOfMs)

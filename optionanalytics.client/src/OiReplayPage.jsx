@@ -7238,7 +7238,7 @@ export default function OiReplayPage() {
                 <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Option delta profile on spot (CE / PE flow by spot price){isLive ? ' · live' : ''}</Space>}>
                   <OptionDeltaProfileCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
-                    underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`${underlying}-${result.date}`}
+                    underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`${underlying}-${result.date}`} isLive={isLive}
                   />
                 </Card>
               </LiveSection>
@@ -7490,7 +7490,7 @@ export default function OiReplayPage() {
             {quickView === 'optionDelta' && (
               <OptionDeltaProfileCard
                 cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
-                underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`quick-${underlying}-${result.date}`}
+                underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`quick-${underlying}-${result.date}`} isLive={isLive}
               />
             )}
             {quickView === 'futuresDelta' && (
