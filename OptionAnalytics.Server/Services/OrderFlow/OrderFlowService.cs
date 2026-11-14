@@ -11,16 +11,17 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// to the DOM's "dom:{underlying}" group through the conflated batcher - only while someone is
 /// watching. Re-resolves the contracts every few minutes, so a futures rollover starts a fresh engine.
 ///
-/// DEPTH. OrderFlow:DepthMode "200" (default) puts NSE futures on Dhan's 200-level feed - one socket
-/// each, at most OrderFlow:MaxTwoHundredDepth of them - and the rest (or all, with "20") on the
-/// 20-level feed; "5" uses only the Full packet's 5 levels. A contract whose 200-level book has not
-/// arrived within DepthFallbackAfter of subscribing (the account lacks it, or the socket keeps
-/// failing) is put on the 20-level feed too, and the 20-level packets are ignored again while the
-/// 200-level book streams. BSE (SENSEX) has neither and stays on 5 levels.
+/// DEPTH (EnsureDepthAsync - asked for: "we need to change to 200 and fallback to 20"). OrderFlow:DepthMode "200" (default)
+/// puts every NSE futures contract order flow tracks on Dhan's 200-level feed FIRST - one socket each, at most
+/// OrderFlow:MaxTwoHundredDepth of them, the nearest contracts before one the page picked (a nearest one with no connection
+/// free takes a picked one's) - and the 20-level feed is its FALLBACK: when no 200-level connection is free, or the 200-level
+/// book has not arrived within DepthFallbackAfter of subscribing (the account lacks it, or the socket keeps failing) - then
+/// the 20-level packets are used until the 200-level book streams again (OnDepth ignores them while it does). "20" puts every
+/// contract on the 20-level feed; "5" uses only the Full packet's 5 levels. BSE (SENSEX) has neither and stays on 5 levels.
 ///
 /// OTHER CONTRACTS. The page can pick any listed futures contract (next month, far month): EngineForAsync
-/// starts tracking it on demand - Full mode plus the 20-level depth (the 200-level sockets stay on the
-/// nearest contracts) - from that moment on, keeping at most MaxExtraEngines of them. Each engine's
+/// starts tracking it on demand - Full mode plus the same depth (200-level first, 20-level the fallback; judged again at
+/// every resolve) - from that moment on, keeping at most MaxExtraEngines of them. Each engine's
 /// live view goes to "of:{underlying}:{expiry}"; the nearest one's also to the older "of:{underlying}".
 ///
 /// TIMING. Every tick (from the market feed's own consumer queue) and every depth packet (from the depth sockets'
@@ -170,6 +171,7 @@ public sealed class OrderFlowService : BackgroundService
                 var oldest = _extra.OrderBy(kv => kv.Value.LastAsked).First();
                 _extra.TryRemove(oldest.Key, out _);
                 _bySecurityId.TryRemove(oldest.Key, out _);
+                _fullDepth.Unsubscribe(oldest.Key);
                 _depth.Unsubscribe(oldest.Key);
                 oldest.Value.Engine.DayEnded -= _pastDays.Add;
                 if (oldest.Value.Engine.ExportDay() is { } day) _pastDays.Add(day);
@@ -180,9 +182,8 @@ public sealed class OrderFlowService : BackgroundService
             _bySecurityId[contract.SecurityId] = engine;
             if (!_feed.IsSubscribed(contract.SecurityId))
                 await _feed.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
-            if (_depthMode != "5" && _depth.Supports(contract.DhanSegment))
-                await _depth.SubscribeAsync(contract.SecurityId, contract.DhanSegment, cancellationToken);
-            _logger.LogInformation("Order flow tracking {Symbol} ({SecurityId}) on request.", contract.TradingSymbol, contract.SecurityId);
+            var levels = await EnsureDepthAsync(contract.SecurityId, contract.DhanSegment, contract.TradingSymbol, nearest: false, DateTimeOffset.UtcNow, cancellationToken);
+            _logger.LogInformation("Order flow tracking {Symbol} ({SecurityId}) on request - {Levels}-level book.", contract.TradingSymbol, contract.SecurityId, levels);
             return engine;
         }
         finally
@@ -269,6 +270,15 @@ public sealed class OrderFlowService : BackgroundService
                     {
                         _logger.LogWarning(ex, "Order flow: setting up {Underlying} futures failed.", underlying);
                         complete = false;
+                    }
+                }
+                // The contracts the page picked: their 200-level book judged again (the 20-level fallback), after the nearest.
+                foreach (var (securityId, picked) in _extra)
+                {
+                    try { await EnsureDepthAsync(securityId, picked.Engine.ExchangeSegment, picked.Engine.ContractSymbol, nearest: false, DateTimeOffset.UtcNow, stoppingToken); }
+                    catch (Exception ex) when (ex is not OperationCanceledException)
+                    {
+                        _logger.LogWarning(ex, "Order flow: depth for {Symbol} failed.", picked.Engine.ContractSymbol);
                     }
                 }
 
@@ -365,15 +375,54 @@ public sealed class OrderFlowService : BackgroundService
         if (!_feed.IsSubscribed(contract.SecurityId))
             await _feed.SubscribeAsync(new Dictionary<uint, string> { [contract.SecurityId] = contract.DhanSegment }, cancellationToken, full: true);
 
-        var onFullDepth = _depthMode == "200" && _fullDepth.Subscribe(contract.SecurityId, contract.DhanSegment);
-        var fullDepthFailing = onFullDepth && !_fullDepth.IsStreaming(contract.SecurityId)
-            && _fullDepth.SubscribedAt(contract.SecurityId) is { } since && DateTimeOffset.UtcNow - since > DepthFallbackAfter;
-        if (_depthMode != "5" && (!onFullDepth || fullDepthFailing) && _depth.Supports(contract.DhanSegment))
-        {
-            if (fullDepthFailing) _logger.LogWarning("Order flow: no 200-level book for {Underlying} yet - using the 20-level feed as well.", underlying);
-            await _depth.SubscribeAsync(contract.SecurityId, contract.DhanSegment, cancellationToken);
-        }
+        await EnsureDepthAsync(contract.SecurityId, contract.DhanSegment, underlying, nearest: true, DateTimeOffset.UtcNow, cancellationToken);
         return true;
+    }
+
+    /// <summary>A tracked contract's deeper book, by OrderFlow:DepthMode - "200" (the default): Dhan's 200-level feed FIRST, the
+    /// 20-level feed its FALLBACK when no 200-level connection is free or the 200-level book has not arrived within
+    /// DepthFallbackAfter of subscribing (it stays subscribed - its book is used again once it streams, OnDepth); a NEAREST
+    /// contract with no connection free takes one from a contract the page picked, which goes on the 20-level feed. "20": the
+    /// 20-level feed only; "5": neither. Returns the levels the contract is on now - 20 while it falls back. Called at every
+    /// resolve (and for a picked contract when it is asked for), so the fallback is judged again each time; each subscribe is
+    /// idempotent.</summary>
+    internal async Task<int> EnsureDepthAsync(uint securityId, string segment, string name, bool nearest, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_depthMode == "5") return 5;
+        var onFullDepth = false;
+        if (_depthMode == "200")
+        {
+            onFullDepth = _fullDepth.Subscribe(securityId, segment);
+            if (!onFullDepth && nearest && _fullDepth.Supports(segment) && TakeFullDepthFromPicked() is { } freed)
+            {
+                onFullDepth = _fullDepth.Subscribe(securityId, segment);
+                if (_depth.Supports(freed.Segment)) await _depth.SubscribeAsync(freed.SecurityId, freed.Segment, cancellationToken);
+            }
+        }
+        var fullDepthFailing = onFullDepth && !_fullDepth.IsStreaming(securityId)
+            && _fullDepth.SubscribedAt(securityId) is { } since && now - since > DepthFallbackAfter;
+        if (onFullDepth && !fullDepthFailing) return 200;
+        if (!_depth.Supports(segment)) return onFullDepth ? 200 : 5;
+        if (!_depth.IsSubscribed(securityId))
+        {
+            if (fullDepthFailing) _logger.LogWarning("Order flow: no 200-level book for {Name} yet - using the 20-level feed as well.", name);
+            else if (_depthMode == "200") _logger.LogInformation("Order flow: no 200-level connection free for {Name} - on the 20-level feed.", name);
+            if (!await _depth.SubscribeAsync(securityId, segment, cancellationToken)) return onFullDepth ? 200 : 5;
+        }
+        return 20;
+    }
+
+    // A 200-level connection held by a contract the page picked, given up for a nearest contract (null = none holds one).
+    private (uint SecurityId, string Segment)? TakeFullDepthFromPicked()
+    {
+        foreach (var (securityId, picked) in _extra)
+        {
+            if (_fullDepth.SubscribedAt(securityId) is null) continue;
+            _fullDepth.Unsubscribe(securityId);
+            _logger.LogInformation("Order flow: {Symbol} gives its 200-level connection to a nearest contract - on the 20-level feed.", picked.Engine.ContractSymbol);
+            return (securityId, picked.Engine.ExchangeSegment);
+        }
+        return null;
     }
 
     // On the market feed consumer's worker: into the inbox, stamped when it came off the socket.
@@ -410,6 +459,13 @@ public sealed class OrderFlowService : BackgroundService
     {
         _bySecurityId[engine.SecurityId] = engine;
         _byUnderlying[engine.Underlying] = engine;
+    }
+
+    /// <summary>A contract the page picked (EngineForAsync's), for the tests.</summary>
+    internal void TrackPickedForTests(OrderFlowEngine engine)
+    {
+        _bySecurityId[engine.SecurityId] = engine;
+        _extra[engine.SecurityId] = (engine, DateTimeOffset.UtcNow);
     }
 
     private void Push(OrderFlowEngine engine)
