@@ -316,8 +316,7 @@ builder.Services.AddSingleton<LiveTradingService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<LiveTradingService>());
 
 // Order flow (footprint, delta, depth heatmap, icebergs) for each underlying's nearest futures - see
-// OrderFlowService. DhanDepthFeedClient is Dhan's separate 20-level depth socket - used only with OrderFlow:DepthMode "20"
-// (the default "200" puts the futures on the 200-level feed alone, so it never connects).
+// OrderFlowService. DhanDepthFeedClient is Dhan's separate 20-level depth socket.
 builder.Services.AddSingleton<DhanDepthFeedClient>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DhanDepthFeedClient>());
 // Dhan's 200-level depth (one socket per instrument) for NIFTY/BANKNIFTY futures, and the last few
