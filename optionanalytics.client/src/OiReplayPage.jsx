@@ -67,6 +67,7 @@ import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
+  screenFromSearch, screenKey, nextScreen,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS, useReplayClockBroadcast } from './replaySync.jsx'
@@ -797,21 +798,23 @@ const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 // Run from the component body rather than an effect: the saved layout is read by usePersistedState's own
 // first render, which is already too late for an effect to have cleared it.
 let layoutMigrated = false
-function migrateSavedDashboard() {
+// `screen`: the window's screen (?screen=N - dashboardLayout's screenKey) - its own saved cards are the ones migrated.
+function migrateSavedDashboard(screen = 1) {
   if (layoutMigrated) return
   layoutMigrated = true
+  const key = (k) => screenKey(k, screen)
   try {
-    if (window.localStorage.getItem(STORED_SECTIONS_VERSION) !== JSON.stringify(SECTIONS_VERSION)) {
+    if (window.localStorage.getItem(key(STORED_SECTIONS_VERSION)) !== JSON.stringify(SECTIONS_VERSION)) {
       // Only the cards added since the version this choice was saved at (a card hidden since stays hidden).
-      const savedVersion = JSON.parse(window.localStorage.getItem(STORED_SECTIONS_VERSION) ?? 'null')
-      window.localStorage.setItem(STORED_SECTIONS_VERSION, JSON.stringify(SECTIONS_VERSION))
-      const sections = JSON.parse(window.localStorage.getItem(STORED_SECTIONS) ?? 'null')
-      if (Array.isArray(sections)) window.localStorage.setItem(STORED_SECTIONS, JSON.stringify(withAddedSections(sections, savedVersion)))
+      const savedVersion = JSON.parse(window.localStorage.getItem(key(STORED_SECTIONS_VERSION)) ?? 'null')
+      window.localStorage.setItem(key(STORED_SECTIONS_VERSION), JSON.stringify(SECTIONS_VERSION))
+      const sections = JSON.parse(window.localStorage.getItem(key(STORED_SECTIONS)) ?? 'null')
+      if (Array.isArray(sections)) window.localStorage.setItem(key(STORED_SECTIONS), JSON.stringify(withAddedSections(sections, savedVersion)))
     }
-    if (window.localStorage.getItem(STORED_LAYOUT_VERSION) === JSON.stringify(LAYOUT_VERSION)) return
-    window.localStorage.setItem(STORED_LAYOUT_VERSION, JSON.stringify(LAYOUT_VERSION))
-    const saved = JSON.parse(window.localStorage.getItem(STORED_LAYOUT) ?? 'null')
-    if (isStackedLayout(saved, OI_REPLAY_CARD_IDS)) window.localStorage.removeItem(STORED_LAYOUT)
+    if (window.localStorage.getItem(key(STORED_LAYOUT_VERSION)) === JSON.stringify(LAYOUT_VERSION)) return
+    window.localStorage.setItem(key(STORED_LAYOUT_VERSION), JSON.stringify(LAYOUT_VERSION))
+    const saved = JSON.parse(window.localStorage.getItem(key(STORED_LAYOUT)) ?? 'null')
+    if (isStackedLayout(saved, OI_REPLAY_CARD_IDS)) window.localStorage.removeItem(key(STORED_LAYOUT))
   } catch {
     // Remembering a layout is a convenience, never a requirement - a browser that refuses storage
     // simply starts on the default every time.
@@ -3590,8 +3593,11 @@ export default function OiReplayPage() {
   const [pePremiumEma2, setPePremiumEma2] = usePersistedState('optionanalytics.oiReplay.pePremium.ema2', 15)
 
   // Saved, like where the cards sit and how big they are - the whole structure comes back on a reload.
-  migrateSavedDashboard()
-  const [storedSections, setVisibleSections] = usePersistedState(STORED_SECTIONS, DEFAULT_SECTION_VALUES)
+  // This window's SCREEN (?screen=N - dashboardLayout's screenFromSearch): its own cards, layout and sizes; the replay
+  // itself moves with the other screens through the Sync switch.
+  const [screen] = useState(() => (typeof window === 'undefined' ? 1 : screenFromSearch(window.location.search)))
+  migrateSavedDashboard(screen)
+  const [storedSections, setVisibleSections] = usePersistedState(screenKey(STORED_SECTIONS, screen), DEFAULT_SECTION_VALUES)
   const visibleSections = useMemo(
     () => reconcileSections(storedSections, ALL_SECTION_VALUES, DEFAULT_SECTION_VALUES),
     [storedSections],
@@ -3605,10 +3611,10 @@ export default function OiReplayPage() {
   const wideLayout = useMediaQuery(`(min-width: ${WIDE_LAYOUT_PX}px)`)
   // A monitor wide enough for six cards a row - "Cards a row" offers 6 there.
   const sixARow = useMediaQuery(`(min-width: ${SIX_A_ROW_PX}px)`)
-  const [storedLayout, setStoredLayout] = usePersistedState(STORED_LAYOUT, null)
+  const [storedLayout, setStoredLayout] = usePersistedState(screenKey(STORED_LAYOUT, screen), null)
   // Which cards have been given a height of their own by dragging a corner. Everything else follows its
   // own content, so the page opens with no card scrolling inside itself (fitLayoutHeights).
-  const [sizedCards, setSizedCards] = usePersistedState(STORED_SIZED, EMPTY_ARRAY)
+  const [sizedCards, setSizedCards] = usePersistedState(screenKey(STORED_SIZED, screen), EMPTY_ARRAY)
   const sized = useMemo(() => new Set(Array.isArray(sizedCards) ? sizedCards : []), [sizedCards])
   const [measured, setMeasured] = useState(() => new Map())
   const onMeasure = useCallback((id, px) => {
@@ -3655,7 +3661,7 @@ export default function OiReplayPage() {
   // views, layout) behind "More". The warnings and the load's progress show either way.
   const [controlsCollapsed, setControlsCollapsed] = usePersistedState(STORED_CONTROLS_COLLAPSED, false)
   // Packed upwards, or a card left exactly where it is dropped (DashboardGrid).
-  const [freePlacement, setFreePlacement] = usePersistedState(STORED_FREE_PLACEMENT, false)
+  const [freePlacement, setFreePlacement] = usePersistedState(screenKey(STORED_FREE_PLACEMENT, screen), false)
   // The cards on the page now - the spot / entry charts and the ladder always, the rest as "Sections shown" says.
   const shownCardIds = useMemo(() => OI_REPLAY_CARD_IDS.filter((id) => ALWAYS_SHOWN_CARDS.has(id) || visibleSections.includes(id)), [visibleSections])
   const dash = (id) => ({
@@ -4433,6 +4439,8 @@ export default function OiReplayPage() {
   )
   const sumKey = sumOn && sumSpec.length ? `${result.underlying}|${result.date}|${sumSpec.map((b) => `${b.key}:${b.expiryFlag}:${b.expiryCode}`).join(',')}` : null
   const [expiryBands, setExpiryBands] = useState({ key: null, byCode: NO_BANDS })
+  // Σ 3 expiries on / off - the checkbox's and another OI Replay screen's (Sync); off drops the other expiries' bands.
+  const applySumExpiries = (on) => { setSumExpiries(on); if (!on) setExpiryBands({ key: null, byCode: NO_BANDS }) }
   const sumKeyRef = useRef(null)
   sumKeyRef.current = sumKey
   useEffect(() => {
@@ -5742,7 +5750,7 @@ export default function OiReplayPage() {
       selectUnderlying(msg.underlying)
       return
     }
-    const key = msg.live ? `${msg.underlying}:live` : `${msg.underlying}:${msg.date}`
+    const key = msg.live ? `${msg.underlying}:live:${liveExpiryFlag}` : `${msg.underlying}:${msg.date}:${expiryFlag}`
     if (followRef.current === key) return
     followRef.current = key
     setSyncMismatch(null)
@@ -5752,9 +5760,28 @@ export default function OiReplayPage() {
     setDate(day)
     load(day, { live: false })
   }
+  // ANOTHER OI REPLAY TAB (a screen) changed what it replays - the index, Weekly / Monthly, the live expiry, Σ 3 expiries:
+  // the same here, the way this page's own controls do it (a replayed day: the index's day at the same minute). Nothing
+  // is sent back - only the controls' own handlers announce.
+  const applyView = (msg) => {
+    if (['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(msg.underlying) && msg.underlying !== underlying) selectUnderlying(msg.underlying)
+    if ((msg.expiryFlag === 'WEEK' || msg.expiryFlag === 'MONTH') && msg.expiryFlag !== expiryFlag && !(msg.expiryFlag === 'WEEK' && (msg.underlying ?? underlying) === 'BANKNIFTY')) setExpiryFlag(msg.expiryFlag)
+    if (typeof msg.liveExpiryFlag === 'string' && /^N\d$/.test(msg.liveExpiryFlag) && msg.liveExpiryFlag !== liveExpiryFlag) { rememberMarksRef.current?.(); setLiveExpiryFlag(msg.liveExpiryFlag) }
+    if (typeof msg.sumExpiries === 'boolean' && msg.sumExpiries !== sumExpiries) applySumExpiries(msg.sumExpiries)
+  }
   const applySync = (msg) => {
     pendingSyncRef.current = null
+    if (msg.type === 'view') { applyView(msg); return }
     if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(msg.underlying)) return
+    // Another OI Replay screen's day / state carries its expiry choices: taken first (not from a heartbeat), and - a new
+    // Weekly / Monthly or live expiry - the message is applied again once they have landed, so the day loads with them.
+    if (msg.kind === 'oi' && msg.reason !== 'tick') {
+      const flagFirst = msg.underlying === underlying && (
+        (!msg.live && (msg.expiryFlag === 'WEEK' || msg.expiryFlag === 'MONTH') && msg.expiryFlag !== expiryFlag)
+        || (msg.live && typeof msg.liveExpiryFlag === 'string' && msg.liveExpiryFlag !== liveExpiryFlag))
+      applyView({ expiryFlag: msg.live ? undefined : msg.expiryFlag, liveExpiryFlag: msg.live ? msg.liveExpiryFlag : undefined, sumExpiries: msg.sumExpiries })
+      if (flagFirst) { pendingSyncRef.current = msg; return }
+    }
     if (msg.type === 'day') {
       // The other page went live: so does this one.
       if (msg.live) {
@@ -5769,7 +5796,8 @@ export default function OiReplayPage() {
       return
     }
     if (!msg.date) return
-    if (isLive || msg.underlying !== underlying || msg.date !== result?.date) {
+    const otherExpiry = msg.kind === 'oi' && (msg.expiryFlag === 'WEEK' || msg.expiryFlag === 'MONTH') && result?.expiryFlag && msg.expiryFlag !== result.expiryFlag
+    if (isLive || msg.underlying !== underlying || msg.date !== result?.date || otherExpiry) {
       // A heartbeat never moves this page to another day - only the user's pick there (or the reply
       // when joining) does, so a heartbeat already in flight cannot pull it back to the old day.
       if (msg.reason === 'tick') return
@@ -5802,9 +5830,14 @@ export default function OiReplayPage() {
     ms: isLive ? null : syncClockMs, live: isLive, playing,
   })
   const sync = useReplaySync({
-    enabled: syncEnabled, active: !isLive, kind: 'oi',
-    // No day while one is loading: until it lands, `result` is still the previous day's.
-    state: { underlying, date: isLive || loading ? null : result?.date ?? null, ms: syncClockMs, playing, speed: 60_000 / speedMs, live: isLive },
+    enabled: syncEnabled, active: !isLive, kind: 'oi', label: `Screen ${screen}`,
+    view: { underlying, expiryFlag, liveExpiryFlag, sumExpiries },
+    // No day while one is loading: until it lands, `result` is still the previous day's. The expiry choices go with it for
+    // the other OI Replay screens (the Order Flow page reads none of them).
+    state: {
+      underlying, date: isLive || loading ? null : result?.date ?? null, ms: syncClockMs, playing, speed: 60_000 / speedMs, live: isLive,
+      expiryFlag: isLive ? undefined : (result?.expiryFlag ?? expiryFlag), liveExpiryFlag: isLive ? liveExpiryFlag : undefined, sumExpiries,
+    },
     onRemote: applySync,
   })
   // A sync that arrived before the matching day had loaded (`result` itself, not its date: reloading
@@ -5812,11 +5845,11 @@ export default function OiReplayPage() {
   useEffect(() => {
     if (pendingSyncRef.current) applySync(pendingSyncRef.current)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [result, oneMinBars.length, underlying])
+  }, [result, oneMinBars.length, underlying, expiryFlag, liveExpiryFlag])
   // The day the other page is on could not be loaded here: say so, with a retry.
   useEffect(() => {
     const msg = pendingSyncRef.current
-    if (error && msg?.date && followRef.current === `${msg.underlying}:${msg.date}`) setSyncMismatch({ underlying: msg.underlying, date: msg.date })
+    if (error && msg?.date && followRef.current === `${msg.underlying}:${msg.date}:${expiryFlag}`) setSyncMismatch({ underlying: msg.underlying, date: msg.date })
   }, [error])
   const loadSyncedDay = () => {
     if (!syncMismatch?.date) return
@@ -5837,10 +5870,39 @@ export default function OiReplayPage() {
     load(d, { live: false })
     sync.announceDay({ underlying, date: d.format('YYYY-MM-DD') })
   }
+  // The user's own picks of what is replayed: done here, and - Sync on - on every other OI Replay screen (announceView).
+  const pickUnderlying = (value) => {
+    if (value === underlying) return
+    selectUnderlying(value)
+    sync.announceView({ underlying: value })
+  }
+  const pickExpiryFlag = (value) => { setExpiryFlag(value); sync.announceView({ expiryFlag: value }) }
+  const pickLiveExpiryFlag = (value) => {
+    if (value !== liveExpiryFlag) rememberMarksRef.current?.()
+    setLiveExpiryFlag(value)
+    sync.announceView({ liveExpiryFlag: value })
+  }
+  const pickSumExpiries = (on) => { applySumExpiries(on); sync.announceView({ sumExpiries: on }) }
+  // ANOTHER SCREEN (asked for - several OI Replay tabs, each on its own monitor with its own cards, synced): a new window
+  // on the next free ?screen=N, Sync turned on so it follows this one's index, day and clock at once.
+  const openScreen = () => {
+    const used = [screen, ...sync.peers.filter((p) => p.kind === 'oi').map((p) => Number(String(p.label ?? '').replace(/\D/g, '')) || 1)]
+    const next = nextScreen(used) ?? Math.min(9, screen + 1)
+    if (!syncEnabled) setSyncEnabled(true)
+    window.open(`${window.location.pathname}?screen=${next}`, `oi-replay-screen-${next}`)
+  }
+  const screenControls = (
+    <Space size={4}>
+      {screen > 1 && <Tag color="purple" style={{ margin: 0 }}>Screen {screen}</Tag>}
+      <Tooltip title="Open OI Replay in a NEW WINDOW as another screen - drag it to another monitor and pick its own cards (Sections shown, the grid): each screen keeps its own cards; with Sync on (turned on for you) the index, expiry, Σ 3 expiries, the day and the replay clock move together on every screen.">
+        <Button size="small" onClick={openScreen}>＋ Screen</Button>
+      </Tooltip>
+    </Space>
+  )
   const syncControl = (
     <>
       <ReplaySyncControl
-        enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="oi"
+        enabled={syncEnabled} onChange={setSyncEnabled} sync={sync} kind="oi" extra={screenControls}
         mismatch={syncMismatch ? `Order Flow is on ${syncMismatch.underlying} ${syncMismatch.date} - could not load it here` : null}
       />
       {syncEnabled && syncMismatch && <Button size="small" onClick={loadSyncedDay}>Retry {syncMismatch.date}</Button>}
@@ -6492,7 +6554,7 @@ export default function OiReplayPage() {
               )}
               {isLive && liveConnectionState === 'connected' && <FeedLagTag delayMs={feedLag.delayMs} />}
               <Select
-                value={underlying} onChange={selectUnderlying} style={{ width: 130 }}
+                value={underlying} onChange={pickUnderlying} style={{ width: 130 }}
                 options={[{ value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }, { value: 'SENSEX', label: 'SENSEX' }]}
               />
               {isLive ? (
@@ -6500,7 +6562,7 @@ export default function OiReplayPage() {
                 // expiries (see resolvedExpiries' own doc comment) instead of an ambiguous Weekly/
                 // Monthly toggle, so the exact contract being tracked is never in doubt.
                 <Select
-                  value={liveExpiryFlag} onChange={(v) => { if (v !== liveExpiryFlag) rememberMarksRef.current?.(); setLiveExpiryFlag(v) }} style={{ width: 220 }}
+                  value={liveExpiryFlag} onChange={pickLiveExpiryFlag} style={{ width: 220 }}
                   options={resolvedExpiries.expiries.map((d, i) => {
                     const tag = d === resolvedExpiries.week ? ' (Weekly)' : d === resolvedExpiries.month ? ' (Monthly)' : ''
                     return { value: `N${i + 1}`, label: `${fmtDateOnly(d)}${tag}` }
@@ -6509,14 +6571,14 @@ export default function OiReplayPage() {
                 />
               ) : (
                 <Select
-                  value={expiryFlag} onChange={setExpiryFlag} style={{ width: 130 }}
+                  value={expiryFlag} onChange={pickExpiryFlag} style={{ width: 130 }}
                   options={[{ value: 'WEEK', label: 'Weekly', disabled: underlying === 'BANKNIFTY' }, { value: 'MONTH', label: 'Monthly' }]}
                 />
               )}
               <Tooltip title="Every OI read on the page - the OI totals' Δ and cumulative Δ, Day OI, Total OI, the heatmap, the walls, Market Read, the ladder and the OI alerts - takes the current expiry's OI plus the next expiry's and the monthly's (the monthly once, when it is already the current or next), live and on a replayed day. GEX adds each expiry's own gamma. Premiums cannot be added, so the straddle, the premium charts, the option CDV / OBV and paper trades stay on the current expiry. Untick it and the page is as it always was.">
                 <Checkbox
                   checked={sumExpiries}
-                  onChange={(e) => { setSumExpiries(e.target.checked); if (!e.target.checked) setExpiryBands({ key: null, byCode: NO_BANDS }) }}
+                  onChange={(e) => pickSumExpiries(e.target.checked)}
                 >Σ 3 expiries</Checkbox>
               </Tooltip>
               <DatePicker value={date} onChange={pickDate} format="DD MMM YYYY" placeholder="Trading day" />

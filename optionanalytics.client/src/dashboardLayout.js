@@ -396,3 +396,27 @@ export function grownChartHeight(px, grow) {
   if (!grow || !(px > 0)) return px
   return Math.max(px, Math.min(Math.round(px * grow.scale), grow.cap))
 }
+
+// OI Replay's SCREENS (asked for - "if there are multiple tabs open on OI Replay all tabs will be synced when the checkbox is
+// ticked ... so many components, I need to see them on different screens"): `?screen=N` in the address (2 - MAX_SCREENS;
+// none or 1 = the main screen) keeps that window's dashboard - which cards are shown, where, how big - under its own keys
+// (`screenKey`), so each monitor keeps its own cards through a reload; the replay itself (index, day, expiry, clock) moves
+// together through the Sync switch (replaySync.jsx).
+export const MAX_SCREENS = 9
+
+/** The screen a page's address names (`location.search`): 2 - MAX_SCREENS, else 1. */
+export function screenFromSearch(search) {
+  let n = NaN
+  try { n = Number(new URLSearchParams(search ?? '').get('screen')) } catch { /* a malformed address is the main screen */ }
+  return Number.isInteger(n) && n >= 2 && n <= MAX_SCREENS ? n : 1
+}
+
+/** A dashboard key for a screen: the main screen's own key (nothing saved changes), another's with `.screenN`. */
+export const screenKey = (key, screen) => (screen > 1 ? `${key}.screen${screen}` : key)
+
+/** The first screen number not in `used` (2 - MAX_SCREENS), or null when every one is open. */
+export function nextScreen(used) {
+  const taken = new Set(used ?? [])
+  for (let n = 2; n <= MAX_SCREENS; n++) if (!taken.has(n)) return n
+  return null
+}
