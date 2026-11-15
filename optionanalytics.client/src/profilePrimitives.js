@@ -157,3 +157,79 @@ export class TpoProfilePrimitive extends BasePrimitive {
     })
   }
 }
+
+/** The DELTA column of the Profiles page's "Delta" tick: a strip of the plot just left of the profile drawn at the right
+ *  (the volume bars / the TPO letters) - each price row's buyers minus sellers, green to the right of its centre line, red
+ *  to the left, scaled to the largest row - with "DELTA" and what it is of (`label`) on top. `profile` - { rows:
+ *  [{ price, delta }], rowSize, maxAbsDelta } (deltaProfile.js'); `right` / `width` - where the strip stands, as shares of
+ *  the plot's width from its right edge (the chart leaves both empty: the candles stop short of them). */
+export const DELTA_COLUMN_SHARE = 0.14
+const DELTA_BG = 'rgba(13,17,23,0.55)'
+const DELTA_BUY = 'rgba(149,222,100,0.9)'
+const DELTA_SELL = 'rgba(146,84,222,0.95)'
+const DELTA_AXIS = 'rgba(160,170,185,0.45)'
+const DELTA_TEXT = 'rgba(200,205,215,0.85)'
+
+export class DeltaColumnPrimitive {
+  constructor() {
+    this._profile = null
+    this._place = { right: 0.3, width: DELTA_COLUMN_SHARE, label: '' }
+    this._series = null
+    this._requestUpdate = null
+    const self = this
+    this._view = { zOrder: () => 'top', renderer: () => ({ draw: (target) => self._draw(target) }) }
+  }
+
+  attached({ series, requestUpdate }) { this._series = series; this._requestUpdate = requestUpdate }
+  detached() { this._series = null; this._requestUpdate = null }
+  updateAllViews() {}
+  paneViews() { return [this._view] }
+
+  setProfile(profile, place = {}) {
+    this._profile = profile
+    this._place = { ...this._place, ...place }
+    this._requestUpdate?.()
+  }
+
+  _draw(target) {
+    const p = this._profile
+    if (!p?.rows?.length || !this._series || !(p.rowSize > 0)) return
+    const { right, width, label } = this._place
+    target.useBitmapCoordinateSpace(({ context: ctx, bitmapSize, horizontalPixelRatio: hpr, verticalPixelRatio: vpr }) => {
+      const W = bitmapSize.width, H = bitmapSize.height
+      const x1 = Math.round(W * (1 - right))
+      const x0 = Math.round(W * (1 - right - width))
+      if (x1 - x0 < 8 * hpr) return
+      const pad = Math.round(3 * hpr)
+      const mid = Math.round((x0 + x1) / 2)
+      const half = Math.max(2, (x1 - x0) / 2 - pad)
+      const head = Math.round(26 * vpr)
+      ctx.fillStyle = DELTA_BG
+      ctx.fillRect(x0, 0, x1 - x0, H)
+      ctx.fillStyle = DELTA_TEXT
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'top'
+      ctx.font = `${Math.round(10 * vpr)}px sans-serif`
+      ctx.fillText('DELTA', mid, Math.round(2 * vpr))
+      if (label) {
+        ctx.font = `${Math.round(9 * vpr)}px sans-serif`
+        ctx.fillText(label, mid, Math.round(13 * vpr))
+      }
+      ctx.fillStyle = DELTA_AXIS
+      ctx.fillRect(mid, head, Math.max(1, Math.round(hpr)), H - head)
+      if (!(p.maxAbsDelta > 0)) return
+      for (const row of p.rows) {
+        if (!row.delta) continue
+        const yTop = this._series.priceToCoordinate(row.price + p.rowSize)
+        const yBottom = this._series.priceToCoordinate(row.price)
+        if (yTop == null || yBottom == null) continue
+        const top = Math.max(head, Math.round(Math.min(yTop, yBottom) * vpr) + 1)
+        const bottom = Math.round(Math.max(yTop, yBottom) * vpr) - 1
+        if (bottom <= top) continue
+        const len = Math.max(1, (Math.abs(row.delta) / p.maxAbsDelta) * half)
+        ctx.fillStyle = row.delta > 0 ? DELTA_BUY : DELTA_SELL
+        ctx.fillRect(row.delta > 0 ? mid : mid - len, top, len, bottom - top)
+      }
+    })
+  }
+}

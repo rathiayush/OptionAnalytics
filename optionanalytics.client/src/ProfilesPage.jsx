@@ -13,7 +13,12 @@ import { mergeFuturesLive, mergeLiveFuturesTicks } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
 import { createZoomableChart } from './chartZoom.js'
 import { PROFILE_PAGE_BARS, VolumeProfilePrimitive } from './volumeProfilePrimitive.js'
-import { TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
+import { DELTA_COLUMN_SHARE, DeltaColumnPrimitive, TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
+import { deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf } from './deltaProfile.js'
+import { optionDayUrl } from './deltaProfileDays.js'
+import { usePastDeltaSessions } from './usePastDeltaSessions.js'
+import { FloatingReplayBar } from './FloatingReplayBar.jsx'
+import { useOnScreen } from './useScreen.js'
 import {
   DEFAULT_VP_BARS, FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, VP_BAR_SIZES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
   lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, vpBarSize, withBackfillBars,
@@ -62,6 +67,7 @@ const STORE = {
   vwap: 'optionanalytics.profiles.vwap',
   vpBars: 'optionanalytics.profiles.vpBars',
   speed: 'optionanalytics.profiles.speedMs',
+  delta: 'optionanalytics.profiles.delta',
 }
 // A past day's replay, as OI Replay's: milliseconds per market minute.
 const SPEED_OPTIONS = [
@@ -237,7 +243,10 @@ function usePastSessions(kind, underlying, dateKey, count) {
  *  price lines. The time axis keeps `room` of the plot empty on the right, so the newest candles never sit
  *  under the profile; a drag, a pinch, the wheel, the zoom buttons or the price axis take over the view - live updates
  *  leave it where it was put - and a double-click (a double tap, ⟲) hands it back. */
-function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room, height, resetKey }) {
+function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones, lines, priceRange, room: profileRoom, height, resetKey, delta = null }) {
+  // The "Delta" tick: a delta column just left of the profile - the candles stop short of both.
+  const room = profileRoom + (delta ? DELTA_COLUMN_SHARE : 0)
+  const deltaRef = useRef(null)
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -294,6 +303,8 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
     series.attachPrimitive(boxesRef.current)
     profileRef.current = makePrimitive()
     series.attachPrimitive(profileRef.current)
+    deltaRef.current = new DeltaColumnPrimitive()
+    series.attachPrimitive(deltaRef.current)
     chartRef.current = chart
     seriesRef.current = series
 
@@ -360,6 +371,9 @@ function ProfileChart({ candles, vwap = null, makePrimitive, drawProfile, zones,
 
   useEffect(() => { vwapRef.current?.setData(vwap ?? []) }, [vwap])
   useEffect(() => { if (profileRef.current) drawProfile(profileRef.current) }, [drawProfile])
+  useEffect(() => {
+    deltaRef.current?.setProfile(delta?.profile ?? null, { right: profileRoom, width: DELTA_COLUMN_SHARE, label: delta?.label ?? '' })
+  }, [delta, profileRoom])
   useEffect(() => { boxesRef.current?.setZones(zones) }, [zones])
   useEffect(() => {
     const series = seriesRef.current
@@ -422,15 +436,42 @@ function useChartHeight() {
   return height
 }
 
+const compact = (v) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toLocaleString('en-IN', { notation: 'compact', maximumFractionDigits: 1 })}` : '—')
+/** The "Delta" tick's line over a chart: what the column is of, the net, and the rows of the most buying / selling. */
+function DeltaLine({ delta, levels }) {
+  const p = delta.profile
+  return (
+    <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>Delta · {delta.text}</Text>
+      {p?.rows?.length ? (
+        <>
+          <span style={{ color: p.delta >= 0 ? '#95de64' : '#b37feb' }}>net {compact(p.delta)}</span>
+          <span style={{ color: '#95de64' }}>most bought {fmt(levels?.buy)}</span>
+          <span style={{ color: '#b37feb' }}>most sold {fmt(levels?.sell)}</span>
+        </>
+      ) : <Text type="secondary" style={{ fontSize: 12 }}>{delta.note ?? 'no delta yet'}</Text>}
+    </Space>
+  )
+}
+
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
   const sessions = useMemo(
     () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
+  // The "Delta" tick (`deltaSource`): { from: 'bars', label } - the futures' own footprint rows, buy - sell at each price,
+  // the same sessions the profiles are built from; { profile, label, note } - worked out by the page (the spot's: the
+  // option flow); null = off.
+  const delta = useMemo(() => {
+    if (!deltaSource) return null
+    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([profileBars], { rowSize: row }) }
+    return deltaSource
+  }, [deltaSource, profileBars, row])
+  const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
   const chartHeight = useChartHeight()
   // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
   // with no candles has no price scale, so the profile and its boxes could not be drawn at all. The latest earlier
@@ -519,6 +560,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
               <span style={{ color: LINE.lvn }}>LVN {fmt(vz.thinLvn)}</span>
             </Space>
             <Legend items={[['high', 'Highest volume (HVN area)'], ['low', 'Thin volume (LVN area)'], ['value', 'Value area']]} />
+            {delta && <DeltaLine delta={delta} levels={deltaLevels} />}
             {empty ?? (!hasVolume && profileBars.length > 0 && (
               <Alert type="info" showIcon message={`No ${name.toLowerCase()} volume for ${sessions.length > 1 ? 'these sessions' : 'this day'} - Dhan sends the index's own volume from January 2026. The market profile (time, not volume) still shows.`} />
             ))}
@@ -526,7 +568,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             {empty ? null : (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeVp} drawProfile={drawVp} zones={vpZones} lines={vpLines}
-                priceRange={vpRange} room={vpBars.room} height={chartHeight} resetKey={resetKey}
+                priceRange={vpRange} room={vpBars.room} height={chartHeight} resetKey={resetKey} delta={delta}
               />
             )}
             <FoldText id="profiles.vp" label="how to read the volume profile" className="oa-note">
@@ -557,11 +599,12 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
               <span style={{ color: BOX.tail.labelColor }}>Tails {mz.tails.length ? mz.tails.map((z) => `${z.side} ${fmt(z.low)}–${fmt(z.high)}`).join(', ') : '—'}</span>
             </Space>
             <Legend items={[['accepted', 'Most time spent - accepted'], ['acceptedValue', 'Value area'], ['single', 'Single prints'], ['tail', 'Tail (rejected)']]} />
+            {delta && <DeltaLine delta={delta} levels={deltaLevels} />}
             {standInNote}
             {empty ?? (
               <ProfileChart
                 candles={candles} vwap={vwap} makePrimitive={makeTpo} drawProfile={drawTpo} zones={mpZones} lines={mpLines}
-                priceRange={tpoRange} room={PROFILE_ROOM.tpo} height={chartHeight} resetKey={resetKey}
+                priceRange={tpoRange} room={PROFILE_ROOM.tpo} height={chartHeight} resetKey={resetKey} delta={delta}
               />
             )}
             <FoldText id="profiles.tpo" label="how to read the market profile" className="oa-note">
@@ -583,6 +626,35 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
       </Col>
     </Row>
   )
+}
+
+// The day's option bars for the spot's "Delta" (the run OI Replay loads - a past day from the server's disk, today from its
+// memory): { key, ce, pe, loading, error }. Asked only while the tick is on; LIVE asked again each minute (a page timer -
+// POLL_HEADERS; the server's memory, not Dhan). A failure waits for the next minute / the next day picked - never a loop.
+const OPTION_REFRESH_MS = 60_000
+function useOptionRun(underlying, dateKey, live, enabled) {
+  const flag = underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK'
+  const key = enabled && underlying && dateKey ? `${underlying}|${dateKey}|${flag}|${live ? 'live' : 'day'}` : null
+  const [state, setState] = useState({ key: null, ce: NO_BARS, pe: NO_BARS, loading: false, error: null })
+  useEffect(() => {
+    if (!key) return undefined
+    let cancelled = false
+    const load = (poll) => {
+      const url = `${optionDayUrl(underlying, dateKey, flag)}${live ? '&forceLive=true' : ''}`
+      fetch(url, poll ? { headers: POLL_HEADERS } : undefined)
+        .then(async (r) => {
+          const body = await r.json().catch(() => null)
+          if (!r.ok || !body?.success) throw new Error(body?.error ?? `HTTP ${r.status}`)
+          return body
+        })
+        .then((body) => { if (!cancelled) setState({ key, ce: body.cePoints ?? NO_BARS, pe: body.pePoints ?? NO_BARS, loading: false, error: null }) })
+        .catch((err) => { if (!cancelled) setState((prev) => ({ ...(prev.key === key ? prev : { ce: NO_BARS, pe: NO_BARS }), key, loading: false, error: err.message || 'failed' })) })
+    }
+    load(false)
+    const id = live ? setInterval(() => load(true), OPTION_REFRESH_MS) : null
+    return () => { cancelled = true; if (id) clearInterval(id) }
+  }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
+  return { flag, ...(state.key === key ? state : { ce: NO_BARS, pe: NO_BARS, loading: Boolean(key), error: null }) }
 }
 
 // ---- the page --------------------------------------------------------------------------------------------
@@ -624,6 +696,7 @@ export default function ProfilesPage() {
   const [clockMs, setClockMs] = useState(null)
   const [playing, setPlaying] = useState(false)
   const [speedMs, setSpeedMs] = usePersistedState(STORE.speed, 500)
+  const [showDelta, setShowDelta] = usePersistedState(STORE.delta, false)
 
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = rows?.[index] > 0 ? rows[index] : PROFILE_ROWS[index]
@@ -766,6 +839,29 @@ export default function ProfilesPage() {
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
   }
   const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey }
+  // The "Delta" tick. SPOT: the OPTIONS' flow on spot rows, as OI Replay's option delta profile works it out (each strike's
+  // bars given a side - where the close sits in the bar's range - weighted by its delta, Net = CE − PE: + calls bought / puts
+  // sold), the minutes up to the clock, the sessions before from their own runs. FUTURES: its footprint's buy − sell at
+  // each price (ProfilePair, from the bars the profiles use).
+  const optionRun = useOptionRun(index, effectiveDate, live, showDelta)
+  const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta ? pastCount : 0, optionRun.flag)
+  const optionMinutes = useMemo(
+    () => (showDelta && profileOf === 'today' ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
+    [showDelta, profileOf, optionRun.ce, optionRun.pe, spotDay, live, clock],
+  )
+  const spotDelta = useMemo(() => {
+    if (!showDelta) return null
+    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...(profileOf === 'today' ? [optionMinutes] : [])]
+    const profile = optionDeltaProfileOf(sessions, { rowSize: row })
+    const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
+      : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
+    return { profile, label: 'options', text: 'options on spot (CE − PE, delta-weighted)', note }
+  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, profileOf, optionMinutes, row, optionRun.loading, optionRun.error])
+  const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
+  // The floating replay bar (FloatingReplayBar.jsx, OI Replay's): once the inline replay controls are out of sight.
+  const [replayInlineEl, setReplayInlineEl] = useState(null)
+  const replayInlineOnScreen = useOnScreen(replayInlineEl)
+  const ownReplay = !live && !following && span
 
   return (
     <div style={{ padding: '16px 16px 32px' }}>
@@ -810,6 +906,9 @@ export default function ProfilesPage() {
               <Tooltip title="The day's VWAP on every chart - typical price x volume over the 1-minute bars, as the server works it out (the spot's on the index's own volume).">
                 <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
               </Tooltip>
+              <Tooltip title="A DELTA column beside each profile - who was more aggressive at each price: buyers (green) or sellers (purple). SPOT: the options' flow on the spot's prices (OI Replay's option delta profile - calls bought / puts sold = +, the day's option bars weighted by their delta). FUTURES: the futures' own buy − sell at each price (the footprint). The same sessions and clock as the profiles.">
+                <Checkbox checked={showDelta} onChange={(e) => setShowDelta(e.target.checked)}>Delta</Checkbox>
+              </Tooltip>
               <Tooltip title="How wide the volume profile's bars are drawn at the right of its charts - the busiest row's bar (the POC's) is this much of the chart; the newest candles stop short of most of it.">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Bars</Text>
@@ -828,8 +927,8 @@ export default function ProfilesPage() {
                   ? <Tag color="blue" style={{ margin: 0, whiteSpace: 'normal' }}>Opened where OI Replay was left · {followed.kept.underlying} {keptClockText(followed.kept)} · it is not running - play on here</Tag>
                   : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
             </Space>
-            {!live && !following && span && (
-              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+            {ownReplay && (
+              <div ref={setReplayInlineEl}><Space direction="vertical" size={6} style={{ width: '100%' }}>
                 <Space size={8} wrap align="center">
                   <Button size="small" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)}>
                     {playing ? 'Pause' : 'Start'}
@@ -853,7 +952,7 @@ export default function ProfilesPage() {
                   style={{ margin: '0 8px' }} min={span.start} max={span.end} step={60_000} value={clock ?? span.start}
                   tooltip={{ open: false }} onChange={(v) => { setPlaying(false); setClockMs(v) }}
                 />
-              </Space>
+              </Space></div>
             )}
             <Space size={8} wrap>
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -879,10 +978,19 @@ export default function ProfilesPage() {
         </Card>
 
         <Text strong style={{ fontSize: 13 }}>Spot · {index} index · {spotDay ? effectiveDate : spot.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
-        <ProfilePair {...pair} name="Spot" known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
+        <ProfilePair {...pair} name="Spot" delta={spotDelta} known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
         <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`} · {futuresDay ? effectiveDate : futures.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
-        <ProfilePair {...pair} name="Futures" known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
+        <ProfilePair {...pair} name="Futures" delta={futuresDelta} known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
       </Space>
+      {ownReplay && !replayInlineOnScreen && (
+        <FloatingReplayBar fabOn={false}>
+          <Button size="small" type="primary" shape="circle" aria-label={playing ? 'Pause' : 'Start'} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)} />
+          <Button size="small" shape="circle" aria-label="Reset" icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setClockMs(span.start) }} />
+          <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{clock ? fmtClock(clock - 60_000) : ''}</Text>
+          <Slider style={{ flex: 1, minWidth: 60, margin: '0 6px' }} min={span.start} max={span.end} step={60_000} value={clock ?? span.start} tooltip={{ open: false }} onChange={(v) => { setPlaying(false); setClockMs(v) }} />
+          <Select size="small" value={speedMs} onChange={setSpeedMs} style={{ width: 72 }} options={SPEED_OPTIONS} aria-label="Speed" />
+        </FloatingReplayBar>
+      )}
     </div>
   )
 }

@@ -719,6 +719,22 @@ All must pass before committing.
   zoomed at all), and a drag / pinch / zoom button / price-axis drag (the time range moved, or the price scale's
   auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
+  THE "DELTA" TICK (asked for - "a tick which will show delta: for spot the OI data, for futures the futures delta, on the
+  market and volume profile"; `optionanalytics.profiles.delta`, OFF by default): a DELTA column just left of the profile on
+  BOTH charts of each instrument (`DeltaColumnPrimitive` in `profilePrimitives.js`, `DELTA_COLUMN_SHARE` 14% of the plot - the
+  candles stop short of it; buyers green right of its centre line, sellers purple left, scaled to the largest row) and a line
+  over each chart (what it is of, the net, the rows of the most buying / selling - `deltaProfileLevels`). SPOT = the OPTIONS'
+  flow on spot rows, OI Replay's option delta profile (`optionDeltaMinutes` / `optionDeltaProfileOf` - each strike's bars
+  given a side by where the close sits, weighted by its delta, Net CE − PE) from the day's run (`useOptionRun` -
+  `/api/oi-replay/{u}/run`, WEEK / BANKNIFTY MONTH; asked only while ticked; LIVE `forceLive` and again each minute, a page
+  timer with `POLL_HEADERS` - the server's memory), the minutes up to the clock, the sessions before from their own runs
+  (`usePastDeltaSessions`, moved to `usePastDeltaSessions.js`, shared with OI Replay's delta cards). FUTURES = the footprint's
+  buy − sell at each price (`futuresDeltaProfileOf`) of the same sessions the profiles use. Display only.
+  THE FLOATING REPLAY BAR (asked for - "on the market / volume profile and order flow pages a floating popover to run replay
+  like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
+  Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /
+  Pause, Reset (Profiles) or −1m / +1m (Order Flow), the minute, the slider, the speed - the same state and handlers as the
+  inline controls.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
   I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone
