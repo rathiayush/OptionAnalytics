@@ -29,6 +29,8 @@ import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { FLOW_READ_SCORES, scoredFlowReads, withScoredReads } from './flowReads.js'
 import { BookPressureCard, LiquidityNetCard, OfiCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
+import { FloatingReplayBar } from './FloatingReplayBar.jsx'
+import { useOnScreen } from './useScreen.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
 const { Title, Text } = Typography
@@ -731,6 +733,11 @@ export default function OrderFlowPage() {
     setReplayMs(Math.max(range.start, Math.min(range.end, ms)))
     sync.userAction()
   }
+  // The floating replay bar (FloatingReplayBar.jsx, OI Replay's - asked for on every replay page): once the inline replay
+  // controls are scrolled out of sight, the same controls float at the bottom of the window.
+  const [replayInlineEl, setReplayInlineEl] = useState(null)
+  const replayInlineOnScreen = useOnScreen(replayInlineEl)
+  const togglePlay = () => { if (!playing && range && replayMs >= range.end) setReplayMs(range.start); setPlaying(!playing); sync.userAction() }
   const shownMinute = replayMs != null ? IST_HHMMSS.format(new Date(Math.max(replayMs - 60_000, range?.start ?? 0))).slice(0, 5) : null
   const contractOptions = [
     { value: 'nearest', label: 'Nearest (auto)' },
@@ -824,11 +831,11 @@ export default function OrderFlowPage() {
             </>)}
           </Space>
           {isReplay && (
-            <div style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
+            <div ref={setReplayInlineEl} style={{ marginTop: 12, padding: 10, border: '1px solid #ffffff1f', borderRadius: 6 }}>
               <Space wrap size={10} align="center">
                 <Button
                   type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!range}
-                  onClick={() => { if (!playing && range && replayMs >= range.end) setReplayMs(range.start); setPlaying(!playing); sync.userAction() }}
+                  onClick={togglePlay}
                 >
                   {playing ? 'Pause' : 'Play'}
                 </Button>
@@ -1084,6 +1091,16 @@ export default function OrderFlowPage() {
         </Text>
         <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       </Space>
+      {isReplay && range && !replayInlineOnScreen && (
+        <FloatingReplayBar fabOn={false}>
+          <Button size="small" type="primary" shape="circle" aria-label={playing ? 'Pause' : 'Play'} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} onClick={togglePlay} />
+          <Button size="small" onClick={() => jump(-1)}>−1m</Button>
+          <Button size="small" onClick={() => jump(1)}>+1m</Button>
+          <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{replayMs != null ? IST_HHMMSS.format(new Date(replayMs)) : ''}</Text>
+          <Slider style={{ flex: 1, minWidth: 60, margin: '0 6px' }} min={range.start} max={range.end} step={1000} value={replayMs ?? range.start} tooltip={{ open: false }} onChange={(v) => { setReplayMs(v); sync.userAction() }} />
+          <Select size="small" value={replaySpeed} onChange={(v) => { setReplaySpeed(v); sync.userAction() }} style={{ width: 72 }} options={withSpeedOption(REPLAY_SPEEDS, replaySpeed, speedOption)} aria-label="Speed" />
+        </FloatingReplayBar>
+      )}
     </div>
   )
 }
