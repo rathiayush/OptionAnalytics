@@ -286,3 +286,28 @@ export function rowAt(profile, price) {
   const bottom = rowOf(price, profile.rowSize)
   return profile.rows.find((r) => Math.abs(r.price - bottom) < 1e-6) ?? null
 }
+
+/**
+ * A CUMULATIVE line through the day under a delta card (asked for - "only net CE − PE ... negative is bullish", "for futures
+ * the delta from the order flow footprint"): `items` (each with a time `t` or `time`, ms / ISO) summed into candles of
+ * `timeframe` minutes (cut by the chart time, as the cards' candles are) - each candle's own `delta` and the running total
+ * from the day's first item `value`, `valueOf(item)` the item's amount. `chartTime` - ms to the chart's time (seconds).
+ * Nothing after the items given, so a cut at the clock = the day's line up to it.
+ */
+export function cumulativeOf(items, { valueOf, timeframe = 1, chartTime }) {
+  const size = Math.max(1, Math.round(timeframe)) * 60
+  const list = (items ?? []).map((it) => ({ ms: msOf(it.t ?? it.time), d: valueOf(it) }))
+    .filter((x) => Number.isFinite(x.ms) && Number.isFinite(x.d)).sort((a, b) => a.ms - b.ms)
+  const out = []
+  let total = 0
+  for (const { ms, d } of list) {
+    total += d
+    const t = Math.floor(chartTime(ms) / size) * size
+    const last = out.at(-1)
+    if (last?.time === t) { last.delta += d; last.value = total } else out.push({ time: t, delta: d, value: total })
+  }
+  return out
+}
+
+/** A footprint bar's delta: buy − sell over its levels (the Order Flow server's aggressor sides). */
+export const footprintBarDelta = (b) => (b?.levels ?? []).reduce((s, l) => s + (l.buy ?? 0) - (l.sell ?? 0), 0)
