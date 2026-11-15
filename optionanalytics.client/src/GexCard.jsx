@@ -1,6 +1,6 @@
 import { HEDGER_GROUPS, gexSignOf, gexSignOptions, gexVerdict, sharesText } from './participantOi.js'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import { Button, Col, Modal, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { Button, Checkbox, Col, Modal, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { BaselineSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
@@ -311,7 +311,7 @@ const HOW_TO_READ = (
  * GEX (gamma exposure) from the day's option OI, IV and premium (gex.js - `days`, useGexDays), up to the replay clock
  * (`asOfMs`; null - live - every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260, participants = null }) {
+export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260, participants = null, allExpiries = null, onAllExpiries = null, expiriesLoading = false }) {
   const [savedSign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
   const sign = gexSignOf(days, savedSign)
   const [savedTrendWindow, setTrendWindow] = usePersistedState('optionanalytics.oiReplay.gexTrendWindow', GEX_TREND_DEFAULTS.window)
@@ -356,12 +356,17 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
           {touchOrNarrow ? <Select size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} style={{ width: 150 }} /> : <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} />}
         </Space>
       </Tooltip>
+      {onAllExpiries && (
+        <Tooltip title="As the GEX platforms do: the GEX of the current expiry, the next and the monthly added up (the monthly once), each with its own time to expiry and IVs - the far expiries hold gamma the current one alone misses, above all early in the week. Unticked: the current expiry alone. A past day's next expiry is ATM ± 3 strikes (all the data source gives).">
+          <Checkbox checked={!!allExpiries} onChange={(e) => onAllExpiries(e.target.checked)} style={{ fontSize: 12 }}>All expiries{expiriesLoading ? ' (loading…)' : ''}</Checkbox>
+        </Tooltip>
+      )}
       <Popover content={HOW_TO_READ} title="How to read GEX" trigger="click" placement="bottomLeft">
         <Button size="small" type="link" style={{ padding: 0 }}>How to read</Button>
       </Popover>
       {/* OI Replay's live "Σ 3 expiries": the numbers add each expiry's own GEX (gex.js `chains`). */}
       {now?.expiries > 1 && (
-        <Tooltip title={`Σ 3 expiries is on: ${now.expiries} expiries' GEX added up - the current, the next and the monthly (the monthly once, when it already is the current or next) - each with its own forward, time to expiry and IVs from its own premiums. The forward, ATM and IV shown are the current expiry's.`}>
+        <Tooltip title={`${now.expiries} expiries' GEX added up - the current, the next and the monthly (the monthly once, when it already is the current or next) - each with its own forward, time to expiry and IVs from its own premiums. The forward, ATM and IV shown are the current expiry's.`}>
           <Tag color="blue" style={{ margin: 0 }}>Σ {now.expiries} expiries</Tag>
         </Tooltip>
       )}
