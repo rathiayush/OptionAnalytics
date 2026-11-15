@@ -231,8 +231,9 @@ test('live: footprint minutes (loaded) and candle minutes (the feed\'s since) ma
   const loaded = { time: iso(at(0)), open: 100, high: 104, low: 100, close: 104, levels: [{ price: 100, buy: 10, sell: 0 }, { price: 103, buy: 0, sell: 6 }] }
   const live = { time: iso(at(1)), open: 104, high: 109, low: 104, close: 108, volume: 20 } // no levels: spread over 100-105-row... 104 -> rows 100, 105
   const vp = dayVolumeProfile([loaded, live], 5)
-  // Row 100: the footprint's 16 + half the live minute's 20 (it spans rows 100 and 105, an up candle - bought).
-  assert.deepEqual(vp.rows.map((r) => [r.price, r.buy, r.sell]), [[100, 20, 6], [105, 10, 0]])
+  // Row 100: the footprint's 16 + half the live minute's 20 (it spans rows 100 and 105), split by where it closed in its
+  // range - 108 in 104 - 109 = 80% buying, not the whole candle to the buyers.
+  assert.deepEqual(vp.rows.map((r) => [r.price, +r.buy.toFixed(6), +r.sell.toFixed(6)]), [[100, 18, 8], [105, 8, 2]])
 })
 
 test('live spot: the newest prices, the open kept, and a minute\'s volume the most any source has', () => {

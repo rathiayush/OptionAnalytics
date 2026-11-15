@@ -69,15 +69,18 @@ export function dayVolumeProfile(bars, rowSize) {
 }
 
 /** A candle's volume as footprint levels: spread evenly over the `rowSize` rows its range covers (orderFlowMath's
- *  volumeProfileFromCandles, one candle at a time). */
+ *  volumeProfileFromCandles, one candle at a time). A candle carries no aggressor side, so its buy / sell split is the close's
+ *  place in its range (close location: at the high all buying, at the low all selling, flat half each) - it gave the WHOLE
+ *  candle to one side by its colour, so a live minute up 1 point on heavy two-way trade read as pure buying in the delta. */
 function spreadLevels(c, rowSize) {
   const volume = c.volume ?? (c.buy ?? 0) + (c.sell ?? 0)
   if (!(volume > 0) || !(c.high >= c.low) || !(c.low > 0)) return []
   const bottom = Math.floor(c.low / rowSize + 1e-9) * rowSize
   const n = Math.round((Math.floor(c.high / rowSize + 1e-9) * rowSize - bottom) / rowSize) + 1
   const share = volume / n
-  const up = c.close >= c.open
-  return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: up ? share : 0, sell: up ? 0 : share }))
+  const range = c.high - c.low
+  const buyShare = range > 0 && Number.isFinite(c.close) ? Math.min(1, Math.max(0, (c.close - c.low) / range)) : 0.5
+  return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: share * buyShare, sell: share * (1 - buyShare) }))
 }
 
 /** A futures day the server recorded only from part way (it restarted - a deploy - during or after the session): its
