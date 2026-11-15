@@ -329,8 +329,9 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.textBaseline = 'middle'
         ctx.fillText(text, pillX + 4, pillY + 7.5)
       }
-      for (const a of bar.absorption ?? []) marker(a.price, a.side, 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
-      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, 'EXH', EXH_COLOR)
+      // A scored read (flowReads.js) carries its score, 0 - 100, on the pill.
+      for (const a of bar.absorption ?? []) marker(a.price, a.side, a.score != null ? `ABS ${a.score}` : 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
+      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, e.score != null ? `EXH ${e.score}` : 'EXH', EXH_COLOR)
 
       // Finished / unfinished auction at the high and the low: a tag just outside the extreme row; an unfinished one a
       // dotted line on to the bar that traded back into it (until then a magnet), or to the right edge while open.

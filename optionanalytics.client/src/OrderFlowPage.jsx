@@ -26,6 +26,7 @@ import { DeltaRulesCard } from './OrderFlowDeltaRules.jsx'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
+import { FLOW_READ_SCORES, scoredFlowReads, withScoredReads } from './flowReads.js'
 import { BookPressureCard, LiquidityNetCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -192,6 +193,10 @@ export default function OrderFlowPage() {
   const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.orderFlow.rowDelta', false)
   // Finished (FA) / unfinished (UA) auction at each bar's high and low.
   const [showAuctions, setShowAuctions] = usePersistedState('optionanalytics.orderFlow.auctions', true)
+  // The footprint's ABS / EXH marks from the SCORED read (flowReads.js) - on by default; off = the first one-bar rules.
+  // The scanner and the bias keep those first rules either way.
+  const [scoredReads, setScoredReads] = usePersistedState('optionanalytics.orderFlow.scoredReads', true)
+  const [readMinScore, setReadMinScore] = usePersistedState('optionanalytics.orderFlow.scoredReadsMin', 50)
   // Heavy icebergs and big orders go to Telegram FROM THE SERVER (OrderFlowTelegramAlerts - page open or not) at the
   // thresholds an admin sets here (OrderFlowTelegramSettings); the page sends none of its own.
   const [showProfile, setShowProfile] = usePersistedState('optionanalytics.orderFlow.showProfile', true)
@@ -475,18 +480,18 @@ export default function OrderFlowPage() {
   // Delta / cumulative delta from the 09:15 open: when the server started recording after the open, the
   // minutes before are an estimate from candles (display only - see cvdBackfill.js).
   const firstMinuteMs = view?.minuteBars?.length ? new Date(view.minuteBars[0].time).getTime() : null
-  const shown = useMemo(() => withBackfill(bars, view?.backfill, timeframe, firstMinuteMs), [bars, view?.backfill, timeframe, firstMinuteMs])
   // Session VWAP of the futures: from the 1-minute bars (the precise one), read at each footprint bar
   // (alignToBars - on the bar's own time) for the footprint, and minute by minute for the heatmap.
   const vwapMinutes = useMemo(() => sessionVwapFromBars((view?.minuteBars ?? []).map((b) => ({
     time: Math.floor(new Date(b.time).getTime() / 1000) + 19800, high: b.high, low: b.low, close: b.close, volume: (b.buy ?? 0) + (b.sell ?? 0),
   }))) ?? [], [view?.minuteBars])
-  const footprintVwap = useMemo(() => {
-    if (!showVwap || !vwapMinutes.length) return null
+  const barVwap = useMemo(() => {
+    if (!vwapMinutes.length) return null
     const chartBars = bars.map((b) => ({ time: Math.floor(new Date(b.time).getTime() / 1000) + 19800 }))
     const byTime = new Map(alignToBars(vwapMinutes, chartBars).map((p) => [p.time, p.value]))
     return chartBars.map((b) => byTime.get(b.time) ?? null)
-  }, [showVwap, vwapMinutes, bars])
+  }, [vwapMinutes, bars])
+  const footprintVwap = showVwap ? barVwap : null
   const heatmapVwap = useMemo(() => (showVwap ? vwapMinutes.map((p) => ({ t: (p.time - 19800) * 1000 + 59_000, value: p.value })) : null), [showVwap, vwapMinutes])
   // Volume profile levels always from the PREVIOUS session (POC, VAH, VAL, HVN, LVN); market profile
   // (TPO) from the previous session plus today's developing one.
@@ -501,6 +506,19 @@ export default function OrderFlowPage() {
     return () => { cancelled = true }
   }, [underlying, sessionDate, rowSize, expiryQuery])
   const prevVp = useMemo(() => (prevSession.data ? sessionVolumeProfile(prevSession.data.bars) : null), [prevSession.data])
+  // The footprint's absorption / exhaustion marks: the SCORED read (flowReads.js - an effort that failed at a price, over
+  // the last bars, with the book and the levels known at each bar: its own VWAP, yesterday's POC / VAH / VAL), or - the
+  // box off, or an estimated day (its rows are a spread, not trades) - the first one-bar rules. `bars` itself (the bias,
+  // the scanner's reads) keeps the first rules.
+  const useScored = scoredReads && !estimated
+  const minScore = FLOW_READ_SCORES.includes(readMinScore) ? readMinScore : 50
+  const markedBars = useMemo(() => {
+    if (!useScored) return bars
+    const fixed = prevVp?.poc != null ? [{ price: prevVp.poc, label: 'yesterday\'s POC' }, { price: prevVp.vah, label: 'yesterday\'s VAH' }, { price: prevVp.val, label: 'yesterday\'s VAL' }] : []
+    const levels = (i) => (barVwap?.[i] != null ? [...fixed, { price: barVwap[i], label: 'VWAP' }] : fixed)
+    return withScoredReads(bars, scoredFlowReads(bars, { rowSize, timeframe, columns: noDepth ? null : view?.heatmap, levels, minScore }))
+  }, [useScored, bars, rowSize, timeframe, noDepth, view?.heatmap, prevVp, barVwap, minScore])
+  const shown = useMemo(() => withBackfill(markedBars, view?.backfill, timeframe, firstMinuteMs), [markedBars, view?.backfill, timeframe, firstMinuteMs])
   const tpoRow = tpoRowFor(underlying, rowSize)
   const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
   const todayTpo = useMemo(() => tpoProfile(view?.minuteBars ?? [], tpoRow), [view?.minuteBars, tpoRow])
@@ -649,7 +667,7 @@ export default function OrderFlowPage() {
 
   const signals = useMemo(() => {
     const list = []
-    for (const bar of bars.slice(-120)) {
+    for (const bar of markedBars.slice(-120)) {
       for (const z of bar.stacked) {
         list.push({ key: `s-${bar.time}-${z.side}-${z.low}`, time: bar.time, bullish: z.side === 'buy', type: 'Stacked imbalance',
           text: `${z.side === 'buy' ? 'Buy' : 'Sell'} stack ${z.low}–${z.high} (${z.rows} rows) - ${z.side === 'buy' ? 'support' : 'resistance'}` })
@@ -682,7 +700,7 @@ export default function OrderFlowPage() {
           : `${t.buy ? 'Buy' : 'Sell'} ${formatVolume(t.quantity, lotSize, true)} lots at ${t.price}` })
     }
     return list.sort((a, b) => b.time - a.time).slice(0, 200)
-  }, [bars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps, suddenLog])
+  }, [markedBars, view?.icebergs, largeTrades, lotSize, showLots, estimated, bigLabel, liquidity, pullStack.signals, sweeps, suddenLog])
 
   // Filter the Signals list: by type, by direction, by minimum confidence (kept across reloads).
   const [signalTypes, setSignalTypes] = usePersistedState('optionanalytics.orderFlow.signalTypes', [])
@@ -789,6 +807,14 @@ export default function OrderFlowPage() {
             <Tooltip title="At each bar's high and low: FA = finished auction (no selling at the top row / no buying at the bottom row - that side ran out); UA = unfinished (both sides traded at the extreme - price tends to come back), its dotted line running on until a later bar trades back into it. Read on the footprint's rows; not on an estimated day.">
               <Checkbox checked={showAuctions} onChange={(e) => setShowAuctions(e.target.checked)}><Text style={{ fontSize: 12 }}>Auctions</Text></Checkbox>
             </Tooltip>
+            <Tooltip title="The ABS / EXH marks from the scored read: absorption = heavy aggression at a price (over the last bars) that failed - the bar closed back off it, the delta did not move price, the resting orders there held or refilled; exhaustion = a new high / low on less volume and delta than the push before it, little traded at the extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree. Off = the first one-bar rules. Not on an estimated day. The scanner's strategies keep the first rules either way.">
+              <Checkbox checked={scoredReads} onChange={(e) => setScoredReads(e.target.checked)}><Text style={{ fontSize: 12 }}>Scored ABS / EXH</Text></Checkbox>
+            </Tooltip>
+            {scoredReads && !estimated && (
+              <Tooltip title="Marks are drawn from this score">
+                <Select size="small" value={minScore} onChange={setReadMinScore} style={{ width: 92 }} options={FLOW_READ_SCORES.map((v) => ({ value: v, label: `score ≥ ${v}` }))} />
+              </Tooltip>
+            )}
             </>)}
           </Space>
           {isReplay && (
@@ -1024,8 +1050,11 @@ export default function OrderFlowPage() {
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and
           its side comes from the book just before it - at or above the best offer = buyers aggressive, at or below the best bid = sellers
           aggressive, otherwise by tick direction. Dhan itself says its WebSocket is event-based snapshot data delivered second by second, not tick-by-tick, so several trades between two snapshots count as one print (at the last price, on one side) - the footprint rows and delta can therefore differ from a tick-by-tick chart such as GoCharting. Imbalance compares diagonally (buying
-          at a price vs selling one row below); a stack is that many imbalanced rows in a row. Absorption = heavy aggression at a bar's
-          extreme that failed to push price on (A); exhaustion = almost nothing traded at the extreme (E). An iceberg is a level that keeps
+          at a price vs selling one row below); a stack is that many imbalanced rows in a row. Absorption (ABS) = heavy aggression
+          at a price - over the last bars - that failed: the bar closed back off it, the delta did not move price, the resting orders there
+          held or refilled; exhaustion (EXH) = a new high / low on less volume and delta than the push before it, little traded at the
+          extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree (the &quot;Scored ABS / EXH&quot; box;
+          off = the first one-bar rules, which the strategy scanner reads either way). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.
           The volume profile is the traded volume per row over the bars shown, with its point of control (POC) and the 70% value area
           (VAH-VAL). Load day replays any date: exactly when the server saw it live (today, or the last few days in its memory - green dot in

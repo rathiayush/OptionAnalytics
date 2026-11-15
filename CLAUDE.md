@@ -1440,6 +1440,25 @@ When adding or changing a strategy:
   fell off the far edge of the 200 levels as price moved is out of view, not cancelled (`pulledByRow`). Live the push's
   whole book, replayed the column at the clock; nothing after the clock (`tests/book-ladder.test.mjs`). A day with no
   depth (estimated / rebuilt) says so. Drawing only - it feeds no signal or strategy.
+  SCORED ABSORPTION / EXHAUSTION on the footprint (asked for - "is there any better way to identify exhaustion / absorption
+  on the footprint ... please work on this area", "yes, you fix absorption exhaustion"; `flowReads.js` - `scoredFlowReads` /
+  `withScoredReads`, `tests/flow-reads.test.mjs`): the Order Flow page's footprint and signal list show ABS / EXH from this
+  read, each mark with its 0 - 100 SCORE on the pill ("Scored ABS / EXH" box, on by default -
+  `optionanalytics.orderFlow.scoredReads`; marks from "score ≥" 40 / 50 (default) / 60 / 70 - `...scoredReadsMin`). THE
+  STRATEGY SCANNER, THE BIAS AND OI REPLAY'S REVIEW FOOTPRINT KEEP `analyzeBars`' FIRST ONE-BAR RULES (they are measured on
+  them) - the page marks a COPY of the bars (`markedBars`); an estimated day keeps the candle rules. ABSORPTION = an effort
+  that failed at a price (at the low, bullish; the high the mirror), parts 0 - 1 weighted 30 / 20 / 20 / 15 / 15: effort
+  (the selling in the bar's bottom third - at least two rows - with the same prices in the 2 bars before, against 1.5x a
+  usual bar's selling over the last 20; the bar's own at least half a usual bar's and 1.5x the buying there - required, and
+  effort >= 0.5), result (closed above the zone, >= 30% off the low - required), efficiency (sellers ahead on the bar yet it
+  closed up, or moved less a lot of delta than usual), context (a new 10-bar low 0.7, a retest of it 0.5, past the bar
+  before 0.35, + 0.5 at a level - the bar's OWN VWAP, yesterday's POC / VAH / VAL), book (what traded there against the most
+  the bids showed through the bar, and how much still stands). EXHAUSTION = participation fading at a NEW 10-bar high
+  (bearish; the low the mirror), closed >= 25% off it, weights 20 / 25 / 15 / 15 / 25: less volume than the last push (the
+  last bar that made a new high; none = the usual bar), less delta (none at all = 1; + 0.3 on a lower cumulative delta),
+  little in the top TWO rows (one row is an artefact of Dhan's one-second packets), the POC not following, the rejection. A
+  part that cannot be read (no book, no push) is left out and the rest re-weighted. Each bar from itself and the bars
+  before (the forming bar's read can change until it closes, as the first rules' did). A read - no strategy, alert or order.
   POSITIONING, BOOK PRESSURE, LIQUIDITY ADDED vs PULLED (asked for - "delta + OI positioning on futures ... book pressure
   line ... net liquidity added versus pulled ... build these in separate card components"; three cards under the chart and
   order book - `FlowToolCards.jsx`, the reading `flowTools.js`, `tests/flow-tools.test.mjs`): (1) `PositioningCard` - the
