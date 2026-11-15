@@ -909,14 +909,18 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       })
       ctx.stroke()
     }
-    ctx.lineWidth = 1.5
-    if (rowH >= 3) {
-      stepLine((c) => bestQuotes(c).bid, 'rgba(38,214,154,0.95)')
-      stepLine((c) => bestQuotes(c).ask, 'rgba(255,99,99,0.95)')
-    } else {
-      stepLine((c, i) => mids[i], '#ffffffdd')
+    // Drawn LAST (after the volume dots and the prints - see "The price line" below), with a dark outline: the dots sit
+    // right along the price's path and hid it, and a thin line was lost over the hot cells.
+    const drawPriceLines = () => {
+      const lines = rowH >= 3
+        ? [[(c) => bestQuotes(c).bid, 'rgb(38,214,154)'], [(c) => bestQuotes(c).ask, 'rgb(255,99,99)']]
+        : [[(c, i) => mids[i], '#ffffff']]
+      ctx.lineJoin = 'round'
+      for (const [priceOf] of lines) { ctx.lineWidth = 4; stepLine(priceOf, 'rgba(0,0,0,0.75)') }
+      for (const [priceOf, color] of lines) { ctx.lineWidth = 2; stepLine(priceOf, color) }
+      ctx.lineWidth = 1
+      ctx.lineJoin = 'miter'
     }
-    ctx.lineWidth = 1
 
     // Icebergs
     for (const ice of icebergs ?? []) {
@@ -1008,6 +1012,9 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.strokeStyle = '#ffffffaa'
       ctx.beginPath(); ctx.arc(xTime(t), yPrice(trade.price), r, 0, Math.PI * 2); ctx.fill(); ctx.stroke()
     }
+
+    // The price line: over the dots and the prints, under the signal pills.
+    drawPriceLines()
 
     // Liquidity signals: a labelled pill at the signal's price and time (green = bullish, red =
     // bearish), with its confidence.
