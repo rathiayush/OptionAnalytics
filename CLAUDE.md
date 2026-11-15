@@ -532,7 +532,7 @@ All must pass before committing.
   added - `flowCePoints`) given a side as the Option CDV does - `barProxyDelta` (where the close sits in the bar's range) x
   `deltaWeight` (the strike's delta at that minute's spot; volume weighted the same) - added up a minute and SPREAD over the
   spot rows that minute's spot bar covered (its last price when it has none); Net = CE Δ − PE Δ (+ bullish: calls bought /
-  puts sold), CE / PE alone their own buying (+) / selling (−); in lots of the index (`PAPER_TRADE_LOT_SIZE`). FUTURES
+  puts sold; asked for - "for options PE − CE" - the side picker also has "Net (PE − CE)", + = puts ahead, the Signal backtest still reads CE − PE), CE / PE alone their own buying (+) / selling (−); in lots of the index (`PAPER_TRADE_LOT_SIZE`). FUTURES
   (`futuresDeltaProfile`): the Order Flow day's footprint (`/api/order-flow/{u}/day/{date}` at the row size, with
   `backfillBars` - the minutes the server did not record live estimated from 1-minute candles and TAGGED, a whole day
   estimated when it holds none), `dayVolumeProfile` regrouped, delta = buy − sell, in lots (`meta.lotSize`); live it is

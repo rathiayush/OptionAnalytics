@@ -32,9 +32,10 @@ const MIN = 60_000
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 const minuteOf = (ms) => Math.floor(ms / MIN) * MIN
 
-/** The option profile's sides: NET (CE delta - PE delta, + bullish), CE, PE. */
+/** The option profile's sides: NET (CE delta - PE delta, + bullish), NET the other way (PE - CE, + puts ahead), CE, PE. */
 export const OPTION_DELTA_SIDES = [
   { value: 'net', label: 'Net (CE − PE)' },
+  { value: 'netpe', label: 'Net (PE − CE)' },
   { value: 'ce', label: 'CE' },
   { value: 'pe', label: 'PE' },
 ]
@@ -127,9 +128,9 @@ function optionDeltaAccumulator(rowSize) {
       return spread(rows, m.low, m.high, rowSize, { ceVol: m.ceVol, peVol: m.peVol, ce: m.ce, pe: m.pe })
     },
     profile(side = 'net') {
-      const pick = side === 'ce' ? (r) => [r.ceVol, r.ce] : side === 'pe' ? (r) => [r.peVol, r.pe] : (r) => [r.ceVol + r.peVol, r.ce - r.pe]
+      const pick = side === 'ce' ? (r) => [r.ceVol, r.ce] : side === 'pe' ? (r) => [r.peVol, r.pe] : side === 'netpe' ? (r) => [r.ceVol + r.peVol, r.pe - r.ce] : (r) => [r.ceVol + r.peVol, r.ce - r.pe]
       const list = [...rows.values()].map((r) => { const [volume, delta] = pick(r); return { ...r, volume, delta } })
-      return { ...finishDeltaProfile(list, rowSize), side, totals: { ce: totals.ce, pe: totals.pe, net: totals.ce - totals.pe }, minutes: count }
+      return { ...finishDeltaProfile(list, rowSize), side, totals: { ce: totals.ce, pe: totals.pe, net: side === 'netpe' ? totals.pe - totals.ce : totals.ce - totals.pe }, minutes: count }
     },
   }
 }
