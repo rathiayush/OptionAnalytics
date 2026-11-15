@@ -1474,9 +1474,9 @@ All must pass before committing.
   changes; the status is the one known at the clock (`tests/flow-reads.test.mjs`). A part that cannot be read (no book, no
   push) is left out and the rest re-weighted. Each bar from itself and the bars before (the forming bar's read can change until it
   closes, as the first rules' did). A read - no strategy, alert or order.
-  POSITIONING, BOOK PRESSURE, LIQUIDITY ADDED vs PULLED (asked for - "delta + OI positioning on futures ... book pressure
-  line ... net liquidity added versus pulled ... build these in separate card components"; three cards under the chart and
-  order book - `FlowToolCards.jsx`, the reading `flowTools.js`, `tests/flow-tools.test.mjs`): (1) `PositioningCard` - the
+  POSITIONING and ORDER FLOW IMBALANCE (asked for - "delta + OI positioning on futures ... build these in separate card
+  components"; two cards under the chart and order book - `FlowToolCards.jsx`, the reading `flowTools.js`,
+  `tests/flow-tools.test.mjs`): (1) `PositioningCard` - the
   futures candles (1 / 3 / 5 / 15 min, default 5, `optionanalytics.orderFlow.positioningTf`) coloured by the candle's
   AGGRESSOR DELTA with the change in the FUTURES' OI over it (`positioningCandles` - the OI at the candle's end less the
   candle before's; useDayOi's `futures`, a replayed day's reading known a minute after its minute - `lag`, nothing after the
@@ -1484,19 +1484,21 @@ All must pass before committing.
   LIQUIDATION; a delta under 5% of the volume = balanced, no OI change / reading = no read; each candle's OI change as bars
   under it, the delta done under each read (day and last 6 candles) and a read (fresh vs closing; "two-sided" when the
   other side is >= 60% as large - `positioningRead`). The OI is the NEAREST contract's: another contract picked = the card
-  says so. (2) `BookPressureCard` - `bookPressure`: resting bids against offers within 10 rows of the touch, a row
-  weighing less the further out (1 ... 1/10), (bids − offers) / (bids + offers) x 100, as a line under the book's mid
-  through the day (10-second buckets, smoothed Raw / 1 min / 5 min - `...bookPressureSmooth`), and `pressureRead` over the
-  last N min (`...bookPressureWindow`): the book's lean, or a move the book does not back (price up >= 0.05% while the
-  offers outweigh the bids by 15+ = "rising on thin bids", and the mirror). (3) `LiquidityNetCard` - `liquidityFlow`'s
-  `cumBid` / `cumAsk`: between two book columns, at the rows away from the touch in BOTH (the PULL / STACK signals' rule)
-  and inside both books (a level off the far edge is not cancelled), a rise = orders ADDED, a drop = PULLED; added − pulled
-  a side as a running line from the day's first column, within 10 / 20 / 30 (default) / 50 rows (`...liquidityNetBand`),
-  and `liquidityRead` over the last N min (bids stacked / pulled, offers stacked / pulled, quiet). The columns are a
-  SAMPLE of the book (2 s live, ~12 s+ on a loaded day), so the lines are a floor and a loaded day reads smaller than
-  the same day live - said on the card. Each column is parsed once (WeakMaps - a live day is ~11 000 columns); every point
-  from the columns up to it. No depth (estimated / rebuilt day) = the two book cards say so. Reads only - they feed no
-  signal, strategy or alert, and `liquidityMap` / `pullStackSignals` are untouched.
+  says so. (2) `OfiCard` - Cont, Kukanov & Stoikov's ORDER FLOW
+  IMBALANCE at the best bid / offer (asked for - it REPLACED the "Book pressure" and "Liquidity added vs pulled" cards,
+  removed on request, code and tests: "book pressure also doesn't seem useful"): between two book columns (`ofiSeries` /
+  `ofiStep`, the best row of each side in the heatmap's rows) e = q_bid(now)·[bid now >= before] − q_bid(before)·[bid now
+  <= before] − q_ask(now)·[ask now <= before] + q_ask(before)·[ask now >= before] - bids joining / stepping up and offers
+  taken add, offers joining / stepping down and bids hit subtract (trades, limit orders and cancels at the touch in one
+  number); 0 across a gap over 60 s and after a one-sided book; summed into candles of 1 / 3 / 5 / 15 min (default 1,
+  `optionanalytics.orderFlow.ofiTf`, `ofiCandles` - the mid's OHLC, the OFI as green / red bars under it), the day's running
+  total, `ofiRead` over the last 5 candles (flow with the price / flow absorbed - price not following / even) and
+  "With the price" MEASURED on the day (`ofiAgreement`: the share of candles whose OFI and move agreed in the same candle,
+  and against the NEXT candle's move - near 50% = it does not forecast). The columns are a SAMPLE of the book (2 s live,
+  ~12 s+ on a loaded day), so a loaded day reads less than the same day live - said on the card. Each column parsed once
+  (WeakMap); every point from the columns up to it (a cut at the clock = the whole day's up to it). No depth (estimated /
+  rebuilt day) = the card says so. Reads only - they feed no signal, strategy or alert, and `liquidityMap` /
+  `pullStackSignals` are untouched.
   RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
   Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
