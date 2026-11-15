@@ -1,3 +1,4 @@
+import { HEDGER_GROUPS, gexSignOf, gexSignOptions, sharesText } from './participantOi.js'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Button, Col, Modal, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { InfoCircleOutlined } from '@ant-design/icons'
@@ -24,7 +25,8 @@ const IST_MS = 330 * 60_000
 /** HH:mm in IST. */
 const istHhmm = (ms) => new Date(ms + IST_MS).toISOString().slice(11, 16)
 
-const cr = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${Math.round(Math.abs(v) / CR).toLocaleString('en-IN')} Cr` : '-')
+// Whole crores; one decimal under ₹10 Cr (the NSE-positions net is a small share of Standard's).
+const cr = (v) => (Number.isFinite(v) ? `${v < 0 ? '−' : ''}₹${(Math.abs(v) / CR < 10 ? Math.round(Math.abs(v) / CR * 10) / 10 : Math.round(Math.abs(v) / CR)).toLocaleString('en-IN')} Cr` : '-')
 const num = (v, digits = 0) => (Number.isFinite(v) ? v.toFixed(digits) : '-')
 // ₹ crore, short: thousands of crore as "k".
 const crShort = (v) => {
@@ -309,12 +311,13 @@ const HOW_TO_READ = (
  * GEX (gamma exposure) from the day's option OI, IV and premium (gex.js - `days`, useGexDays), up to the replay clock
  * (`asOfMs`; null - live - every minute given; 0 - the replay not started), so it runs with OI Replay, replayed or live.
  */
-export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260 }) {
-  const [sign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
+export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = null, height = 260, participants = null }) {
+  const [savedSign, setSign] = usePersistedState('optionanalytics.oiReplay.gexSign', 'standard')
+  const sign = gexSignOf(days, savedSign)
   const [savedTrendWindow, setTrendWindow] = usePersistedState('optionanalytics.oiReplay.gexTrendWindow', GEX_TREND_DEFAULTS.window)
   const trendWindow = GEX_TREND_WINDOWS.includes(savedTrendWindow) ? savedTrendWindow : GEX_TREND_DEFAULTS.window
   // Both signs, always: the card shows the one chosen; the line under the read says whether the other agrees.
-  const minutes = useMemo(() => gexUpTo((sign === 'buildup' ? days?.buildup : days?.standard) ?? [], asOfMs), [days, sign, asOfMs])
+  const minutes = useMemo(() => gexUpTo(days?.[sign] ?? [], asOfMs), [days, sign, asOfMs])
   const now = minutes.at(-1)
   // Smart detection: the truth table's row for how the net GEX and spot moved over the last `trendWindow` minutes.
   const trend = useMemo(() => gexTrend(minutes, { window: trendWindow }), [minutes, trendWindow])
@@ -324,6 +327,7 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   // closed by its ✕ - as a tooltip they ran past the bottom of a phone's screen with no way to scroll or close them.
   const touchOrNarrow = useMediaQuery('(hover: none), (max-width: 768px)')
   const [tableOpen, setTableOpen] = useState(false)
+  const narrowSigns = useMediaQuery('(max-width: 768px)')
   const both = useMemo(() => {
     const standardNow = gexUpTo(days?.standard ?? [], asOfMs).at(-1)
     const buildupNow = gexUpTo(days?.buildup ?? [], asOfMs).at(-1)
@@ -346,12 +350,21 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
-      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard.">
+      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard. NSE positions: not assumed - the hedgers' real net share of the calls and of the puts from NSE's participant-wise open interest of the session before (one number a side for all NSE index options, so it leans the net and the flip, not a strike). NSE + build-up: starts from those positions, then the OI changes signed by their IV.">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>Sign</Text>
-          <Segmented size="small" value={sign} onChange={setSign} options={[{ value: 'standard', label: 'Standard' }, { value: 'buildup', label: 'OI build-up' }]} />
+          {/* Four signs do not fit a phone's width as a row of buttons (the page came out wider than the screen). */}
+          {narrowSigns ? <Select size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} style={{ width: 150 }} /> : <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} />}
         </Space>
       </Tooltip>
+      {participants?.shares && (
+        <Tooltip title="Whose positions count as the dealers' (the ones hedging with the index) under the NSE signs.">
+          <Space size={4}>
+            <Text type="secondary" style={{ fontSize: 12 }}>Hedgers</Text>
+            <Select size="small" value={participants.shares.group} onChange={participants.setGroup} options={HEDGER_GROUPS.map(({ value, label }) => ({ value, label }))} style={{ width: 136 }} />
+          </Space>
+        </Tooltip>
+      )}
       <Popover content={HOW_TO_READ} title="How to read GEX" trigger="click" placement="bottomLeft">
         <Button size="small" type="link" style={{ padding: 0 }}>How to read</Button>
       </Popover>
@@ -441,6 +454,29 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
           )}
         </div>
       </FoldText>
+      {participants && (
+        <FoldText id="gex.participants" label="NSE positions" style={{ marginBottom: 8 }}
+          summary={participants.shares ? `NSE positions (${participants.shares.date}): ${sharesText(participants.shares)}` : participants.loading ? 'NSE positions: loading…' : 'NSE positions: not available for this day - the signs are the assumed ones'}>
+          <div style={{ fontSize: 12 }}>
+            {participants.shares ? (
+              <>
+                NSE&apos;s participant-wise open interest at the close of <b>{participants.shares.date}</b> (the session before - nothing
+                later is read): <b>{sharesText(participants.shares)}</b> ({num(participants.shares.callNet)} of {num(participants.shares.callTotal)} call
+                contracts, {num(participants.shares.putNet)} of {num(participants.shares.putTotal)} put contracts). Under &quot;NSE
+                positions&quot; every call&apos;s OI counts × {participants.shares.call.toFixed(3)} and every put&apos;s × {participants.shares.put.toFixed(3)} as
+                the dealers&apos; (Standard: × 1 and × −1) - so the net is much smaller than Standard&apos;s: the real books are close to
+                balanced. It is one number a side for ALL NSE index options (every index, strike and expiry), so it sets which way the
+                hedgers lean and the flip; the walls and max gamma do not depend on it.
+                {participants.bse ? ' SENSEX trades on BSE - NSE\'s positions are a stand-in here.' : ''}
+                {days?.participant && (() => {
+                  const nseNow = gexUpTo(days.participant, asOfMs).at(-1)
+                  return nseNow ? <> Net GEX now: <span style={{ color: gexColor(nseNow.net) }}>{cr(nseNow.net)}</span> on NSE positions vs <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)}</span> Standard.</> : null
+                })()}
+              </>
+            ) : participants.loading ? 'Loading NSE\'s participant-wise open interest…' : 'NSE\'s participant-wise open interest could not be read for the session before this day - Standard and OI build-up (assumed signs) are shown.'}
+          </div>
+        </FoldText>
+      )}
       <FoldText id="gex.agreement" label="the two signs' verdict" style={{ marginBottom: 8 }}>
         <div style={{ fontSize: 12 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
