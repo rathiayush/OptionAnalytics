@@ -13,6 +13,7 @@
 // the card's Retry walks again (nothing kept is asked again). A click, never a timer. Pure - no React (the cards' hook,
 // `usePastDeltaSessions`, is in DeltaProfileCard.jsx): the Signal backtest's loader and runners read it too.
 
+import { optionOiMinutes } from './oiProfile.js'
 import { optionDeltaMinutes } from './deltaProfile.js'
 import { FETCH_ROWS, barsKnownAt, withBackfillBars } from './profileZones.js'
 
@@ -65,7 +66,8 @@ export function optionDayRecord(date, body) {
   const spot = barsKnownAt(body?.spotCandlesOneMinute ?? [], null)
     .map((b) => ({ time: msOf(b.time), open: b.open, high: b.high, low: b.low, close: b.close }))
     .filter((b) => b.close > 0)
-  return { date, items: optionDeltaMinutes(body?.cePoints, body?.pePoints, spot), candles: spot }
+  // `oi`: the options' OI change a minute too (oiProfile.js - the card's "OI (CE − PE)" choice).
+  return { date, items: optionDeltaMinutes(body?.cePoints, body?.pePoints, spot), candles: spot, oi: optionOiMinutes(body?.cePoints, body?.pePoints, spot) }
 }
 
 /** The Order Flow day's minute bars IN LOTS (`meta.lotSize` - so days of another lot size add up right): the recorded
