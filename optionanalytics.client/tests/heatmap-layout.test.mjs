@@ -84,30 +84,34 @@ test('how long a level has rested: back while it holds at least half its size, s
 })
 
 // ---- As the professional heatmaps draw it: cutoffs + contrast curve, BBO, volume dots, the current order book ----
-import { HEAT_CONTRASTS, bestQuotes, cobBars, heatLevel, heatScale, volumeDots } from '../src/heatmapLayout.js'
+import { HEAT_SCALE, bestQuotes, cobBars, heatLevel, heatScale, volumeDots } from '../src/heatmapLayout.js'
 import { rowOf } from '../src/orderFlowMath.js'
 
-test('the colour scale runs between a lower and an upper cutoff of the sizes in view, on a contrast curve', () => {
+test('one professional colour scale: the smallest sizes dark, the biggest walls bright, a straight line between', () => {
   const sizes = Array.from({ length: 100 }, (_, i) => i + 1) // 1 .. 100
-  const s = heatScale(sizes, 'normal')
-  assert.equal(s.lo, 16)
-  assert.equal(s.hi, 98)
+  const s = heatScale(sizes)
+  assert.deepEqual(s, { lo: 16, hi: 99, gamma: 1 })
   assert.equal(heatLevel(10, s), 0, 'under the lower cutoff: the dark background')
-  assert.equal(heatLevel(99, s), 1, 'over the upper cutoff: the brightest')
-  const mid = heatLevel(57, s)
-  assert.ok(mid > 0.5 && mid < 1, `the curve lifts the middle sizes: ${mid}`)
-  assert.ok(heatLevel(40, s) < heatLevel(60, s), 'bigger is brighter')
-  // High contrast: more of the small orders are background, the top saturates sooner.
-  const high = heatScale(sizes, 'high'), low = heatScale(sizes, 'low')
-  assert.ok(high.lo > s.lo && high.hi < s.hi && low.lo < s.lo && low.hi > s.hi)
-  assert.equal(heatLevel(30, high), 0)
-  assert.ok(heatLevel(30, low) > 0)
+  assert.equal(heatLevel(99, s), 1, 'at the upper cutoff: the brightest')
+  assert.ok(Math.abs(heatLevel(57.5, s) - 0.5) < 1e-9, 'straight between the cutoffs')
   // Adaptive: the same wall is less bright among bigger orders.
   assert.ok(heatLevel(50, heatScale(sizes)) > heatLevel(50, heatScale(sizes.map((q) => q * 2))))
-  // Nothing in view / zeros / an unknown preset do not fail.
-  assert.deepEqual(heatScale([], 'normal'), { lo: 0, hi: 1, gamma: HEAT_CONTRASTS.normal.gamma })
-  assert.equal(heatScale(sizes, 'nope').lo, s.lo)
+  assert.deepEqual(heatScale([]), { lo: 0, hi: 1, gamma: HEAT_SCALE.gamma })
   assert.equal(heatLevel(5, heatScale([5, 5, 5])), 0)
+})
+
+test('on a real-looking book (heavy-tailed sizes, 1% walls) only a few cells light up - no confetti', () => {
+  let seed = 7
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd())) * Math.cos(2 * Math.PI * rnd())
+  for (const sigma of [0.5, 0.7, 1]) {
+    const sizes = Array.from({ length: 20000 }, () => Math.exp(6 + sigma * gauss()) * (rnd() < 0.01 ? 8 + 7 * rnd() : 1))
+    const s = heatScale(sizes)
+    const share = (from) => sizes.filter((q) => heatLevel(q, s) >= from).length / sizes.length
+    assert.ok(share(0.55) < 0.1, `cyan or brighter: ${share(0.55)}`)
+    assert.ok(share(0.8) < 0.04, `yellow or brighter: ${share(0.8)}`)
+    assert.ok(share(1) >= 0.015 && share(1) <= 0.025, `the brightest = the top 2%: ${share(1)}`)
+  }
 })
 
 test('the best bid / ask of a column and the current order book bars', () => {
