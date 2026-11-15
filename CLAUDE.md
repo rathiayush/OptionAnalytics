@@ -740,6 +740,7 @@ All must pass before committing.
   closed - a floor building; − = a ceiling). Each minute spread evenly over its rows (`oiProfileOf`), the run of the day
   (`useOptionRun`, loaded while either tick is on) cut at the clock, the sessions before from their runs (`optionDayRecord`
   keeps `oi` / `futuresOi` too). `tests/oi-profile.test.mjs` (worked values, first readings, a cut = the minutes up to it).
+  PREVIOUS PLUS THE DAY RUNNING (asked for - "when we select previous day it should also sum the live current day ... delta, OI delta and futures"): with "Previous session(s)" the Delta and OI Δ columns (spot's options, futures' footprint, both OI Δ) are the sessions BEFORE with the day up to the clock / live ON TOP - as OI Replay's delta cards (`deltaCardSessions`); the volume / market profile boxes stay the sessions before only.
   THE FLOATING REPLAY BAR (asked for - "on the market / volume profile and order flow pages a floating popover to run replay
   like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
   Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /

@@ -22,7 +22,7 @@ import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
 import {
   DEFAULT_VP_BARS, FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, VP_BAR_SIZES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, vpBarSize, withBackfillBars,
+  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, deltaCardSessions, profileSessions, volumeZones, vpBarSize, withBackfillBars,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -490,9 +490,10 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
   // option flow); null = off.
   const delta = useMemo(() => {
     if (!deltaSource) return null
-    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([profileBars], { rowSize: row }) }
+    // "Previous" = the sessions before PLUS the day running up to the clock / live on top (OI Replay's delta cards do the same).
+    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }).flat()], { rowSize: row }) }
     return deltaSource
-  }, [deltaSource, profileBars, row])
+  }, [deltaSource, known, past, dayCount, profileOf, row])
   const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
   const columns = useMemo(() => [delta && { ...delta, title: 'DELTA' }, oi && { ...oi, title: 'OI Δ' }].filter(Boolean), [delta, oi])
   const chartHeight = useChartHeight()
@@ -872,12 +873,12 @@ export default function ProfilesPage() {
   const optionRun = useOptionRun(index, effectiveDate, live, showDelta || showOi)
   const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta || showOi ? pastCount : 0, optionRun.flag)
   const optionMinutes = useMemo(
-    () => (showDelta && profileOf === 'today' ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
+    () => (showDelta ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
     [showDelta, profileOf, optionRun.ce, optionRun.pe, spotDay, live, clock],
   )
   const spotDelta = useMemo(() => {
     if (!showDelta) return null
-    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...(profileOf === 'today' ? [optionMinutes] : [])]
+    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...([optionMinutes])]
     const profile = optionDeltaProfileOf(sessions, { rowSize: row })
     const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
@@ -892,12 +893,12 @@ export default function ProfilesPage() {
   const oiPast = (key) => (pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d[key] ?? NO_BARS) : [])
   const spotOi = useMemo(() => {
     if (!showOi) return null
-    const today = profileOf === 'today' ? [optionOiMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: oiClock })] : []
+    const today = [optionOiMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: oiClock })]
     return { profile: oiProfileOf([...oiPast('oi'), ...today], { rowSize: row }), label: 'option OI', text: 'option OI added (PE − CE: + floor / − ceiling)', note: oiNote }
   }, [showOi, profileOf, optionRun.ce, optionRun.pe, spotDay, oiClock, optionPast.sessions, pastCount, row, oiNote]) // eslint-disable-line react-hooks/exhaustive-deps
   const futuresOi = useMemo(() => {
     if (!showOi) return null
-    const today = profileOf === 'today' ? [futuresOiMinutes(optionRun.futures, { asOfMs: oiClock })] : []
+    const today = [futuresOiMinutes(optionRun.futures, { asOfMs: oiClock })]
     return { profile: oiProfileOf([...oiPast('futuresOi'), ...today], { rowSize: row }), label: 'futures OI', text: 'futures OI (+ opened / − closed)', note: oiNote }
   }, [showOi, profileOf, optionRun.futures, oiClock, optionPast.sessions, pastCount, row, oiNote]) // eslint-disable-line react-hooks/exhaustive-deps
   const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
