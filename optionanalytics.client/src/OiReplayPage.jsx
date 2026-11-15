@@ -45,6 +45,7 @@ import { GexSpotCard } from './GexSpotCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
+import { OrderFab } from './OrderFab.jsx'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
 import { OiTotalsChartsModal } from './OiTotalsCharts.jsx'
@@ -65,7 +66,7 @@ import { ABSORPTION_TIMEFRAMES, absorptionMarkers, oiAbsorptionEvents } from './
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
+  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
   screenFromSearch, screenKey, nextScreen,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
@@ -3652,6 +3653,9 @@ export default function OiReplayPage() {
   const [quickFabOn, setQuickFabOn] = usePersistedState(STORED_QUICK_FAB, true)
   // Where it was dropped (its nearest corner - quickViews.fabAnchor); null = the bottom left of the page.
   const [quickFabAnchor, setQuickFabAnchor] = usePersistedState(STORED_QUICK_FAB_ANCHOR, null)
+  // The order button (OrderFab.jsx), always on screen: one tap opens / closes the order panel; where it was dropped.
+  const [orderFabOn, setOrderFabOn] = usePersistedState(STORED_ORDER_FAB, true)
+  const [orderFabAnchor, setOrderFabAnchor] = usePersistedState(STORED_ORDER_FAB_ANCHOR, null)
   // The floating replay bar (FloatingReplayBar.jsx): on a replayed day, once the Spot card's own replay controls are
   // out of sight - they are watched where they stand (replayInlineEl).
   const [replayBarOn, setReplayBarOn] = usePersistedState(STORED_REPLAY_BAR, true)
@@ -6502,7 +6506,7 @@ export default function OiReplayPage() {
     // row" offers six there) instead of the page sitting centred with empty space either side. It was capped at
     // 2600 px, which left a third of a 3440 px monitor empty.
     // Room at the bottom for the quick button and the replay bar floating there, so the last card can be scrolled clear of them.
-    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: `24px 16px ${result && (quickFabOn || replayBarOn) ? 72 : 24}px` }}>
+    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: `24px 16px ${!result ? 24 : orderFabOn ? 120 : quickFabOn || replayBarOn ? 72 : 24}px` }}>
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
         <Space align="center" size={16} wrap className="oa-brand-row">
@@ -6693,6 +6697,9 @@ export default function OiReplayPage() {
                 ))}
                 <Tooltip title="The same views from a small round button floating over the page - at the bottom left, drag it anywhere. On a phone it is the only way in; on a monitor it saves the same scrolling.">
                   <Checkbox checked={quickFabOn} onChange={(e) => setQuickFabOn(e.target.checked)}>Quick button</Checkbox>
+                </Tooltip>
+                <Tooltip title="A round cart button always on screen - at the bottom right, drag it anywhere: one tap opens / closes the Paper / Live order panel, so a trade is punched from anywhere on the page.">
+                  <Checkbox checked={orderFabOn} onChange={(e) => setOrderFabOn(e.target.checked)}>Order button</Checkbox>
                 </Tooltip>
                 <Tooltip title="On a replayed day, the replay controls (Start / Pause, Reset, the slider, the speed) as a slim bar floating at the bottom of the window once the Spot card's own controls are scrolled out of sight - the same controls, so either works.">
                   <Checkbox checked={replayBarOn} onChange={(e) => setReplayBarOn(e.target.checked)}>Replay bar</Checkbox>
@@ -7514,8 +7521,15 @@ export default function OiReplayPage() {
           }]}
         />
       )}
+      {/* The order button, always on screen: one tap opens / closes the same order panel. */}
+      {result && (
+        <OrderFab
+          open={paperPanelOpen} live={liveTradeActive} onToggle={() => setPaperPanelOpen((o) => !o)}
+          enabled={orderFabOn} anchor={orderFabAnchor} onAnchorChange={setOrderFabAnchor}
+        />
+      )}
       {replayBarOn && !isLive && result && oneMinBars.length > 0 && !replayControlsFloating && !replayInlineOnScreen && (
-        <FloatingReplayBar fabOn={quickFabOn} fabAnchor={quickFabAnchor}>{replayBarControls}</FloatingReplayBar>
+        <FloatingReplayBar fabOn={quickFabOn} fabAnchor={quickFabAnchor} orderOn={orderFabOn} orderAnchor={orderFabAnchor}>{replayBarControls}</FloatingReplayBar>
       )}
       {result && (
         <ChartGrow value={popupChartGrow}>

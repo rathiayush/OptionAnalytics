@@ -423,7 +423,14 @@ When adding or changing a strategy:
   button's `actions`, `fabEntries` in `quickViews.js`): it opens / closes the Paper / Live order panel - the "Paper Trade"
   button's own `DraggableFloatingPanel` (`paperPanelOpen`), so a trade is punched from anywhere on the page without
   scrolling to that button; "Order (live)" while Live mode is on, blue while the panel is open. It only opens the panel -
-  a live order still goes through the panel's own confirm. Where it was dropped is
+  a live order still goes through the panel's own confirm. The panel also has an ORDER BUTTON OF ITS OWN, always on
+  screen (asked for - "there as well as popover somewhere on screen"; `OrderFab.jsx`): a round cart button whose one tap
+  opens / closes the same panel - blue while it is open, a red ring and a LIVE tag while Live mode is on; it starts at the
+  BOTTOM RIGHT, one row above the replay bar (`orderFabDefault` - in the bar's row it would cover the speed), is dragged
+  anywhere and kept by its nearest corner as the quick button is (`optionanalytics.oiReplay.orderFabAnchor`); dropped in the
+  bar's row at the right the bar ends left of it (`fabInBarRowRight`); the page's "Order button" tick turns it off
+  (`...orderFabOn`), and the page keeps 120 px of room at its bottom while it is on. Both buttons drag through one hook
+  (`useFabDrag.js`). Where the quick button was dropped is
   kept as its distance from the NEAREST CORNER (`fabAnchor` / `fabFromAnchor`, `optionanalytics.oiReplay.quickFabAnchor`)
   - an account preference, so a phone and a monitor share it: kept in pixels from the top left (the old
   `...quickFab`, no longer read), a spot picked on a phone put the button in the middle of a monitor's spot chart. It

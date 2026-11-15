@@ -134,3 +134,36 @@ test('the floating button lists the order action first, then every quick view', 
   // No actions = the quick views as before.
   assert.deepEqual(fabEntries(QUICK_VIEWS).map((e) => e.key), QUICK_VIEWS.map((v) => v.key))
 })
+
+import { FAB_ROW_GAP, fabInBarRowRight, orderFabDefault } from '../src/quickViews.js'
+
+test('the order button starts at the bottom right, one row above the replay bar, and keeps its corner across screens', () => {
+  const phone = { width: 390, height: 800 }
+  const monitor = { width: 1920, height: 1080 }
+  // Bottom right, its own row above the bar's (the bar is FAB_SIZE tall, FAB_EDGE from the bottom).
+  assert.deepEqual(placeFab(orderFabDefault(phone), phone), { x: 390 - FAB_SIZE - FAB_EDGE, y: 800 - FAB_SIZE * 2 - FAB_EDGE - FAB_ROW_GAP })
+  assert.deepEqual(placeFab(orderFabDefault(monitor), monitor, 64), { x: 1920 - FAB_SIZE - FAB_EDGE, y: 1080 - FAB_SIZE * 2 - FAB_EDGE - FAB_ROW_GAP })
+  // Never in the bar's row (it would cover the speed at the bar's right end), nor where the quick button starts.
+  assert.equal(fabInBarRowRight(orderFabDefault(phone), phone), false)
+  assert.equal(fabInBarRow(orderFabDefault(phone), phone, 0), false)
+  const quick = fabDefault(phone)
+  const order = orderFabDefault(phone)
+  assert.ok(Math.abs(order.x - quick.x) >= FAB_SIZE || Math.abs(order.y - quick.y) >= FAB_SIZE)
+  // A tiny window still shows it whole.
+  const tiny = { width: 200, height: 90 }
+  const p = placeFab(orderFabDefault(tiny), tiny)
+  assert.ok(p.x >= 0 && p.x + FAB_SIZE <= 200 && p.y >= 0 && p.y + FAB_SIZE <= 90)
+  // Its corner is the bottom right, so a phone's place reads the same on a monitor.
+  const anchor = fabAnchor(orderFabDefault(phone), phone)
+  assert.equal(anchor.h, 'right')
+  assert.equal(anchor.v, 'bottom')
+  assert.deepEqual(fabFromAnchor(anchor, monitor, 64), placeFab(orderFabDefault(monitor), monitor, 64))
+})
+
+test('dropped in the replay bar\'s row at the bottom right, the order button makes the bar end left of it', () => {
+  const monitor = { width: 1920, height: 1080 }
+  const inRow = { x: 1920 - FAB_SIZE - FAB_EDGE, y: 1080 - FAB_SIZE - FAB_EDGE }
+  assert.equal(fabInBarRowRight(inRow, monitor), true)
+  assert.equal(fabInBarRowRight({ x: 1920 - FAB_SIZE - FAB_EDGE, y: 500 }, monitor), false)
+  assert.equal(fabInBarRowRight({ x: 300, y: 1080 - FAB_SIZE - FAB_EDGE }, monitor), false)
+})

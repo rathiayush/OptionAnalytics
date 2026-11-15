@@ -1,7 +1,7 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import { AlignLeftOutlined, AlignRightOutlined, AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
-import { useSideNavInset, useViewport } from './useScreen.js'
-import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabEntries, fabFromAnchor, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
+import { FAB_ACCENT, FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, FAB_Z, fabDefault, fabEntries, fabOpensUp } from './quickViews.js'
+import { useFabDrag } from './useFabDrag.js'
 
 // The quick views as a small round button that floats over the page and can be dragged anywhere: a tap opens the views as
 // small icons with their names, a tap on one opens its popup, a tap elsewhere closes them. On a phone it is the only way
@@ -10,51 +10,21 @@ import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabEntries, fa
 // page, right of the sidebar (fabDefault); where it is dropped is `anchor` - its distance from the nearest corner
 // (fabAnchor), kept by the page, so the same place reads right on a phone and on a monitor. `actions` come first, nearest
 // the button (fabEntries) - the ORDER panel (asked for - "order punching should also be in the floating popover so I can
-// punch trades easily"): { key, label, title, icon (a component), active, onClick }.
+// punch trades easily"): { key, label, title, icon (a component), active, onClick }. The order panel also has a button of
+// its own, always on screen (OrderFab.jsx). The dragging is useFabDrag's, shared with it.
 const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined, optionDelta: AlignLeftOutlined, futuresDelta: AlignRightOutlined }
-// Over the floating panels (900+) and the replay bar, under the popups (1000).
-const FAB_Z = 960
-const ACCENT = '#1677ff'
+const ACCENT = FAB_ACCENT
 
 export function QuickViewFab({ views, actions = [], active = null, onOpen, enabled = true, anchor = null, onAnchorChange }) {
-  const viewport = useViewport()
-  const inset = useSideNavInset()
-  const [dragPos, setDragPos] = useState(null)
+  const { pos, viewport, inset, dragging, handlers, tapped } = useFabDrag({ anchor, onAnchorChange, start: fabDefault })
   const [open, setOpen] = useState(false)
-  const drag = useRef(null)
-  const dragged = useRef(false)
   if (!enabled) return null
 
-  const pos = placeFab(dragPos ?? fabFromAnchor(anchor, viewport, inset) ?? fabDefault(viewport, inset), viewport, inset)
   const entries = fabEntries(views, actions)
   const up = fabOpensUp(pos, entries.length, viewport)
   const labelsLeft = pos.x + FAB_SIZE / 2 > inset + (viewport.width - inset) / 2
-
-  const moveTo = (e, d) => placeFab({ x: d.from.x + e.clientX - d.x, y: d.from.y + e.clientY - d.y }, viewport, inset)
-  const onPointerDown = (e) => {
-    e.currentTarget.setPointerCapture?.(e.pointerId)
-    drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY, from: pos, moved: false }
-  }
-  const onPointerMove = (e) => {
-    const d = drag.current
-    if (!d || d.id !== e.pointerId) return
-    if (!d.moved && !isFabDrag(e.clientX - d.x, e.clientY - d.y)) return
-    d.moved = true
-    setDragPos(moveTo(e, d))
-  }
-  const onPointerUp = (e) => {
-    const d = drag.current
-    drag.current = null
-    if (!d || d.id !== e.pointerId) return
-    dragged.current = d.moved
-    if (d.moved) { onAnchorChange?.(fabAnchor(moveTo(e, d), viewport, inset)); setDragPos(null) }
-  }
-  const onPointerCancel = () => { drag.current = null; setDragPos(null) }
   // A tap (not the end of a drag) opens or closes the icons.
-  const onClick = () => {
-    if (dragged.current) { dragged.current = false; return }
-    setOpen((o) => !o)
-  }
+  const onClick = () => { if (tapped()) setOpen((o) => !o) }
 
   const round = (size, background, color) => ({
     width: size, height: size, borderRadius: '50%', border: '1px solid rgba(255,255,255,0.18)', background, color,
@@ -96,8 +66,8 @@ export function QuickViewFab({ views, actions = [], active = null, onOpen, enabl
         })}
         <button
           type="button" aria-label={open ? 'Close the quick views' : 'Quick views and order'} aria-expanded={open}
-          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onClick={onClick}
-          style={{ ...round(FAB_SIZE, ACCENT, '#fff'), fontSize: 17, touchAction: 'none', opacity: open || dragPos ? 1 : 0.85 }}
+          {...handlers} onClick={onClick}
+          style={{ ...round(FAB_SIZE, ACCENT, '#fff'), fontSize: 17, touchAction: 'none', opacity: open || dragging ? 1 : 0.85 }}
         >
           {open ? <CloseOutlined /> : <AppstoreOutlined />}
         </button>

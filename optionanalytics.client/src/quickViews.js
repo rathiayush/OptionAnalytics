@@ -98,6 +98,21 @@ export function fabFromAnchor(anchor, viewport, leftInset = 0) {
 export const fabInBarRow = (pos, viewport, leftInset = 0) =>
   pos.y + FAB_SIZE >= viewport.height - FAB_EDGE - FAB_SIZE && pos.x < leftInset + FAB_EDGE + FAB_SIZE * 2
 
+/** The gap between the floating buttons and the replay bar beside / under them. */
+export const FAB_ROW_GAP = 10
+/** Over the floating panels (900+) and the replay bar (955), under the popups (1000). */
+export const FAB_Z = 960
+/** The buttons' blue - the app's selected blue (appTheme.js): an open panel / view is blue. */
+export const FAB_ACCENT = '#1677ff'
+
+/** The ORDER button's first place (OrderFab.jsx - asked for: "there as well as popover somewhere on screen"): the BOTTOM
+ *  RIGHT, one row ABOVE the floating replay bar - in the bar's row it would cover the speed at the bar's right end. */
+export const orderFabDefault = (viewport) => ({ x: viewport.width - FAB_SIZE - FAB_EDGE, y: viewport.height - FAB_SIZE * 2 - FAB_EDGE - FAB_ROW_GAP })
+
+/** Whether a button at `pos` sits in the floating replay bar's row at the bottom RIGHT - the bar then ends left of it. */
+export const fabInBarRowRight = (pos, viewport) =>
+  pos.y + FAB_SIZE >= viewport.height - FAB_EDGE - FAB_SIZE && pos.x + FAB_SIZE > viewport.width - FAB_EDGE - FAB_SIZE * 2
+
 /** A press that moved this far is a drag (it moves the button), else a tap (it opens / closes the icons). */
 export const isFabDrag = (dx, dy) => Math.hypot(dx, dy) >= FAB_DRAG_PX
 
