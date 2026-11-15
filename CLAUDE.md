@@ -730,17 +730,6 @@ All must pass before committing.
   timer with `POLL_HEADERS` - the server's memory), the minutes up to the clock, the sessions before from their own runs
   (`usePastDeltaSessions`, moved to `usePastDeltaSessions.js`, shared with OI Replay's delta cards). FUTURES = the footprint's
   buy − sell at each price (`futuresDeltaProfileOf`) of the same sessions the profiles use. Display only.
-  THE "OI Δ" TICK (asked for - "delta profile ... like professional systems use it: on the futures chart futures OI, on
-  the option chart options OI"; `optionanalytics.profiles.oi`, OFF by default; `oiProfile.js`): the OI PROFILE of the
-  professional tools (Hyblock's OI profile, ATAS' options OI net) - OPEN INTEREST CHANGE added up by price - as a second
-  column ("OI Δ") left of the Delta one, and a line (net, the rows MOST BUILT / MOST UNWOUND). FUTURES = the near futures'
-  OI change each minute (`futuresOiMinutes` - the run's 1-minute futures bars, OI at the close less the minute before's) on
-  that bar's rows: + opened, − closed. SPOT = the options' OI change each minute (`optionOiMinutes` - every strike from its
-  own first reading, calls and puts apart) on the rows the spot covered: NET = PE added − CE added (+ = puts written / calls
-  closed - a floor building; − = a ceiling). Each minute spread evenly over its rows (`oiProfileOf`), the run of the day
-  (`useOptionRun`, loaded while either tick is on) cut at the clock, the sessions before from their runs (`optionDayRecord`
-  keeps `oi` / `futuresOi` too). `tests/oi-profile.test.mjs` (worked values, first readings, a cut = the minutes up to it).
-  PREVIOUS PLUS THE DAY RUNNING (asked for - "when we select previous day it should also sum the live current day ... delta, OI delta and futures"): with "Previous session(s)" the Delta and OI Δ columns (spot's options, futures' footprint, both OI Δ) are the sessions BEFORE with the day up to the clock / live ON TOP - as OI Replay's delta cards (`deltaCardSessions`); the volume / market profile boxes stay the sessions before only.
   THE FLOATING REPLAY BAR (asked for - "on the market / volume profile and order flow pages a floating popover to run replay
   like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
   Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /
