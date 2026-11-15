@@ -777,8 +777,8 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const { hi, lo } = range
     const quantities = []
     for (const c of visible) for (const side of [c.bids, c.asks]) for (const [, q] of side) quantities.push(q)
-    // Between a lower and an upper cutoff of the sizes in view (heatScale - Bookmap's cutoffs): the small orders are the
-    // dark background, ordinary ones blue, the walls hot.
+    // Each colour a fixed share of the sizes in view (heatScale - Bookmap's percentage cutoffs): the bottom half dark,
+    // ordinary orders blue, only the top few percent cyan / yellow / red.
     const scale = heatScale(quantities)
     let hiPad = hi + step
     let nRows = Math.round((hiPad - (lo - step)) / step) + 1

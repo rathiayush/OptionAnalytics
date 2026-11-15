@@ -14,7 +14,7 @@
 // As the professional heatmaps draw it (asked for - "check the liquidity heatmap for the best possible representation ...
 // how professional systems do it"; Bookmap's heatmap, its BBO lines, volume dots and current order book column):
 //  - heatScale / heatLevel: the colour between a LOWER and an UPPER cutoff (percentiles of the sizes in view - adaptive to
-//    what is on screen) - HEAT_SCALE, one fixed professional scale: ordinary orders dark / blue, walls bright.
+//    what is on screen) - HEAT_BANDS, Bookmap's percentage cutoffs: each colour a fixed share of the sizes in view.
 //  - bestQuotes: each column's best bid / best ask - drawn as the green / red BBO lines (the mid when the rows are too thin).
 //  - volumeDots: EVERY traded minute at each row as a dot sized by its volume, coloured by its aggressor (buy - sell) - not
 //    only the big orders.
@@ -138,29 +138,45 @@ export function restingSince(columns, index, side, price, { fraction = 0.5, span
   return { since, quantity: now }
 }
 
-/** THE colour scale - one, as the professional heatmaps draw it (asked for - "use it in professional way only"): the
- *  smallest 15% of the sizes in view are the dark background, the largest 2% the brightest, a straight scale between - so
- *  ordinary resting orders stay dark / blue and only real walls light up. Measured on heavy-tailed books (lognormal sizes
- *  with 1% walls): ~6 - 9% of cells cyan or brighter, ~2% at the top. (A Low / Normal / High choice with a lifting curve
- *  was tried and removed: it lit up 20 - 34% of cells - confetti, the walls lost in it.) */
-export const HEAT_SCALE = { lo: 0.15, hi: 0.98, gamma: 1 }
+/** THE colour scale, as the professional heatmaps draw it (Bookmap's PERCENTAGE cutoffs; asked for - "use it in
+ *  professional way only", "if there are any deviation from what industry uses you do"): each colour band is pinned to a
+ *  SHARE of the sizes in view - [percentile, level on the palette]: the bottom half the dark background, up to the 80th
+ *  percentile dark -> blue, the 93rd cyan, the 98th yellow, the top 0.5% red - with sizes interpolated between those
+ *  percentiles' values. So the picture has the same balance whatever the day's size distribution (a straight line between
+ *  two size cutoffs lit a real 5-point book cyan almost everywhere: its sizes are flatter than a 1-point book's), and only
+ *  the few real walls light up - and a wall (WALL_RATIO) always does. Adaptive: the percentiles are of what is on screen. */
+export const HEAT_BANDS = [[0.5, 0], [0.8, 0.3], [0.93, 0.55], [0.98, 0.8], [0.995, 1]]
+/** A WALL is hot whatever its rank (a busy book with many walls would otherwise push them down the bands): a level at
+ *  `WALL_RATIO` (4) times the median size in view - the app's own wall rule (findWalls) - is at least yellow, red from twice
+ *  that. */
+export const WALL_RATIO = 4
 
-/** The colour scale of `quantities` (the sizes in view - adaptive to what is on screen): { lo, hi, gamma } - at or under
- *  `lo` the darkest colour, at or over `hi` the brightest. */
+/** The colour scale of `quantities` (the sizes in view): { knots: [[size, level], ...] } - the HEAT_BANDS' percentiles as
+ *  sizes, each at least a hair over the one before (a flat book still orders its bands). */
 export function heatScale(quantities) {
   const v = (quantities ?? []).filter((q) => q > 0).sort((a, b) => a - b)
-  if (!v.length) return { lo: 0, hi: 1, gamma: HEAT_SCALE.gamma }
+  if (!v.length) return { knots: HEAT_BANDS.map(([, level], i) => [i, level]), median: 0 }
   const at = (f) => v[Math.min(v.length - 1, Math.max(0, Math.floor(v.length * f)))]
-  const lo = at(HEAT_SCALE.lo)
-  const hi = Math.max(at(HEAT_SCALE.hi), lo + 1e-9)
-  return { lo, hi, gamma: HEAT_SCALE.gamma }
+  const knots = []
+  for (const [f, level] of HEAT_BANDS) {
+    const prev = knots.at(-1)?.[0]
+    knots.push([prev != null ? Math.max(at(f), prev + 1e-9) : at(f), level])
+  }
+  return { knots, median: at(0.5) }
 }
 
-/** A size's place on the colour scale, 0 - 1. */
-export function heatLevel(q, { lo, hi, gamma }) {
-  if (!(q > lo)) return 0
-  if (q >= hi) return 1
-  return ((q - lo) / (hi - lo)) ** gamma
+/** A size's place on the colour palette, 0 - 1: 0 at or under the first knot, 1 at or over the last, straight between. */
+export function heatLevel(q, { knots, median = 0 }) {
+  const wall = median > 0 && q >= WALL_RATIO * median ? Math.min(1, 0.8 + 0.2 * (q / median - WALL_RATIO) / WALL_RATIO) : 0
+  if (!(q > knots[0][0])) return wall
+  for (let i = 1; i < knots.length; i++) {
+    const [q1, l1] = knots[i]
+    if (q <= q1) {
+      const [q0, l0] = knots[i - 1]
+      return Math.max(wall, l0 + ((q - q0) / (q1 - q0)) * (l1 - l0))
+    }
+  }
+  return 1
 }
 
 /** A column's best bid (highest bid price) and best ask (lowest ask price); null for a side with none. */

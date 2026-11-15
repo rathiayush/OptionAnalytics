@@ -84,33 +84,47 @@ test('how long a level has rested: back while it holds at least half its size, s
 })
 
 // ---- As the professional heatmaps draw it: cutoffs + contrast curve, BBO, volume dots, the current order book ----
-import { HEAT_SCALE, bestQuotes, cobBars, heatLevel, heatScale, volumeDots } from '../src/heatmapLayout.js'
+import { HEAT_BANDS, bestQuotes, cobBars, heatLevel, heatScale, volumeDots } from '../src/heatmapLayout.js'
 import { rowOf } from '../src/orderFlowMath.js'
 
-test('one professional colour scale: the smallest sizes dark, the biggest walls bright, a straight line between', () => {
-  const sizes = Array.from({ length: 100 }, (_, i) => i + 1) // 1 .. 100
+test('the colour scale: each colour band a fixed share of the sizes in view (Bookmap\'s percentage cutoffs)', () => {
+  const sizes = Array.from({ length: 1000 }, (_, i) => i + 1) // 1 .. 1000
   const s = heatScale(sizes)
-  assert.deepEqual(s, { lo: 16, hi: 99, gamma: 1 })
-  assert.equal(heatLevel(10, s), 0, 'under the lower cutoff: the dark background')
-  assert.equal(heatLevel(99, s), 1, 'at the upper cutoff: the brightest')
-  assert.ok(Math.abs(heatLevel(57.5, s) - 0.5) < 1e-9, 'straight between the cutoffs')
+  assert.deepEqual(s.knots, [[501, 0], [801, 0.3], [931, 0.55], [981, 0.8], [996, 1]])
+  assert.equal(heatLevel(300, s), 0, 'the bottom half: the dark background')
+  assert.equal(heatLevel(999, s), 1, 'the top 0.5%: the brightest')
+  assert.ok(Math.abs(heatLevel(651, s) - 0.15) < 1e-9, 'straight between two knots')
+  assert.ok(heatLevel(800, s) < heatLevel(900, s), 'bigger is brighter')
   // Adaptive: the same wall is less bright among bigger orders.
-  assert.ok(heatLevel(50, heatScale(sizes)) > heatLevel(50, heatScale(sizes.map((q) => q * 2))))
-  assert.deepEqual(heatScale([]), { lo: 0, hi: 1, gamma: HEAT_SCALE.gamma })
-  assert.equal(heatLevel(5, heatScale([5, 5, 5])), 0)
+  assert.ok(heatLevel(900, heatScale(sizes)) > heatLevel(900, heatScale(sizes.map((q) => q * 2))))
+  // A flat book still orders its bands; nothing in view does not fail.
+  const flat = heatScale([5, 5, 5, 5])
+  assert.ok(flat.knots.every((k, i) => i === 0 || k[0] > flat.knots[i - 1][0]))
+  assert.equal(heatLevel(5, flat), 0)
+  assert.equal(heatScale([]).knots.length, HEAT_BANDS.length)
 })
 
-test('on a real-looking book (heavy-tailed sizes, 1% walls) only a few cells light up - no confetti', () => {
+test('a wall (4x the median size in view) is always hot, even when walls are many', () => {
+  // A busy book: 10% of the cells are walls of ~6x the ordinary size.
+  const sizes = [...Array.from({ length: 900 }, (_, i) => 100 + (i % 50)), ...Array.from({ length: 100 }, () => 700)]
+  const s = heatScale(sizes)
+  assert.ok(heatLevel(700, s) >= 0.8, `a 6x wall is at least yellow: ${heatLevel(700, s)}`)
+  assert.equal(heatLevel(8 * s.median, s), 1, '8x the median: red')
+  assert.ok(heatLevel(3.9 * s.median, s) < 1, 'under 4x: by its rank')
+})
+
+test('the same balance on a book: ~7% cyan or brighter, ~2 - 4% yellow or brighter, ~1% red', () => {
   let seed = 7
   const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647
   const gauss = () => Math.sqrt(-2 * Math.log(rnd())) * Math.cos(2 * Math.PI * rnd())
-  for (const sigma of [0.5, 0.7, 1]) {
+  for (const sigma of [0.2, 0.5, 0.7]) {
     const sizes = Array.from({ length: 20000 }, () => Math.exp(6 + sigma * gauss()) * (rnd() < 0.01 ? 8 + 7 * rnd() : 1))
     const s = heatScale(sizes)
     const share = (from) => sizes.filter((q) => heatLevel(q, s) >= from).length / sizes.length
-    assert.ok(share(0.55) < 0.1, `cyan or brighter: ${share(0.55)}`)
-    assert.ok(share(0.8) < 0.04, `yellow or brighter: ${share(0.8)}`)
-    assert.ok(share(1) >= 0.015 && share(1) <= 0.025, `the brightest = the top 2%: ${share(1)}`)
+    assert.ok(Math.abs(share(0.55) - 0.075) < 0.015, `sigma ${sigma}: cyan or brighter ${share(0.55)}`)
+    assert.ok(share(0.8) >= 0.015 && share(0.8) <= 0.045, `sigma ${sigma}: yellow or brighter ${share(0.8)}`)
+    assert.ok(share(1) <= 0.012, `sigma ${sigma}: red ${share(1)}`)
+    assert.ok(Math.abs(share(1e-9) - 0.5) < 0.01, `sigma ${sigma}: half the book dark ${share(1e-9)}`)
   }
 })
 

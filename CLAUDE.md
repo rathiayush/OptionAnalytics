@@ -1401,12 +1401,15 @@ All must pass before committing.
   size there, stopped by less, no book or a gap): "resting since 10:36:12 (10 min)" / "just placed" - a wall that stays vs
   one flashed (a spoof). AS THE PROFESSIONAL HEATMAPS DRAW IT (asked for - "check the liquidity heatmap for the best possible
   representation ... how professional systems do it"; Bookmap's heatmap settings / main chart - `heatmapLayout.js`,
-  `tests/heatmap-layout.test.mjs`): the COLOUR is ONE fixed professional scale (asked for - "use it in professional way only"; `HEAT_SCALE`, `heatScale`
-  / `heatLevel`): the sizes in view (adaptive to what is on screen) - the smallest 15% the dark background, the largest 2%
-  the brightest, a straight scale between, so ordinary orders stay dark / blue and only real walls light up (measured on
-  heavy-tailed books: ~6 - 9% of cells cyan or brighter, ~2% at the top - `tests/heatmap-layout.test.mjs`); a Low / Normal /
-  High "Contrast" choice with a lifting curve was tried and REMOVED - it lit up 20 - 34% of cells, confetti, the walls lost
-  in it; THE PRICE LINE - the mid as a BOLD WHITE step line (2.5 px on a dark 5 px outline - the one colour nothing else on
+  `tests/heatmap-layout.test.mjs`): the COLOUR is Bookmap's PERCENTAGE CUTOFFS (asked for - "use it in professional way only", "if there are any deviation
+  from what industry uses you do"; `HEAT_BANDS`, `heatScale` / `heatLevel`): each colour band pinned to a SHARE of the
+  sizes in view (adaptive to what is on screen) - the bottom 50% the dark background, up to the 80th percentile dark ->
+  blue, the 93rd cyan, the 98th yellow, the top 0.5% red, sizes interpolated between those percentiles' values - so the
+  picture has the same balance whatever the day's size distribution (a straight line between two size cutoffs lit a real
+  5-point book cyan almost everywhere), AND a WALL is always hot: a level at `WALL_RATIO` 4x the median size in view (the
+  app's own `findWalls` rule) at least yellow, red from 8x - else a busy book with many walls pushed them down the bands
+  (`tests/heatmap-layout.test.mjs` - the shares on any book, the wall rule). A Low / Normal / High "Contrast" choice with
+  a lifting curve was tried and REMOVED - it lit up 20 - 34% of cells, confetti; THE PRICE LINE - the mid as a BOLD WHITE step line (2.5 px on a dark 5 px outline - the one colour nothing else on
   the heatmap uses; asked for twice - "I cannot see the price line": green / red bid / ask lines vanished into a real day's
   green / red cells, STACK / PULL pills and walls), zoomed in (a row 3 px or more) with the BEST BID / BEST ASK as thin
   DOTTED green / red guides (`bestQuotes`), all DRAWN LAST - over the volume dots and the prints, under the signal pills
