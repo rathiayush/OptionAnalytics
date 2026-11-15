@@ -13,6 +13,7 @@
 // the card's Retry walks again (nothing kept is asked again). A click, never a timer. Pure - no React (the cards' hook,
 // `usePastDeltaSessions`, is in DeltaProfileCard.jsx): the Signal backtest's loader and runners read it too.
 
+import { futuresOiMinutes, optionOiMinutes } from './oiProfile.js'
 import { optionDeltaMinutes } from './deltaProfile.js'
 import { FETCH_ROWS, barsKnownAt, withBackfillBars } from './profileZones.js'
 
@@ -60,12 +61,14 @@ export async function walkPastSessions(dateKey, count, load, { onSession, cancel
   return { sessions: found, error: null }
 }
 
-/** A run's day as the option profile keeps it: its minutes (`optionDeltaMinutes`) and the spot's 1-minute candles (ms). */
+/** A run's day as the option profile keeps it: its minutes (`optionDeltaMinutes`), the spot's 1-minute candles (ms) and
+ *  the OI profile's minutes (`oi` - the options', `futuresOi` - the near futures'). */
 export function optionDayRecord(date, body) {
   const spot = barsKnownAt(body?.spotCandlesOneMinute ?? [], null)
     .map((b) => ({ time: msOf(b.time), open: b.open, high: b.high, low: b.low, close: b.close }))
     .filter((b) => b.close > 0)
-  return { date, items: optionDeltaMinutes(body?.cePoints, body?.pePoints, spot), candles: spot }
+  // The OI profile's minutes too (oiProfile.js - the Profiles page's "OI Δ"): the options' on the spot, the futures' own.
+  return { date, items: optionDeltaMinutes(body?.cePoints, body?.pePoints, spot), candles: spot, oi: optionOiMinutes(body?.cePoints, body?.pePoints, spot), futuresOi: futuresOiMinutes(body?.futuresBars) }
 }
 
 /** The Order Flow day's minute bars IN LOTS (`meta.lotSize` - so days of another lot size add up right): the recorded

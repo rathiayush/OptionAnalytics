@@ -16,6 +16,7 @@ import { PROFILE_PAGE_BARS, VolumeProfilePrimitive } from './volumeProfilePrimit
 import { DELTA_COLUMN_SHARE, DeltaColumnPrimitive, TpoProfilePrimitive, ZoneBoxesPrimitive } from './profilePrimitives.js'
 import { deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf } from './deltaProfile.js'
 import { optionDayUrl } from './deltaProfileDays.js'
+import { futuresOiMinutes, oiProfileOf, optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
@@ -69,6 +70,7 @@ const STORE = {
   speed: 'optionanalytics.profiles.speedMs',
   delta: 'optionanalytics.profiles.delta',
   netOrder: 'optionanalytics.profiles.netOrder',
+  oi: 'optionanalytics.profiles.oi',
 }
 // A past day's replay, as OI Replay's: milliseconds per market minute.
 const SPEED_OPTIONS = [
@@ -459,11 +461,26 @@ function DeltaLine({ delta, levels }) {
 }
 
 /** The "OI Δ" tick's line over a chart: what it is of, the net change, the rows where the most OI was built / taken off. */
+function OiLine({ oi }) {
+  const p = oi.profile
+  return (
+    <Space size={[12, 2]} wrap style={{ fontSize: 12 }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>OI Δ · {oi.text}</Text>
+      {p?.rows?.length ? (
+        <>
+          <span style={{ color: p.delta >= 0 ? '#95de64' : '#b37feb' }}>net {compact(p.delta)}</span>
+          <span style={{ color: '#95de64' }}>most built {fmt(p.built)}</span>
+          <span style={{ color: '#b37feb' }}>most unwound {fmt(p.unwound)}</span>
+        </>
+      ) : <Text type="secondary" style={{ fontSize: 12 }}>{oi.note ?? 'no OI change yet'}</Text>}
+    </Space>
+  )
+}
 
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null, oi = null }) {
   const sessions = useMemo(
     () => deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
@@ -478,7 +495,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
     return deltaSource
   }, [deltaSource, profileBars, row])
   const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
-  const columns = useMemo(() => [delta && { ...delta, title: 'DELTA' }].filter(Boolean), [delta])
+  const columns = useMemo(() => [delta && { ...delta, title: 'DELTA' }, oi && { ...oi, title: 'OI Δ' }].filter(Boolean), [delta, oi])
   const chartHeight = useChartHeight()
   // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
   // with no candles has no price scale, so the profile and its boxes could not be drawn at all. The latest earlier
@@ -568,6 +585,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             </Space>
             <Legend items={[['high', 'Highest volume (HVN area)'], ['low', 'Thin volume (LVN area)'], ['value', 'Value area']]} />
             {delta && <DeltaLine delta={delta} levels={deltaLevels} />}
+            {oi && <OiLine oi={oi} />}
             {empty ?? (!hasVolume && profileBars.length > 0 && (
               <Alert type="info" showIcon message={`No ${name.toLowerCase()} volume for ${sessions.length > 1 ? 'these sessions' : 'this day'} - Dhan sends the index's own volume from January 2026. The market profile (time, not volume) still shows.`} />
             ))}
@@ -607,6 +625,7 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
             </Space>
             <Legend items={[['accepted', 'Most time spent - accepted'], ['acceptedValue', 'Value area'], ['single', 'Single prints'], ['tail', 'Tail (rejected)']]} />
             {delta && <DeltaLine delta={delta} levels={deltaLevels} />}
+            {oi && <OiLine oi={oi} />}
             {standInNote}
             {empty ?? (
               <ProfileChart
@@ -707,6 +726,7 @@ export default function ProfilesPage() {
   // The option net's order, this page's own setting (OI Replay's card keeps its own): CE − PE (+ bullish) or PE − CE.
   const [netSide, setNetSide] = usePersistedState(STORE.netOrder, 'net')
   const netOrder = netSide === 'netpe' ? 'netpe' : 'net'
+  const [showOi, setShowOi] = usePersistedState(STORE.oi, false)
 
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = rows?.[index] > 0 ? rows[index] : PROFILE_ROWS[index]
@@ -853,8 +873,8 @@ export default function ProfilesPage() {
   // bars given a side - where the close sits in the bar's range - weighted by its delta, Net = CE − PE: + calls bought / puts
   // sold), the minutes up to the clock, the sessions before from their own runs. FUTURES: its footprint's buy − sell at
   // each price (ProfilePair, from the bars the profiles use).
-  const optionRun = useOptionRun(index, effectiveDate, live, showDelta)
-  const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta ? pastCount : 0, optionRun.flag)
+  const optionRun = useOptionRun(index, effectiveDate, live, showDelta || showOi)
+  const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta || showOi ? pastCount : 0, optionRun.flag)
   const optionMinutes = useMemo(
     () => (showDelta ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
     [showDelta, profileOf, optionRun.ce, optionRun.pe, spotDay, live, clock],
@@ -867,6 +887,23 @@ export default function ProfilesPage() {
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
     return { profile, label: 'options', text: `options on spot (${netOrder === 'netpe' ? 'PE − CE, + puts ahead' : 'CE − PE, + bullish'}, delta-weighted)`, note }
   }, [showDelta, netOrder, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, profileOf, optionMinutes, row, optionRun.loading, optionRun.error])
+  // The "OI Δ" tick (oiProfile.js - the OI profile of the professional tools): OPEN INTEREST CHANGE by price. SPOT: the
+  // options' OI added / taken off (PE − CE: + = puts written / calls closed - a floor building) on the spot's rows; FUTURES:
+  // the near futures' own OI change on its rows. The run's day up to the clock and the sessions before from their runs.
+  const oiNote = optionRun.loading || optionPast.loading ? 'loading the OI…'
+    : optionRun.error ? `the day's OI could not be read (${optionRun.error})` : optionPast.error ? 'a session before could not be read' : null
+  const oiClock = live || clock == null ? null : clock - 60_000
+  const oiPast = (key) => (pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d[key] ?? NO_BARS) : [])
+  const spotOi = useMemo(() => {
+    if (!showOi) return null
+    const today = [optionOiMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: oiClock })]
+    return { profile: oiProfileOf([...oiPast('oi'), ...today], { rowSize: row }), label: 'option OI', text: 'option OI added (PE − CE: + floor / − ceiling)', note: oiNote }
+  }, [showOi, profileOf, optionRun.ce, optionRun.pe, spotDay, oiClock, optionPast.sessions, pastCount, row, oiNote]) // eslint-disable-line react-hooks/exhaustive-deps
+  const futuresOi = useMemo(() => {
+    if (!showOi) return null
+    const today = [futuresOiMinutes(optionRun.futures, { asOfMs: oiClock })]
+    return { profile: oiProfileOf([...oiPast('futuresOi'), ...today], { rowSize: row }), label: 'futures OI', text: 'futures OI (+ opened / − closed)', note: oiNote }
+  }, [showOi, profileOf, optionRun.futures, oiClock, optionPast.sessions, pastCount, row, oiNote]) // eslint-disable-line react-hooks/exhaustive-deps
   const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
   // The floating replay bar (FloatingReplayBar.jsx, OI Replay's): once the inline replay controls are out of sight.
   const [replayInlineEl, setReplayInlineEl] = useState(null)
@@ -920,6 +957,9 @@ export default function ProfilesPage() {
                 <Checkbox checked={showDelta} onChange={(e) => setShowDelta(e.target.checked)}>Delta</Checkbox>
               </Tooltip>
               {showDelta && <Segmented size="small" value={netOrder} onChange={setNetSide} options={[{ value: 'net', label: 'CE − PE' }, { value: 'netpe', label: 'PE − CE' }]} aria-label="Option net order" />}
+              <Tooltip title="An OI PROFILE column - open interest change added up at each price, as the professional OI profiles show it: where positions were OPENED (+, green) and CLOSED (−, purple). SPOT: the options' OI on the spot's prices, PE − CE (+ = puts written / calls closed there - a floor building; − = calls written / puts closed - a ceiling). FUTURES: the near futures' own OI change at each price. The same sessions and clock as the profiles.">
+                <Checkbox checked={showOi} onChange={(e) => setShowOi(e.target.checked)}>OI Δ</Checkbox>
+              </Tooltip>
               <Tooltip title="How wide the volume profile's bars are drawn at the right of its charts - the busiest row's bar (the POC's) is this much of the chart; the newest candles stop short of most of it.">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Bars</Text>
@@ -989,9 +1029,9 @@ export default function ProfilesPage() {
         </Card>
 
         <Text strong style={{ fontSize: 13 }}>Spot · {index} index · {spotDay ? effectiveDate : spot.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
-        <ProfilePair {...pair} name="Spot" delta={spotDelta} known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
+        <ProfilePair {...pair} name="Spot" delta={spotDelta} oi={spotOi} known={spotKnown} past={pastCount ? spotPast.sessions.slice(-pastCount) : NO_BARS} neutral empty={emptyFor(spot, spotSession, spotPast, 'spot')} dayError={spot.error} />
         <Text strong style={{ fontSize: 13 }}>Futures · {futuresDay?.contract ?? `${index} near futures`} · {futuresDay ? effectiveDate : futures.loading ? `loading ${effectiveDate}…` : effectiveDate}</Text>
-        <ProfilePair {...pair} name="Futures" delta={futuresDelta} known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
+        <ProfilePair {...pair} name="Futures" delta={futuresDelta} oi={futuresOi} known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
       </Space>
       {ownReplay && !replayInlineOnScreen && (
         <FloatingReplayBar fabOn={false}>
