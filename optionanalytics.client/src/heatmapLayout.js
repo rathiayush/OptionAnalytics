@@ -153,8 +153,10 @@ export const WALL_RATIO = 4
 
 /** The colour scale of `quantities` (the sizes in view): { knots: [[size, level], ...] } - the HEAT_BANDS' percentiles as
  *  sizes, each at least a hair over the one before (a flat book still orders its bands). */
-export function heatScale(quantities) {
+export function heatScale(quantities, { classic = false } = {}) {
   const v = (quantities ?? []).filter((q) => q > 0).sort((a, b) => a - b)
+  // The ORIGINAL heatmap's colours (the card's "Pro colours" unticked): a straight scale from 0 to the 98th percentile.
+  if (classic) return { classic: true, cap: v.length ? v[Math.floor(v.length * 0.98)] || 1 : 1 }
   if (!v.length) return { knots: HEAT_BANDS.map(([, level], i) => [i, level]), median: 0 }
   const at = (f) => v[Math.min(v.length - 1, Math.max(0, Math.floor(v.length * f)))]
   const knots = []
@@ -166,7 +168,8 @@ export function heatScale(quantities) {
 }
 
 /** A size's place on the colour palette, 0 - 1: 0 at or under the first knot, 1 at or over the last, straight between. */
-export function heatLevel(q, { knots, median = 0 }) {
+export function heatLevel(q, { knots, median = 0, classic = false, cap = 1 }) {
+  if (classic) return Math.max(0, Math.min(1, q / cap))
   const wall = median > 0 && q >= WALL_RATIO * median ? Math.min(1, 0.8 + 0.2 * (q / median - WALL_RATIO) / WALL_RATIO) : 0
   if (!(q > knots[0][0])) return wall
   for (let i = 1; i < knots.length; i++) {

@@ -104,6 +104,16 @@ test('the colour scale: each colour band a fixed share of the sizes in view (Boo
   assert.equal(heatScale([]).knots.length, HEAT_BANDS.length)
 })
 
+test('unticked "Pro colours": the original heatmap\'s straight scale up to the 98th percentile', () => {
+  const sizes = Array.from({ length: 100 }, (_, i) => i + 1)
+  const s = heatScale(sizes, { classic: true })
+  assert.deepEqual(s, { classic: true, cap: 99 })
+  assert.equal(heatLevel(49.5, s), 0.5)
+  assert.equal(heatLevel(150, s), 1)
+  assert.equal(heatLevel(0, s), 0)
+  assert.deepEqual(heatScale([], { classic: true }), { classic: true, cap: 1 })
+})
+
 test('a wall (4x the median size in view) is always hot, even when walls are many', () => {
   // A busy book: 10% of the cells are walls of ~6x the ordinary size.
   const sizes = [...Array.from({ length: 900 }, (_, i) => 100 + (i % 50)), ...Array.from({ length: 100 }, () => 700)]
