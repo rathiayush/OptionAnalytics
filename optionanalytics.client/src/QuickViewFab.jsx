@@ -1,20 +1,22 @@
 import { useRef, useState } from 'react'
 import { AlignLeftOutlined, AlignRightOutlined, AppstoreOutlined, CloseOutlined, ColumnWidthOutlined, DollarOutlined, FundOutlined, HeatMapOutlined, LineChartOutlined, RadarChartOutlined, StockOutlined } from '@ant-design/icons'
 import { useSideNavInset, useViewport } from './useScreen.js'
-import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabFromAnchor, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
+import { FAB_GAP, FAB_ITEM_SIZE, FAB_SIZE, fabAnchor, fabDefault, fabEntries, fabFromAnchor, fabOpensUp, isFabDrag, placeFab } from './quickViews.js'
 
 // The quick views as a small round button that floats over the page and can be dragged anywhere: a tap opens the views as
 // small icons with their names, a tap on one opens its popup, a tap elsewhere closes them. On a phone it is the only way
 // in (no keyboard for the Z X C V B N M keys, and scrolling to each card is slow); on a monitor it saves the same scroll,
 // so it shows there too - `enabled` (the page's "Quick button" tick) turns it off. It starts at the BOTTOM LEFT of the
 // page, right of the sidebar (fabDefault); where it is dropped is `anchor` - its distance from the nearest corner
-// (fabAnchor), kept by the page, so the same place reads right on a phone and on a monitor.
+// (fabAnchor), kept by the page, so the same place reads right on a phone and on a monitor. `actions` come first, nearest
+// the button (fabEntries) - the ORDER panel (asked for - "order punching should also be in the floating popover so I can
+// punch trades easily"): { key, label, title, icon (a component), active, onClick }.
 const ICONS = { dayOi: FundOutlined, oiCharts: LineChartOutlined, oiHeatmap: HeatMapOutlined, premium: DollarOutlined, straddle: ColumnWidthOutlined, gex: RadarChartOutlined, futures: StockOutlined, optionDelta: AlignLeftOutlined, futuresDelta: AlignRightOutlined }
 // Over the floating panels (900+) and the replay bar, under the popups (1000).
 const FAB_Z = 960
 const ACCENT = '#1677ff'
 
-export function QuickViewFab({ views, active = null, onOpen, enabled = true, anchor = null, onAnchorChange }) {
+export function QuickViewFab({ views, actions = [], active = null, onOpen, enabled = true, anchor = null, onAnchorChange }) {
   const viewport = useViewport()
   const inset = useSideNavInset()
   const [dragPos, setDragPos] = useState(null)
@@ -24,7 +26,8 @@ export function QuickViewFab({ views, active = null, onOpen, enabled = true, anc
   if (!enabled) return null
 
   const pos = placeFab(dragPos ?? fabFromAnchor(anchor, viewport, inset) ?? fabDefault(viewport, inset), viewport, inset)
-  const up = fabOpensUp(pos, views.length, viewport)
+  const entries = fabEntries(views, actions)
+  const up = fabOpensUp(pos, entries.length, viewport)
   const labelsLeft = pos.x + FAB_SIZE / 2 > inset + (viewport.width - inset) / 2
 
   const moveTo = (e, d) => placeFab({ x: d.from.x + e.clientX - d.x, y: d.from.y + e.clientY - d.y }, viewport, inset)
@@ -61,8 +64,10 @@ export function QuickViewFab({ views, active = null, onOpen, enabled = true, anc
     <>
       {open && <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: FAB_Z - 1, background: 'rgba(0,0,0,0.25)' }} />}
       <div style={{ position: 'fixed', left: pos.x, top: pos.y, width: FAB_SIZE, height: FAB_SIZE, zIndex: FAB_Z }}>
-        {open && views.map((v, i) => {
-          const Icon = ICONS[v.key] ?? AppstoreOutlined
+        {open && entries.map((v, i) => {
+          const Icon = (v.action ? v.icon : ICONS[v.key]) ?? AppstoreOutlined
+          const isActive = v.action ? !!v.active : active === v.key
+          const pick = () => { setOpen(false); if (v.action) v.onClick?.(); else onOpen(v.key) }
           // Centred on the button, one above (or below) the other.
           const inset = (FAB_SIZE - FAB_ITEM_SIZE) / 2
           return (
@@ -75,14 +80,14 @@ export function QuickViewFab({ views, active = null, onOpen, enabled = true, anc
             >
               <button
                 type="button" aria-label={v.title} title={v.title}
-                onClick={() => { setOpen(false); onOpen(v.key) }}
-                style={{ ...round(FAB_ITEM_SIZE, active === v.key ? ACCENT : '#1f2430', '#fff'), flexShrink: 0, fontSize: 15 }}
+                onClick={pick}
+                style={{ ...round(FAB_ITEM_SIZE, isActive ? ACCENT : '#1f2430', '#fff'), flexShrink: 0, fontSize: 15 }}
               >
                 <Icon />
               </button>
               <span
-                onClick={() => { setOpen(false); onOpen(v.key) }}
-                style={{ whiteSpace: 'nowrap', fontSize: 11, color: '#fff', background: 'rgba(22,26,34,0.92)', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4, padding: '2px 6px', cursor: 'pointer' }}
+                onClick={pick}
+                style={{ whiteSpace: 'nowrap', fontSize: 11, color: '#fff', background: 'rgba(22,26,34,0.92)', border: `1px solid ${v.action ? ACCENT : 'rgba(255,255,255,0.12)'}`, borderRadius: 4, padding: '2px 6px', cursor: 'pointer', fontWeight: v.action ? 600 : 400 }}
               >
                 {v.label}
               </span>
@@ -90,7 +95,7 @@ export function QuickViewFab({ views, active = null, onOpen, enabled = true, anc
           )
         })}
         <button
-          type="button" aria-label={open ? 'Close the quick views' : 'Quick views'} aria-expanded={open}
+          type="button" aria-label={open ? 'Close the quick views' : 'Quick views and order'} aria-expanded={open}
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onClick={onClick}
           style={{ ...round(FAB_SIZE, ACCENT, '#fff'), fontSize: 17, touchAction: 'none', opacity: open || dragPos ? 1 : 0.85 }}
         >

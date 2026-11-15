@@ -6,7 +6,7 @@ import { chime, speak, telegram } from './alerts.js'
 import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highProbabilityAlertKey, highProbabilityText, newOiBreakAlertState, newReplayOiBreakAlertState, perStrikeLevels, stepOiBreakAlerts, stepReplayOiBreakAlerts } from './oiLevelBreaks.js'
 import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend, withOrderFlowRows } from './oiTotalsHeatmap.js'
-import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined } from '@ant-design/icons'
+import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined, ShoppingCartOutlined } from '@ant-design/icons'
 import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
@@ -7503,7 +7503,17 @@ export default function OiReplayPage() {
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
-      {result && <QuickViewFab views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} anchor={quickFabAnchor} onAnchorChange={setQuickFabAnchor} />}
+      {result && (
+        <QuickViewFab
+          views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} anchor={quickFabAnchor} onAnchorChange={setQuickFabAnchor}
+          // The order panel (Paper / Live - the "Paper Trade" button's own floating panel), nearest the button: punch a trade
+          // from anywhere on the page without scrolling to that button.
+          actions={[{
+            key: 'order', label: liveTradeActive ? 'Order (live)' : 'Order', icon: ShoppingCartOutlined, active: paperPanelOpen,
+            title: paperPanelOpen ? 'Close the order panel' : 'Punch a trade - the Paper / Live order panel', onClick: () => setPaperPanelOpen((o) => !o),
+          }]}
+        />
+      )}
       {replayBarOn && !isLive && result && oneMinBars.length > 0 && !replayControlsFloating && !replayInlineOnScreen && (
         <FloatingReplayBar fabOn={quickFabOn} fabAnchor={quickFabAnchor}>{replayBarControls}</FloatingReplayBar>
       )}

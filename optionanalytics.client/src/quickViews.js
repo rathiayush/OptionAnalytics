@@ -102,6 +102,13 @@ export const fabInBarRow = (pos, viewport, leftInset = 0) =>
 export const isFabDrag = (dx, dy) => Math.hypot(dx, dy) >= FAB_DRAG_PX
 
 /** Which way `count` icons open from the button at `pos`: up when they fit above it (or there is more room above). */
+/** What the floating button opens, NEAREST IT FIRST: its actions (asked for - "order punching should also be in the
+ *  floating popover so I can punch trades easily": the Paper / Live order panel), then the quick views. Each entry says
+ *  whether it is an action (`action: true` - its own `onClick` / `active` / `icon`) or a quick view (opened by its key). */
+export function fabEntries(views = [], actions = []) {
+  return [...(actions ?? []).map((a) => ({ ...a, action: true })), ...(views ?? []).map((v) => ({ ...v, action: false }))]
+}
+
 export function fabOpensUp(pos, count, viewport) {
   const need = count * (FAB_ITEM_SIZE + FAB_GAP)
   const above = pos.y

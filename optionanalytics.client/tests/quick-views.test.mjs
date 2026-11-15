@@ -119,3 +119,18 @@ test('the B / S ticket keys are kept from a box you type in - not from a checkbo
     assert.equal(isTypingField(el), false, JSON.stringify(el))
   }
 })
+
+// Asked for - "order punching should also be in the floating popover so I can punch trades easily": the floating button's
+// actions (the order panel) come first - nearest the button - then the quick views.
+import { fabEntries } from '../src/quickViews.js'
+
+test('the floating button lists the order action first, then every quick view', () => {
+  const order = { key: 'order', label: 'Order', onClick: () => {}, active: false }
+  const entries = fabEntries(QUICK_VIEWS, [order])
+  assert.equal(entries.length, QUICK_VIEWS.length + 1)
+  assert.deepEqual([entries[0].key, entries[0].action], ['order', true])
+  assert.deepEqual(entries.slice(1).map((e) => e.key), QUICK_VIEWS.map((v) => v.key))
+  assert.ok(entries.slice(1).every((e) => e.action === false))
+  // No actions = the quick views as before.
+  assert.deepEqual(fabEntries(QUICK_VIEWS).map((e) => e.key), QUICK_VIEWS.map((v) => v.key))
+})
