@@ -704,6 +704,9 @@ export default function ProfilesPage() {
   const [playing, setPlaying] = useState(false)
   const [speedMs, setSpeedMs] = usePersistedState(STORE.speed, 500)
   const [showDelta, setShowDelta] = usePersistedState(STORE.delta, false)
+  // The option net's order, ONE setting with OI Replay's option delta card (its side picker): CE − PE (+ bullish) or PE − CE.
+  const [netSide, setNetSide] = usePersistedState('optionanalytics.oiReplay.optionDeltaSide', 'net')
+  const netOrder = netSide === 'netpe' ? 'netpe' : 'net'
 
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
   const row = rows?.[index] > 0 ? rows[index] : PROFILE_ROWS[index]
@@ -859,11 +862,11 @@ export default function ProfilesPage() {
   const spotDelta = useMemo(() => {
     if (!showDelta) return null
     const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...([optionMinutes])]
-    const profile = optionDeltaProfileOf(sessions, { rowSize: row })
+    const profile = optionDeltaProfileOf(sessions, { rowSize: row, side: netOrder })
     const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
-    return { profile, label: 'options', text: 'options on spot (CE − PE, delta-weighted)', note }
-  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, profileOf, optionMinutes, row, optionRun.loading, optionRun.error])
+    return { profile, label: 'options', text: `options on spot (${netOrder === 'netpe' ? 'PE − CE, + puts ahead' : 'CE − PE, + bullish'}, delta-weighted)`, note }
+  }, [showDelta, netOrder, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, profileOf, optionMinutes, row, optionRun.loading, optionRun.error])
   const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
   // The floating replay bar (FloatingReplayBar.jsx, OI Replay's): once the inline replay controls are out of sight.
   const [replayInlineEl, setReplayInlineEl] = useState(null)
@@ -916,8 +919,7 @@ export default function ProfilesPage() {
               <Tooltip title="A DELTA column beside each profile - who was more aggressive at each price: buyers (green) or sellers (purple). SPOT: the options' flow on the spot's prices (OI Replay's option delta profile - calls bought / puts sold = +, the day's option bars weighted by their delta). FUTURES: the futures' own buy − sell at each price (the footprint). The same sessions and clock as the profiles.">
                 <Checkbox checked={showDelta} onChange={(e) => setShowDelta(e.target.checked)}>Delta</Checkbox>
               </Tooltip>
-              <Tooltip title="An OI PROFILE column - open interest change added up at each price, as the professional OI profiles show it: where positions were OPENED (+, green) and CLOSED (−, purple). SPOT: the options' OI on the spot's prices, PE − CE (+ = puts written / calls closed there - a floor building; − = calls written / puts closed - a ceiling). FUTURES: the near futures' own OI change at each price. The same sessions and clock as the profiles.">
-              </Tooltip>
+              {showDelta && <Segmented size="small" value={netOrder} onChange={setNetSide} options={[{ value: 'net', label: 'CE − PE' }, { value: 'netpe', label: 'PE − CE' }]} aria-label="Option net order" />}
               <Tooltip title="How wide the volume profile's bars are drawn at the right of its charts - the busiest row's bar (the POC's) is this much of the chart; the newest candles stop short of most of it.">
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Bars</Text>

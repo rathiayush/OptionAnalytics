@@ -725,7 +725,7 @@ All must pass before committing.
   candles stop short of it; buyers green right of its centre line, sellers purple left, scaled to the largest row) and a line
   over each chart (what it is of, the net, the rows of the most buying / selling - `deltaProfileLevels`). SPOT = the OPTIONS'
   flow on spot rows, OI Replay's option delta profile (`optionDeltaMinutes` / `optionDeltaProfileOf` - each strike's bars
-  given a side by where the close sits, weighted by its delta, Net CE − PE) from the day's run (`useOptionRun` -
+  given a side by where the close sits, weighted by its delta, Net CE − PE, or PE − CE: the page's CE − PE / PE − CE picker beside the tick is the SAME setting as OI Replay's option delta card's side picker, `optionanalytics.oiReplay.optionDeltaSide`) from the day's run (`useOptionRun` -
   `/api/oi-replay/{u}/run`, WEEK / BANKNIFTY MONTH; asked only while ticked; LIVE `forceLive` and again each minute, a page
   timer with `POLL_HEADERS` - the server's memory), the minutes up to the clock, the sessions before from their own runs
   (`usePastDeltaSessions`, moved to `usePastDeltaSessions.js`, shared with OI Replay's delta cards). FUTURES = the footprint's
