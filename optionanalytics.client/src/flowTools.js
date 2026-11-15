@@ -1,4 +1,4 @@
-// The Order Flow page's two reads of the futures' positioning and book flow (asked for - "build these in separate card
+// The Order Flow page's four reads of the futures' positioning and book (asked for - "build these in separate card
 // components"; the cards are FlowToolCards.jsx). Pure - each from data up to the clock only; they feed no strategy or alert.
 //
 //  1. DELTA + OI POSITIONING (`positioningCandles`): each candle's aggressor delta (buy - sell) with the change in the
@@ -9,7 +9,17 @@
 //       sellers aggressive, OI down = LONG LIQUIDATION
 //     The futures chart's OI regimes read price x OI; this reads the AGGRESSOR x OI. A candle whose delta is under
 //     `flatShare` of its volume is BALANCED (no one side aggressive); one with no OI change, or no OI reading, has no read.
-//  2. ORDER FLOW IMBALANCE (`ofiSeries` / `ofiCandles`) - Cont, Kukanov & Stoikov's OFI (2014, "The price impact of
+//  2. BOOK PRESSURE (`liquidityFlow`'s `pressure`): the resting bids against the resting offers within `bandRows` rows of
+//     the touch, a row weighted less the further it is (1 at the touch, falling in a line to 1 / bandRows at the last row):
+//     (bids - offers) / (bids + offers) x 100, +100 all bids, -100 all offers.
+//  3. NET LIQUIDITY ADDED vs PULLED (`liquidityFlow`'s `cumBid` / `cumAsk`): between two book columns, at the rows that
+//     stayed AWAY from the touch in both (bids under both best bids, offers over both best offers, up to `bandRows` rows
+//     out, and inside both columns' books - a level that left the book's far edge was not cancelled) nothing can have
+//     traded: a rise there is orders ADDED, a drop orders PULLED - the pull / stack signals' own rule, here added up from
+//     the day's first column as a running line a side. The columns are a sample of the book (every 2 s live, further
+//     apart on a loaded day), so what was added and pulled again between two of them is not seen: a floor, not a count.
+
+//  4. ORDER FLOW IMBALANCE (`ofiSeries` / `ofiCandles`) - Cont, Kukanov & Stoikov's OFI (2014, "The price impact of
 //     order book events"): between two pictures of the book, at the BEST bid and offer,
 //       e = q_bid(now) x [bid now >= bid before] - q_bid(before) x [bid now <= bid before]
 //         - q_ask(now) x [ask now <= ask before] + q_ask(before) x [ask now >= ask before]
@@ -132,15 +142,218 @@ export function positioningRead(summary) {
   return { tone: twoSided ? 0 : side * (fresh >= closing ? 1 : 0.5), text: `${what}.${other}` }
 }
 
+// ---- The book: pressure, and liquidity added / pulled ---------------------------------------------------------------
+
+export const LIQUIDITY_FLOW_DEFAULTS = { bandRows: 10, maxGapMs: 60_000 }
+/** How far out the added / pulled card counts, in rows (its picker) - wider than the pressure's band: a wall 20 - 30 rows
+ *  away being built or pulled is what the line is for. */
+export const LIQUIDITY_BANDS = [10, 20, 30, 50]
+export const LIQUIDITY_BAND_DEFAULT = 30
+
+// A column's sides by row number, with each side's best and far edge - worked out once a column (and row size).
+const parsedColumns = new WeakMap()
+function parse(column, step) {
+  const kept = parsedColumns.get(column)
+  if (kept?.step === step) return kept
+  const key = (p) => Math.round(p / step)
+  const side = (levels) => {
+    const map = new Map()
+    for (const [p, q] of levels ?? []) if (q > 0 && p > 0) map.set(key(p), (map.get(key(p)) ?? 0) + q)
+    return map
+  }
+  const bids = side(column.bids)
+  const asks = side(column.asks)
+  let bestBid = null, lowBid = null, bestAsk = null, highAsk = null
+  for (const k of bids.keys()) { if (bestBid == null || k > bestBid) bestBid = k; if (lowBid == null || k < lowBid) lowBid = k }
+  for (const k of asks.keys()) { if (bestAsk == null || k < bestAsk) bestAsk = k; if (highAsk == null || k > highAsk) highAsk = k }
+  const out = { step, t: column.t, bids, asks, bestBid, lowBid, bestAsk, highAsk, ok: bestBid != null && bestAsk != null && bestAsk > bestBid }
+  parsedColumns.set(column, out)
+  return out
+}
+
+/** The book's pressure in a column (-100 ... +100; null without both sides): the bids against the offers within
+ *  `bandRows` rows of the touch, weighted 1 at the touch down to 1 / bandRows at the last row. */
+export function bookPressure(column, rowSize, bandRows = LIQUIDITY_FLOW_DEFAULTS.bandRows) {
+  const c = parse(column, rowSize > 0 ? rowSize : 0.05)
+  if (!c.ok) return null
+  if (c.pressureBand === bandRows) return c.pressure
+  c.pressureBand = bandRows
+  let bid = 0, ask = 0
+  for (let d = 0; d < bandRows; d++) {
+    const w = 1 - d / bandRows
+    bid += (c.bids.get(c.bestBid - d) ?? 0) * w
+    ask += (c.asks.get(c.bestAsk + d) ?? 0) * w
+  }
+  return (c.pressure = bid + ask > 0 ? ((bid - ask) / (bid + ask)) * 100 : null)
+}
+
+// What was added / pulled a side between two columns (parsed), away from the touch in both and inside both books.
+const pairEvents = new WeakMap()
+function eventOf(columnA, columnB, a, b, bandRows) {
+  // Kept a band (the pressure card and the added / pulled card read different ones off the same columns).
+  let byBand = pairEvents.get(columnB)
+  if (!byBand || byBand.from !== columnA || byBand.step !== b.step) pairEvents.set(columnB, byBand = { from: columnA, step: b.step, events: new Map() })
+  const kept = byBand.events.get(bandRows)
+  if (kept) return kept
+  const ev = { bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0 }
+  const bidCut = Math.min(a.bestBid, b.bestBid)
+  const bidEdge = Math.max(a.lowBid, b.lowBid)
+  for (let k = Math.max(bidCut - bandRows, bidEdge); k <= bidCut - 1; k++) {
+    const change = (b.bids.get(k) ?? 0) - (a.bids.get(k) ?? 0)
+    if (change > 0) ev.bidAdded += change; else ev.bidPulled -= change
+  }
+  const askCut = Math.max(a.bestAsk, b.bestAsk)
+  const askEdge = Math.min(a.highAsk, b.highAsk)
+  for (let k = askCut + 1; k <= Math.min(askCut + bandRows, askEdge); k++) {
+    const change = (b.asks.get(k) ?? 0) - (a.asks.get(k) ?? 0)
+    if (change > 0) ev.askAdded += change; else ev.askPulled -= change
+  }
+  byBand.events.set(bandRows, ev)
+  return ev
+}
+
+/**
+ * The book through the day, a point a column: `columns` - the heatmap's ({ t (ms), bids, asks } as [price, quantity]
+ * rows, ascending; the page's, already cut at its clock), `rowSize` their rows, `bandRows` how far out added / pulled
+ * are counted, `pressureRows` the pressure's band. Each point { t, mid, pressure (`bookPressure`), bidAdded, bidPulled, askAdded, askPulled (since the column before - 0 across a gap over `maxGapMs`
+ * or a column with no book), cumBid, cumAsk (added - pulled a side, from the first column) }. A column without both
+ * sides is left out. Each point from the columns up to it only.
+ */
+export function liquidityFlow(columns, { rowSize, bandRows = LIQUIDITY_FLOW_DEFAULTS.bandRows, pressureRows = LIQUIDITY_FLOW_DEFAULTS.bandRows, maxGapMs = LIQUIDITY_FLOW_DEFAULTS.maxGapMs, clockMs = null } = {}) {
+  const step = rowSize > 0 ? rowSize : 0.05
+  const out = []
+  let prev = null, prevColumn = null
+  let cumBid = 0, cumAsk = 0
+  for (const column of columns ?? []) {
+    if (!column || !Number.isFinite(column.t) || (clockMs != null && column.t > clockMs)) continue
+    const c = parse(column, step)
+    if (!c.ok) continue
+    const ev = prev && c.t - prev.t <= maxGapMs && c.t > prev.t ? eventOf(prevColumn, column, prev, c, bandRows) : { bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0 }
+    cumBid += ev.bidAdded - ev.bidPulled
+    cumAsk += ev.askAdded - ev.askPulled
+    out.push({ t: c.t, mid: ((c.bestBid + c.bestAsk) / 2) * step, pressure: bookPressure(column, step, pressureRows), ...ev, cumBid, cumAsk })
+    prev = c
+    prevColumn = column
+  }
+  return out
+}
+
+/** `points` (liquidityFlow) as one point every `seconds`: the bucket's last mid and running totals, its average
+ *  pressure, what was added / pulled in it - { t (ms, the bucket's start), ... }. */
+export function bucketFlow(points, seconds = 10) {
+  const size = Math.max(1, seconds) * 1000
+  const out = []
+  let n = 0
+  for (const p of points ?? []) {
+    const t = Math.floor(p.t / size) * size
+    let b = out.at(-1)
+    if (!b || b.t !== t) { out.push(b = { t, mid: p.mid, pressure: 0, bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0, cumBid: p.cumBid, cumAsk: p.cumAsk }); n = 0 }
+    b.mid = p.mid
+    b.cumBid = p.cumBid
+    b.cumAsk = p.cumAsk
+    b.bidAdded += p.bidAdded; b.bidPulled += p.bidPulled; b.askAdded += p.askAdded; b.askPulled += p.askPulled
+    if (p.pressure != null) { n++; b.pressure += (p.pressure - b.pressure) / n }
+  }
+  return out
+}
+
+/** An EMA of `values` over `length` points (the first value starts it) - each from itself and those before. */
+export function emaLine(values, length) {
+  if (!(length > 1)) return [...(values ?? [])]
+  const k = 2 / (length + 1)
+  let ema = null
+  return (values ?? []).map((v) => (ema = ema == null ? v : v * k + ema * (1 - k)))
+}
+
+const lastAtOrBefore = (points, t) => {
+  let lo = 0, hi = points.length - 1, found = null
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (points[mid].t <= t) { found = points[mid]; lo = mid + 1 } else hi = mid - 1
+  }
+  return found
+}
+
+/**
+ * The book pressure now against the price's move: `points` (liquidityFlow), over the last `windowMin` minutes -
+ * { now (the last 30 s' average), average (the window's), move (the mid's change over it, points), kind, tone, text }.
+ * `kind`: 'bidThin' (price up while the offers outweigh the bids - rising into supply / on thinning bids), 'askThin' (the
+ * mirror), 'bid' / 'ask' (the book leans that way), 'even'. `movePct`: the move that counts, in % of the price.
+ */
+export function pressureRead(points, { windowMin = 5, lean = 15, movePct = 0.05 } = {}) {
+  if (!points?.length) return null
+  const end = points.at(-1)
+  const from = end.t - windowMin * MIN
+  const start = lastAtOrBefore(points, from) ?? points[0]
+  let sum = 0, n = 0, recent = 0, m = 0
+  for (let i = points.length - 1; i >= 0 && points[i].t > from; i--) {
+    if (points[i].pressure == null) continue
+    sum += points[i].pressure; n++
+    if (points[i].t > end.t - 30_000) { recent += points[i].pressure; m++ }
+  }
+  if (!n) return null
+  const average = sum / n
+  const now = m ? recent / m : average
+  const move = end.mid - start.mid
+  const moved = Math.abs(move) >= (movePct / 100) * end.mid
+  let kind = 'even'
+  if (moved && move > 0 && average <= -lean) kind = 'bidThin'
+  else if (moved && move < 0 && average >= lean) kind = 'askThin'
+  else if (average >= lean) kind = 'bid'
+  else if (average <= -lean) kind = 'ask'
+  const text = {
+    bidThin: `Price is up ${move.toFixed(1)} pts in ${windowMin} min while the offers outweigh the bids - rising into supply on thin bids: the move is not backed by the book.`,
+    askThin: `Price is down ${Math.abs(move).toFixed(1)} pts in ${windowMin} min while the bids outweigh the offers - falling into demand on thin offers: the move is not backed by the book.`,
+    bid: `The bids outweigh the offers near the price${moved && move > 0 ? ' and price is rising with them' : ''} - buyers are resting under the market.`,
+    ask: `The offers outweigh the bids near the price${moved && move < 0 ? ' and price is falling with them' : ''} - sellers are resting over the market.`,
+    even: 'Bids and offers near the price are about even.',
+  }[kind]
+  return { now, average, move, kind, tone: kind === 'bid' || kind === 'askThin' ? 1 : kind === 'ask' || kind === 'bidThin' ? -1 : 0, text }
+}
+
+/**
+ * What was added and pulled over the last `windowMin` minutes of `points` (liquidityFlow): { bidNet, askNet (added -
+ * pulled a side), bidAdded, bidPulled, askAdded, askPulled, move (the mid's change), kind, tone, text }. `kind`: what
+ * leads - 'bidStack' (bids added: support building), 'bidPull' (bids pulled: support withdrawn), 'askStack' (offers
+ * added: resistance building), 'askPull' (offers pulled: resistance withdrawn), 'quiet'. A side's net counts when it is
+ * at least `share` of everything that changed on both sides.
+ */
+export function liquidityRead(points, { windowMin = 5, share = 0.15 } = {}) {
+  if (!points?.length) return null
+  const end = points.at(-1)
+  const from = end.t - windowMin * MIN
+  const start = lastAtOrBefore(points, from) ?? points[0]
+  const sum = { bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0 }
+  for (let i = points.length - 1; i >= 0 && points[i].t > from; i--) for (const key of Object.keys(sum)) sum[key] += points[i][key]
+  const bidNet = sum.bidAdded - sum.bidPulled
+  const askNet = sum.askAdded - sum.askPulled
+  const total = sum.bidAdded + sum.bidPulled + sum.askAdded + sum.askPulled
+  const move = end.mid - start.mid
+  let kind = 'quiet'
+  if (total > 0) {
+    const big = Math.abs(bidNet) >= Math.abs(askNet) ? ['bid', bidNet] : ['ask', askNet]
+    if (Math.abs(big[1]) >= share * total) kind = `${big[0]}${big[1] > 0 ? 'Stack' : 'Pull'}`
+  }
+  const up = move > 0 ? 'rising' : move < 0 ? 'falling' : 'flat'
+  const text = {
+    bidStack: `Bids are being ADDED under the price (support building) - price ${up}.`,
+    bidPull: `Bids are being PULLED from under the price (support withdrawn) - price ${up}${move < 0 ? ': a fall with the bids stepping away can run' : ''}.`,
+    askStack: `Offers are being ADDED over the price (resistance building) - price ${up}${move > 0 ? ': a rise into stacking offers is being sold into' : ''}.`,
+    askPull: `Offers are being PULLED from over the price (resistance withdrawn) - price ${up}${move > 0 ? ': a rise with the offers stepping away can run' : ''}.`,
+    quiet: 'Little net change in the resting orders on either side.',
+  }[kind]
+  return { ...sum, bidNet, askNet, move, kind, tone: kind === 'bidStack' || kind === 'askPull' ? 1 : kind === 'bidPull' || kind === 'askStack' ? -1 : 0, text }
+}
+
 // ---- Order flow imbalance at the touch ------------------------------------------------------------------------------
 
 export const OFI_DEFAULTS = { maxGapMs: 60_000 }
 export const OFI_TIMEFRAMES = [1, 3, 5, 15]
 
 // A column's best bid / offer (in rows of `step`) and the size there - worked out once a column (and row size).
-const parsedColumns = new WeakMap()
+const bestColumns = new WeakMap()
 function best(column, step) {
-  const kept = parsedColumns.get(column)
+  const kept = bestColumns.get(column)
   if (kept?.step === step) return kept
   const key = (p) => Math.round(p / step)
   let bid = null, bidQ = 0, ask = null, askQ = 0
@@ -155,7 +368,7 @@ function best(column, step) {
     if (ask == null || k < ask) { ask = k; askQ = q } else if (k === ask) askQ += q
   }
   const out = { step, bid, bidQ, ask, askQ, ok: bid != null && ask != null && ask > bid }
-  parsedColumns.set(column, out)
+  bestColumns.set(column, out)
   return out
 }
 
@@ -212,7 +425,7 @@ export function ofiCandles(points, minutes = 1) {
     c.cum = p.cum
     c.move = c.close - c.base
   }
-  return out.map(({ base, ...c }) => c)
+  return out.map(({ base: _base, ...c }) => c)
 }
 
 const sign = (v) => (v > 0 ? 1 : v < 0 ? -1 : 0)
