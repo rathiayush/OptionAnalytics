@@ -26,7 +26,7 @@
 
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
 import { bidShare, liquidityMap } from './orderFlowMath.js'
-import { optionTrailLevel, tighterStop } from './optionTrail.js'
+import { gapFill, optionTrailLevel, tighterStop } from './optionTrail.js'
 import { adaptiveDecision, combineRegime, cvdDayVote, dayRegime, oiDayVote, sessionOpenMs } from './dayRegime.js'
 
 const MIN = 60_000
@@ -225,7 +225,7 @@ function sortedSeries(points, lag = 0) {
     if (p.openInterest == null) continue
     const strike = Number(p.strike)
     if (!byStrike.has(strike)) byStrike.set(strike, [])
-    byStrike.get(strike).push({ t: msOf(p.time) + lag, oi: p.openInterest, price: p.price, high: p.high ?? p.price, low: p.low ?? p.price })
+    byStrike.get(strike).push({ t: msOf(p.time) + lag, oi: p.openInterest, price: p.price, open: p.open ?? null, high: p.high ?? p.price, low: p.low ?? p.price })
   }
   for (const list of byStrike.values()) list.sort((a, b) => a.t - b.t)
   return byStrike
@@ -424,7 +424,11 @@ export function optionPnlPoints(trade, oi, ms) {
 /** A paper option trade's own premium stop-loss / target, in premium points (0 = none): the first
  *  minute after `entryMs` (and before `untilMs`) whose range reaches either level. A SELL loses when the
  *  premium rises, a BUY when it falls; the stop counts first when one minute touches both. Filled at
- *  the level itself. Returns { at (ms, the minute's end), premium, reason } or null.
+ *  the level itself - but a minute that OPENED through the stop fills at its open (the gap), and one whose
+ *  whole range is past it (no open known) at the nearest price it traded (its high for a BUY, low for a
+ *  SELL): the premium never traded at the stop, so filling there made a gap's loss look smaller. A target is
+ *  filled at the target (a gap through it is not given the better price). Returns { at (ms, the minute's
+ *  end), premium, reason } or null.
  *  `levelLog` ([{ t, sl, target, trailStart, trailGap }], oldest first): the trader changed the levels
  *  while the trade was open - each minute is judged with the levels in force when it STARTED (a change
  *  applies from its minute on, never to what already passed). */
@@ -463,7 +467,7 @@ export function optionStopTargetHit(oi, trade, entryMs, untilMs, slPoints, targe
     if (inForce != null && (sell ? high >= inForce : low <= inForce)) {
       const reason = inForce !== earned || earned === stop ? `Max SL ${sl} pts hit`
         : inForce === trailed ? `Trailing SL hit (${tr.gap} pts behind the best ${best.toFixed(1)})` : `Trailing SL hit (the ${inForce.toFixed(1)} it had earned)`
-      return { at: start + MIN, premium: inForce, reason }
+      return { at: start + MIN, premium: gapFill(trade.action, inForce, p.open, high, low), reason }
     }
     if (target != null && (sell ? low <= target : high >= target)) return { at: start + MIN, premium: target, reason: `Target ${tgt} pts hit` }
     best = sell ? Math.min(best, low) : Math.max(best, high)

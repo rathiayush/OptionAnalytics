@@ -43,6 +43,8 @@
 // A minute uses only readings up to that minute (each option point holds its minute's close, as the page shows it, and
 // a leg is read at its last reading within 5 minutes), and nothing after `asOfMs` - the replay clock.
 
+import { isFoSession } from './marketHolidays.js'
+
 const MIN = 60_000
 const IST_MS = 330 * MIN
 const STALE_MINUTES = 5
@@ -119,8 +121,8 @@ const DAY_MS = 86_400_000
 const STRADDLE_SIGMA = Math.sqrt(2 / Math.PI)   // an at-the-money straddle is worth 0.8 sigma
 
 // Trading minutes from minute `t` to 15:30 IST on `expiry` (YYYY-MM-DD): what is left of today's session (`closeMs` -
-// today's 15:30) plus a session for every weekday after today up to the expiry day (holidays in between are not known
-// here); null without a date or past it.
+// today's 15:30) plus a session for every weekday after today up to the expiry day that is not one of NSE's listed trading
+// holidays (marketHolidays.js); null without a date or past it.
 function minutesToExpiry(t, expiry, closeMs) {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(expiry ?? ''))
   if (!m) return null
@@ -128,10 +130,8 @@ function minutesToExpiry(t, expiry, closeMs) {
   const today = Math.floor((t + IST_MS) / DAY_MS)
   if (expiryDay < today) return null
   let minutes = Math.max((closeMs - t) / MIN, 1)
-  for (let d = today + 1; d <= expiryDay; d++) {
-    const weekday = new Date(d * DAY_MS).getUTCDay()
-    if (weekday !== 0 && weekday !== 6) minutes += SESSION_MINUTES
-  }
+  // Each session after today up to the expiry: weekdays, less NSE's trading holidays (marketHolidays.js).
+  for (let d = today + 1; d <= expiryDay; d++) if (isFoSession(d)) minutes += SESSION_MINUTES
   return minutes
 }
 

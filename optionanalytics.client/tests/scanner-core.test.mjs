@@ -104,8 +104,9 @@ test('option positions: one per signal, closed by their own premium stop, P&L in
   assert.equal(p.key, `wallDefence-${setup.t}-sell`)
   assert.ok(sameSignal(p, { ...setup, t: setup.t + 5 * MIN }, trade))
   assert.ok(!sameSignal(p, { ...setup, t: setup.t + COOLDOWN_MS }, trade))
-  // The PE premium rises to 61: the 10-point stop of the sold option is hit.
-  const series = (premium) => [{ t: at(61), oi: 1e6, price: 50, high: 50, low: 50 }, { t: at(62), oi: 1e6, price: premium, high: premium, low: premium }]
+  // The PE premium rises to 61 through the minute (from 50): the 10-point stop of the sold option is hit, at the stop. (A
+  // minute that OPENED past it would fill at its open - optionStopTargetHit's gap rule, tests/option-sl-target.test.mjs.)
+  const series = (premium) => [{ t: at(61), oi: 1e6, price: 50, high: 50, low: 50 }, { t: at(62), oi: 1e6, price: premium, open: 50, high: premium, low: 50 }]
   const book = { pe: new Map([[22600, series(61)]]), ce: new Map(), spot: [], futures: [], step: 50 }
   const [row] = positionRows({ positions: [p], dayResults: [], withOutcome: [{ ...setup, outcome: { status: 'open' } }], oi: book, nowMs: at(64), settings: cfg })
   assert.ok(row.exitTime, 'closed')
@@ -145,6 +146,7 @@ test('feeds: an order flow push adds prints, a heatmap column and the forming ba
   assert.ok(!applyOiTicks(ctx, [{ underlying: 'SENSEX', expiryFlag: 'WEEK', side: 'CE', strike: 22600, time: new Date(at(3)).toISOString(), openInterest: 1, price: 5 }], 'NIFTY', 'WEEK'))
   // A packet with no OI keeps the minute's real OI.
   applyOiTicks(ctx, [{ underlying: 'NIFTY', expiryFlag: 'WEEK', side: 'CE', strike: 22600, time: new Date(at(3) + 20_000).toISOString(), openInterest: 0, price: 6 }], 'NIFTY', 'WEEK')
-  assert.deepEqual(ctx.ce.get(22600), [{ t: at(3), oi: 100, price: 6, high: 6, low: 5 }])
+  // ... and the minute's first price stays its open (a later tick does not move it).
+  assert.deepEqual(ctx.ce.get(22600), [{ t: at(3), oi: 100, price: 6, open: 5, high: 6, low: 5 }])
   assert.ok(!upsertSeries(ctx.ce.get(22600), new Date(at(2)).toISOString(), { oi: 1 }), 'an older minute never rewrites the newer one')
 })

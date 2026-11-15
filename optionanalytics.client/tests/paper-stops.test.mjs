@@ -34,8 +34,9 @@ test('live: a dip in the entry minute BEFORE the entry is not a stop - only the 
   const p = position({ entryTime: ist('10:05', 30), levelLog: punchLevelLog(levels(20, 30), ist('10:05', 30)) })
   assert.equal(paperStopTargetHit([tick('10:05', 45, 99, 75, 104)], p), null, 'the pre-entry low (75) does not stop it')
   assert.equal(paperStopTargetHit([tick('10:05', 45, 99, 99, 135)], p), null, 'nor a pre-entry high reach the target')
-  // A later tick of the same minute through the stop does.
-  assert.deepEqual(paperStopTargetHit([tick('10:05', 55, 79, 75, 104)], p), { kind: 'sl', fillPrice: 80, at: ist('10:05', 55) })
+  // A later tick of the same minute through the stop does - filled at that tick's price (79): only it is known after the
+  // entry, and the premium was already past the stop there.
+  assert.deepEqual(paperStopTargetHit([tick('10:05', 55, 79, 75, 104)], p), { kind: 'sl', fillPrice: 79, at: ist('10:05', 55) })
   // The next minute is all after the entry: its whole range counts.
   assert.deepEqual(paperStopTargetHit([tick('10:05', 59, 95, 75, 104), tick('10:06', 20, 92, 79.5, 96)], p), { kind: 'sl', fillPrice: 80, at: ist('10:06', 20) })
 })
@@ -70,9 +71,10 @@ test('a change applies from the minute it is made - never to the bars already pa
   assert.deepEqual(paperStopTargetHit(series, changed, { asOfMs: ist('10:09') }), { kind: 'sl', fillPrice: 90, at: ist('10:09') })
   // Without the change the old 20-pt stop (80) holds.
   assert.equal(paperStopTargetHit(series, position(), { asOfMs: ist('10:09') }), null)
-  // A stop set through the price shown (the 10:08 close, 95) closes it at once, at the level.
+  // A stop set through the price shown (the 10:08 close, 95) closes it at once - at that price, the market's (the premium
+  // was already under the 96 stop: it never traded there after the change).
   const [through] = withPaperLevelChange([position()], 'NIFTY', { sl: 4 }, ist('10:08'))
-  assert.deepEqual(paperStopTargetHit(series, through, { asOfMs: ist('10:08') }), { kind: 'sl', fillPrice: 96, at: ist('10:08') })
+  assert.deepEqual(paperStopTargetHit(series, through, { asOfMs: ist('10:08') }), { kind: 'sl', fillPrice: 95, at: ist('10:08') })
   // Widened instead: the trade survives a dip the old stop would have caught.
   const deep = [bar('10:05', 100), bar('10:06', 98), bar('10:07', 90, 75, 99)]
   const [wide] = withPaperLevelChange([position()], 'NIFTY', { sl: 30 }, ist('10:06'))
@@ -85,7 +87,8 @@ test('live: a change mid-minute is judged on the prices after it in that minute'
   const [changed] = withPaperLevelChange([p], 'NIFTY', { sl: 10 }, ist('10:07', 30))
   // The running 10:07 minute had dipped to 88 at 10:07:05, before the change; now 93.
   assert.equal(paperStopTargetHit([tick('10:06', 59, 95, 92, 97), tick('10:07', 40, 93, 88, 96)], changed), null)
-  assert.deepEqual(paperStopTargetHit([tick('10:06', 59, 95, 92, 97), tick('10:07', 50, 89.5, 88, 96)], changed), { kind: 'sl', fillPrice: 90, at: ist('10:07', 50) })
+  // The price after the change (89.5) is the fill: it is past the 90 stop.
+  assert.deepEqual(paperStopTargetHit([tick('10:06', 59, 95, 92, 97), tick('10:07', 50, 89.5, 88, 96)], changed), { kind: 'sl', fillPrice: 89.5, at: ist('10:07', 50) })
 })
 
 test('the trailing stop only tightens: widening the trail or switching it off keeps what it earned', () => {
@@ -167,4 +170,23 @@ test('a No SL position is squared off at 15:15; one with levels keeps its stop /
   // Live / another chain: the clock is given apart from the points.
   assert.deepEqual(paperExitHit(late.slice(0, 3), noStop, { asOfMs: null, clockMs: ist('15:15', 20) }), { kind: 'dayEnd', fillPrice: 99, at: ist('15:15') })
   assert.equal(paperExitHit(late, { ...p, status: 'CLOSED' }, { asOfMs: ist('15:20') }), null)
+})
+
+test('a bar that OPENS through the stop fills at its open (the gap), not at the stop - BUY and SELL; a target stays at the target', () => {
+  const withOpen = (hhmm, open, close, low, high) => ({ ...bar(hhmm, close, low, high), open })
+  // BUY at 100, stop 80: 10:06 opens at 71 (a gap down), trades 65 - 72.
+  assert.deepEqual(paperStopTargetHit([bar('10:05', 100), withOpen('10:06', 71, 70, 65, 72)], position(), { asOfMs: ist('10:06') }), { kind: 'sl', fillPrice: 71, at: ist('10:06') })
+  // Opened above the stop and fell through it: filled at the stop.
+  assert.deepEqual(paperStopTargetHit([bar('10:05', 100), withOpen('10:06', 90, 75, 70, 92)], position(), { asOfMs: ist('10:06') }), { kind: 'sl', fillPrice: 80, at: ist('10:06') })
+  // No open known, the whole bar under the stop: its high, the nearest price it traded.
+  assert.deepEqual(paperStopTargetHit([bar('10:05', 100), bar('10:06', 70, 65, 72)], position(), { asOfMs: ist('10:06') }), { kind: 'sl', fillPrice: 72, at: ist('10:06') })
+  // SELL at 100, stop 120: 10:06 opens at 131 (a gap up).
+  const sell = position({ direction: 'SELL' })
+  assert.deepEqual(paperStopTargetHit([bar('10:05', 100), withOpen('10:06', 131, 133, 128, 135)], sell, { asOfMs: ist('10:06') }), { kind: 'sl', fillPrice: 131, at: ist('10:06') })
+  // A gap through the TARGET is filled at the target (never the better price).
+  assert.deepEqual(paperStopTargetHit([bar('10:05', 100), withOpen('10:06', 140, 142, 138, 145)], position(), { asOfMs: ist('10:06') }), { kind: 'target', fillPrice: 130, at: ist('10:06') })
+  // The trailing stop too: up to 130 (stop 125), then a gap down to 118.
+  const trail = position({ levelLog: punchLevelLog(levels(20, 0, 0, 5), ist('10:05')) })
+  const series = [bar('10:05', 100), bar('10:06', 130, 100, 130), withOpen('10:07', 118, 117, 115, 119)]
+  assert.deepEqual(paperStopTargetHit(series, trail, { asOfMs: ist('10:07') }), { kind: 'trail', fillPrice: 118, at: ist('10:07') })
 })

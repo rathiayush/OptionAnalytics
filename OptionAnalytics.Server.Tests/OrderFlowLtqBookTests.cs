@@ -49,8 +49,10 @@ public sealed class OrderFlowLtqBookTests
         DepthLevel[] Bid(long q) => new[] { L(100.00m, q) };
         DepthLevel[] Ask(long q) => new[] { L(100.05m, q) };
         // A second that traded both ways at an unmoved book: 600 off the bid, 900 off the ask; 1,500 traded, the last trade
-        // a 75 sell. The rules in use call all 1,500 sold; this one: -75, then 1,425 split 60 / 40 to the buyers.
-        Assert.Equal(-75 + 855 - 570, OrderFlowEngine.LtqBookDelta(-1, 1500, 75, 100.00m, 100.00m, Bid(1500), Ask(1500), Bid(900), Ask(600)));
+        // a 75 sell. The rules in use call all 1,500 sold; this one: -75 (the last trade, which took 75 of the bid's 600),
+        // then the rest as the book says - 900 bought, 525 sold. (Counting the last trade's 75 in the bid's taken too, it
+        // read -75 + 855 - 570 = +210.)
+        Assert.Equal(-75 + 900 - 525, OrderFlowEngine.LtqBookDelta(-1, 1500, 75, 100.00m, 100.00m, Bid(1500), Ask(1500), Bid(900), Ask(600)));
         // A sweep up through the asks: every unit bought.
         var asks = new[] { L(100.05m, 750), L(100.10m, 750), L(100.15m, 750) };
         Assert.Equal(3000, OrderFlowEngine.LtqBookDelta(1, 3000, 150, 100.15m, 100.00m, Bid(500), asks, new[] { L(100.10m, 500) }, new[] { L(100.20m, 750) }));
@@ -69,6 +71,22 @@ public sealed class OrderFlowLtqBookTests
     }
 
     [Fact]
+    public void More_taken_than_traded_was_pulled_less_was_refilled_and_is_split_by_the_typical_move()
+    {
+        DepthLevel[] Bid(long q) => new[] { L(100.00m, q) };
+        DepthLevel[] Ask(long q) => new[] { L(100.05m, q) };
+        // 1,000 traded, the last trade a 100 buy. The book lost 1,500 off the ask (some of it PULLED, not filled) and 300
+        // off the bid: 1,400 + 300 taken for a rest of 900 - each side scaled to the rest, its share kept: 741 bought.
+        Assert.Equal(100 + 741 - 159, OrderFlowEngine.LtqBookDelta(1, 1000, 100, 100.05m, 100.00m, Bid(1500), Ask(2000), Bid(1200), Ask(500)));
+        // Nothing taken (refilled at the touch): the rest split by bulk volume classification - up 0.05 over a typical
+        // 0.10 move: Phi(0.5) = 0.6915 of 900 = 622 bought - not all of it, as the move's direction alone said.
+        Assert.Equal(100 + 622 - 278, OrderFlowEngine.LtqBookDelta(1, 1000, 100, 100.05m, 100.00m, null, null, null, null, typicalMove: 0.10));
+        Assert.Equal(1000, OrderFlowEngine.LtqBookDelta(1, 1000, 100, 100.05m, 100.00m, null, null, null, null));   // no typical move yet
+        // Partly taken: 400 bought off the ask, the other 500 at the touch - unchanged price: half each way.
+        Assert.Equal(-100 + 650 - 250, OrderFlowEngine.LtqBookDelta(-1, 1000, 100, 100.00m, 100.00m, Bid(1500), Ask(1500), Bid(1500), Ask(1100), typicalMove: 0.10));
+    }
+
+    [Fact]
     public void The_engine_tallies_it_per_candle_beside_the_other_rules_and_keeps_it_with_the_day()
     {
         var engine = NewEngine();
@@ -78,7 +96,9 @@ public sealed class OrderFlowLtqBookTests
 
         var row = Assert.Single(engine.DeltaRules(1));
         Assert.Equal(-1500, row.Delta);                                    // the rule in use: the whole second sold
-        Assert.Equal(-75 + 855 - 570, row.LtqBook);                        // the last trade sold, the rest split by the book
+        Assert.Equal(-75 + 900 - 525, row.LtqBook);                        // the last trade sold, the rest as the book says
+        // The packet counts: one packet with volume, holding more than one trade (1,500 over its LTQ of 75).
+        Assert.Equal((1L, 1L, 1500L), (row.Packets!.Value, row.MultiPackets!.Value, row.MultiVolume!.Value));
         // The footprint itself is still the rule in use - this is a comparison until it is chosen.
         var bar = Assert.Single(engine.Snapshot(rowSize: 0, minTradeQty: 1, heatmapColumns: 10).Bars);
         Assert.Equal((0L, 1500L), (bar.Buy, bar.Sell));
@@ -106,6 +126,25 @@ public sealed class OrderFlowLtqBookTests
         Assert.Equal(225, after.Delta);
         Assert.Null(after.TickRule);
         Assert.Null(after.LtqBook);
+    }
+
+    [Fact]
+    public void Packets_of_one_trade_are_not_counted_as_several_and_a_day_saved_before_the_counts_shows_none()
+    {
+        var engine = NewEngine();
+        engine.OnTick(Tick(100.00m, 1000, new[] { L(100.00m, 750) }, new[] { L(100.05m, 750) }), T0);
+        engine.OnTick(Tick(100.05m, 1075, new[] { L(100.00m, 750) }, new[] { L(100.05m, 675) }, ltq: 75), T0.AddSeconds(1));   // one trade
+        engine.OnTick(Tick(100.05m, 1375, new[] { L(100.00m, 750) }, new[] { L(100.05m, 375) }, ltq: 75), T0.AddSeconds(2));   // several
+        engine.OnTick(Tick(100.05m, 1450, new[] { L(100.00m, 750) }, new[] { L(100.05m, 300) }), T0.AddSeconds(3));            // no LTQ
+        var row = Assert.Single(engine.DeltaRules(1));
+        Assert.Equal((3L, 1L, 300L), (row.Packets!.Value, row.MultiPackets!.Value, row.MultiVolume!.Value));
+        // Saved with the four rules but no counts: the rules read, the counts none.
+        var day = engine.ExportDay()!;
+        for (var i = 0; i < day.Bars.Count; i++) day.Bars[i] = day.Bars[i] with { Rules = day.Bars[i].Rules![..4] };
+        var restored = Assert.Single(OrderFlowEngine.FromDay(day).DeltaRules(1));
+        Assert.Equal(row.LtqBook, restored.LtqBook);
+        Assert.Null(restored.Packets);
+        Assert.Null(restored.MultiPackets);
     }
 
     [Fact]

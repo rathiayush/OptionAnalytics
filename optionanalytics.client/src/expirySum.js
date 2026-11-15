@@ -57,16 +57,20 @@ export function sumExpiryOi(base, extras) {
     const others = extraByStrike.map((m) => {
       const list = m.get(strike) ?? []
       const first = list.find((r) => Number.isFinite(r.p.openInterest))
-      return { list, i: -1, joinedLate: first ? first.ms > startMs : false, firstOi: first?.p.openInterest ?? null }
+      return { list, i: -1, last: null, joinedLate: first ? first.ms > startMs : false, firstOi: first?.p.openInterest ?? null }
     })
     for (const { p, ms } of rows) {
       if (!Number.isFinite(p.openInterest)) { out.push({ ...p, ms }); continue }
       let sum = p.openInterest
       for (const o of others) {
-        while (o.i + 1 < o.list.length && o.list[o.i + 1].ms <= ms) o.i++
-        const reading = o.i >= 0 ? o.list[o.i].p.openInterest : null
-        if (!Number.isFinite(reading)) continue
-        sum += o.joinedLate ? reading - o.firstOi : reading
+        // Its last reading WITH an OI at or before the point: one without (a packet with no OI) carries the last on - read
+        // as none, that expiry's whole OI fell out of the sum for the minute (a fake drop, then a fake rise).
+        while (o.i + 1 < o.list.length && o.list[o.i + 1].ms <= ms) {
+          o.i++
+          if (Number.isFinite(o.list[o.i].p.openInterest)) o.last = o.list[o.i].p.openInterest
+        }
+        if (!Number.isFinite(o.last)) continue
+        sum += o.joinedLate ? o.last - o.firstOi : o.last
       }
       out.push({ ...p, ms, openInterest: sum, oiNearest: p.openInterest })
     }

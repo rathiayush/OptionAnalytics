@@ -344,11 +344,21 @@ public sealed class OrderFlowRealtimeTests
         // typical move, so the afternoon's volatility changed the morning's delta (look-ahead, and a live day's estimated
         // morning shifted at every load).
         Assert.Equal(morning.Bars.Select(b => (b.Buy, b.Sell)), wholeDay.Bars.Take(30).Select(b => (b.Buy, b.Sell)));
-        // Each minute's typical move is the root mean square of the changes up to it; a tick while there has been none.
-        var sigmas = OrderFlowEstimator.TypicalChanges(new[] { 0.0, 2.0, -1.0 }, 0.05);
-        Assert.Equal(0.05, sigmas[0]);
-        Assert.Equal(Math.Sqrt(2.0), sigmas[1], 9);          // (0 + 4) / 2
-        Assert.Equal(Math.Sqrt(5.0 / 3), sigmas[2], 9);      // (0 + 4 + 1) / 3
+        // Each minute's typical move is the root mean square of the changes BEFORE it - never its own; a tick while there has
+        // been none.
+        var sigmas = OrderFlowEstimator.TypicalChanges(new[] { 0.0, 2.0, -1.0, 3.0 }, 0.05);
+        Assert.Equal(0.05, sigmas[0]);                       // none before it
+        Assert.Equal(0.05, sigmas[1]);                       // 0 before it
+        Assert.Equal(Math.Sqrt(2.0), sigmas[2], 9);          // (0 + 4) / 2
+        Assert.Equal(Math.Sqrt(5.0 / 3), sigmas[3], 9);      // (0 + 4 + 1) / 3
+        // Started from SeedWeight minutes of a seed: the first minute reads the seed, the day's minutes take over.
+        var seeded = OrderFlowEstimator.TypicalChanges(new[] { 0.0, 2.0 }, 0.05, 1.0);
+        Assert.Equal(1.0, seeded[0], 9);                                                   // 5 x 1 / 5
+        Assert.Equal(Math.Sqrt(5.0 / 6), seeded[1], 9);                                    // (5 + 0) / 6
+        // A tiny first move on a big minute is about half and half - with its own change in its sigma it was always 84 / 16.
+        var open = OrderFlowEstimator.Build("NIFTY", 35001, "NIFTY-FUT", "NSE_FNO", 0.05m, 75, null, new DateOnly(2026, 10, 5),
+            new[] { new OptionAnalytics.Server.Models.CandleWithVolume(T0, 24000m, 24005m, 23995m, 24000.05m, 1_500_000) }, 1m, 75);
+        Assert.InRange(open.Bars[0].Buy - open.Bars[0].Sell, -15_000, 15_000);
     }
 
     private static OrderFlowService CreateService(LiveBroadcastBatcher? batcher = null)

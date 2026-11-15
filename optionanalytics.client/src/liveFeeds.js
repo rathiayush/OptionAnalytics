@@ -98,7 +98,7 @@ export function applyOiTicks(ctx, ticks, underlying, flag) {
     if (tick?.underlying !== underlying || tick?.expiryFlag !== flag) continue
     const map = tick.side === 'CE' ? ctx.ce : ctx.pe
     // A packet without OI reads 0 - never let it wipe the minute's real OI.
-    if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest > 0 ? tick.openInterest : null, price: tick.price, high: tick.high ?? tick.price, low: tick.low ?? tick.price })) changed = true
+    if (upsertMinute(map, Number(tick.strike), tick.time, { oi: tick.openInterest > 0 ? tick.openInterest : null, price: tick.price, open: tick.open ?? tick.price, high: tick.high ?? tick.price, low: tick.low ?? tick.price })) changed = true
   }
   return changed
 }
@@ -136,9 +136,10 @@ export function upsertSeries(series, time, values) {
   const last = series[series.length - 1]
   const clean = Object.fromEntries(Object.entries(values).filter(([, v]) => v != null && Number.isFinite(v)))
   if (last && last.t === t) {
-    // Within the minute the range widens; everything else is the newest reading.
+    // Within the minute the range widens; the open stays the minute's first; everything else is the newest reading.
     if (clean.high != null && last.high != null) clean.high = Math.max(last.high, clean.high)
     if (clean.low != null && last.low != null) clean.low = Math.min(last.low, clean.low)
+    if (last.open != null) delete clean.open
     Object.assign(last, clean)
     return true
   }

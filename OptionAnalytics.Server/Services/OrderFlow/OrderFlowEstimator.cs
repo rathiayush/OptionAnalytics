@@ -10,9 +10,12 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// - Buy/sell split (delta): bulk volume classification (Easley, Lopez de Prado & O'Hara): a minute's
 ///   buy share is the normal CDF of its price change over the typical one-minute change, Phi(dP / sigma) -
 ///   a big up-minute is mostly buying, a flat one half and half. Sigma is the root mean square of the
-///   day's one-minute changes UP TO that minute (TypicalChanges) - not the whole day's: a replayed
-///   minute used to depend on how volatile the afternoon after it was (look-ahead), and a live day's
-///   estimated morning shifted every time the day was loaded again.
+///   day's one-minute changes BEFORE that minute (TypicalChanges), started from SeedWeight minutes of a
+///   typical index minute (SeedShare of the day's first price) - not the whole day's: a replayed minute
+///   used to depend on how volatile the afternoon after it was (look-ahead), and a live day's estimated
+///   morning shifted every time the day was loaded again. Nor the minute's OWN change: with it in its own
+///   sigma, the first minute was always split 84 / 16 by its direction alone (z = +-1, however small the
+///   move - and 09:15 is the day's heaviest minute), and every early minute's z was capped at sqrt(i + 1).
 /// - Footprint rows: a candle cannot say where in its range it traded, so its volume is laid along the
 ///   path price most likely took inside the minute (see Rows) - rising legs as buying, falling legs as
 ///   selling, in whole lots. Volume profile, delta and cumulative delta are meaningful from this;
@@ -39,7 +42,7 @@ public static class OrderFlowEstimator
         var changes = new List<double>(ordered.Count);
         for (var i = 0; i < ordered.Count; i++)
             changes.Add((double)(ordered[i].Close - (i == 0 ? ordered[i].Open : ordered[i - 1].Close)));
-        var sigmas = TypicalChanges(changes, (double)Math.Max(tickSize, 0.05m));
+        var sigmas = TypicalChanges(changes, (double)Math.Max(tickSize, 0.05m), ordered.Count > 0 ? (double)ordered[0].Open * SeedShare : 0);
 
         var bars = new List<OrderFlowBar>(ordered.Count);
         var trades = new List<OrderFlowTrade>();
@@ -70,15 +73,26 @@ public static class OrderFlowEstimator
     /// <summary>Each minute's typical one-minute change: the root mean square of the changes up to and including it (a
     /// minute's own change is known at its close, when it is shown) - nothing after it; <paramref name="floor"/> (a
     /// tick) while every change so far is zero.</summary>
-    internal static double[] TypicalChanges(IReadOnlyList<double> changes, double floor)
+    /// <summary>A typical index minute's close-to-close move as a share of price (NIFTY's ~0.8% a day over 375 minutes is
+    /// ~0.04% a minute) - the estimate's starting sigma, before the day has minutes of its own.</summary>
+    public const double SeedShare = 0.0004;
+    /// <summary>How many minutes the starting sigma counts as: the day's own minutes take over within the first few.</summary>
+    public const int SeedWeight = 5;
+
+    /// <summary>Each minute's typical move: the root mean square of the changes BEFORE it (never its own, nor a later
+    /// one), with <see cref="SeedWeight"/> minutes of <paramref name="seed"/> to start from (none when it is 0);
+    /// <paramref name="floor"/> while that is still 0.</summary>
+    internal static double[] TypicalChanges(IReadOnlyList<double> changes, double floor, double seed = 0)
     {
         var sigmas = new double[changes.Count];
-        double sumSquares = 0;
+        var weight = seed > 0 ? SeedWeight : 0;
+        double sumSquares = weight * seed * seed;
         for (var i = 0; i < changes.Count; i++)
         {
-            sumSquares += changes[i] * changes[i];
-            var rms = Math.Sqrt(sumSquares / (i + 1));
+            var count = weight + i;
+            var rms = count > 0 ? Math.Sqrt(sumSquares / count) : 0;
             sigmas[i] = rms > 0 ? rms : floor;
+            sumSquares += changes[i] * changes[i];
         }
         return sigmas;
     }
