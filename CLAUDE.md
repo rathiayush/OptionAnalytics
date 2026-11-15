@@ -1409,7 +1409,10 @@ All must pass before committing.
   5-point book cyan almost everywhere), AND a WALL is always hot: a level at `WALL_RATIO` 4x the median size in view (the
   app's own `findWalls` rule) at least yellow, red from 8x - else a busy book with many walls pushed them down the bands
   (`tests/heatmap-layout.test.mjs` - the shares on any book, the wall rule). A Low / Normal / High "Contrast" choice with
-  a lifting curve was tried and REMOVED - it lit up 20 - 34% of cells, confetti; THE PRICE LINE - the mid as a BOLD WHITE step line (2.5 px on a dark 5 px outline - the one colour nothing else on
+  a lifting curve was tried and REMOVED - it lit up 20 - 34% of cells, confetti; the card's "Pro colours" tick (asked for - "keep the old heatmap as
+  well, when unticked the older will be shown"; `optionanalytics.orderFlow.heatPro`, ON by default; `classicColours` /
+  `heatScale(q, { classic: true })`) unticked = the ORIGINAL heatmap's colours, a straight scale from 0 to the 98th
+  percentile of the sizes in view - with "Volume dots" and "Book column" unticked too, the heatmap as it first was; THE PRICE LINE - the mid as a BOLD WHITE step line (2.5 px on a dark 5 px outline - the one colour nothing else on
   the heatmap uses; asked for twice - "I cannot see the price line": green / red bid / ask lines vanished into a real day's
   green / red cells, STACK / PULL pills and walls), zoomed in (a row 3 px or more) with the BEST BID / BEST ASK as thin
   DOTTED green / red guides (`bestQuotes`), all DRAWN LAST - over the volume dots and the prints, under the signal pills
