@@ -82,3 +82,59 @@ test('how long a level has rested: back while it holds at least half its size, s
   const jumped = [col(T, [[100, 900]]), col(T + 2000, [[100, 900]]), col(T + 2000 + 600_000, [[100, 900]])]
   assert.equal(restingSince(jumped, 2, 'bid', 100, { spans: columnSpans(jumped).spans }).since, T + 2000 + 600_000)
 })
+
+// ---- As the professional heatmaps draw it: cutoffs + contrast curve, BBO, volume dots, the current order book ----
+import { HEAT_CONTRASTS, bestQuotes, cobBars, heatLevel, heatScale, volumeDots } from '../src/heatmapLayout.js'
+import { rowOf } from '../src/orderFlowMath.js'
+
+test('the colour scale runs between a lower and an upper cutoff of the sizes in view, on a contrast curve', () => {
+  const sizes = Array.from({ length: 100 }, (_, i) => i + 1) // 1 .. 100
+  const s = heatScale(sizes, 'normal')
+  assert.equal(s.lo, 16)
+  assert.equal(s.hi, 98)
+  assert.equal(heatLevel(10, s), 0, 'under the lower cutoff: the dark background')
+  assert.equal(heatLevel(99, s), 1, 'over the upper cutoff: the brightest')
+  const mid = heatLevel(57, s)
+  assert.ok(mid > 0.5 && mid < 1, `the curve lifts the middle sizes: ${mid}`)
+  assert.ok(heatLevel(40, s) < heatLevel(60, s), 'bigger is brighter')
+  // High contrast: more of the small orders are background, the top saturates sooner.
+  const high = heatScale(sizes, 'high'), low = heatScale(sizes, 'low')
+  assert.ok(high.lo > s.lo && high.hi < s.hi && low.lo < s.lo && low.hi > s.hi)
+  assert.equal(heatLevel(30, high), 0)
+  assert.ok(heatLevel(30, low) > 0)
+  // Adaptive: the same wall is less bright among bigger orders.
+  assert.ok(heatLevel(50, heatScale(sizes)) > heatLevel(50, heatScale(sizes.map((q) => q * 2))))
+  // Nothing in view / zeros / an unknown preset do not fail.
+  assert.deepEqual(heatScale([], 'normal'), { lo: 0, hi: 1, gamma: HEAT_CONTRASTS.normal.gamma })
+  assert.equal(heatScale(sizes, 'nope').lo, s.lo)
+  assert.equal(heatLevel(5, heatScale([5, 5, 5])), 0)
+})
+
+test('the best bid / ask of a column and the current order book bars', () => {
+  const col = { t: 0, bids: [[99, 10], [100, 30], [98, 5]], asks: [[102, 7], [101, 50], [103, 0]] }
+  assert.deepEqual(bestQuotes(col), { bid: 100, ask: 101 })
+  assert.deepEqual(bestQuotes({ bids: [], asks: [[5, 1]] }), { bid: null, ask: 5 })
+  const book = cobBars(col)
+  assert.equal(book.max, 50)
+  assert.equal(book.asks.length, 2, 'an empty level is not a bar')
+  assert.deepEqual(cobBars(null), { bids: [], asks: [], max: 0 })
+})
+
+test('volume dots: every traded minute at each row, sized by its volume, with its delta; only the minutes in view', () => {
+  const T = Date.parse('2026-11-13T04:00:00Z')
+  const bars = [
+    { time: new Date(T).toISOString(), levels: [{ price: 100, buy: 30, sell: 10 }, { price: 100.5, buy: 0, sell: 20 }, { price: 101, buy: 5, sell: 5 }] },
+    { time: new Date(T + 60_000).toISOString(), levels: [{ price: 102, buy: 0, sell: 0 }, { price: 103, buy: 100, sell: 60 }] },
+  ]
+  const dots = volumeDots(bars, 1, rowOf)
+  // Rows of 1 point: 100 and 100.5 are one row.
+  const at100 = dots.find((d) => d.price === 100 && d.t === T + 30_000)
+  assert.deepEqual([at100.volume, at100.delta], [60, 0])
+  assert.equal(dots.filter((d) => d.t === T + 90_000).length, 1, 'a row with nothing traded has no dot')
+  const biggest = dots.find((d) => d.price === 103)
+  assert.equal(biggest.r, 1)
+  assert.ok(Math.abs(at100.r - Math.sqrt(60 / 160)) < 1e-12)
+  // Only the minutes overlapping the time in view.
+  assert.equal(volumeDots(bars, 1, rowOf, { t0: T + 61_000, t1: T + 200_000 }).length, 1)
+  assert.deepEqual(volumeDots(null, 1, rowOf), [])
+})

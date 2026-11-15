@@ -1399,8 +1399,20 @@ All must pass before committing.
   pills are placed strongest first and never over each other (`placeLabels` - above the anchor, else below; no room = a
   small dot). The hover adds how long the level has rested (`restingSince` - back while that side held at least half its
   size there, stopped by less, no book or a gap): "resting since 10:36:12 (10 min)" / "just placed" - a wall that stays vs
-  one flashed (a spoof). Drawing only: `liquidityMap` / `liquiditySignals` / `pullStackSignals` (what the strategies and the
-  Signal backtest read) are untouched.
+  one flashed (a spoof). AS THE PROFESSIONAL HEATMAPS DRAW IT (asked for - "check the liquidity heatmap for the best possible
+  representation ... how professional systems do it"; Bookmap's heatmap settings / main chart - `heatmapLayout.js`,
+  `tests/heatmap-layout.test.mjs`): the COLOUR runs between a LOWER and an UPPER cutoff of the sizes in view (percentiles -
+  adaptive to what is on screen) on a contrast CURVE (`heatScale` / `heatLevel`; the card's "Contrast" Low / Normal / High -
+  `HEAT_CONTRASTS`, `optionanalytics.orderFlow.heatContrast`; it was a straight line to the 98th percentile: the small orders
+  one blue, every wall alike); the BEST BID (green) and BEST ASK (red) as step lines (`bestQuotes`; the mid while a row is
+  under 3 px - zoomed out they merge); VOLUME DOTS - every traded minute at each heatmap row, sized by its volume against
+  the largest in view (at most half a row / half a minute across), split green bought / red sold by its share
+  (`volumeDots` on the page's `view.minuteBars` - cut at the replay clock; "Volume dots", on by default,
+  `...heatVolumeDots`; the big prints still drawn on top, ringed); the CURRENT ORDER BOOK column at the right of the plot -
+  the last column in view (the book at the clock) as bars, bids green / offers red, the best of each brighter, its hover
+  the level's size and resting time (`cobBars`; "Book column", on by default, `...heatCob`; 64 / 44 / 32 px by width). The
+  External page's heatmap passes none of these props and stays as it was (only the contrast curve, Normal, is shared).
+  Drawing only: `liquidityMap` / `liquiditySignals` / `pullStackSignals` (what the Signal backtest reads) are untouched.
   CHART AND ORDER BOOK (asked for - "on Order Flow the liquidity heatmap on the futures chart, like the one I sent";
   `OrderBookChartCard.jsx`, the reading `bookLadder.js`, the drawing `bookLadderPrimitive.js`; under the heatmap card): the
   futures candles (own timeframe, 1 min by default - `optionanalytics.orderFlow.bookChartTf`; the newest ~70 shown, 36 on a
