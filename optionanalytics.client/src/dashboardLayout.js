@@ -355,6 +355,10 @@ export const STORED_QUICK_FAB = 'optionanalytics.oiReplay.quickFabOn'
 // 'optionanalytics.oiReplay.quickFab' held pixels from the top left, and one saved on a phone put the button in the
 // middle of a monitor's chart - everyone starts again at the bottom left.
 export const STORED_QUICK_FAB_ANCHOR = 'optionanalytics.oiReplay.quickFabAnchor'
+// OI Replay's order button (OrderFab.jsx) - always on screen, on by default - and where it was dropped (its nearest
+// corner, as the quick button's; none = the bottom right, one row above the replay bar).
+export const STORED_ORDER_FAB = 'optionanalytics.oiReplay.orderFabOn'
+export const STORED_ORDER_FAB_ANCHOR = 'optionanalytics.oiReplay.orderFabAnchor'
 // The floating replay bar (FloatingReplayBar.jsx) on a replayed day - on by default.
 export const STORED_REPLAY_BAR = 'optionanalytics.oiReplay.replayBarOn'
 // The page's controls card folded to its one row of day / index / Load day (the rest behind "More").
