@@ -286,3 +286,27 @@ export function rowAt(profile, price) {
   const bottom = rowOf(price, profile.rowSize)
   return profile.rows.find((r) => Math.abs(r.price - bottom) < 1e-6) ?? null
 }
+
+/**
+ * The option flow's CUMULATIVE line through the day (asked for - "add net delta of option like we have net cumulative"):
+ * `minutes` (`optionDeltaMinutes` - the day up to the clock) summed into candles of `timeframe` minutes (from the chart time
+ * of each minute, as the cards' candles are cut), each candle's own flow `delta` and the running total from the day's first
+ * minute `value` - of the side picked ('net' CE − PE, 'netpe' PE − CE, 'ce', 'pe'), in contracts (the cards divide by the
+ * lot). `chartTime` - ms to the chart's time (seconds). Nothing after the minutes given, so a cut at the clock = the day's
+ * line up to it.
+ */
+export function optionDeltaCumulative(minutes, { side = 'net', timeframe = 1, chartTime } = {}) {
+  const pick = side === 'ce' ? (m) => m.ce : side === 'pe' ? (m) => m.pe : side === 'netpe' ? (m) => m.pe - m.ce : (m) => m.ce - m.pe
+  const size = Math.max(1, Math.round(timeframe)) * 60
+  const out = []
+  let total = 0
+  for (const m of [...(minutes ?? [])].sort((a, b) => a.t - b.t)) {
+    const d = pick(m)
+    if (!Number.isFinite(d)) continue
+    total += d
+    const t = Math.floor(chartTime(m.t) / size) * size
+    const last = out.at(-1)
+    if (last?.time === t) { last.delta += d; last.value = total } else out.push({ time: t, delta: d, value: total })
+  }
+  return out
+}
