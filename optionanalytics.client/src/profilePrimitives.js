@@ -158,7 +158,7 @@ export class TpoProfilePrimitive extends BasePrimitive {
   }
 }
 
-/** The DELTA column of the Profiles page's "Delta" tick: a strip of the plot just left of the profile drawn at the right
+/** A DELTA / OI Δ column of the Profiles page's "Delta" / "OI Δ" ticks (`title`): a strip of the plot just left of the profile drawn at the right
  *  (the volume bars / the TPO letters) - each price row's buyers minus sellers, green to the right of its centre line, red
  *  to the left, scaled to the largest row - with "DELTA" and what it is of (`label`) on top. `profile` - { rows:
  *  [{ price, delta }], rowSize, maxAbsDelta } (deltaProfile.js'); `right` / `width` - where the strip stands, as shares of
@@ -173,7 +173,7 @@ const DELTA_TEXT = 'rgba(200,205,215,0.85)'
 export class DeltaColumnPrimitive {
   constructor() {
     this._profile = null
-    this._place = { right: 0.3, width: DELTA_COLUMN_SHARE, label: '' }
+    this._place = { right: 0.3, width: DELTA_COLUMN_SHARE, label: '', title: 'DELTA' }
     this._series = null
     this._requestUpdate = null
     const self = this
@@ -194,7 +194,7 @@ export class DeltaColumnPrimitive {
   _draw(target) {
     const p = this._profile
     if (!p?.rows?.length || !this._series || !(p.rowSize > 0)) return
-    const { right, width, label } = this._place
+    const { right, width, label, title } = this._place
     target.useBitmapCoordinateSpace(({ context: ctx, bitmapSize, horizontalPixelRatio: hpr, verticalPixelRatio: vpr }) => {
       const W = bitmapSize.width, H = bitmapSize.height
       const x1 = Math.round(W * (1 - right))
@@ -210,7 +210,7 @@ export class DeltaColumnPrimitive {
       ctx.textAlign = 'center'
       ctx.textBaseline = 'top'
       ctx.font = `${Math.round(10 * vpr)}px sans-serif`
-      ctx.fillText('DELTA', mid, Math.round(2 * vpr))
+      ctx.fillText(title || 'DELTA', mid, Math.round(2 * vpr))
       if (label) {
         ctx.font = `${Math.round(9 * vpr)}px sans-serif`
         ctx.fillText(label, mid, Math.round(13 * vpr))
