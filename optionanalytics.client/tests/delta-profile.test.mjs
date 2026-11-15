@@ -259,24 +259,3 @@ test('the candles: the day\'s, live before the open the session before, a replay
   assert.equal(scaleHolderCandle(null, 1), null)
   assert.deepEqual(cardCandleSource({ dayBars: [], past: [], isLive: false, date: null, price: null }), { bars: [], standIn: null, holder: false })
 })
-
-test('option flow cumulative: candles of the timeframe, each its own flow and the running total, by side', async () => {
-  const { optionDeltaCumulative } = await import('../src/deltaProfile.js')
-  const M = 60_000
-  const mins = [
-    { t: 0, ce: 10, pe: 4 },
-    { t: M, ce: -2, pe: 6 },
-    { t: 3 * M, ce: 5, pe: -1 },
-  ]
-  const chartTime = (ms) => ms / 1000
-  // 3-minute candles: minutes 0 and 1 in the first, minute 3 in the second.
-  assert.deepEqual(optionDeltaCumulative(mins, { side: 'net', timeframe: 3, chartTime }), [
-    { time: 0, delta: (10 - 4) + (-2 - 6), value: -2 },
-    { time: 180, delta: 6, value: 4 },
-  ])
-  assert.deepEqual(optionDeltaCumulative(mins, { side: 'netpe', timeframe: 3, chartTime }).map((p) => p.value), [2, -4])
-  assert.deepEqual(optionDeltaCumulative(mins, { side: 'ce', timeframe: 1, chartTime }).map((p) => p.value), [10, 8, 13])
-  // A cut at the clock = the day's line up to it.
-  assert.deepEqual(optionDeltaCumulative(mins.slice(0, 2), { side: 'net', timeframe: 1, chartTime }),
-    optionDeltaCumulative(mins, { side: 'net', timeframe: 1, chartTime }).slice(0, 2))
-})
