@@ -290,6 +290,16 @@ All must pass before committing.
   `cr` shows a decimal under ₹10 Cr. SENSEX (BSE) uses NSE's file as a stand-in, said on the card ("NSE positions" fold:
   the file's date, the shares, the contracts, the net against Standard's). `NseParticipantOiTests.cs`,
   `tests/participant-oi.test.mjs`. It feeds no strategy or alert.
+  ALL EXPIRIES BY DEFAULT (asked for - "how standard systems use GEX, I need to use it the same way; if there are gaps, fix":
+  the GEX platforms add up the expiries - SpotGamma the nearest four - on OPEN INTEREST x gamma, calls +, puts -, as here;
+  the gap was coverage: this read the current expiry alone unless the page's Σ 3 expiries was ticked): the GEX card's
+  "All expiries" tick (`optionanalytics.oiReplay.gexAllExpiries`, ON by default) loads the next and the monthly expiry's
+  bands FOR GEX ALONE (`gexAllOn` / `bandsOn` in `OiReplayPage` - the Σ tick's own loader, the same `summed-expiries` /
+  `expiry-band` requests, live ticks and groups; asked only while a GEX card / the checklist / the GEX quick view is on,
+  live on N1 only) and gives them to `useGexDays` as `chains` - both GEX cards and the entry checklist's gamma check read
+  the three; the page's OI reads (totals, heatmap, walls, alerts) still follow the Σ tick only (`oiSumExtras`). Unticked
+  (and Σ off) = the current expiry alone, as before. A past day's next expiry is ATM +/- 3 (all Dhan gives), two more band
+  requests a day the first time, then disk. The Signal backtest's GEX is unchanged (its own Σ option).
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - OI Replay's GEX LEVELS ON SPOT card (asked for - "on OI Replay show the GEX levels with the spot chart"; `gexSpot` -

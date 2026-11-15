@@ -4420,7 +4420,20 @@ export default function OiReplayPage() {
   // OI read below (ceByStrike / peByStrike) takes the sum, GEX adds each expiry's own (`sumExtras.chains`); the premiums
   // and the option flow (flowCePoints) stay on the current expiry. Live it sums on the current expiry (N1) only.
   const sumOn = sumExpiries && Boolean(result?.success) && (!isLive || liveExpiryFlag === 'N1')
-  const dayExpiriesKey = sumOn && !isLive ? `${result.underlying}|${result.date}|${result.expiryFlag}` : null
+  // Quick views (QUICK_VIEWS): which popup is open - its keyboard shortcuts (Z X C V B N M) are set up with the order
+  // ticket's below.
+  const [quickView, setQuickView] = useState(null)
+  const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
+  // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
+  const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex'
+  // GEX OVER ALL THREE EXPIRIES BY DEFAULT (asked for - "how standard systems use GEX, I need to use it the same way; if
+  // there are gaps, fix": the GEX platforms add up the expiries - SpotGamma the nearest four - where this read only the
+  // current one unless the page's Σ was ticked). The GEX card's "All expiries" tick (on by default): the next and the
+  // monthly expiry's bands are loaded for GEX ALONE (`bandsOn`) - the page's OI reads still follow the Σ tick (`sumOn`).
+  const [gexAllExpiries, setGexAllExpiries] = usePersistedState('optionanalytics.oiReplay.gexAllExpiries', true)
+  const gexAllOn = gexAllExpiries !== false && gexWanted && Boolean(result?.success) && (!isLive || liveExpiryFlag === 'N1')
+  const bandsOn = sumOn || gexAllOn
+  const dayExpiriesKey = bandsOn && !isLive ? `${result.underlying}|${result.date}|${result.expiryFlag}` : null
   const [dayExpiries, setDayExpiries] = useState({ key: null })
   useEffect(() => {
     if (!dayExpiriesKey) return undefined
@@ -4433,19 +4446,19 @@ export default function OiReplayPage() {
     return () => controller.abort()
   }, [dayExpiriesKey])
   const sumDates = useMemo(() => {
-    if (!sumOn) return null
+    if (!bandsOn) return null
     if (isLive) return { listed: resolvedExpiries.expiries, month: resolvedExpiries.month }
     if (dayExpiries.key !== dayExpiriesKey) return null
     return { listed: [dayExpiries.current, dayExpiries.next].filter(Boolean), month: dayExpiries.monthly }
-  }, [sumOn, isLive, resolvedExpiries, dayExpiries, dayExpiriesKey])
+  }, [bandsOn, isLive, resolvedExpiries, dayExpiries, dayExpiriesKey])
   const sumSpec = useMemo(
     () => (sumDates ? summedExpiries(sumDates.listed, sumDates.month, result?.expiryFlag) : []),
     [sumDates, result?.expiryFlag],
   )
-  const sumKey = sumOn && sumSpec.length ? `${result.underlying}|${result.date}|${sumSpec.map((b) => `${b.key}:${b.expiryFlag}:${b.expiryCode}`).join(',')}` : null
+  const sumKey = bandsOn && sumSpec.length ? `${result.underlying}|${result.date}|${sumSpec.map((b) => `${b.key}:${b.expiryFlag}:${b.expiryCode}`).join(',')}` : null
   const [expiryBands, setExpiryBands] = useState({ key: null, byCode: NO_BANDS })
   // Σ 3 expiries on / off - the checkbox's and another OI Replay screen's (Sync); off drops the other expiries' bands.
-  const applySumExpiries = (on) => { setSumExpiries(on); if (!on) setExpiryBands({ key: null, byCode: NO_BANDS }) }
+  const applySumExpiries = (on) => { setSumExpiries(on); if (!on && !gexAllOn) setExpiryBands({ key: null, byCode: NO_BANDS }) }
   const sumKeyRef = useRef(null)
   sumKeyRef.current = sumKey
   useEffect(() => {
@@ -4482,25 +4495,21 @@ export default function OiReplayPage() {
     const chains = ready.map(({ spec, band }) => ({ cePoints: [...band.ce, ...band.liveCe], pePoints: [...band.pe, ...band.livePe], expiry: spec.expiry ?? band.bandExpiry }))
     return { ce: chains.map((c) => c.cePoints), pe: chains.map((c) => c.pePoints), chains }
   }, [sumKey, sumSpec, sumBands])
+  // The other expiries for the page's OI reads: only with the Σ tick (GEX takes `sumExtras.chains` on its own tick too).
+  const oiSumExtras = sumOn ? sumExtras : null
   const ceByStrike = useMemo(() => {
     const base = isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])
-    return groupByStrike(sumExtras?.ce.length ? sumExpiryOi(base, sumExtras.ce) : base)
-  }, [result, liveCePoints, isLive, sumExtras])
+    return groupByStrike(oiSumExtras?.ce.length ? sumExpiryOi(base, oiSumExtras.ce) : base)
+  }, [result, liveCePoints, isLive, oiSumExtras])
   const peByStrike = useMemo(() => {
     const base = isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])
-    return groupByStrike(sumExtras?.pe.length ? sumExpiryOi(base, sumExtras.pe) : base)
-  }, [result, livePePoints, isLive, sumExtras])
+    return groupByStrike(oiSumExtras?.pe.length ? sumExpiryOi(base, oiSumExtras.pe) : base)
+  }, [result, livePePoints, isLive, oiSumExtras])
   // The option CDV / OBV card's inputs: the run's option bars plus (live) each live minute - later points of the same
   // strike and minute win - and the spot the page shows (the run's 1-minute bars plus the live tail).
   const flowCePoints = useMemo(() => (isLive ? [...(result?.cePoints ?? []), ...liveCePoints] : (result?.cePoints ?? [])), [result, liveCePoints, isLive])
   const flowPePoints = useMemo(() => (isLive ? [...(result?.pePoints ?? []), ...livePePoints] : (result?.pePoints ?? [])), [result, livePePoints, isLive])
   const flowSpotBars = useMemo(() => oneMinBars.map((b) => ({ time: fromChartTime(b.time) * 1000, close: b.close })), [oneMinBars])
-  // Quick views (QUICK_VIEWS): which popup is open - its keyboard shortcuts (Z X C V B N M) are set up with the order
-  // ticket's below.
-  const [quickView, setQuickView] = useState(null)
-  const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
-  // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
-  const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex'
   // NSE's participant-wise open interest of the session BEFORE the day shown (participantOi.js) - the GEX signs read from
   // real positions. Asked once a day shown (the server keeps it on disk); none = the assumed signs only.
   const [hedgers, setHedgers] = usePersistedState('optionanalytics.oiReplay.gexHedgers', HEDGER_DEFAULT)
@@ -4591,7 +4600,7 @@ export default function OiReplayPage() {
     for (const tick of batch) {
       if (tick?.underlying !== underlying || tick?.expiryFlag !== liveExpiryFlag) {
         // Σ 3 expiries: the next expiry's / the monthly's legs, for their OI and GEX.
-        if (sumOn && tick?.underlying === underlying && sumSpec.some((b) => b.liveFlag === tick?.expiryFlag)) {
+        if (bandsOn && tick?.underlying === underlying && sumSpec.some((b) => b.liveFlag === tick?.expiryFlag)) {
           if (!summed.has(tick.expiryFlag)) summed.set(tick.expiryFlag, { ce: [], pe: [] })
           summed.get(tick.expiryFlag)[tick.side === 'CE' ? 'ce' : 'pe'].push(tick)
         }
@@ -4743,7 +4752,7 @@ export default function OiReplayPage() {
     setFuturesFlow((prev) => (prev?.bars ? { ...prev, bars: mergeDeltaPush(prev.bars, payload.minutes).minutes } : prev))
   }
   // Σ 3 expiries: the next expiry's and the monthly's chains too (their ticks carry their OI - handleOiReplayTicks).
-  const sumGroupKey = sumOn && isLive ? sumSpec.map((b) => `c:${underlying}:${b.liveFlag}`).join('|') : ''
+  const sumGroupKey = bandsOn && isLive ? sumSpec.map((b) => `c:${underlying}:${b.liveFlag}`).join('|') : ''
   const feedGroups = useMemo(() => [...new Set([
     ...liveExtraGroups, ...(foreignChainKey ? foreignChainKey.split('|').map((chain) => `c:${chain}`) : []),
     ...(sumGroupKey ? sumGroupKey.split('|') : []), ...(deltaGroup ? [deltaGroup] : []),
@@ -5100,7 +5109,7 @@ export default function OiReplayPage() {
     hpWindowMinutes: oiBreakAlertSettings.windowMinutes, hpAtmShiftPct: oiBreakAlertSettings.atmShiftPct,
     serverCovers: !!oiBreakAlertSettings.server?.covers, types: alertTypes, toTelegram: oiBreakAlertSettings.telegram,
     // How many other expiries the OI holds (0 = none): the watch starts again with each, as with any change of the data.
-    summed: Math.max(sumExtras?.ce.length ?? 0, sumExtras?.pe.length ?? 0),
+    summed: Math.max(oiSumExtras?.ce.length ?? 0, oiSumExtras?.pe.length ?? 0),
   })
 
   // Sudden OI walls as of the replay's current point (suddenOi.js - the same rule as the Order Flow
@@ -7197,7 +7206,7 @@ export default function OiReplayPage() {
                       days={gexDays}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`} expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
-                      participants={gexParticipants}
+                      participants={gexParticipants} allExpiries={gexAllExpiries !== false} onAllExpiries={setGexAllExpiries} expiriesLoading={gexAllOn && sumBandList.some((b) => b.state === 'loading')}
                     />
                   </Card>
                 </Col>
@@ -7517,7 +7526,7 @@ export default function OiReplayPage() {
               <GexCard
                 days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
                 expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
-                participants={gexParticipants}
+                participants={gexParticipants} allExpiries={gexAllExpiries !== false} onAllExpiries={setGexAllExpiries} expiriesLoading={gexAllOn && sumBandList.some((b) => b.state === 'loading')}
               />
             )}
             {/* The delta profile cards' own components, with the page's inputs - their settings (timeframe, rows, previous
