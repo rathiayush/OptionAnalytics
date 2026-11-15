@@ -21,7 +21,7 @@ import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
 import {
   DEFAULT_VP_BARS, FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, VP_BAR_SIZES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, deltaCardSessions, profileSessions, volumeZones, vpBarSize, withBackfillBars,
+  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, deltaCardSessions, volumeZones, vpBarSize, withBackfillBars,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -465,7 +465,7 @@ function DeltaLine({ delta, levels }) {
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
 function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
   const sessions = useMemo(
-    () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
+    () => deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
@@ -474,10 +474,9 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
   // option flow); null = off.
   const delta = useMemo(() => {
     if (!deltaSource) return null
-    // "Previous" = the sessions before PLUS the day running up to the clock / live on top (OI Replay's delta cards do the same).
-    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }).flat()], { rowSize: row }) }
+    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([profileBars], { rowSize: row }) }
     return deltaSource
-  }, [deltaSource, known, past, dayCount, profileOf, row])
+  }, [deltaSource, profileBars, row])
   const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
   const columns = useMemo(() => [delta && { ...delta, title: 'DELTA' }].filter(Boolean), [delta])
   const chartHeight = useChartHeight()
@@ -835,9 +834,9 @@ export default function ProfilesPage() {
   // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)" - the futures' sessions (the spot's
   // are the same trading days).
   const usedPast = futuresPast.sessions.slice(-pastCount)
-  const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
+  const coverDates = [...usedPast.map((d) => d.date), ...(futuresKnown.length || spotKnown.length ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
-  const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
+  const estimated = (futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
   // A replay is named by the minute it shows (as OI Replay's): the clock is that minute's END.
   const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `replay · ${fmtClock(clock - 60_000)} candle` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
