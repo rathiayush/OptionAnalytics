@@ -70,14 +70,10 @@
         <RelativePath>wwwroot/%(ClientDist.RecursiveDir)%(ClientDist.Filename)%(ClientDist.Extension)</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
-      <!-- The server-side scanner (ScannerRunnerHostedService runs it with Node): its bundle and the
+      <!-- The server-side alert runner (ScannerRunnerHostedService runs it with Node): its bundle and the
            package.json of its one runtime dependency, installed by InstallScannerRunner below. -->
       <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/runner.mjs">
         <RelativePath>scanner-runner/runner.mjs</RelativePath>
-        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      </ResolvedFileToPublish>
-      <ResolvedFileToPublish Include="../optionanalytics.client/dist-runner/tune.mjs">
-        <RelativePath>scanner-runner/tune.mjs</RelativePath>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       </ResolvedFileToPublish>
       <!-- The Signal backtest's background job (SignalBacktestJobService). -->

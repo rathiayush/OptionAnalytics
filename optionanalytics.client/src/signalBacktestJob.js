@@ -10,7 +10,7 @@ import {
   orderFlowNeeded, prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
 import { FLOW_BOOK, FLOW_NONE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
-import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
+import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import { summedExpiries } from './expirySum.js'
 import { cachedDay, loadOptionDay, optionDayKey, rememberDay, walkPastSessions } from './deltaProfileDays.js'
 

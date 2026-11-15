@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { readAlertSwitches } from './alertSwitches.js'
 import { Button, InputNumber, Space, Tag, Tooltip, Typography, notification } from 'antd'
 import { BellOutlined } from '@ant-design/icons'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
@@ -7,7 +8,6 @@ import { alertsHit, chime, speak, telegram, unlockAudio } from './alerts.js'
 const { Text } = Typography
 // Per underlying: [{ id, price, dir: 'above' | 'below', createdAt }] - the futures price.
 const ALERTS_KEY = 'optionanalytics.orderFlow.priceAlerts.v1'
-const SCANNER_SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 const MAX_ALERTS = 20
 
 const readJson = (key, fallback) => {
@@ -45,7 +45,7 @@ export function usePriceAlerts(underlying, lastPrice, live) {
     if (!live) return
     const hits = alertsHit(alerts, lastPrice).filter((a) => !firing.current.has(a.id))
     if (!hits.length) return
-    const cfg = readJson(SCANNER_SETTINGS_KEY, {})
+    const cfg = readAlertSwitches()
     for (const a of hits) {
       firing.current.add(a.id)
       const up = a.dir === 'above'

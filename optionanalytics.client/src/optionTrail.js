@@ -1,5 +1,5 @@
 // Trailing stop-loss for an OPTION trade, in premium points - the paper trades on the OI Replay panel
-// and the strategy scanner (the server applies the same rule to a live super order's stop-loss leg,
+// and the Signal backtest (the server applies the same rule to a live super order's stop-loss leg,
 // LiveTradingService.TrailStop). Once the trade is `start` points in profit, its stop follows the best
 // premium `gap` points behind; it only ever tightens and never loosens the fixed stop. BUY: profit
 // when the premium rises (stop below it). SELL: profit when it falls (stop above it).

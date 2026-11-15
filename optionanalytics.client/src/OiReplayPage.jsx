@@ -1,4 +1,5 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { readAlertSwitches } from './alertSwitches.js'
 import dayjs from 'dayjs'
 import { Select, Space, Typography, Card, Button, Statistic, Row, Col, DatePicker, TimePicker, Alert, Empty, Tooltip, Popconfirm, Slider, Tag, InputNumber, Switch, Table, Segmented, Checkbox, Modal, Steps, ConfigProvider, message, notification } from 'antd'
 import { findSuddenWalls, suddenWallText } from './suddenOi.js'
@@ -1846,7 +1847,7 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           </Tooltip>
           <HeatmapBucketSelect value={heatmapTimeframeMinutes} onChange={setHeatmapTimeframeMinutes} />
           {alertUnderlying && (
-            <Tooltip title={'Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts\' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the strategy scanner\'s switches. A replayed day raises them too, on the replay clock (no Telegram). Which ones pop up on this page: "Alerts" in the controls at the top - 🎯 and the CE / PE breaks by default.'}>
+            <Tooltip title={'Telegram, notification, chime and voice when the CE, PE or Net cumulative line breaks its own support or resistance (the charts\' "broke S" / "broke R" arrows), at this bucket size, once the bucket is complete - and a 🎯 HIGH PROBABILITY alert when a break and an ATM ± 1 CE or PE OI shift of at least the set % happen within the window you pick (3 - 5 min), the same way. Voice and Telegram follow the Alerts switches on the Order Flow page. A replayed day raises them too, on the replay clock (no Telegram). Which ones pop up on this page: "Alerts" in the controls at the top - 🎯 and the CE / PE breaks by default.'}>
               <Space size={4}>
                 <Switch size="small" checked={breakAlertsOn} onChange={alerts?.setOn} aria-label="S/R break alerts" />
                 <Text style={{ fontSize: 12 }}>S/R break alerts</Text>
@@ -1889,12 +1890,12 @@ export function OiChangeHeatmapSection({ ceByStrike, peByStrike, strikes, atmStr
           {alertUnderlying && breakAlertsOn && alerts?.telegram && serverOiBreaks && (serverOiBreaks.covers ? (
             <Tooltip title={serverSent.length
               ? <div style={{ whiteSpace: 'pre-line', fontSize: 12 }}>{serverSent.slice().reverse().map((m) => `${istTimeFormatter(toChartTime(m.t))} ${m.text}`).join('\n\n')}</div>
-              : `The server scanner watches ${alertUnderlying} all day and sends these to Telegram with no page open (1-min buckets). Nothing sent yet today.`}>
+              : `The server's alert runner watches ${alertUnderlying} all day and sends these to Telegram with no page open (1-min buckets). Nothing sent yet today.`}>
               <Tag color="success" style={{ margin: 0 }}>Telegram from the server · sent today: {serverSent.length}</Tag>
             </Tooltip>
           ) : (
-            <Tooltip title={!serverOiBreaks.running ? 'The server scanner is not running - only this page sends these, while it is open and on screen.'
-              : !serverOiBreaks.enabled ? `The server scanner is switched off for ${alertUnderlying} (Trade settings) - only this page sends these, while it is open and on screen.`
+            <Tooltip title={!serverOiBreaks.running ? 'The server alert runner is not running - only this page sends these, while it is open and on screen.'
+              : !serverOiBreaks.enabled ? `The server's alert runner is switched off for ${alertUnderlying} (Trade settings) - only this page sends these, while it is open and on screen.`
                 : 'The server has not loaded today\'s OI yet - only this page sends these for now.'}>
               <Tag color="warning" style={{ margin: 0 }}>Server not sending - this page only, while open</Tag>
             </Tooltip>
@@ -2045,8 +2046,7 @@ function useOiBreakAlerts({
     const step = live ? stepOiBreakAlerts(state.current, data, opts) : stepReplayOiBreakAlerts(replayState.current, data, opts)
     const { breaks, signals } = pickOiAlerts(step, latest.current.types)
     if (!breaks.length && !signals.length) return
-    let cfg = {}
-    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    const cfg = readAlertSwitches()
     // Telegram only when switched on for these (the app's alerts otherwise), live, and the server is not sending them -
     // never read off the 3 expiries' sum (the server's watch and the Telegram keys are the nearest expiry's).
     const sendTelegram = live && latest.current.toTelegram && cfg.telegram !== false && !latest.current.serverCovers && !latest.current.summed
@@ -2078,7 +2078,7 @@ function useOiBreakAlerts({
 }
 
 // The S/R break and 🎯 alerts' settings for `underlying`, owned by the page (its alerts run there) and shown in the OI
-// totals card: on / off, the 🎯 window and ATM ± 1 shift % - shared with the server scanner, which sends these to
+// totals card: on / off, the 🎯 window and ATM ± 1 shift % - shared with the server's alert runner, which sends these to
 // Telegram with no page open: the page shows the server's on load and saves a change back (an admin's - others get 403
 // and keep their own) - and the totals' bucket size the alerts read.
 function useOiBreakAlertSettings(underlying) {
@@ -2110,7 +2110,7 @@ function useOiBreakAlertSettings(underlying) {
   }
 }
 
-// What the server scanner does with these alerts for `underlying` (GET /api/scanner-runner/status, every minute):
+// What the server's alert runner does with these alerts for `underlying` (GET /api/scanner-runner/status, every minute):
 // whether it is sending them (running, the index switched on, the alerts on), its settings and what it sent today.
 // `onFirst(settings)`: called once with the server's settings, so the page shows what the server uses.
 function useServerOiBreakAlerts(underlying, onFirst) {
@@ -4663,11 +4663,10 @@ export default function OiReplayPage() {
 
   // Price moved but the nearest strike's OI did not give way (the server's OiDivergenceMonitor - over 3 one-minute bars,
   // or a completed 15-minute candle; only the 15-minute read goes to Telegram): a notification, a chime and the words -
-  // when "Premium / discount zone" is in the page's Alerts choice; the scanner's switches apply.
+  // when "Premium / discount zone" is in the page's Alerts choice; the Alerts switches (Order Flow page) apply.
   const handleDivergenceAlert = (alert) => {
     if (!alert?.zone || !alertTypesRef.current.includes('zone')) return
-    let cfg = {}
-    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    const cfg = readAlertSwitches()
     if (cfg.alerts === false) return
     const discount = alert.zone === 'Discount'
     if (cfg.sound !== false) chime(discount)
@@ -5083,7 +5082,7 @@ export default function OiReplayPage() {
   const suddenMinute = asOfMs == null ? null : Math.floor(asOfMs / 60_000)
   const spotNow = currentBar?.close ?? null
   // Spot reaching the previous day's spot volume profile (the POC / VAH / VAL / HVN / LVN lines on these
-  // charts) - live only; the server scanner sends the same alerts to Telegram with no page open.
+  // charts) - live only; the server's alert runner sends the same alerts to Telegram with no page open.
   const spotProfileAlerts = useProfileAlerts({ underlying, vp: null, tpo: null, tpoRow: tpoRowFor(underlying, 1), futuresPrice: null, spotPrice: isLive ? spotNow : null, basis: null, spotVp: volumeProfile, live: isLive })
   const suddenWalls = useMemo(() => {
     if (suddenMinute == null || !(spotNow > 0)) return []

@@ -17,7 +17,6 @@ import TriggersPage from './TriggersPage.jsx'
 import ContractsPage from './ContractsPage.jsx'
 import LoginPage from './LoginPage.jsx'
 import TradeSettingsPage from './TradeSettingsPage.jsx'
-import StrategyTuningPage from './StrategyTuningPage.jsx'
 import ExternalPage from './ExternalPage.jsx'
 import VisitorsPage from './VisitorsPage.jsx'
 import CachePage from './CachePage.jsx'
@@ -1816,6 +1815,7 @@ export default function App() {
         <Route path="/" element={<DashboardPage />} />
         {/* The Backtrack page is gone - an old bookmark lands on the dashboard. */}
         <Route path="/backtest" element={<Navigate to="/" replace />} />
+        <Route path="/strategy-tuning" element={<Navigate to="/" replace />} />
         <Route path="/strike-data" element={<StrikeDataPage />} />
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
@@ -1830,7 +1830,6 @@ export default function App() {
         <Route path="/visitors" element={<RequireAdmin><VisitorsPage /></RequireAdmin>} />
         <Route path="/cache" element={<RequireAdmin><CachePage /></RequireAdmin>} />
         <Route path="/trade-settings" element={<TradeSettingsPage />} />
-        <Route path="/strategy-tuning" element={<StrategyTuningPage />} />
       </Routes>
     </AuthContext.Provider>
   )

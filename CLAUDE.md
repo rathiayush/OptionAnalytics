@@ -1,66 +1,45 @@
 # OptionAnalytics - notes for every session
 
-## The strategy scanner is the most important part of the app
+## The strategy scanner was removed (on request)
 
-The Order Flow page's strategy scanner (`optionanalytics.client/src/strategyEngine.js`,
-`StrategyScanner.jsx`, `scannerCore.js`, fed by `useDayOi.js`, `liveFeeds.js`, `orderFlowMath.js`, `profiles.js`, `suddenOi.js` and `dayRegime.js`) decides when a trade
-is signalled, at what entry, stop-loss and target, how a trailing stop moves, when a trade exits and
-what the paper / live option trade does. A mistake there costs real money.
+The Order Flow page's strategy scanner - its strategies, paper / live auto trades, alerts, the server-side
+strategy scan, the scanner log (`/api/scanner-log`) and the Strategy tuning page - was removed, code and tests
+(asked for - "Order flow page strategy and its code, alert and server scan, remove all"). What it shared and the
+rest of the app still reads was kept:
 
-After ANY change to those files (or to anything they read):
+- `oiContext.js` - `buildOiContext` (no look-ahead: a replayed day's context is built with `{ live: false }`, points
+  read at their minute's END; only today's live context, `live: true`, reads the running minute), `oiBiasParts`,
+  `oiSummary`, `suddenOiWalls`, `optionOiRead`, `vwapOf` - for `useDayOi.js`, the Order Flow page's bias / OI summary /
+  sudden walls and the server alert runner (`tests/options-oi.test.mjs`);
+- `PAPER_TRADE_LOT_SIZE` in `tradeDefaults.js`;
+- THE SERVER ALERT RUNNER (`optionanalytics.client/scanner-runner/runner.mjs` + `indexScanner.mjs`, bundled by
+  `npm run build:runner`, started by the server's `ScannerRunnerHostedService`, config / status at
+  `/api/scanner-runner/...`): ALERTS ONLY now - the OI totals S/R break / 🎯 alerts and the profile-level alerts for
+  every index switched on (Trade settings' "Server alerts"), no page open (`tests/scanner-runner.test.mjs`,
+  `tests/oi-break-alerts-server.test.mjs`). Its "Runner" role cannot reach the live-trading API;
+- the page alerts' switches - pop-ups, sound, speak, Telegram - are the Order Flow page's "Alerts" card
+  (`AlertSwitches.jsx`, `alertSwitches.js`, the old scanner card's localStorage key so what a browser had set still
+  holds; an admin's Telegram switch also goes to the alert runner) - read by the sudden OI walls, profile / price
+  alerts and OI Replay's OI break / zone alerts (`tests/alert-switches.test.mjs`).
+
+The Trade settings CSV keeps its old `auto_trade` column (read and written, used by nothing) so a saved file stays
+valid. After any client change:
 
 ```
 cd optionanalytics.client
-npm test          # node --test: every strategy's scenarios, the outcome rules, no look-ahead
+npm test
 npm run lint
 npx vite build
+npm run build:runner
 ```
 
-All must pass before committing. The SAME scanner also runs on the server for NIFTY, BANKNIFTY and SENSEX
-(`optionanalytics.client/scanner-runner/`, bundled by `npm run build:runner`, started by the server's
-`ScannerRunnerHostedService`): the page and the runner share `scannerCore.js` / `liveFeeds.js`, so a change
-there changes both - `tests/scanner-core.test.mjs` and `tests/scanner-runner.test.mjs` cover them. The runner is
-paper only: its "Runner" role cannot reach the live-trading API.
+All must pass before committing.
 
-When adding or changing a strategy:
-
-- add a scenario test in `optionanalytics.client/tests/` - it fires on its rules (LONG and SHORT where
-  it trades both) and does NOT fire when each key condition is missing;
-- update the strategy count in the tests (`STRATEGIES.length`) and check what the default Top 15
-  alerts on (`topFifteen`, `priority`, the `DEFAULT_*` lists);
-- keep `tests/audit.test.mjs` passing - it is the guard on the rules below.
-- per-strategy filters (`STRATEGY_FILTERS`, the scanner's Filters button): a filter's DEFAULT must be
-  the rule as written and tested (an untouched strategy behaves exactly as before); read them through
-  `strategyFilters(id, input.filters?.[id])`, and test that loosening each one lets its case through;
-- every strategy also has the TRADE filters (`TRADE_FILTERS`: sides, entry window, stop / target size, time stop,
-  trailing stop), applied by `applyTradeFilter` - defaults change nothing. The strategy tuning (`strategyTuning.js`,
-  `scanDay.js`, `scanner-runner/tune.mjs`, the Strategy tuning page) measures settings through the same function and
-  the same day scan as the scanner; keep `tests/strategy-tuning.test.mjs` (tuning == scanner) passing;
-- a strategy that measures as losing is RETIRED (`retired: true` in `STRATEGIES`), not deleted: it is
-  not run, listed, alerted or scored (`ACTIVE_STRATEGIES`); tests can still run it with `includeRetired`.
-
-### Rules the scanner must keep (checked by `tests/audit.test.mjs`)
-
-- **No look-ahead.** A setup at clock T uses only what was known at T: completed minute bars, prints
-  up to T, and OI / premiums / spot / futures of FINISHED minutes. OI-replay points are 1-minute bars
-  stamped at their start but holding their close, so a replayed day's context is built with
-  `buildOiContext(run, expiry, { live: false })` (points read at their minute's end); only today's live
-  context (`live: true`, ticks folded into the running minute) reads the running minute.
-- **Entry** = the futures price at the clock: the last tape print, else the last completed minute's
-  close (`replayView` / `priceAt`) - never the last big print or volume-spike minute.
-- **Outcome** (`simulateOutcome`): bars from the one starting at the entry (a bar already running at a
-  mid-minute live entry is skipped); stop before target in the same bar; a bar opening beyond the stop
-  fills at its open; target at the target; the trailing stop moves after each completed bar and only
-  tightens; time stop and the 15:10 square-off at the bar's close; no entries after 14:45.
-- **Option trades**: entry premium = the last finished minute's; their own Max SL / Target are checked
-  from the first full minute after the entry, at the level - but a minute that OPENS through the stop fills at its open
-  (a gap: the premium never traded at the stop), one with no open whose whole range is past it at the nearest price it
-  traded, a target always at the target (`gapFill` in `optionTrail.js` - the scanner's `optionStopTargetHit` and the OI
-  Replay paper panel; asked for - the audit's "fix": filled at the stop, a gap's loss looked smaller than it was; the
-  scanner's option series carry each minute's `open`, the live fold keeping the minute's first); a SL / target / trail change applies to
-  open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
-  signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
-  never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
+- **Option trades** (the OI Replay paper panel, the Signal backtest): their own SL / target are checked from the first
+  full minute after the entry, at the level - but a minute that OPENS through the stop fills at its open (a gap), one
+  with no open whose whole range is past it at the nearest price it traded, a target always at the target (`gapFill`
+  in `optionTrail.js`); a SL / target / trail change applies to open trades only, FROM the minute it is made
+  (`levelLog`) - what already passed is never rewritten and a trailing stop is never loosened by a change.
 
 ## Other rules
 
@@ -106,14 +85,14 @@ When adding or changing a strategy:
   slows down (`RetryBackoff` / `KeyedBackoff`: today warm-up and spot volume 10 min doubling to 1 h, CDV 30 s doubling to
   30 min) instead of asking again at its normal pace; any new timer that calls Dhan must do the same
   (`DhanRepeatGuardTests.cs`). NOTHING polls Dhan outside market hours - IST weekdays 09:00 - 16:00 (`MarketHours`): every
-  hosted service's loop runs in `MarketHours.BackgroundScope()`, as do the server scanner's requests and a page's TIMER
+  hosted service's loop runs in `MarketHours.BackgroundScope()`, as do the server alert runner's requests and a page's TIMER
   refreshes (the `X-Poll` header - `POLL_HEADERS` in `shared.jsx`), and `DhanApiClient` does not send a background polling
   call (positions, orders, the option chain / OI, quotes - everything but `/charts/...`) outside the window; the positions /
   orders refresh and the kill switch check also skip their rounds (`MarketHours.IsOpen`). Candle backfills (`/charts/...`)
   are not polling and go at any hour, as do a page's first load or a click - EXCEPT `/charts/intraday` from 20:00 to 08:00 IST
   (asked for - "charts intraday call should not go after 8 pm and should start at 8 am"; `Dhan:IntradayQuietHours`
   "20:00-08:00" in appsettings.json, `MarketHours.IntradayQuietReason` in `DhanApiClient`): not sent at all, whoever asks
-  (a page, a hosted service, the server scanner) and for any day - it comes back "Not sent" (logged at Debug), is never
+  (a page, a hosted service, the server alert runner) and for any day - it comes back "Not sent" (logged at Debug), is never
   kept on disk (a failure), so a past day not on disk loads from 08:00; the other candle downloads still go; no setting =
   none held (the tests' `DhanOptions`); token renewal has its own HttpClient. A new hosted service or page timer must do the same (`MarketHoursTests.cs`). What reached Dhan in the last 15 min: `GET /api/system/dhan-calls` (admin). `GET /api/oi-replay/{u}/run?forceFetch=true` (the OI Replay page's "Force fetch from Dhan" tick) skips the saved days -
   the cache's reads miss (`DhanDataCache.ForceRefreshScope`), the stored database and the in-memory futures are not used - and writes what Dhan sends over the cache.
@@ -144,7 +123,7 @@ When adding or changing a strategy:
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
-  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server scanner for every enabled
+  (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server alert runner for every enabled
   index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). They are the APP'S alerts: Telegram
   (the server's, and the page's own when the server is not covering) only when the OI totals card's "Telegram" switch is
   on (`config.oiBreakAlerts.telegram`, OFF by default - a config saved before the switch has none and reads as off; the
@@ -383,7 +362,7 @@ When adding or changing a strategy:
   leaving a blank page), and the page starts on `DEFAULT_SECTION_VALUES` - every card but Snapshot and Market Read,
   whose numbers all appear on the cards below them; both are one tick away in "Sections shown". (OI Replay's own
   "Liquidity map" card - the per-strike imbalance / zone / bias table - was removed on request, code and all; a saved
-  layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which strategies read, is a
+  layout or "Sections shown" naming it just drops it. The Order Flow page's liquidity map, which the Signal backtest reads, is a
   different thing and stays.)
 - OI Replay's SCREENS (asked for - "if there are multiple tabs open on OI Replay all tabs will be synced when the checkbox is
   ticked ... so many components, I need to see them on different screens"): the existing SYNC switch (`replaySync.jsx`,
@@ -455,7 +434,7 @@ When adding or changing a strategy:
   grey a shade lighter than the rest - and so are the sidebar menu's page (Menu) and a dropdown's picked option (Select,
   `#1554ad`, a deeper blue so a coloured CE / PE label still reads). Checkboxes, switches and primary-button toggles were
   already that blue. A new picker needs nothing; never style a selection grey (`tests/app-theme.test.mjs`).
-- The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals, the scanner's,
+- The POP-UP ALERTS (antd's static `notification` - every page's: OI Replay's S/R breaks and 🎯 signals,
   price / profile alerts, order errors) are set up ONCE in `main.jsx` (`notificationStack.jsx`, rules in
   `notificationStackRules.js`): STACKED - past `notificationStackThreshold` (1 on a phone, 3 wider) they fold into one pile,
   the newest in front, a tap / hover spreads it out (antd's own stack; the static API takes it only from an antd `App`
@@ -551,8 +530,7 @@ When adding or changing a strategy:
   judged with the last change made in it or before, so the minutes already passed are never judged again. In the minute of
   the entry or of a change only the point's own price counts - its high / low partly came before it (live, the forming
   minute's range holds the ticks before the entry) - and a price already past the stop there is the fill (a stop set
-  through the price closes at the price, the market's). A bar that OPENS through the stop fills at its open (`gapFill`,
-  the scanner's option trades' rule); a target at the target. The trailing stop only tightens: what a bar earned is kept through a
+  through the price closes at the price, the market's). A bar that OPENS through the stop fills at its open (`gapFill`); a target at the target. The trailing stop only tightens: what a bar earned is kept through a
   change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
   position is squared off at 15:15 (`tests/paper-stops.test.mjs`). Each position keeps its entry and exit time (`entryTime` /
   `exitTime`, shown HH:MM:SS under its prices): the clock at a punch or a manual exit (live, to the second); an auto exit's
@@ -623,7 +601,7 @@ When adding or changing a strategy:
   day's volume profile is drawn as HORIZONTAL BARS behind the candles on the spot and both entry charts as well as the
   futures chart, and the futures chart's own HVN / LVN are read by `profiles.histogramNodes` - the SAME rule the server
   uses for the spot profile (a strict local peak / trough of the raw rows, a run of equal rows counted once), NOT the
-  stricter `profileNodes` the strategies read (`lvnRun`): that one smooths, wants 1.3x / 0.6x the mean and a trough
+  stricter `profileNodes` (`lvnRun`): that one smooths, wants 1.3x / 0.6x the mean and a trough
   BETWEEN the peaks, which on a profile built by spreading each minute's volume over its range finds no LVN at all on
   a real day. (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
   POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
@@ -636,7 +614,7 @@ When adding or changing a strategy:
   row change asks nothing) with `backfillBars=true`: the Order Flow engine records a day in MEMORY from when the server
   starts, so after a restart / deploy - part way, or after the close (then none of the session) - the day's minutes before
   it come as the estimate from Dhan's 1-minute candles as WHOLE bars (`OrderFlowSnapshot.BackfillBars`, only when asked -
-  the Order Flow page and the scanner read the recorded `Bars` only, untouched; `OrderFlowHistory.BackfillCutoff` /
+  the Order Flow page reads the recorded `Bars` only, untouched; `OrderFlowHistory.BackfillCutoff` /
   `AttachBackfill`, `OrderFlowBackfillTests.cs`) and `withBackfillBars` fills exactly the minutes not recorded, tagged "futures
   before HH:MM estimated" (without it the card had no futures of the day and fell back to the day before's). SPOT: the index's 1-minute bars WITH its own volume (`GET /api/oi-replay/{u}/spot-day` -
   `OiReplayService.GetSpotDayAsync`, the run's own order, `PickSpotDayAsync`: the spot feed's whole day with no Dhan call, else
@@ -1235,7 +1213,7 @@ When adding or changing a strategy:
   beyond the one before while the OI at the strike held, the OI read at each candle's END (its last minute - `BarMinutes`
   in `Evaluate`; a 1-minute bar unchanged), to TELEGRAM as "[OI divergence 15m] <b>NIFTY</b> DISCOUNT zone" (`TelegramText`)
   and to the page's popup ("· 15 min"). PROFILE LEVELS (`profileAlerts.js`): every level still pops up / chimes on the
-  pages and is logged by the server scanner, but only one naming a POC or an LVN - an LVN gap, a confluence with either -
+  pages and is logged by the server alert runner, but only one naming a POC or an LVN - an LVN gap, a confluence with either -
   goes to Telegram (`sendsProfileTelegram`, in `IndexScanner.checkProfileLevels` and the pages' `useProfileAlerts`); an HVN
   or single prints alone do not. `PriceOiDivergenceTests.cs`, `tests/profile-alerts.test.mjs`, `tests/scanner-runner.test.mjs`.
 - EVERY TELEGRAM MESSAGE IS KEPT (`TelegramMessageLog`, `Storage:TelegramLogPath` - /app/data/telegram-log, in
@@ -1324,7 +1302,7 @@ When adding or changing a strategy:
   stop ends it (`RequestAborted`). On a phone the cards' buttons sit in their body, not beside the title (they squeezed
   the folder's trail to nothing). No timer - loaded on opening, after a delete, by Refresh; a block an entry on
   a phone (`CacheBrowserTests.cs`, `tests/cache-browser.test.mjs`).
-- ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`; the strategies read its pushes). Dhan sends a tick per
+- ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the
   tick's last price, its aggressor side by Lee-Ready: the quote rule against the PREVIOUS MARKET FEED PACKET's best bid / ask
   (asked for - "match Dhan's delta": the same socket as the trade, so always the book before it. Against the depth sockets the
@@ -1389,8 +1367,7 @@ When adding or changing a strategy:
   minute: its own change in its own sigma put the 09:15 minute - the day's heaviest - at 84 / 16 by its direction alone,
   however small the move (`cvdBackfill.estimateFlowMinutes` the same)) and lead the
   charts (`withBackfill`, drawn faded): on a 3 / 5 / 15-minute timeframe those in the first recorded candle before its
-  first recorded minute count too (`firstMinuteMs` - they were dropped from the delta from the open). The strategies read
-  exact bars only (relative CVD moves). OI Replay's futures delta panes are LIVE: the "orderFlowDelta" push (group
+  first recorded minute count too (`firstMinuteMs` - they were dropped from the delta from the open). OI Replay's futures delta panes are LIVE: the "orderFlowDelta" push (group
   `ofd:{U}` - `OrderFlowService.DeltaGroup`, `OrderFlowEngine.LiveDelta`: the last two minutes' buy / sell, a few bytes;
   External may not join it) merged as the minutes trade (`mergeDeltaPush`; a missed minute / another contract or day
   loads the day again, once) - they reloaded the whole day every 60 s. `tests/cvd-backfill.test.mjs`. The Order Flow
@@ -1491,13 +1468,13 @@ When adding or changing a strategy:
   day read back kept for the next asks. TODAY is checkpointed every `CheckpointInterval` (5 min) and at shutdown, and a new
   engine starts from it (`NewEngine` -> `ImportDay`): a deploy mid-session keeps the morning exact - only the minutes the
   server was down are missing, and the first tick after sets a new baseline (no giant print). `OrderFlowDayStoreTests.cs`.
-  The live push carries only the engine's last two minute bars, so a page (or the server scanner) that missed a minute -
+  The live push carries only the engine's last two minute bars, so a page (or the server alert runner) that missed a minute -
   a phone asleep, pushes skipped, the connection down and back - LOADS THE DAY AGAIN (`orderFlowPushGap`; the Order Flow
   page also on every hub reconnect, once a load is not already on its way): it used to fold in what came next and keep a
   hole in the footprint, the cumulative delta and the tape until a manual reload (`tests/scanner-runner.test.mjs`).
-  Alerts / the scanner may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
+  Alerts may lag the pushes; the ticks are applied as they arrive. The live push still carries the last 40
   prints: a client that skips pushes for several seconds (a slow phone - the conflated batcher) can miss prints in its tape
-  (bars are whole; the server scanner is local and does not).
+  (bars are whole; the server alert runner is local and does not).
   ON A PHONE (asked for - "order flow is not mobile supportive"): the page is never wider than the screen
   (`.oa-of-page { overflow-x: clip }` in `index.css`) - the footprint legend's longest line did not wrap, the page came out
   wider than a phone, and iOS drew the WHOLE page shrunk with the ☰ off its edge; legend items now wrap inside the card.
@@ -1543,6 +1520,5 @@ When adding or changing a strategy:
   101.59999847412109375, an IV 12.34 became 12.3399999...); .NET 8 rounded to 15 / 7 significant digits. Every double / float
   that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast (it gives the same numbers on 8 and on 11)
   (`DecimalConversionTests.cs`).
-- Live order placement only ever happens behind the explicit, confirmed "Auto-place on alert" switch in
-  Live (Dhan) mode, or a saved Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`);
-  alerts and the default auto trade are paper.
+- Live order placement only ever happens from a confirmed order on a page (OI Replay's Live order panel) or a saved
+  Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`); alerts are never orders.

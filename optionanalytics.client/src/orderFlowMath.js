@@ -725,7 +725,7 @@ export function orderFlowBias({ bars = [], liquidity = [], bigTrades = [], nowMs
     add('Liquidity pulling / stacking', 10, score / Math.max(1, recentPull.length * 0.6), `${recentPull.length} in 10 min`)
   }
 
-  // Options OI and futures OI (strategyEngine's oiBiasParts) - the positioning behind the flow.
+  // Options OI and futures OI (oiContext's oiBiasParts) - the positioning behind the flow.
   for (const p of extra) add(p.name, p.weight, p.score, p.detail)
 
   const totalWeight = sum(parts, (p) => p.weight) || 1

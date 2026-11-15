@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Alert, Button, Card, InputNumber, Popconfirm, Segmented, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, InputNumber, Popconfirm, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { NavBar, useAuth } from './shared.jsx'
 import { loadTradeDefaults, refreshTradeSettings, subscribeTradeLevels } from './tradeDefaults.js'
 
@@ -12,10 +12,9 @@ const fromDefaults = (u) => {
 
 /**
  * Trade settings, per index, in one place: the default lots, the option stop-loss / target and trailing
- * stop (premium points), the live order slippage, and the server scanner - whether it scans the index and
- * what it does on an alert. Saved on the server in trade-settings.csv (created with the defaults if it is
- * not there) and used by every page - the OI Replay trade panel and its keyboard ticket, the Order Flow
- * scanner - and by the server scanner, which runs these indices with no page open.
+ * stop (premium points), the live order slippage, and whether the server's alert runner (OI break / profile alerts)
+ * watches the index. Saved on the server in trade-settings.csv (created with the defaults if it is not there) and
+ * used by the OI Replay trade panel and its keyboard ticket and the saved Signal strategies' live orders.
  */
 const rupees = (v) => (v == null ? '-' : `${v < 0 ? '-' : ''}₹${Math.abs(Math.round(v)).toLocaleString('en-IN')}`)
 const istTime = (iso) => (iso ? new Date(iso).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }) : '')
@@ -148,12 +147,8 @@ export default function TradeSettingsPage() {
     { title: <Tooltip title="...the stop follows the best premium this many points behind, only tightening. 0 = no trailing.">Trail follow</Tooltip>, dataIndex: 'trailGap', width: 110, render: num('trailGap', { step: 1 }) },
     { title: <Tooltip title="A live order's limit price is the bid / ask plus this many points">Slippage pts</Tooltip>, dataIndex: 'slippagePoints', width: 110, render: num('slippagePoints', { step: 0.5, max: 100 }) },
     {
-      title: <Tooltip title="The server scans this index with the strategy scanner - with no page open">Server scanner</Tooltip>, dataIndex: 'scannerEnabled', width: 120,
-      render: (v, r) => <Switch size="small" checked={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { scannerEnabled: x })} aria-label={`${r.underlying} server scanner`} />,
-    },
-    {
-      title: <Tooltip title="What the server scanner does on an alert: paper-sell or paper-buy the option, or only alert">On an alert</Tooltip>, dataIndex: 'autoTrade', width: 230,
-      render: (v, r) => <Segmented size="small" value={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { autoTrade: x })} options={[{ value: 'sell', label: 'Sell option' }, { value: 'buy', label: 'Buy option' }, { value: 'off', label: 'Alert only' }]} />,
+      title: <Tooltip title="The server watches this index for the OI break and profile-level alerts - with no page open">Server alerts</Tooltip>, dataIndex: 'scannerEnabled', width: 120,
+      render: (v, r) => <Switch size="small" checked={v} disabled={!isAdmin} onChange={(x) => edit(r.underlying, { scannerEnabled: x })} aria-label={`${r.underlying} server alerts`} />,
     },
     { title: '', key: 'save', width: 90, render: (_, r) => isAdmin && <Button size="small" type="primary" disabled={!changed(r)} loading={saving === r.underlying} onClick={() => save(r)}>Save</Button> },
   ]
@@ -169,18 +164,13 @@ export default function TradeSettingsPage() {
         <Card size="small" title="Trade settings · per index">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              The defaults every trade starts from - the OI Replay trade panel and its keyboard ticket (B / S), the Order Flow scanner&apos;s paper and
-              live trades - and what the server scanner runs with: it scans each index switched on here and trades it this way on every alert, whether
-              or not any page is open. Changing a stop-loss / target here, or in any of those boxes on a page, changes it everywhere; open trades take a
+              The defaults every trade starts from - the OI Replay trade panel and its keyboard ticket (F1 / S) and the saved Signal strategies&apos;
+              live orders - and which indices the server watches for its OI break / profile-level alerts, whether or not any page is open. Changing a stop-loss / target here, or in any of those boxes on a page, changes it everywhere; open trades take a
               new stop-loss / target from the minute it changes. Saved on the server in {file ?? 'trade-settings.csv'} (written again with the defaults
               if it is missing).
             </Text>
             {!isAdmin && <Alert type="info" showIcon message="Only an admin can change these." />}
             <Table size="small" rowKey="underlying" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1150 }} />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              The server scanner is paper only: it alerts and paper-trades on Telegram (tagged [Server]) and never places a real order. Which
-              strategies it alerts on, their filters and the trailing stop on the futures signal follow the Order Flow scanner&apos;s settings.
-            </Text>
           </Space>
         </Card>
       </Space>

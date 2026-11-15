@@ -1,4 +1,4 @@
-// The live data the strategy scanner reads, kept up to date from the server's pushes - without React, so
+// The live data the server's alert runner reads, kept up to date from the server's pushes - without React, so
 // the Order Flow page and the server-side scanner runner build exactly the same picture:
 //   - the futures order flow (bars, prints, icebergs, sweeps, the heatmap's book columns) from a REST
 //     snapshot plus each "orderFlowLive" push,
@@ -85,7 +85,7 @@ export function applyOrderFlowPush(prev, payload, rowSize) {
   }
 }
 
-// ---- OI context (strategyEngine.buildOiContext) kept live ----------------------------------------
+// ---- OI context (oiContext.buildOiContext) kept live ----------------------------------------
 
 // The OI expiry flag the scanner reads per underlying (BANKNIFTY has no weekly).
 export const expiryFlagOf = (underlying) => (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')

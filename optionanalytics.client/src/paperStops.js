@@ -1,6 +1,6 @@
 // The OI Replay trade panel's paper positions: the stop-loss / target / trailing stop on the option's own premium, and
-// a No SL position's 15:15 square-off (paperExit.js). The rules are the scanner's for its option trades (strategyEngine
-// optionStopTargetHit), on the page's own premium points:
+// a No SL position's 15:15 square-off (paperExit.js). The rules are those the strategy scanner's option trades had (removed
+// since), on the page's own premium points:
 //
 // - LEVELS: each position keeps the levels it was punched with (the panel's, or the keyboard ticket's) in `levelLog`
 //   [{ t, sl, target, trailStart, trailGap }] (premium points, 0 = off; the first at the entry). A change on the panel

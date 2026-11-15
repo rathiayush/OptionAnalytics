@@ -67,7 +67,6 @@ ENV Storage__TriggersPath=/app/data/strategy-triggers.json \
     Storage__OrderHistoryPath=/app/data/trigger-order-history.json \
     Storage__HistoricalDataPath=/app/data/historical \
     Storage__ExpiredOptionDataPath=/app/data/expired-option-data \
-    Storage__ScannerLogPath=/app/data/scanner-log \
     Storage__LiveTimeExitsPath=/app/data/live-time-exits.json \
     Storage__DataProtectionKeysPath=/app/data/dataprotection-keys \
     Storage__ScannerRunnerPath=/app/data/scanner-runner \

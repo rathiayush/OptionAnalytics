@@ -1,6 +1,6 @@
 // A synthetic trading day (futures bars with footprint rows, prints, option / futures / index OI) for the
 // scanner-core tests - deterministic, enough for several setups to fire through the whole pipeline.
-import { buildOiContext } from '../src/strategyEngine.js'
+import { buildOiContext } from '../src/oiContext.js'
 const MIN = 60000
 const T915 = Date.parse('2026-10-05T03:45:00Z')
 const at = (m) => T915 + m * MIN

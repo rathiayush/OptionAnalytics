@@ -103,14 +103,14 @@ public sealed class ScannerRunnerTests : IDisposable
         Assert.All(ScannerRunnerStore.Underlyings, u => Assert.True(config["enabled"]![u]!.GetValue<bool>()));
 
         store.Update(new JsonObject { ["settings"] = new JsonObject { ["pick"] = "all" }, ["enabled"] = new JsonObject { ["SENSEX"] = false, ["FOO"] = false } });
-        store.Update(new JsonObject { ["levels"] = new JsonObject { ["NIFTY"] = new JsonObject { ["sl"] = 15 } } });
+        store.Update(new JsonObject { ["profileAlerts"] = new JsonObject { ["spot"] = false } });
 
         var again = Store().Config();
         Assert.Equal("all", again["settings"]!["pick"]!.GetValue<string>());
         Assert.False(again["enabled"]!["SENSEX"]!.GetValue<bool>());
         Assert.True(again["enabled"]!["NIFTY"]!.GetValue<bool>());
         Assert.Null(again["enabled"]!["FOO"]);
-        Assert.Equal(15, again["levels"]!["NIFTY"]!["sl"]!.GetValue<int>());
+        Assert.False(again["profileAlerts"]!["spot"]!.GetValue<bool>());
     }
 
     [Fact]

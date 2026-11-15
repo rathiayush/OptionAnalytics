@@ -1,4 +1,4 @@
-// Alert outputs shared by the strategy scanner and the Order Flow page's price alerts: a chime, the
+// Alert outputs shared by the Order Flow and OI Replay pages' alerts: a chime, the
 // spoken words and the server's Telegram chat.
 
 // A trade punched / placed (and a live trade's exit) to the server's Telegram chat - live view only.

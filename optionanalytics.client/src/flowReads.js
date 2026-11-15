@@ -1,7 +1,7 @@
 // SCORED absorption and exhaustion on the footprint (asked for - "is there any better way to identify exhaustion /
 // absorption on the footprint ... please work on this area"; "yes, you fix absorption exhaustion"). The footprint's first
 // rules (orderFlowMath.analyzeBars) read ONE bar: heavy aggression in its end rows with a close off the extreme
-// (absorption), a nearly empty end row (exhaustion). They stay as they are for the strategy scanner and the bias - which
+// (absorption), a nearly empty end row (exhaustion). They stay as they are for the bias - which
 // are measured on them. What the FOOTPRINT shows is this read instead, each mark with a 0 - 100 score of how many
 // independent things agree:
 //

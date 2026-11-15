@@ -6,8 +6,8 @@ using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.Controllers;
 
-/// <summary>The server-side strategy scanner (ScannerRunnerHostedService): its config - which indices, the
-/// scanner settings - and what it reports.</summary>
+/// <summary>The server-side alert runner (ScannerRunnerHostedService - OI break and profile-level alerts): its config -
+/// which indices, the alert settings - and what it reports.</summary>
 [ApiController]
 [Route("api/scanner-runner")]
 public sealed class ScannerRunnerController : ControllerBase
@@ -21,9 +21,8 @@ public sealed class ScannerRunnerController : ControllerBase
         _trade = trade;
     }
 
-    /// <summary>GET /api/scanner-runner/config - the runner reads it every minute; the page shows it. The
-    /// scanner settings synced from the Order Flow page, with each index's trade settings
-    /// (trade-settings.csv) on top: whether it is scanned, its lots, SL / target / trail and what it trades.</summary>
+    /// <summary>GET /api/scanner-runner/config - the runner reads it every minute; the pages show it. The alert
+    /// settings, with whether each index is watched (trade-settings.csv's scanner switch) on top.</summary>
     [HttpGet("config")]
     [Authorize(Roles = $"{AuthRoles.Admin},{ScannerRunnerKey.Role}")]
     public IActionResult GetConfig() => Ok(WithTradeSettings(_store.Config()));
@@ -31,29 +30,23 @@ public sealed class ScannerRunnerController : ControllerBase
     private JsonObject WithTradeSettings(JsonObject config)
     {
         var enabled = new JsonObject();
-        var levels = new JsonObject();
-        var trade = new JsonObject();
-        foreach (var s in _trade.All())
-        {
-            enabled[s.Underlying] = s.ScannerEnabled;
-            levels[s.Underlying] = new JsonObject { ["sl"] = s.SlPoints, ["target"] = s.TargetPoints, ["trailStart"] = s.TrailStart, ["trailGap"] = s.TrailGap };
-            trade[s.Underlying] = new JsonObject { ["lots"] = s.Lots, ["autoTrade"] = s.AutoTrade, ["slippage"] = s.SlippagePoints };
-        }
+        foreach (var s in _trade.All()) enabled[s.Underlying] = s.ScannerEnabled;
         config["enabled"] = enabled;
-        config["levels"] = levels;
-        config["trade"] = trade;
+        // Keys the removed strategy scanner kept in a saved config.
+        config.Remove("alertIds");
+        config.Remove("levels");
         return config;
     }
 
-    /// <summary>PUT /api/scanner-runner/config - an admin's page saves its scanner settings (and per-index SL /
-    /// target levels) here as they change, and switches indices on / off. Only the keys sent change.</summary>
+    /// <summary>PUT /api/scanner-runner/config - an admin's page saves its alert settings here as they change, and
+    /// switches indices on / off. Only the keys sent change.</summary>
     [HttpPut("config")]
     [Authorize(Roles = AuthRoles.Admin)]
     [RequestSizeLimit(200_000)]
     public IActionResult PutConfig([FromBody] JsonObject patch)
     {
         if (patch is null) return BadRequest(new { error = "No body." });
-        var allowed = new HashSet<string> { "settings", "levels", "enabled", "alertIds", "profileAlerts", "oiBreakAlerts" };
+        var allowed = new HashSet<string> { "settings", "enabled", "profileAlerts", "oiBreakAlerts" };
         var unknown = patch.Select(kv => kv.Key).Where(k => !allowed.Contains(k)).ToList();
         if (unknown.Count > 0) return BadRequest(new { error = $"Unknown keys: {string.Join(", ", unknown)}" });
         // Which indices the server scans lives with the rest of each index's trade settings.
@@ -66,12 +59,10 @@ public sealed class ScannerRunnerController : ControllerBase
             }
             patch.Remove("enabled");
         }
-        // The SL / target levels too: trade-settings.csv is the one place they are kept.
-        patch.Remove("levels");
         return Ok(WithTradeSettings(_store.Update(patch)));
     }
 
-    /// <summary>POST /api/scanner-runner/status - the runner's heartbeat (per index: last look, signals, paper trades).</summary>
+    /// <summary>POST /api/scanner-runner/status - the runner's heartbeat (per index: last look, the alerts' state).</summary>
     [HttpPost("status")]
     [Authorize(Roles = ScannerRunnerKey.Role)]
     [RequestSizeLimit(2_000_000)]
