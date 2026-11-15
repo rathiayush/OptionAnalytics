@@ -21,17 +21,40 @@ export const HEDGER_GROUPS = [
 export const HEDGER_DEFAULT = 'pro'
 export const hedgerGroup = (value) => HEDGER_GROUPS.find((g) => g.value === value) ?? HEDGER_GROUPS[0]
 
-/** The GEX signs a card can show: the two assumed ones, and the two read from NSE's positions (when the day has them). */
+/** The GEX signs a card can show. NSE's positions are NOT a sign to pick (four choices left the user unable to tell which
+ *  to trust - "I do not know which to trust"): they are the third vote of the card's one verdict (`gexVerdict`). */
 export const GEX_SIGNS = [
   { value: 'standard', label: 'Standard' },
   { value: 'buildup', label: 'OI build-up' },
-  { value: 'participant', label: 'NSE positions', nse: true },
-  { value: 'participantBuildup', label: 'NSE + build-up', nse: true },
 ]
-/** The sign to show: the one picked when `days` (useGexDays) has it, else Standard. */
+/** The sign to show: the one picked, else Standard (a saved NSE sign from when they could be picked reads as Standard). */
 export const gexSignOf = (days, picked) => (GEX_SIGNS.some((s) => s.value === picked) && days?.[picked] ? picked : 'standard')
-/** The picker's options for `days`: the NSE ones only when worked out. */
-export const gexSignOptions = (days) => GEX_SIGNS.filter((s) => !s.nse || days?.[s.value]).map(({ value, label }) => ({ value, label }))
+export const gexSignOptions = () => GEX_SIGNS.map(({ value, label }) => ({ value, label }))
+
+const regimeOf = (minute) => (minute && Number.isFinite(minute.net) && minute.net !== 0 ? (minute.net > 0 ? 'positive' : 'negative') : null)
+
+/**
+ * THE ONE VERDICT of a minute, from the three reads of who holds the gamma - `standard` and `buildup` (the assumed signs)
+ * and `nse` (signed by NSE's real positions; null = no file): `{ regime ('positive' = range / pin day, 'negative' = trend /
+ * fast day, null = unclear), confidence ('high' | 'medium' | 'none'), votes: [{ name, regime }], agree, of, text }`.
+ * The rule: Standard and OI build-up must agree, or it is unclear (the card's rule before). NSE's positions then only
+ * move the confidence: with them = high, against them = medium (smaller size), no file = medium.
+ */
+export function gexVerdict(standard, buildup, nse = null) {
+  const votes = [{ name: 'Standard', regime: regimeOf(standard) }, { name: 'OI build-up', regime: regimeOf(buildup) }]
+  if (nse) votes.push({ name: 'NSE positions', regime: regimeOf(nse) })
+  const [a, b, c] = votes.map((v) => v.regime)
+  const regime = a != null && a === b ? a : null
+  const agree = regime ? votes.filter((v) => v.regime === regime).length : 0
+  const confidence = !regime ? 'none' : c === regime ? 'high' : 'medium'
+  const day = regime === 'positive' ? 'RANGE / PIN day - fade the walls, aim at the max gamma strike' : 'TREND / FAST day - trade with the break, do not fade it'
+  const text = !regime
+    ? 'UNCLEAR - Standard and OI build-up disagree: ignore the regime and the flip, trade the walls only'
+    : c == null ? `${day} (Standard and OI build-up agree)`
+      : c === regime ? `${day} (all 3 reads agree - high confidence)`
+        : `${day} (2 of 3 - NSE's real positions lean the other way: smaller size)`
+  return { regime, confidence, votes, agree, of: votes.length, text }
+}
 
 const rowOf = (day, type) => (day?.rows ?? []).find((r) => String(r.type ?? '').trim().toUpperCase() === type)
 

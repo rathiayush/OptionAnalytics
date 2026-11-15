@@ -271,11 +271,16 @@ All must pass before committing.
   Pro desks - the default - / Pro + FII / All but clients, `optionanalytics.oiReplay.gexHedgers`). `gexDay`'s `shares`
   { call, put } takes the place of +1 / -1 as the dealers' share of every call's / put's OI (none = exactly as before -
   +1 / -1 held deepEqual to it in `tests/gex.test.mjs`), under 'buildup' for the first reading and the changes that cannot
-  be read. `useGexDays` adds two days when it has them - `participant` ("NSE positions") and `participantBuildup` ("NSE +
-  build-up") - beside `standard` / `buildup`, which are UNCHANGED (the two signs' verdict, the entry checklist's gamma
-  check and the Signal backtest still read those); both GEX cards' Sign pickers offer them only then (`gexSignOptions` /
-  `gexSignOf` - a saved NSE sign on a day without the file shows Standard; a dropdown on a phone - four buttons made the
-  page wider than the screen). It is ONE number a side for ALL NSE index options (every index, strike, expiry): it leans
+  be read. `useGexDays` adds ONE day when it has them - `participant` (no flip worked out) - beside `standard` / `buildup`,
+  which are UNCHANGED (the entry checklist's gamma check and the Signal backtest still read those). NSE'S POSITIONS ARE NOT
+  A SIGN TO PICK (they were - "NSE positions" / "NSE + build-up" in the Sign picker - and four choices left the user unable
+  to tell which to trust: "I am confused ... I do not know which to trust"; removed, with `participantBuildup`): the Sign
+  picker is Standard / OI build-up again (`GEX_SIGNS`; a saved NSE sign reads as Standard - `gexSignOf`) and the GEX card
+  shows ONE VERDICT line, always open, in place of the folded "two signs' verdict" (`gexVerdict(standard, buildup, nse)`):
+  Standard and OI build-up must agree, else "UNCLEAR - ... trade the walls only" (the rule before); NSE's positions only
+  move the confidence - with them "all 3 reads agree - high confidence", against them "2 of 3 ... smaller size", no file =
+  the two alone; each read's net and range / trend under it, and "the walls and max gamma hold under every read". The
+  Hedgers picker is inside the "NSE positions" fold. It is ONE number a side for ALL NSE index options (every index, strike, expiry): it leans
   the net, its sign, the flip and each strike's GEX - not the walls / max gamma (gamma x OI, whoever holds it) - and the
   net is a small share of Standard's (real books are near balanced: Pro +1.5% of calls, -0.8% of puts on 13 Nov 2026), so
   `cr` shows a decimal under ₹10 Cr. SENSEX (BSE) uses NSE's file as a stand-in, said on the card ("NSE positions" fold:

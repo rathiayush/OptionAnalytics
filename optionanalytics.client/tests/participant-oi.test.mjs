@@ -1,7 +1,7 @@
 // NSE's participant-wise open interest as the GEX sign (participantOi.js).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { GEX_SIGNS, HEDGER_GROUPS, gexSignOf, gexSignOptions, participantShares, sharesText } from '../src/participantOi.js'
+import { GEX_SIGNS, HEDGER_GROUPS, gexSignOf, gexSignOptions, gexVerdict, participantShares, sharesText } from '../src/participantOi.js'
 
 // NSE's own file of 13 Nov 2026, as the server gives it.
 const DAY = {
@@ -48,14 +48,39 @@ test('the shares in words', () => {
   assert.equal(sharesText(null), '')
 })
 
-test('the sign shown: the NSE ones only when the day was worked out with them - else Standard', () => {
-  const assumed = { standard: [], buildup: [] }
-  const withNse = { ...assumed, participant: [], participantBuildup: [] }
-  assert.deepEqual(gexSignOptions(assumed).map((o) => o.value), ['standard', 'buildup'])
-  assert.deepEqual(gexSignOptions(withNse).map((o) => o.value), GEX_SIGNS.map((s) => s.value))
-  assert.equal(gexSignOf(withNse, 'participant'), 'participant')
-  assert.equal(gexSignOf(assumed, 'participant'), 'standard')
-  assert.equal(gexSignOf(assumed, 'buildup'), 'buildup')
-  assert.equal(gexSignOf(withNse, 'nonsense'), 'standard')
+test('the signs to pick are the two assumed ones only - a saved NSE sign reads as Standard', () => {
+  const days = { standard: [], buildup: [], participant: [] }
+  assert.deepEqual(gexSignOptions().map((o) => o.value), ['standard', 'buildup'])
+  assert.deepEqual(GEX_SIGNS.map((s) => s.value), ['standard', 'buildup'])
+  assert.equal(gexSignOf(days, 'buildup'), 'buildup')
+  assert.equal(gexSignOf(days, 'participant'), 'standard')
+  assert.equal(gexSignOf(days, 'participantBuildup'), 'standard')
   assert.equal(gexSignOf(null, 'buildup'), 'standard')
+})
+
+test('the one verdict: Standard and OI build-up must agree; NSE positions only move the confidence', () => {
+  const pos = { net: 5 }, neg = { net: -5 }
+  // All three agree: high confidence.
+  let v = gexVerdict(neg, neg, neg)
+  assert.deepEqual([v.regime, v.confidence, v.agree, v.of], ['negative', 'high', 3, 3])
+  assert.match(v.text, /^TREND .*all 3 reads agree/)
+  v = gexVerdict(pos, pos, pos)
+  assert.equal(v.regime, 'positive')
+  assert.match(v.text, /^RANGE/)
+  // NSE against the two: the regime stands, at medium confidence.
+  v = gexVerdict(pos, pos, neg)
+  assert.deepEqual([v.regime, v.confidence, v.agree, v.of], ['positive', 'medium', 2, 3])
+  assert.match(v.text, /2 of 3 .*smaller size/)
+  // No NSE file: as the two signs' verdict was.
+  v = gexVerdict(neg, neg)
+  assert.deepEqual([v.regime, v.confidence, v.of], ['negative', 'medium', 2])
+  // The two assumed signs disagree: unclear, whatever NSE says.
+  for (const nse of [pos, neg, null]) {
+    v = gexVerdict(pos, neg, nse)
+    assert.deepEqual([v.regime, v.confidence], [null, 'none'])
+    assert.match(v.text, /^UNCLEAR/)
+  }
+  // No reading yet.
+  assert.equal(gexVerdict(null, null, null).regime, null)
+  assert.equal(gexVerdict({ net: 0 }, { net: 0 }).regime, null)
 })
