@@ -22,7 +22,8 @@ function useThrottled(value, ms, throttle) {
  * again at most every few seconds. Null while `enabled` is off (neither card shown). `chains`: other expiries added in
  * (OI Replay's live "Σ 3 expiries" - [{ cePoints, pePoints, expiry }], gexDay's `chains`), each with its own gamma.
  * `shares`: NSE's participant positions ({ call, put } - participantOi.js): with them the day is ALSO worked out signed by
- * them - `participant` - the third vote of the GEX card's verdict (`gexVerdict`), not a sign to pick.
+ * them - `participant` (the third vote of the GEX card's verdict, `gexVerdict` - not a sign to pick) and
+ * `participantBuildup` (from them, then the day's OI changes read by their IV - the "NSE + build-up" sign).
  */
 export function useGexDays(cePoints, pePoints, spotBars, { expiry = null, live = false, enabled = true, chains = null, shares = null } = {}) {
   const inputs = useMemo(() => ({ cePoints, pePoints, spotBars, chains }), [cePoints, pePoints, spotBars, chains])
@@ -34,6 +35,7 @@ export function useGexDays(cePoints, pePoints, spotBars, { expiry = null, live =
     buildup: gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'buildup', expiry, chains: shown.chains ?? [] }),
     ...(call != null && put != null ? {
       participant: gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'standard', expiry, chains: shown.chains ?? [], shares: { call, put }, flips: false }),
+      participantBuildup: gexDay(shown.cePoints, shown.pePoints, shown.spotBars, { sign: 'buildup', expiry, chains: shown.chains ?? [], shares: { call, put } }),
     } : {}),
   } : null), [shown, expiry, enabled, call, put])
 }

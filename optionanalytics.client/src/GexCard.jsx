@@ -350,10 +350,10 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
-      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard. The Verdict line under the controls compares both for you (and NSE's real positions, when it has them).">
+      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard. NSE + build-up (when NSE's file is there): starts from NSE's real positions instead of the standard assumption, then the day's OI changes signed by their IV the same way. The Verdict line under the controls compares Standard, OI build-up and NSE's positions for you.">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>Sign</Text>
-          <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions()} />
+          {touchOrNarrow ? <Select size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} style={{ width: 150 }} /> : <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} />}
         </Space>
       </Tooltip>
       <Popover content={HOW_TO_READ} title="How to read GEX" trigger="click" placement="bottomLeft">
