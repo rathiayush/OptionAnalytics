@@ -418,7 +418,12 @@ When adding or changing a strategy:
   (`tests/quick-views.test.mjs`). On a phone / touch screen (no keyboard, a long page) a small floating button
   (`QuickViewFab.jsx`, 40 px) opens them: it starts at the BOTTOM LEFT of the page, right of the sidebar (`fabDefault`,
   `useSideNavInset` in `useScreen.js` - never over the menu), dragged anywhere (kept on the screen), a tap opens the nine
-  views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. Where it was dropped is
+  views as small labelled icons (up or down, wherever they fit), a tap on one opens its popup. NEAREST THE BUTTON, before the
+  views, is ORDER (asked for - "order punching should also be in the floating popover so I can punch trades easily"; the
+  button's `actions`, `fabEntries` in `quickViews.js`): it opens / closes the Paper / Live order panel - the "Paper Trade"
+  button's own `DraggableFloatingPanel` (`paperPanelOpen`), so a trade is punched from anywhere on the page without
+  scrolling to that button; "Order (live)" while Live mode is on, blue while the panel is open. It only opens the panel -
+  a live order still goes through the panel's own confirm. Where it was dropped is
   kept as its distance from the NEAREST CORNER (`fabAnchor` / `fabFromAnchor`, `optionanalytics.oiReplay.quickFabAnchor`)
   - an account preference, so a phone and a monitor share it: kept in pixels from the top left (the old
   `...quickFab`, no longer read), a spot picked on a phone put the button in the middle of a monitor's spot chart. It
