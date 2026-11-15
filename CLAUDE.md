@@ -1440,6 +1440,29 @@ When adding or changing a strategy:
   fell off the far edge of the 200 levels as price moved is out of view, not cancelled (`pulledByRow`). Live the push's
   whole book, replayed the column at the clock; nothing after the clock (`tests/book-ladder.test.mjs`). A day with no
   depth (estimated / rebuilt) says so. Drawing only - it feeds no signal or strategy.
+  POSITIONING, BOOK PRESSURE, LIQUIDITY ADDED vs PULLED (asked for - "delta + OI positioning on futures ... book pressure
+  line ... net liquidity added versus pulled ... build these in separate card components"; three cards under the chart and
+  order book - `FlowToolCards.jsx`, the reading `flowTools.js`, `tests/flow-tools.test.mjs`): (1) `PositioningCard` - the
+  futures candles (1 / 3 / 5 / 15 min, default 5, `optionanalytics.orderFlow.positioningTf`) coloured by the candle's
+  AGGRESSOR DELTA with the change in the FUTURES' OI over it (`positioningCandles` - the OI at the candle's end less the
+  candle before's; useDayOi's `futures`, a replayed day's reading known a minute after its minute - `lag`, nothing after the
+  clock): buyers aggressive + OI up = NEW LONGS, + OI down = SHORT COVERING, sellers + OI up = NEW SHORTS, + OI down = LONG
+  LIQUIDATION; a delta under 5% of the volume = balanced, no OI change / reading = no read; each candle's OI change as bars
+  under it, the delta done under each read (day and last 6 candles) and a read (fresh vs closing; "two-sided" when the
+  other side is >= 60% as large - `positioningRead`). The OI is the NEAREST contract's: another contract picked = the card
+  says so. (2) `BookPressureCard` - `bookPressure`: resting bids against offers within 10 rows of the touch, a row
+  weighing less the further out (1 ... 1/10), (bids − offers) / (bids + offers) x 100, as a line under the book's mid
+  through the day (10-second buckets, smoothed Raw / 1 min / 5 min - `...bookPressureSmooth`), and `pressureRead` over the
+  last N min (`...bookPressureWindow`): the book's lean, or a move the book does not back (price up >= 0.05% while the
+  offers outweigh the bids by 15+ = "rising on thin bids", and the mirror). (3) `LiquidityNetCard` - `liquidityFlow`'s
+  `cumBid` / `cumAsk`: between two book columns, at the rows away from the touch in BOTH (the PULL / STACK signals' rule)
+  and inside both books (a level off the far edge is not cancelled), a rise = orders ADDED, a drop = PULLED; added − pulled
+  a side as a running line from the day's first column, within 10 / 20 / 30 (default) / 50 rows (`...liquidityNetBand`),
+  and `liquidityRead` over the last N min (bids stacked / pulled, offers stacked / pulled, quiet). The columns are a
+  SAMPLE of the book (2 s live, ~12 s+ on a loaded day), so the lines are a floor and a loaded day reads smaller than
+  the same day live - said on the card. Each column is parsed once (WeakMaps - a live day is ~11 000 columns); every point
+  from the columns up to it. No depth (estimated / rebuilt day) = the two book cards say so. Reads only - they feed no
+  signal, strategy or alert, and `liquidityMap` / `pullStackSignals` are untouched.
   RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
   Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
