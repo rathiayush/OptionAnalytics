@@ -88,22 +88,31 @@ function normalCdf(x) {
  * A day's futures order flow ESTIMATED from its 1-minute candles ({ time, open, high, low, close, volume }) exactly as
  * the server estimates a day it did not record (OrderFlowEstimator.Build): bulk volume classification - a minute's buy
  * share Phi(change / sigma), the change its close less the close before (its own open for the first), sigma the root mean
- * square of the changes UP TO that minute (a tick, 0.05, while all are zero) - buy rounded to whole lots, sell the rest.
+ * square of the changes BEFORE that minute - never its own (with it, the first minute was always split 84 / 16 by its
+ * direction alone) - started from SEED_WEIGHT minutes of a typical index minute, SEED_SHARE of the day's first price
+ * (a tick, 0.05, while all are zero) - buy rounded to whole lots, sell the rest.
  * For OI Replay's replayed day when the order flow server has none for it (asked for - "if the futures cumulative delta is
  * present in replay show that as well"): the run's own futures candles. Each minute from it and those before it only.
  * Returns deltaMinutes' shape - [{ ms, delta, estimated: true }].
  */
+/** OrderFlowEstimator.SeedShare / SeedWeight: a typical index minute's move as a share of price, and how many minutes it counts as. */
+export const SEED_SHARE = 0.0004
+export const SEED_WEIGHT = 5
+
 export function estimateFlowMinutes(candles, { lotSize = 1, tick = 0.05 } = {}) {
   const bars = (candles ?? [])
     .map((c) => ({ ...c, ms: typeof c.time === 'number' ? c.time : new Date(c.time).getTime() }))
     .filter((c) => Number.isFinite(c.ms) && c.volume > 0 && c.high >= c.low && c.low > 0)
     .sort((a, b) => a.ms - b.ms)
   const lot = Math.max(1, lotSize || 1)
-  let sumSquares = 0
+  const seed = bars.length && bars[0].open > 0 ? bars[0].open * SEED_SHARE : 0
+  const weight = seed > 0 ? SEED_WEIGHT : 0
+  let sumSquares = weight * seed * seed
   return bars.map((c, i) => {
     const change = c.close - (i === 0 ? c.open : bars[i - 1].close)
+    const count = weight + i
+    const rms = count > 0 ? Math.sqrt(sumSquares / count) : 0
     sumSquares += change * change
-    const rms = Math.sqrt(sumSquares / (i + 1))
     const share = normalCdf(change / (rms > 0 ? rms : Math.max(tick, 0.05)))
     const buy = Math.min(c.volume, Math.round((c.volume * share) / lot) * lot)
     return { ms: c.ms, delta: buy - (c.volume - buy), estimated: true }

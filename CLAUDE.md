@@ -53,7 +53,11 @@ When adding or changing a strategy:
   fills at its open; target at the target; the trailing stop moves after each completed bar and only
   tightens; time stop and the 15:10 square-off at the bar's close; no entries after 14:45.
 - **Option trades**: entry premium = the last finished minute's; their own Max SL / Target are checked
-  from the first full minute after the entry, at the level; a SL / target / trail change applies to
+  from the first full minute after the entry, at the level - but a minute that OPENS through the stop fills at its open
+  (a gap: the premium never traded at the stop), one with no open whose whole range is past it at the nearest price it
+  traded, a target always at the target (`gapFill` in `optionTrail.js` - the scanner's `optionStopTargetHit` and the OI
+  Replay paper panel; asked for - the audit's "fix": filled at the stop, a gap's loss looked smaller than it was; the
+  scanner's option series carry each minute's `open`, the live fold keeping the minute's first); a SL / target / trail change applies to
   open trades only, FROM the minute it is made (`levelLog` on the position, `trailLog` for the futures
   signals' trailing SL; `optionStopTargetHit` / `simulateOutcome` follow them - what already passed is
   never rewritten and a trailing stop is never loosened by a change); paper trades are all sized by the current lots setting (live trades keep their quantity).
@@ -164,7 +168,7 @@ When adding or changing a strategy:
   estimated throughout; none (a 404 - the server could not read the day's candles either - or a day with no minutes) on a
   REPLAYED day = the run's OWN 1-minute futures candles estimated the server's way (asked for again - "if the futures
   cumulative delta is present in replay show that as well"; `estimateFlowMinutes` in `cvdBackfill.js` = `OrderFlowEstimator`:
-  bulk volume classification, Phi(change / RMS of the changes up to the minute), buy in whole lots - `runFlow`, the answer
+  bulk volume classification, Phi(change / RMS of the changes BEFORE the minute, seeded), buy in whole lots - `runFlow`, the answer
   kept as `{ failed: true }`), marked estimated ("from the day's 1-minute futures candles"); never live. Loaded on a replayed day while the totals are on screen (the card or the N
   quick view) or the panes' Δ switch is on (`futuresFlowWanted`), once a day - no timer; the minutes up to the replay clock
   (the minute shown counted whole, as the OI points and the panes are). Not on the External page (it passes no flow) -
@@ -203,7 +207,9 @@ When adding or changing a strategy:
   a strike picked on the card, kept all day and NEVER shifted (an adjustment is the trader's, not the chart's), with what
   a seller of it has made. The range the options priced at the start: by default ("Range: Today") the ATM strike ±
   today's share of the straddle - straddle x sqrt(trading minutes left today / trading minutes left to the expiry, the
-  run's `optionExpiry`; on expiry day the straddle itself - the straddle prices the move to EXPIRY); "To expiry" = strike
+  run's `optionExpiry` - the sessions in between are weekdays less NSE's F&O TRADING HOLIDAYS (`marketHolidays.js`,
+  `isFoSession` - NSE's 2025 and 2026 lists; ADD THE NEXT YEAR'S each December, a year not listed counts every weekday;
+  `tests/market-holidays.test.mjs`); on expiry day the straddle itself - the straddle prices the move to EXPIRY); "To expiry" = strike
   ± the straddle. It is read from the option PRICES and the expiry date only - no futures data, not the feed's IV (the ATM
   IV shown is the straddle's own), so a past day replayed and today live are worked out the same way; only without an
   expiry date does the range fall back to the feed's IV. TIME DECAY is shown, not taken out of the Auto ATM line: a dotted
@@ -489,6 +495,11 @@ When adding or changing a strategy:
   by each minute's spot, bar-proxy delta; OBV weighted by the LATEST spot - the replay clock's - rebased to the day's first
   minute, EMA 9). CDV is drawn raw like the dashboard's chart ("Smooth CDV (EMA 9)" checkbox for the Pine look). One fixed
   day is held to the same numbers on both sides (`CdvParityTests.cs`, `tests/option-flow.test.mjs`) - change one, change both.
+  The DELTA WEIGHT is the Pine "delta auto" indicator's own sigmoid (`deltaWeight` / `ComputeDeltaWeight`, slope 8.5 - a
+  1-year, 20%-volatility option's delta: across a weekly's ATM +/- 10 it runs only ~0.46 - 0.54, so the CDV, the option delta
+  profile and its Signal backtest conditions read close to unweighted volume). Kept ON PURPOSE (an audit flagged it, the
+  fix was not made): the CDV is a port of that indicator, and the delta profiles and saved strategies' live scans read the
+  same weight - a real delta (1.702 / (sigma x sqrt(T)) as the slope, sigma x sqrt(T) from the ATM straddle) is the user's call.
 - OI Replay's DELTA PROFILES (asked for - "like volume profile and market profile we need to build delta profile: the delta
   profile of option data on the spot chart, and also on the futures chart - add two more components on OI Replay"; two
   cards, `optionDeltaProfile` / `futuresDeltaProfile` - `DeltaProfileCard.jsx`, the maths `deltaProfile.js`, the drawing
@@ -539,7 +550,9 @@ When adding or changing a strategy:
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is
   judged with the last change made in it or before, so the minutes already passed are never judged again. In the minute of
   the entry or of a change only the point's own price counts - its high / low partly came before it (live, the forming
-  minute's range holds the ticks before the entry). The trailing stop only tightens: what a bar earned is kept through a
+  minute's range holds the ticks before the entry) - and a price already past the stop there is the fill (a stop set
+  through the price closes at the price, the market's). A bar that OPENS through the stop fills at its open (`gapFill`,
+  the scanner's option trades' rule); a target at the target. The trailing stop only tightens: what a bar earned is kept through a
   change of the trail (wider, or off). A long log folds into `checkpoint` (the server keeps a position to 4 KB). A No SL
   position is squared off at 15:15 (`tests/paper-stops.test.mjs`). Each position keeps its entry and exit time (`entryTime` /
   `exitTime`, shown HH:MM:SS under its prices): the clock at a punch or a manual exit (live, to the second); an auto exit's
@@ -577,8 +590,9 @@ When adding or changing a strategy:
   expiry's; one chain alone exactly as before - `tests/gex.test.mjs`), tagged "Σ N expiries" on the GEX card, the entry
   checklist's gamma check with it. The PREMIUMS cannot be added, so a point keeps the current expiry's premium, IV and
   volume: the straddle, the premium charts, the paper trades (and the order ticket) and the option CDV / OBV
-  (`flowCePoints`) stay on the current expiry. An expiry's last reading AT OR BEFORE a point's time is added (carried on,
-  never a later one); one first read at a strike AFTER the current expiry's first reading there counts by its CHANGE from
+  (`flowCePoints`) stay on the current expiry. An expiry's last reading WITH AN OI AT OR BEFORE a point's time is added
+  (carried on, never a later one - a reading with no OI carries the last on: read as none, that expiry's whole OI fell out
+  of the sum for the minute); one first read at a strike AFTER the current expiry's first reading there counts by its CHANGE from
   that reading (0 before) - in full, its whole OI read as OI added; strikes the current expiry does not have are left out
   (`tests/expiry-sum.test.mjs`, a cut at any clock equals the whole day's up to it). The bands: `GET
   /api/oi-replay/{u}/expiry-band?date&expiryFlag&expiryCode` (`OiReplayService.ExpiryBandAsync`; the next = the series'
@@ -1337,8 +1351,18 @@ When adding or changing a strategy:
   restored from such a checkpoint and traded on shows none) gives only the last trade (the LTQ, held to the packet's volume)
   that side and splits the rest of the second by what was TAKEN off each side of the PREVIOUS market feed packet's 5-level
   book (`_feedBids` / `_feedAsks`, fresh as the quote): ask levels the new best ask moved past plus the drop at it = bought,
-  the bids the mirror = sold (pulled orders count too - an estimate), else by the price's move, else half and half. It is
-  a comparison only - the footprint stays on the rule in use until it is chosen against Dhan's candles. A trade with NO side
+  the bids the mirror = sold - LESS what the last trade itself took on its side (it is in the LTQ part); MORE taken than the
+  rest traded = orders PULLED: each side scaled to the rest, its share kept; LESS = the leftover traded at the touch
+  (refilled / hidden orders): split by bulk volume classification, Phi(the price's move / the day's typical
+  packet-to-packet move BEFORE this packet - `_packetMoveSquares`, from `MinPacketMoves` 5 packets), else by the move's
+  direction, else half and half (asked for - "are we using the best formula, considering all parameters": LTP, LTQ,
+  cumulative volume, the Full packet's 5-level book; ATP is a float32 - too coarse to recover a second's average price -
+  and the total buy / sell quantity and OI are not trades). Each bar's tallies also COUNT the packets that carried volume,
+  those holding MORE THAN ONE TRADE (volume over the LTQ) and the volume in them (`TallyPackets` / `TallyMultiPackets` /
+  `TallyMultiVolume` after the four rules - a day saved before them reads the rules and none for these), shown on the card
+  as "Several trades" (`multiTradeShare` in `deltaRules.js`, a column and the day's total): how often the rule in use
+  reads several trades as one, at one side and one price. It is a comparison only - the footprint stays on the rule in use
+  until it is chosen against Dhan's candles. A trade with NO side
   known yet (before any trade of the engine had one - no quote, an unchanged price) is NEUTRAL: half buy, half sell in the
   bars, no tape print, no iceberg read (it started as a buy - `_lastSide` was 1). `OrderFlowLtqBookTests.cs`. A trade's BAR is the exchange's last trade time, as Dhan's candles, or arrival when that is over `MaxFeedLag` 5 s away (a
   stale time); the tape and sweeps stay on arrival (they need the milliseconds). A packet behind the last moves neither the
@@ -1359,8 +1383,11 @@ When adding or changing a strategy:
   DELTA = a bar's aggressor buy - sell volume; CUMULATIVE DELTA = its running sum from the session's first bar (the Order
   Flow page's chart and header, OI Replay's futures delta panes, the footprint's ΣΔ). A live day the server started
   recording part way: the minutes before come ESTIMATED (`OrderFlowEstimator` - bulk volume classification, Phi(change /
-  typical change), the typical change the root mean square of the changes UP TO that minute, `TypicalChanges` - it was the
-  whole day's: a replayed minute depended on the afternoon after it, a live morning shifted at every load) and lead the
+  typical change), the typical change the root mean square of the changes BEFORE that minute, `TypicalChanges`, started
+  from `SeedWeight` 5 minutes of `SeedShare` 0.04% of the day's first price - it was the whole day's: a replayed minute
+  depended on the afternoon after it, a live morning shifted at every load; then the changes up to AND INCLUDING the
+  minute: its own change in its own sigma put the 09:15 minute - the day's heaviest - at 84 / 16 by its direction alone,
+  however small the move (`cvdBackfill.estimateFlowMinutes` the same)) and lead the
   charts (`withBackfill`, drawn faded): on a 3 / 5 / 15-minute timeframe those in the first recorded candle before its
   first recorded minute count too (`firstMinuteMs` - they were dropped from the delta from the open). The strategies read
   exact bars only (relative CVD moves). OI Replay's futures delta panes are LIVE: the "orderFlowDelta" push (group

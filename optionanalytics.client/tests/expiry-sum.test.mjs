@@ -57,6 +57,14 @@ test('an expiry\'s last reading at or before the minute is carried on - never a 
   assert.deepEqual([0, 1, 2, 3].map((i) => oiAt(live, 25000, i)), [1200, 1200, 1200, 1900])
 })
 
+test('an expiry\'s reading with no OI carries its last OI on - its whole OI never drops out of the sum for a minute', () => {
+  const nearest = [pt(25000, 0, 1000), pt(25000, 1, 1100), pt(25000, 2, 1200)]
+  // The next expiry's minute 1 came without an OI (a packet with none): 5000 is carried, not dropped.
+  const next = [pt(25000, 0, 5000), pt(25000, 1, null), pt(25000, 2, 5200)]
+  const out = sumExpiryOi(nearest, [next])
+  assert.deepEqual([0, 1, 2].map((i) => oiAt(out, 25000, i)), [6000, 6100, 6400])
+})
+
 test('an expiry first read at a strike later in the day counts by its change from that reading - no fake OI added', () => {
   const base = [0, 1, 2, 3, 4].map((i) => pt(25150, i, 1000))
   // The next expiry's ATM±3 window reaches this strike only at minute 2 (spot moved): 5000 then, 5300 at minute 4.

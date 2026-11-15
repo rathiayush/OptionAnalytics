@@ -98,12 +98,20 @@ test('a replayed day with no order flow from the server: the run\'s futures cand
   // The zero-volume minute is left out (as the server does); every minute marked estimated.
   assert.equal(m.length, 4)
   assert.ok(m.every((x) => x.estimated))
-  // Minute 0: change +2 over sigma 2 -> Phi(1) = 0.8413 -> buy round(841.3 / 50) x 50 = 850, sell 150 -> +700.
-  assert.equal(m[0].delta, 700)
+  // Sigma = the changes BEFORE the minute, started from 5 minutes of 0.04% of the first price (100 -> 0.04).
+  // Minute 0: change +2 over sigma 0.04 -> Phi(50) = 1 -> buy 1000 -> +1000 (it was +700: its own +2 in its sigma made
+  // z = 1 whatever the move - the first minute always split 84 / 16).
+  assert.equal(m[0].delta, 1000)
   // Minute 1: flat -> half and half: buy round(250 / 50) x 50 = 250 -> 0.
   assert.equal(m[1].delta, 0)
-  // Minute 2: -3 over sigma sqrt((4 + 0 + 9) / 3) = 2.0817 -> Phi(-1.441) = 0.0748 -> buy 150, sell 1850 -> -1700.
-  assert.equal(m[2].delta, -1700)
+  // Minute 2: -3 over sigma sqrt((5 x 0.0016 + 4 + 0) / 7) = 0.7567 -> Phi(-3.96) ~ 0 -> buy 0, sell 2000 -> -2000.
+  assert.equal(m[2].delta, -2000)
+  // The next (the zero-volume minute left out): +1 over sigma sqrt((0.008 + 4 + 0 + 9) / 8) = 1.2752 -> Phi(0.784) = 0.7835
+  // -> buy round(587.6 / 50) x 50 = 600, sell 150 -> +450.
+  assert.equal(m[3].delta, 450)
+  // A minute's split never depends on its own move's size relative to itself: a tiny first move is about half and half.
+  const tiny = estimateFlowMinutes([c(0, 24000, 24000.05, 1_500_000)], { lotSize: 75 })
+  assert.ok(Math.abs(tiny[0].delta) < 0.01 * 1_500_000, `a +0.05 first minute is not 84% buying: ${tiny[0].delta}`)
   // Each minute from it and those before only: the day cut part way gives the same minutes.
   for (let k = 1; k <= candles.length; k++) {
     const part = estimateFlowMinutes(candles.slice(0, k), { lotSize: 50 })

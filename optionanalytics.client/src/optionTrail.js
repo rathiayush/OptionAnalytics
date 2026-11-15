@@ -20,3 +20,12 @@ export function tighterStop(action, fixed, trailed) {
   if (fixed == null) return trailed
   return action === 'SELL' ? Math.min(fixed, trailed) : Math.max(fixed, trailed)
 }
+
+/** The fill of an option stop-loss `stop` hit in a bar: the stop itself - unless the bar OPENED through it (a gap: its
+ *  open, the premium never traded at the stop) or, with no open known, its whole range is past it (the nearest price it
+ *  traded - a BUY's high, a SELL's low). Filled at the stop, a gap's loss looked smaller than it was. */
+export function gapFill(action, stop, open, high, low) {
+  const known = (v) => Number.isFinite(v) && v > 0
+  if (action === 'SELL') return Math.max(stop, known(open) ? open : known(low) ? low : stop)
+  return Math.min(stop, known(open) ? open : known(high) ? high : stop)
+}

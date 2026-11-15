@@ -14,7 +14,7 @@
 //   own price (that minute's close, or the latest tick) counts there.
 // - The stop counts first when one bar touches both; a fill is at the level itself (as the scanner's option trades).
 
-import { optionTrailLevel, tighterStop } from './optionTrail.js'
+import { gapFill, optionTrailLevel, tighterStop } from './optionTrail.js'
 import { dayEndExit } from './paperExit.js'
 
 const MIN = 60_000
@@ -69,6 +69,7 @@ function walk(series, p, log, untilMs) {
     const priceOnly = minute === entryMinute || minute === Math.floor(c.t / MIN)
     const high = priceOnly ? pt.price : pt.high ?? pt.price
     const low = priceOnly ? pt.price : pt.low ?? pt.price
+    const open = priceOnly ? pt.price : pt.open
     if (!(high > 0) || !(low > 0)) continue
     const fixed = c.sl > 0 ? (sell ? entry + c.sl : entry - c.sl) : null
     const target = c.target > 0 ? (sell ? entry - c.target : entry + c.target) : null
@@ -77,7 +78,8 @@ function walk(series, p, log, untilMs) {
     trail = trailedStop(p.direction, entry, best, c, trail)
     const stop = tighterStop(p.direction, fixed, trail)
     if (stop != null && (sell ? high >= stop : low <= stop)) {
-      return { hit: { kind: trail != null && stop === trail && stop !== fixed ? 'trail' : 'sl', fillPrice: stop, at: t } }
+      // A point that opened through the stop fills at its open (a gap - the premium never traded at the stop).
+      return { hit: { kind: trail != null && stop === trail && stop !== fixed ? 'trail' : 'sl', fillPrice: gapFill(p.direction, stop, open, high, low), at: t } }
     }
     if (target != null && (sell ? low <= target : high >= target)) return { hit: { kind: 'target', fillPrice: target, at: t } }
     best = sell ? Math.min(best, low) : Math.max(best, high)

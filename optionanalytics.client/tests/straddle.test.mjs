@@ -262,6 +262,16 @@ test('with the expiry date the range and the IV come from the option prices alon
   const f = readFrom(moved(fri.ce), moved(fri.pe), moved(fri.spots), { start: '09:21', expiry: '2026-10-27' })
   assert.ok(Math.abs(f.day.sessions - (left + 750) / 375) < 1e-9)
 
+  // An NSE trading HOLIDAY between is not a session (marketHolidays.js): Monday 9 Nov 2026 to Wednesday 11 Nov counts only
+  // Wednesday - Tuesday 10 Nov is Diwali-Balipratipada. Counted as a session, today's share of the range was sqrt(1/3)
+  // of the straddle's instead of sqrt(1/2) - 18% too narrow.
+  const mon = day({ minutes: 375, spot: () => 25000, tv: () => 175 })
+  const toMon = Date.parse('2026-11-09T09:15:00+05:30') - OPEN
+  const onMon = (points) => points.map((p) => ({ ...p, time: typeof p.time === 'number' ? p.time + toMon : new Date(Date.parse(p.time) + toMon).toISOString() }))
+  const h = readFrom(onMon(mon.ce), onMon(mon.pe), onMon(mon.spots), { start: '09:21', expiry: '2026-11-11' })
+  assert.ok(Math.abs(h.day.sessions - (left + 375) / 375) < 1e-9, `one session after today, not two: ${h.day.sessions}`)
+  assert.ok(Math.abs(h.day.width - h.day.value * Math.sqrt(left / (left + 375))) < 1e-9)
+
   // Expiry day: the straddle is today's move. Past the expiry date: back to the feed's IV.
   assert.equal(straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-20' }).day.width, straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-20' }).day.value)
   const past = straddleRead(d.ce, d.pe, d.spots, { expiry: '2026-10-13' })
