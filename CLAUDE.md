@@ -664,8 +664,9 @@ All must pass before committing.
   LIVE it is kept up to date the way OI Replay is - NO TIMER (`useLiveIndexFeed`): the "/hubs/spot" connection, group
   "u:{U}", its conflated "liveBatch" - "futuresTicks" folded into minutes with the rise of Dhan's day volume
   (`mergeLiveFuturesTicks` in `futuresLive.js`, OI Replay's own, shared) and joined to the loaded day (`mergeFuturesLive`;
-  those minutes are candles, their volume spread over their range - `dayVolumeProfile` takes footprint and candle minutes
-  together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
+  those minutes are candles, their volume spread over their range, split buy / sell by the close's place in the range - close
+  location; it gave the whole candle to one side by its colour, which put a live minute's two-way trade all into the delta -
+  `spreadLevels`; `dayVolumeProfile` takes footprint and candle minutes together), "spotUpdate" for the spot's forming minute (OHLC - Dhan's index ticks carry NO volume: the spot feed re-reads
   each finished minute's from Dhan, so when the push turns to a new minute the page reads the feed's memory once,
   `/api/spot/{u}/volume-candles` - never Dhan - and `mergeSpotLive` keeps each minute's largest volume). The day is loaded
   once (and again after a reconnect, for what it missed). LIVE with no minute of today yet (before the open, a holiday)
