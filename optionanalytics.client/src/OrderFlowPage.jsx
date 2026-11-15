@@ -927,7 +927,7 @@ export default function OrderFlowPage() {
                   size="small" title="Liquidity heatmap"
                   extra={(
                     <Space size={12} wrap>
-                      {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · dots = traded volume (ringed = big orders) · green / red lines = best bid / ask · magenta = icebergs</Text>}
+                      {!narrow && <Text type="secondary" style={{ fontSize: 11 }}>resting bids/offers over time (brighter = more) · dots = traded volume (ringed = big orders) · white line = price (dotted green / red = best bid / ask, zoomed in) · magenta = icebergs</Text>}
                       {!estimated && (
                         <Tooltip title="Price points per heatmap row - only this picture changes: the footprint keeps its own rows, and the liquidity read, signals and scanner read the book in the footprint's rows as before.">
                           <Select size="small" value={heatRowPick ?? 'same'} style={{ width: 150 }}
@@ -966,7 +966,7 @@ export default function OrderFlowPage() {
                   {!estimated && (
                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                       How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price
-                      (dark = little, blue - yellow - red = more; Contrast sets where the scale starts and ends) - bids below the green best-bid line, offers above the red best-ask line. A bright band that price stops at and that STAYS = a real
+                      (dark = little, blue - yellow - red = more; Contrast sets where the scale starts and ends) - bids below the white price line, offers above it (zoomed in, dotted green / red = the best bid / ask). A bright band that price stops at and that STAYS = a real
                       wall (support / resistance); one that vanishes as price gets near = pulled / spoofed (not real). Price eating through a
                       bright band = absorption won - the move usually continues. Dots = the traded volume each minute at each price (bigger = more; green share bought, red sold - Volume dots), white-ringed = big trades, magenta = icebergs
                       (hidden size refilling). Drawn on it: S / R = the support / resistance walls that stay, blue bands = low-liquidity

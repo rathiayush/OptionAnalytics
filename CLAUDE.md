@@ -1404,10 +1404,11 @@ All must pass before committing.
   `tests/heatmap-layout.test.mjs`): the COLOUR runs between a LOWER and an UPPER cutoff of the sizes in view (percentiles -
   adaptive to what is on screen) on a contrast CURVE (`heatScale` / `heatLevel`; the card's "Contrast" Low / Normal / High -
   `HEAT_CONTRASTS`, `optionanalytics.orderFlow.heatContrast`; it was a straight line to the 98th percentile: the small orders
-  one blue, every wall alike); the BEST BID (green) and BEST ASK (red) as step lines (`bestQuotes`; the mid, white, while a row is
-  under 3 px - zoomed out they merge) DRAWN LAST - over the volume dots and the prints, under the signal pills - 2 px with a
-  dark outline (`drawPriceLines`; asked for - "I cannot see the price line": drawn before the dots, the dots along the price's
-  path hid it); VOLUME DOTS - every traded minute at each heatmap row, sized by its volume against
+  one blue, every wall alike); THE PRICE LINE - the mid as a BOLD WHITE step line (2.5 px on a dark 5 px outline - the one colour nothing else on
+  the heatmap uses; asked for twice - "I cannot see the price line": green / red bid / ask lines vanished into a real day's
+  green / red cells, STACK / PULL pills and walls), zoomed in (a row 3 px or more) with the BEST BID / BEST ASK as thin
+  DOTTED green / red guides (`bestQuotes`), all DRAWN LAST - over the volume dots and the prints, under the signal pills
+  (`drawPriceLines`); VOLUME DOTS - every traded minute at each heatmap row, sized by its volume against
   the largest in view (at most half a row / half a minute across), split green bought / red sold by its share
   (`volumeDots` on the page's `view.minuteBars` - cut at the replay clock; "Volume dots", on by default,
   `...heatVolumeDots`; the big prints still drawn on top, ringed); the CURRENT ORDER BOOK column at the right of the plot -

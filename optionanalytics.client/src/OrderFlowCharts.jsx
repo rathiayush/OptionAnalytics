@@ -912,12 +912,21 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     // Drawn LAST (after the volume dots and the prints - see "The price line" below), with a dark outline: the dots sit
     // right along the price's path and hid it, and a thin line was lost over the hot cells.
     const drawPriceLines = () => {
-      const lines = rowH >= 3
-        ? [[(c) => bestQuotes(c).bid, 'rgb(38,214,154)'], [(c) => bestQuotes(c).ask, 'rgb(255,99,99)']]
-        : [[(c, i) => mids[i], '#ffffff']]
       ctx.lineJoin = 'round'
-      for (const [priceOf] of lines) { ctx.lineWidth = 4; stepLine(priceOf, 'rgba(0,0,0,0.75)') }
-      for (const [priceOf, color] of lines) { ctx.lineWidth = 2; stepLine(priceOf, color) }
+      // Zoomed in (a row 3 px or more): the best bid / ask as thin dotted guides - in the heatmap's own greens and reds
+      // they cannot be THE price line (a real day's cells, STACK / PULL pills and walls are the same colours).
+      if (rowH >= 3) {
+        ctx.setLineDash([3, 3])
+        ctx.lineWidth = 1
+        stepLine((c) => bestQuotes(c).bid, 'rgba(38,214,154,0.9)')
+        stepLine((c) => bestQuotes(c).ask, 'rgba(255,99,99,0.9)')
+        ctx.setLineDash([])
+      }
+      // THE PRICE LINE: the mid, bold white with a dark outline - the one colour nothing else on the heatmap uses.
+      ctx.lineWidth = 5
+      stepLine((c, i) => mids[i], 'rgba(0,0,0,0.85)')
+      ctx.lineWidth = 2.5
+      stepLine((c, i) => mids[i], '#ffffff')
       ctx.lineWidth = 1
       ctx.lineJoin = 'miter'
     }
