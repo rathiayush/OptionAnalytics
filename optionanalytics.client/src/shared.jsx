@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
   AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
-  LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SendOutlined, SettingOutlined, SlidersOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
+  LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SendOutlined, SettingOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
@@ -1115,7 +1115,6 @@ const NAV_ITEMS = [
   { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
   { key: '/contracts', label: 'Contracts', icon: <FileTextOutlined /> },
   { key: '/trade-settings', label: 'Trade settings', icon: <SettingOutlined /> },
-  { key: '/strategy-tuning', label: 'Strategy tuning', icon: <SlidersOutlined /> },
   { key: '/visitors', label: 'Visitors', icon: <TeamOutlined /> },
   { key: '/cache', label: 'Cache', icon: <DatabaseOutlined /> },
 ]

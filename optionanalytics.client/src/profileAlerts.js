@@ -7,7 +7,19 @@
 // whatever it returns. Levels are the previous session's, so they never move and a hit means the same
 // thing all day (today's developing profile moves under the price and would alert on its own drift).
 
-import { profileGaps, tpoHighNodes, tpoProfile } from './profiles.js'
+import { profileGaps, sessionVolumeProfile, tpoHighNodes, tpoProfile, tpoRowFor } from './profiles.js'
+
+/** The previous session's profiles from its bars - what the profile alerts' levels are read from (`profileLevels`): its
+ *  volume profile (POC, value area, HVN / LVN), its TPO profile and its high / low; null without a volume profile. */
+export function sessionProfileOf(prevBars, underlying, rowSize) {
+  if (!prevBars?.length) return null
+  const vp = sessionVolumeProfile(prevBars)
+  if (vp?.poc == null) return null
+  const tpoPrev = tpoProfile(prevBars, tpoRowFor(underlying, rowSize))
+  const bars = prevBars.filter((b) => b.high > 0 && b.low > 0)
+  const range = bars.length ? { prevHigh: Math.max(...bars.map((b) => b.high)), prevLow: Math.min(...bars.map((b) => b.low)) } : null
+  return { vp, tpoPrev, ...range }
+}
 
 const round2 = (v) => Math.round(v * 100) / 100
 
@@ -110,7 +122,7 @@ export function profileHits(levels, previousPrice, price, armed, { tolerance, re
 
 /** Which levels go to TELEGRAM (asked for - "lvn and poc signals, that is all"): a level whose labels name a POC or an
  *  LVN - an LVN gap too, and a confluence with either in it; an HVN or single prints alone stay the app's popup / chime
- *  only. The server scanner and the pages both send through it. */
+ *  only. The server's alert runner and the pages both send through it. */
 export const sendsProfileTelegram = (level) => (level?.labels ?? []).some((l) => /\b(POC|LVN)\b/.test(l))
 
 /** Where a level is: its price, or a gap's low-high. */
@@ -130,7 +142,7 @@ export const newProfileWatch = () => ({ futures: { armed: new Set(), previous: 0
  * { futures, spot } (spot: the spot profiles' own, else the futures levels less the premium - spotLevelsOf);
  * `prices` - { futures, spot }; `enabled` - { futures, spot }. A market switched off is still tracked, so
  * switching it on next to a level does not alert at once. Used by the Order Flow and OI Replay pages and the
- * server scanner alike.
+ * server's alert runner alike.
  */
 export function watchProfiles(state, { levels, prices, enabled = { futures: true, spot: true }, tpoRow }) {
   const out = []

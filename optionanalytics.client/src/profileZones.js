@@ -11,7 +11,7 @@ import { inMarketSession } from './marketSession.js'
 //     tails at its extremes), beside the POC, value area and initial balance.
 //
 // Plain functions over the existing profile builders (orderFlowMath.volumeProfile, profiles.tpoProfile)
-// so they can be tested without a browser. NOT read by the strategy scanner: its own node rules
+// so they can be tested without a browser. NOT read by the alerts: their own node rules
 // (profiles.profileNodes, lvnRun) are left exactly as they are.
 
 const MIN = 60_000

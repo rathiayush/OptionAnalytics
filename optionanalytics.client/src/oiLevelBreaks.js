@@ -185,7 +185,7 @@ export function highProbabilityText(underlying, b, hp, format, timeOf, bucketMin
 }
 
 // ---- One step for the page and the server ---------------------------------------------------------------------------
-// The OI Replay page (useOiBreakAlerts) and the server scanner (scanner-runner/indexScanner.mjs) both run the same step
+// The OI Replay page (useOiBreakAlerts) and the server's alert runner (scanner-runner/indexScanner.mjs) both run the same step
 // on their own data each time a bucket completes or OI changes: the breaks to announce and the high-probability
 // signals. The Telegram keys are the same too, so when both are running the server sends each message once.
 
@@ -253,7 +253,7 @@ export function fmtOiLakh(v) {
 /** A chart time (IST-shifted seconds) as "HH:mm" IST. */
 export const chartTimeHHmm = (sec) => new Date(sec * 1000).toISOString().slice(11, 16)
 
-/** The server scanner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). `telegram`:
+/** The server's alert runner's settings for these alerts (config.oiBreakAlerts, synced from the OI Replay page). `telegram`:
  *  whether they go to Telegram at all - off unless switched on: they are the app's alerts (the page's pop-up, chime and
  *  voice), and a config saved before the switch existed has none, so it reads as off too. */
 export const OI_BREAK_ALERT_DEFAULTS = { on: true, telegram: false, bucketMinutes: 1, windowMinutes: HIGH_PROBABILITY.windowMinutes, atmShiftPct: HIGH_PROBABILITY.atmShiftPct }

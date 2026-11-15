@@ -8,13 +8,14 @@ using OptionAnalytics.Server.Auth;
 namespace OptionAnalytics.Server.Services;
 
 /// <summary>
-/// The server-side strategy scanner: the same scanner the Order Flow page runs (optionanalytics.client's
-/// scannerCore.js, strategyEngine.js ...), bundled into scanner-runner/runner.mjs and run by Node, for
-/// NIFTY, BANKNIFTY and SENSEX at once - with or without a browser open. This service starts it once the
+/// The server-side ALERT RUNNER: the OI totals S/R break / 🎯 alerts and the profile-level alerts
+/// (optionanalytics.client's oiLevelBreaks.js, profileAlerts.js ...), bundled into scanner-runner/runner.mjs and run
+/// by Node, for NIFTY, BANKNIFTY and SENSEX at once - with or without a browser open. (The strategy scanner it ran
+/// before was removed on request.) This service starts it once the
 /// web server is listening, restarts it if it stops (backing off up to a minute), passes it the base URL,
 /// its key (ScannerRunnerKey) and where to keep its state, and copies its output into the log.
 ///
-/// Phase 2: alerts and PAPER trades only. The runner's role cannot place live orders.
+/// Alerts only. The runner's role cannot place live orders.
 ///
 /// ScannerRunner:Enabled (default true) turns it off; ScannerRunner:NodePath (default "node") and
 /// ScannerRunner:ScriptPath (default {ContentRoot}/scanner-runner/runner.mjs) locate it. A server with no

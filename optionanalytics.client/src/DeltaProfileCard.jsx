@@ -12,7 +12,7 @@ import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, fut
 import { PREV_PROFILE } from './profileColors.js'
 import { EXTRA_WEEKDAYS, cachedDay, footprintBars, loadFuturesDay, loadOptionDay, optionDayKey, walkPastSessions } from './deltaProfileDays.js'
 import { MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, deltaCardSessions, pastSessionsNeeded } from './profileZones.js'
-import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
+import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 
 // OI Replay's two DELTA PROFILE cards (asked for - "like volume profile and market profile we need to build delta profile:
 // the delta profile of option data on the spot chart, and also on the futures chart - add two more components on OI

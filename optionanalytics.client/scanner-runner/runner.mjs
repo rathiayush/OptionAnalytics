@@ -1,30 +1,25 @@
-// The server-side strategy scanner: runs the Order Flow page's scanner for NIFTY, BANKNIFTY and SENSEX at
-// once, with no browser - started and restarted by the server (ScannerRunnerHostedService), which passes:
+// The server's ALERT RUNNER: with no browser open it raises the app's profile-level alerts and the OI totals' S/R break
+// / high-probability alerts for NIFTY, BANKNIFTY and SENSEX (indexScanner.mjs) - started and restarted by the server
+// (ScannerRunnerHostedService), which passes:
 //   RUNNER_BASE_URL  this server, e.g. http://127.0.0.1:8080
 //   RUNNER_KEY       the key it accepts from this process only (X-Runner-Key, loopback only)
-//   RUNNER_DATA_DIR  where the day's state is kept across restarts
-// PAPER ONLY: alerts, paper trades and their exits go to Telegram tagged [Server]; the record goes to the
-// scanner log's server-signals.csv / server-trades.csv. Its role cannot reach the live-trading API.
+// (It was the server-side strategy scanner; the strategies and their paper trades were removed on request.) It places
+// nothing - its role cannot reach the live-trading API. Telegram is tagged [Server].
 
 import { createRequire } from 'node:module'
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
 import { fetchPreviousSession } from '../src/profiles.js'
-import { IndexScanner, istDate, topFromSignalsCsv } from './indexScanner.mjs'
+import { IndexScanner, istDate } from './indexScanner.mjs'
 
 const require = createRequire(import.meta.url)
 const signalR = require('@microsoft/signalr')
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
-const DATA = process.env.RUNNER_DATA_DIR ?? join(process.cwd(), 'scanner-runner-data')
 const UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 const LOOP_MS = 2_000
 const STATUS_MS = 5_000
 const CONFIG_MS = 60_000
-const TOP_MS = 30 * 60_000
 const startedUtc = new Date().toISOString()
-mkdirSync(DATA, { recursive: true })
 
 const log = (msg) => console.log(`${new Date().toISOString()} ${msg}`)
 
@@ -44,7 +39,6 @@ async function api(path, { method = 'GET', body } = {}) {
   try { return text ? JSON.parse(text) : null } catch { return text }
 }
 
-const statePath = (u, date) => join(DATA, `state-${u}-${date}.json`)
 const io = {
   api,
   now: () => Date.now(),
@@ -52,29 +46,15 @@ const io = {
   // `key`: one event - the server sends a keyed message once a day, however many senders report it (the OI Replay page too).
   telegram: (text, key = null) => api('/api/alerts/telegram', { method: 'POST', body: { text, key } }).catch((err) => log(`telegram failed: ${err.message}`)),
   previousSession: (u, date, rowSize) => fetchPreviousSession(u, date, rowSize),
-  loadState: async (u, date) => {
-    try { return existsSync(statePath(u, date)) ? JSON.parse(readFileSync(statePath(u, date), 'utf8')) : null } catch { return null }
-  },
-  saveState: async (u, date, state) => {
-    const path = statePath(u, date)
-    writeFileSync(`${path}.tmp`, JSON.stringify(state))
-    renameSync(`${path}.tmp`, path)
-  },
 }
 
 const scanners = UNDERLYINGS.map((u) => new IndexScanner(u, io))
 
-// ---- Config: the page's scanner settings (synced by an admin's Order Flow page) ---------------------
-let top = null
-let topAt = 0
+// ---- Config: what the pages saved for the alerts (the OI break settings, the profile alerts' switches, Telegram) -------
 async function refreshConfig() {
   try {
     const config = await api('/api/scanner-runner/config')
-    if (!Array.isArray(config?.alertIds) && Date.now() - topAt > TOP_MS) {
-      const csv = await api('/api/scanner-log/signals').catch(() => null)
-      if (csv != null) { top = topFromSignalsCsv(csv); topAt = Date.now() }
-    }
-    for (const s of scanners) s.setConfig({ ...config, top })
+    for (const s of scanners) s.setConfig(config)
   } catch (err) {
     log(`config not read: ${err.message}`)
   }
@@ -144,7 +124,7 @@ async function loop() {
 process.on('unhandledRejection', (err) => log(`unhandled: ${err?.stack ?? err}`))
 for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { connection.stop().finally(() => process.exit(0)) })
 
-log(`scanner runner starting - ${UNDERLYINGS.join(', ')}, paper only, server ${BASE}`)
+log(`alert runner starting - ${UNDERLYINGS.join(', ')}, server ${BASE}`)
 await refreshConfig()
 lastConfig = Date.now()
 connect()

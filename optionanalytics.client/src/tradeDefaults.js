@@ -1,6 +1,6 @@
 // The trade settings per index - the option stop-loss / target (premium points) and trailing stop, the
-// default lots and live slippage, and whether the server scanner trades the index - for the OI Replay trade
-// panel, the Order Flow strategy scanner and the Trade settings page. Premiums scale with the index: a
+// default lots and live slippage, and whether the server's alert runner watches the index - for the OI Replay trade
+// panel, the saved Signal strategies' live orders and the Trade settings page. Premiums scale with the index: a
 // BANKNIFTY ATM option moves ~2.5x a NIFTY one, SENSEX ~3x - one flat number is too tight on one and too
 // loose on the other. A trade always starts with BOTH SL and target set (a live order is a Dhan super order,
 // which needs both legs). The master copy is the server's trade-settings.csv (TradeSettingsStore); this
@@ -66,7 +66,7 @@ export function loadTradeDefaults(underlying) {
 
 /** Remembers `levels` for `underlying` (this browser), tells every other page / tab that has the app open
  *  so they pick it up straight away, and saves them on the server (trade-settings.csv - for every device
- *  and the server scanner; an admin's change only). */
+ *  and the server's alert runner; an admin's change only). */
 export function saveTradeLevels(_page, underlying, levels) {
   const key = String(underlying ?? '').toUpperCase()
   try {
@@ -134,3 +134,6 @@ export function subscribeTradeLevels(onChange) {
   window.addEventListener('storage', onStorage)
   return () => { window.removeEventListener(TRADE_LEVELS_EVENT, onChange); window.removeEventListener('storage', onStorage) }
 }
+
+// Paper trades' lot size per index (a live trade takes the contract's real lot size from Dhan).
+export const PAPER_TRADE_LOT_SIZE = { NIFTY: 65, BANKNIFTY: 30, SENSEX: 20 }

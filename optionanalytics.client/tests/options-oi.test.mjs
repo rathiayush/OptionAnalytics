@@ -1,6 +1,6 @@
-// Options OI read (whole chain, since open), the option to trade a setup with, and the order flow read parts.
+// Options OI read (whole chain, since open) and the order flow read parts (oiContext.js).
 // Run: npm test (node --test) - see CLAUDE.md.
-import { buildOiContext, optionTradesFor, optionPnlPoints, oiBiasParts, optionTradeText, optionOiRead, optionOiStance } from '../src/strategyEngine.js'
+import { buildOiContext, oiBiasParts, optionOiRead } from '../src/oiContext.js'
 import { orderFlowBias } from '../src/orderFlowMath.js'
 let fails = 0
 const ok = (c, m) => { if (!c) { fails++; console.log('FAIL', m) } else console.log('ok  ', m) }
@@ -19,13 +19,6 @@ for (let m = 0; m <= 30; m++) {
 }
 const oi = buildOiContext({ success: true, date: '2026-10-05', step: 50, spotCandlesOneMinute: spot, cePoints: ce, pePoints: pe, futuresBars: fut })
 const at = t0 + 20 * 60000
-const trades = optionTradesFor(oi, 1, 22640, at)
-ok(trades.buy.side === 'CE' && trades.sell.side === 'PE' && trades.buy.strike === 22650 && trades.sell.action === 'SELL', `LONG: buy CE / sell PE at ATM: ${optionTradeText(trades.buy)} | ${optionTradeText(trades.sell)}`)
-const short = optionTradesFor(oi, -1, 22640, at)
-ok(short.buy.side === 'PE' && short.sell.side === 'CE', 'SHORT: buy PE / sell CE')
-const later = t0 + 30 * 60000
-const pb = optionPnlPoints(trades.buy, oi, later), ps = optionPnlPoints(trades.sell, oi, later)
-ok(pb.points > 0 && ps.points > 0, `market rose: bought CE gains ${pb.points.toFixed(1)}, sold PE gains ${ps.points.toFixed(1)}`)
 const parts = oiBiasParts(oi, at)
 console.log(parts)
 ok(parts.find((p) => p.name === 'Options OI · since open')?.score > 0.3 && parts.find((p) => p.name === 'Options OI · 15 min')?.score > 0.3, 'put writing -> options OI bullish on both clocks')
@@ -48,8 +41,8 @@ ok(flowOnly.parts.length === 0 && withOi.bias === 'Bullish' && withOi.confidence
   const at2 = t0 + 20 * 60000
   const chain = optionOiRead(oi2, 22600, at2, 15)
   const near = optionOiRead(oi2, 22600, at2, 15, 2)
-  ok(chain.strikes === 15 && chain.combined < 0 && optionOiStance(chain, 1) !== 'agrees', `chain sees the far call writing: combined ${chain.combined.toFixed(2)} (${optionOiStance(chain, 1)} for a long)`)
-  ok(near.strikes === 5 && near.combined > 0 && optionOiStance(near, 1) === 'agrees', `ATM ±2 only sees the put writing: combined ${near.combined.toFixed(2)}`)
+  ok(chain.strikes === 15 && chain.combined < 0, `chain sees the far call writing: combined ${chain.combined.toFixed(2)}`)
+  ok(near.strikes === 5 && near.combined > 0, `ATM ±2 only sees the put writing: combined ${near.combined.toFixed(2)}`)
   // At 20 minutes past the open the latest FINISHED minute is the 19th (a replayed minute is read once it is over).
   ok(chain.ceOpen === 19 * 60000 * 5 && chain.peOpen === 19 * 20000 * 5, `since open: calls +${chain.ceOpen}, puts +${chain.peOpen}`)
 }

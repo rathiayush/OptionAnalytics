@@ -1,6 +1,6 @@
 import { pocIndexOf, valueAreaOf, volumeProfile } from './orderFlowMath.js'
 
-// Volume profile and market profile (TPO) for the strategy scanner and the Profiles card.
+// Volume profile and market profile (TPO) for the alerts, the Signal backtest and the Profiles card.
 //
 // Volume profile levels always come from the PREVIOUS session - POC, value area (VAH / VAL, 70% of the
 // volume) and its high / low volume nodes (HVN / LVN) - the levels a day trader carries into today.

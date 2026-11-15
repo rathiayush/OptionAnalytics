@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
-import { PAPER_TRADE_LOT_SIZE } from './scannerCore.js'
+import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,

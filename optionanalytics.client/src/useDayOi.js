@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as signalR from '@microsoft/signalr'
-import { buildOiContext } from './strategyEngine.js'
+import { buildOiContext } from './oiContext.js'
 import { RECONNECT_RETRY_POLICY, joinAllSignalRGroups, onLiveBatch, syncSignalRGroups } from './shared.jsx'
 import { applyFuturesTicks, applyOiTicks, applySpotUpdate, expiryFlagOf } from './liveFeeds.js'
 
@@ -10,7 +10,7 @@ const PUBLISH_MS = 2_000
 
 /**
  * The day's options and futures OI (and option premiums) - the same data OI Replay loads - for the
- * Order Flow page: the order flow read, the strategy scanner and its option trades.
+ * Order Flow page: the order flow read, the OI summary and the sudden OI walls.
  *
  * A past day: one REST load. Today: one REST load for the day so far, then LIVE from Dhan's market-feed
  * websocket - the server's OiReplayLiveFeedService already streams every tracked strike's OI and

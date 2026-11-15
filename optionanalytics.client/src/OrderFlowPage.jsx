@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { readAlertSwitches } from './alertSwitches.js'
+import { AlertSwitches } from './AlertSwitches.jsx'
 import dayjs from 'dayjs'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography, notification } from 'antd'
 import { PlayCircleOutlined, PauseCircleOutlined } from '@ant-design/icons'
@@ -8,9 +10,8 @@ import {
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
 import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap, heatmapFetchRow, rebucketColumns, rowsNest } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
-import { StrategyScanner } from './StrategyScanner.jsx'
 import { useDayOi } from './useDayOi.js'
-import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './strategyEngine.js'
+import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './oiContext.js'
 import { suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
 import { LiquidityMapCard } from './LiquidityMap.jsx'
@@ -18,7 +19,6 @@ import { alignToBars, sessionVwapFromBars } from './chartVwap.js'
 import { ProfilesCard } from './ProfilesCard.jsx'
 import { PriceAlertsBar, usePriceAlerts } from './PriceAlerts.jsx'
 import { ProfileAlertsBar, usePreviousSpotProfile, useProfileAlerts } from './ProfileAlerts.jsx'
-import { ServerScannerCard } from './ServerScanner.jsx'
 import { OrderFlowTelegramSettings } from './OrderFlowTelegramSettings.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
@@ -184,8 +184,6 @@ export default function OrderFlowPage() {
   const [largeLots, setLargeLots] = usePersistedState('optionanalytics.orderFlow.largeLots', 10)
   // Big order: 'auto' (default) - the top 2.5% of the day's prints (autoBigLots) - or the fixed lots above.
   const [bigMode, setBigMode] = usePersistedState('optionanalytics.orderFlow.bigMode', 'auto')
-  // What the server scanner needs from this page's own settings to read the order flow the same way.
-  const orderFlowSettings = useMemo(() => ({ rowSizes, bigMode, largeLots }), [rowSizes, bigMode, largeLots])
   // What the server is asked for: in auto mode every print of 5+ lots (the page picks the big ones).
   const fetchLots = bigMode === 'auto' ? 5 : largeLots
   const [showLots, setShowLots] = usePersistedState('optionanalytics.orderFlow.showLots', true)
@@ -227,9 +225,7 @@ export default function OrderFlowPage() {
   const [reloadNonce, setReloadNonce] = useState(0)
   const [exactDays, setExactDays] = useState(() => new Set())
   const isReplay = mode === 'replay'
-  // Live (Dhan) trading from the strategy scanner: admins, today's live view only.
   const auth = useAuth()
-  const canTradeLive = auth?.user?.role === 'Admin' && !isReplay
 
   const changeUnderlying = (value) => { setUnderlying(value); setExpiry(null) }
 
@@ -529,7 +525,6 @@ export default function OrderFlowPage() {
     const bars = (prevSession.data?.bars ?? []).filter((b) => b.high > 0 && b.low > 0)
     return bars.length ? { prevHigh: Math.max(...bars.map((b) => b.high)), prevLow: Math.min(...bars.map((b) => b.low)) } : null
   }, [prevSession.data])
-  const scannerProfile = useMemo(() => (prevVp?.poc != null ? { vp: prevVp, tpoPrev: prevTpo, ...prevRange } : null), [prevVp, prevTpo, prevRange])
   const profile = showProfile ? prevVp : null
   // The Market depth card's rows (20 / 50 / 100 / 200 a side, remembered) - only how much of the book is SHOWN: the
   // live push and a replayed day both carry the whole book (Dhan's 200 levels on NSE futures), and the walls, the bid
@@ -572,7 +567,7 @@ export default function OrderFlowPage() {
   // The heatmap's STACK / PULL pills can be hidden (a box on the card, remembered) - the read, bias and signal list keep them.
   const [heatPullStack, setHeatPullStack] = usePersistedState('optionanalytics.orderFlow.heatPullStack', true)
   const heatSignals = useMemo(() => [...liquidity, ...(heatPullStack ? pullStack.signals : []), ...sweeps], [liquidity, heatPullStack, pullStack.signals, sweeps])
-  // The day's options + futures OI: part of the order flow read, and what the strategy scanner reads.
+  // The day's options + futures OI: part of the order flow read.
   const { oi: dayOi, error: dayOiError } = useDayOi(underlying, isReplay ? replayDate : todayKey(), isReplay)
   const oiMinute = Math.floor((nowMs ?? 0) / 60_000)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -611,8 +606,7 @@ export default function OrderFlowPage() {
     // OI_ALERT_MIN_PCT in the window. The rest still show in the Signals list.
     const alertable = fresh.filter((w) => w.pct > OI_ALERT_MIN_PCT)
     if (!alertable.length) return
-    let cfg = {}
-    try { cfg = JSON.parse(localStorage.getItem('optionanalytics.strategyScanner.settings')) ?? {} } catch { /* none */ }
+    const cfg = readAlertSwitches()
     if (cfg.alerts === false) return
     for (const w of alertable.slice(0, 3)) {
       const fut = basis != null ? ` (futures ~${Math.round(w.strike + basis)})` : ''
@@ -1037,14 +1031,7 @@ export default function OrderFlowPage() {
           </Col>
         </Row>
 
-        <StrategyScanner
-          underlying={underlying} isReplay={isReplay} date={isReplay ? replayDate : todayKey()} view={view} replayDay={replayDay} replayMs={replayMs} range={range}
-          tapePrints={tapePrints} liquidity={liquidity} pullStack={pullStack.signals} rowSize={rowSize} lotSize={lotSize} largeLots={bigLots} estimated={noDepth}
-          profile={scannerProfile} oi={dayOi} oiError={dayOiError} canTradeLive={canTradeLive}
-          isAdmin={auth?.user?.role === 'Admin'} orderFlowSettings={orderFlowSettings}
-        />
-
-        <ServerScannerCard isAdmin={auth?.user?.role === 'Admin'} focus={underlying} />
+        <AlertSwitches isAdmin={auth?.user?.role === 'Admin'} />
 
         <Text type="secondary" style={{ fontSize: 11, color: AXIS_COLOR }}>
           Trades are inferred from Dhan's tick feed: the rise in the day's volume between two ticks is the volume traded, at the tick's price, and
@@ -1054,7 +1041,7 @@ export default function OrderFlowPage() {
           at a price - over the last bars - that failed: the bar closed back off it, the delta did not move price, the resting orders there
           held or refilled; exhaustion (EXH) = a new high / low on less volume and delta than the push before it, little traded at the
           extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree (the &quot;Scored ABS / EXH&quot; box;
-          off = the first one-bar rules, which the strategy scanner reads either way). An iceberg is a level that keeps
+          off = the first one-bar rules). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.
           The volume profile is the traded volume per row over the bars shown, with its point of control (POC) and the 70% value area
           (VAH-VAL). Load day replays any date: exactly when the server saw it live (today, or the last few days in its memory - green dot in

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { readAlertSwitches } from './alertSwitches.js'
 import { Space, Switch, Tag, Tooltip, Typography, notification } from 'antd'
 import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
 import { chime, speak, telegram } from './alerts.js'
@@ -6,7 +7,6 @@ import { levelWhere, newProfileWatch, profileAlertText, profileLevels, sendsProf
 
 const { Text } = Typography
 const SETTINGS_KEY = 'optionanalytics.orderFlow.profileAlerts.v1'
-const SCANNER_SETTINGS_KEY = 'optionanalytics.strategyScanner.settings'
 const STATUS_POLL_MS = 60_000
 
 const readJson = (key, fallback) => {
@@ -27,7 +27,7 @@ export function usePreviousSpotProfile(underlying, date) {
   return vp
 }
 
-/** Whether the server scanner is sending this index's profile alerts to Telegram right now (then the page
+/** Whether the server's alert runner is sending this index's profile alerts to Telegram right now (then the page
  *  does not send them again - it only chimes, speaks and shows them). */
 export function useServerProfileAlerts(underlying) {
   const [covers, setCovers] = useState({ futures: false, spot: false })
@@ -49,15 +49,15 @@ export function useServerProfileAlerts(underlying) {
 /** Alerts when price reaches a level of the previous session's profiles, or enters one of their gaps -
  *  futures: its volume profile (POC / HVN, LVN gaps) and market profile (POC / HVN, LVN gaps, single prints), confluences flagged; spot: the previous day's spot volume and market profiles (`spotVp` -
  *  the lines on the OI Replay charts), else the futures levels less the premium. Futures and spot are separate
- *  switches (synced to the server scanner, which sends the same alerts to Telegram with no page open). Live
- *  only. Chime, spoken words and notification follow the scanner's Voice switch; Telegram is sent from here
+ *  switches (synced to the server's alert runner, which sends the same alerts to Telegram with no page open). Live
+ *  only. Chime, spoken words and notification follow the old scanner's Voice switch (on unless it was turned off); Telegram is sent from here
  *  only when the server is not already sending it. */
 export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, spotPrice, basis, spotVp = null, live }) {
   const [on, setOn] = useState(() => ({ futures: true, spot: true, ...readJson(SETTINGS_KEY, {}) }))
   const change = (market, value) => setOn((prev) => {
     const next = { ...prev, [market]: value }
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)) } catch { /* convenience only */ }
-    // The server scanner follows the same switches (an admin's change; others get 403 and keep their own).
+    // The server's alert runner follows the same switches (an admin's change; others get 403 and keep their own).
     fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileAlerts: next }) }).catch(() => {})
     return next
   })
@@ -75,7 +75,7 @@ export function useProfileAlerts({ underlying, vp, tpo, tpoRow, futuresPrice, sp
     if (!live) return
     const hits = watchProfiles(watch.current, { levels: { futures: futuresLevels, spot: spotLevels }, prices: { futures: futuresPrice, spot: spotPrice }, enabled: on, tpoRow })
     if (!hits.length) return
-    const cfg = readJson(SCANNER_SETTINGS_KEY, {})
+    const cfg = readAlertSwitches()
     for (const { market, level, price } of hits) {
       const label = market === 'futures' ? `${underlying} futures` : `${underlying} spot`
       const text = profileAlertText(level, price, label)
@@ -113,7 +113,7 @@ export function ProfileAlertsBar({ on, change, levelCount, confluences, hasSpot,
         <Space size={4}><Switch size="small" checked={on.spot} onChange={(v) => change('spot', v)} disabled={!hasSpot} aria-label="Profile alerts spot" /><Text style={{ fontSize: 12 }}>Spot</Text></Space>
       </Tooltip>
       {(serverCovers?.futures || serverCovers?.spot) && (
-        <Tooltip title="The server scanner sends these alerts to Telegram even with no page open - a POC or an LVN only (an HVN / single prints just chime and show here); this page only chimes and shows them.">
+        <Tooltip title="The server sends these alerts to Telegram even with no page open - a POC or an LVN only (an HVN / single prints just chime and show here); this page only chimes and shows them.">
           <Tag color="success" style={{ fontSize: 11 }}>Telegram from the server</Tag>
         </Tooltip>
       )}

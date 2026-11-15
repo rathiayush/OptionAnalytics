@@ -272,9 +272,6 @@ builder.Services.AddHostedService<HistoricalSpotDataPrefetchHostedService>();
 // FetchAcrossSegmentsAsync reads from - see ExpiredOptionDataStore/
 // ExpiredOptionDataPrefetchHostedService's own doc comments.
 builder.Services.AddSingleton<ExpiredOptionDataStore>();
-// The strategy scanner's record as two CSV files - signals.csv and trades.csv, every day in each -
-// Storage:ScannerLogPath; see ScannerLogStore.
-builder.Services.AddSingleton<ScannerLogStore>();
 builder.Services.AddHostedService<ExpiredOptionDataPrefetchHostedService>();
 
 // Every registered IBacktestStrategy is picked up automatically by BacktestService's
@@ -375,8 +372,6 @@ builder.Services.AddSingleton<RiskSettingsStore>();
 // AI analysis of a run's report by a LOCAL model (Ollama) - LlmAnalysisService / LlmController. A singleton on purpose: it
 // holds the one-at-a-time lock, and its HttpClient lives as long as it does.
 builder.Services.AddSingleton(sp => new OptionAnalytics.Server.Services.LlmAnalysisService(new HttpClient(), sp.GetRequiredService<IConfiguration>()));
-// The strategy tuning job (scanner-runner/tune.mjs) - StrategyTuningService / StrategyTuningController.
-builder.Services.AddSingleton<StrategyTuningService>();
 // The Signal backtest's background runs (scanner-runner/signal-backtest.mjs) - a queue worked one at a time, now or at a
 // time picked on the page; the browser can be closed (SignalBacktestJobService / SignalBacktestController).
 builder.Services.AddSingleton<SignalBacktestJobService>();

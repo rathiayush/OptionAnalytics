@@ -2,7 +2,7 @@
 // partway through (a restart, a deploy, a late start). The server sends the minutes before that as
 // `backfill` - ESTIMATED from Dhan's 1-minute candles, buy / sell per minute - and this puts them in
 // front of the exact bars for DISPLAY only: the delta histogram, the cumulative-delta line, the
-// footprint's running total and the header. The footprint cells, the strategy scanner and analyzeBars
+// footprint's running total and the header. The footprint cells and analyzeBars
 // never see them, so no signal changes.
 //
 // Only minutes before the first exact MINUTE are used (all of them precede it by construction), so a
