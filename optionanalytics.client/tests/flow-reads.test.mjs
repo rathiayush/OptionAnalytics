@@ -3,7 +3,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { analyzeBars } from '../src/orderFlowMath.js'
-import { scoredFlowReads, withScoredReads } from '../src/flowReads.js'
+import { scoredFlowReads, swingTracker, withScoredReads } from '../src/flowReads.js'
 
 const MIN = 60_000
 const T0 = Date.parse('2026-11-13T09:15:00+05:30')
@@ -36,7 +36,7 @@ test('absorption: heavy selling at a new low that closed back above it - scored,
   assert.equal(a.parts.effort, 1)
   assert.equal(a.parts.efficiency, 1, 'sellers ahead on the bar, yet it closed up')
   assert.equal(a.parts.book, null, 'no book given: that part is not read')
-  assert.match(a.text, /^Selling absorbed \(score \d+\): .*selling at 94–96.*closed 100% off the low.*price did not follow.*a new 10-bar low/)
+  assert.match(a.text, /^Selling absorbed \(score \d+\): .*selling at 94–96.*closed 100% off the low.*price did not follow.*a new session low/)
   assert.deepEqual(read(bars).slice(0, -1).flatMap((x) => [...x.absorption, ...x.exhaustion]), [], 'quiet bars read nothing')
   // The mirror: buying absorbed at a new high.
   const m = read(mirror(bars)).at(-1).absorption
@@ -64,7 +64,7 @@ test('absorption over several bars: selling at the same prices in the bars befor
   const after = read([...base(), probe(8), probe(9), hold]).at(-1).absorption
   assert.equal(after.length, 1)
   assert.equal(after[0].volume, 510 + 850 + 850)
-  assert.match(after[0].text, /over the last bars.*a retest of the 10-bar low/)
+  assert.match(after[0].text, /over the last 3 bars.*a retest of the session low 94/)
   assert.equal(after[0].parts.context, 0.5)
   assert.ok(alone[0].volume === 510 && alone[0].parts.effort < after[0].parts.effort, 'the fight so far is the bigger effort')
 })
@@ -113,7 +113,7 @@ test('exhaustion: a new high on less volume and delta than the last push, thin a
   assert.equal(e[0].price, 107)
   assert.ok(e[0].score >= 70, `score ${e[0].score}`)
   assert.ok(e[0].parts.volume > 0.7 && e[0].parts.delta === 1 && e[0].parts.thin > 0.8 && e[0].parts.value >= 0.6)
-  assert.match(e[0].text, /^Buying exhausted \(score \d+\): a new 10-bar high · \d+% less volume than the last push · no buying delta behind it · little traded at the top · the busiest price did not follow · closed 75% off it/)
+  assert.match(e[0].text, /^Buying exhausted \(score \d+\): a new session high · \d+% less volume than the last push · no buying delta behind it · little traded at the top · the busiest price did not follow · closed 75% off it/)
   const m = read(mirror(bars)).at(-1).exhaustion
   assert.deepEqual([m.length, m[0].side, m[0].price, m[0].score], [1, 'buy', 93, e[0].score])
   assert.match(m[0].text, /^Selling exhausted/)
@@ -149,4 +149,71 @@ test('no look-ahead: a bar\'s read is the same whatever comes after it; the bars
   assert.deepEqual(shown.map((b) => b.absorption), whole.map((x) => x.absorption))
   assert.deepEqual(shown.map((b) => [b.cvd, b.poc, b.stacked]), analyzed.map((b) => [b.cvd, b.poc, b.stacked]))
   assert.notEqual(shown[0], analyzed[0], 'the bars the scanner and the bias read are not touched')
+})
+
+test('adaptive: yesterday\'s bars at the same time of day are the yardstick from the first bars of the day', () => {
+  // Today: one quiet bar, then the absorption bar - too few of today's bars alone.
+  const today = [quiet(0, 100), { ...absorbed(1) }]
+  assert.deepEqual(read(today).at(-1).absorption, [], 'one bar of today is no yardstick')
+  const DAY = 86_400_000
+  const yesterday = (offsetMin, mid) => ({ ...quiet(0, mid), time: T0 - DAY + offsetMin * MIN })
+  const prior = [0, 1, 2, 3, 4].map((m) => yesterday(m, 100))
+  const r = read(today, { prior }).at(-1).absorption
+  assert.equal(r.length, 1)
+  assert.match(r[0].text, /a new session low/)
+  // Yesterday's bars far from this time of day (the afternoon) are not this bar's yardstick.
+  const afternoon = [0, 1, 2, 3, 4].map((m) => yesterday(300 + m, 100))
+  assert.deepEqual(read(today, { prior: afternoon }).at(-1).absorption, [])
+  // Heavier bars yesterday at this time: the same selling is no longer heavy.
+  const heavy = (m) => ({ ...bar(0, 100, 101, [[98, 600, 700], [99, 1000, 1100], [100, 1400, 1300], [101, 1100, 1000], [102, 900, 900]]), time: T0 - DAY + m * MIN })
+  assert.deepEqual(read(today, { prior: [0, 1, 2, 3, 4, 5, 6].map(heavy) }).at(-1).absorption, [])
+})
+
+test('adaptive: the swings follow the market\'s own range - a swing is confirmed by 1.5x today\'s usual range', () => {
+  const t = swingTracker()
+  const b = (high, low) => ({ high, low })
+  t.add(b(105, 100), 0, 6)
+  t.add(b(110, 104), 1, 6)
+  assert.equal(t.levels().swingHigh, null, 'not confirmed while price keeps rising')
+  t.add(b(108, 105), 2, 6)
+  assert.equal(t.levels().swingHigh, null, 'a pull-back smaller than the swing size is noise')
+  t.add(b(106, 103.5), 3, 6)
+  assert.deepEqual(t.levels().swingHigh, { price: 110, i: 1 }, 'back 6.5 from 110: a swing high')
+  // The same moves in a market twice as wide are noise.
+  const wide = swingTracker()
+  for (const [i, x] of [b(105, 100), b(110, 104), b(108, 105), b(106, 103.5)].entries()) wide.add(x, i, 12)
+  assert.equal(wide.levels().swingHigh, null)
+})
+
+test('a new low INSIDE the structure is not a break: under the last swing low it is', () => {
+  // A day that fell from 100 to 90, bounced to 97, and dips to 95: not under the swing low 90 - no fresh break.
+  const path = [100, 98, 96, 94, 92, 90, 92, 94, 96, 97]
+  const day = path.map((m, i) => quiet(i, m))
+  const dip = bar(path.length, 95, 97, [[93, 100, 700], [94, 150, 800], [95, 120, 100], [96, 130, 90], [97, 160, 60]])
+  const r = read([...day, dip]).at(-1).absorption
+  assert.ok(r.every((x) => !/a new session low|under the swing low/.test(x.text)), r.map((x) => x.text).join('\n'))
+  // Down to 86: the session low (88) taken out - a break.
+  const flush = bar(path.length, 89, 92, [[86, 100, 900], [87, 150, 900], [88, 120, 100], [89, 130, 90], [90, 140, 80], [91, 160, 60], [92, 150, 50]])
+  assert.match(read([...day, flush]).at(-1).absorption[0].text, /a new session low/)
+})
+
+test('the fight runs as long as price stays at the price: five bars at 94 - 95 all count', () => {
+  const probe = (i) => bar(i, 97, 96, [[94, 60, 300], [95, 80, 300], [96, 150, 140], [97, 160, 150]])
+  const hold = bar(13, 96, 98, [[94, 80, 250], [95, 100, 260], [96, 150, 100], [97, 160, 90], [98, 170, 80]])
+  const r = read([...base(), probe(8), probe(9), probe(10), probe(11), probe(12), hold]).at(-1).absorption
+  assert.equal(r[0].volume, 510 + 5 * 600)
+  assert.match(r[0].text, /over the last 6 bars/)
+  // A bar between that left the price breaks the fight: only the bars after it count.
+  const away = quiet(11, 104)
+  const cut = read([...base(), probe(8), probe(9), probe(10), away, probe(12), hold]).at(-1).absorption
+  assert.equal(cut[0].volume, 510 + 600)
+})
+
+test('a new day starts fresh: yesterday\'s bars in the list are not today\'s structure', () => {
+  const DAY = 86_400_000
+  const yesterday = [90, 92, 94].map((m, i) => ({ ...quiet(i, m), time: T0 - DAY + i * MIN }))
+  const bars = [...yesterday, ...base(), absorbed()]
+  const r = read(bars).at(-1).absorption
+  assert.equal(r.length, 1)
+  assert.match(r[0].text, /a new session low/, 'under today\'s low 98, though yesterday traded lower')
 })

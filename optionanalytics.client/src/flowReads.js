@@ -7,23 +7,33 @@
 //
 //   ABSORPTION - an EFFORT that FAILED at a price. At a bar's low (bullish; the high is the mirror):
 //     effort     - the aggressive SELLING in the bar's bottom zone (its lowest third, at least two rows), with what was
-//                  sold at those same prices in the two bars before it (absorption is a fight at a price, often over
-//                  several bars), against a typical bar's selling - the bar's own at least half a usual bar's, and the
-//                  selling there 1.5x the buying;
+//                  sold at those same prices in the bars before it for as long as price kept trading there (absorption is
+//                  a fight at a price - it lasts as long as the market stays at it, not a set number of bars), against
+//                  today's usual bar's selling - the bar's own at least half a usual bar's, and the selling there 1.5x
+//                  the buying;
 //     result     - how far the bar closed back off its low (it must close above the zone);
 //     efficiency - the delta that did not move price: sellers ahead on the bar yet it closed up, or it moved far less a
 //                  lot of delta than bars usually do;
-//     context    - the low is a new low of the last bars (a real test, not noise inside the range) and / or sits at a
-//                  level given (VWAP, a wall, yesterday's value area ...);
+//     context    - the low breaks the market's STRUCTURE (a new session low, under the last swing low, a new low of the
+//                  move) or retests it, and / or sits at a level given (VWAP, a wall, yesterday's value area ...);
 //     book       - with the order book: what traded into the bids there against what they SHOWED, and whether they
 //                  are still there (traded more than was ever shown, bids still standing = refilled: the real thing).
-//   EXHAUSTION - PARTICIPATION FADING at a new extreme. At a new high of the last bars (bearish; the low is the mirror):
-//     volume     - less volume than the push before it (the last bar that made a new high);
+//   EXHAUSTION - PARTICIPATION FADING at a new extreme. At a new high of the STRUCTURE (bearish; the low is the mirror):
+//     volume     - less volume than the push before it (the last bar that made a new high of the structure);
 //     delta      - less buying delta than that push (or none at all), and a lower cumulative delta at a higher high;
 //     thin top   - little traded in the top two rows (two, not one: Dhan's one-second packets put a whole second's
 //                  volume on one price, so a single thin row is often an artefact);
 //     value      - the bar's busiest price (POC) did not follow price up;
 //     rejection  - how far it closed back off the high (it must close off it).
+//
+// NOTHING IS A FIXED NUMBER OF BARS (asked for - "like how a human reads it ... not 5 - 10 candles, adaptive and
+// dynamic"; "I am only loading the current day - 10 bars come after 50 min"): the yardstick (the usual bar's volume,
+// selling, buying, range and move per delta) is the median of TODAY's bars before this one together with YESTERDAY's
+// bars within 30 minutes of its time of day (`prior` - so it reads from the first bars of the day, the open against
+// yesterday's open, and today's own bars count for more as they come); the "new high / low" is against the
+// market's SWINGS (`swingTracker` - a swing is confirmed once price comes back from it by 1.5x today's usual bar range,
+// at least two rows, so the swings grow with a fast market and shrink with a quiet one), the session's high / low and the
+// current move's extreme; the fight at a price runs back over every bar that kept trading there.
 //
 // A part that cannot be read (no book, no push before) is left out and the rest re-weighted. Every bar is read from
 // itself and the bars BEFORE it - nothing after (`tests/flow-reads.test.mjs`). A read on the chart: it feeds no strategy,
@@ -36,10 +46,53 @@ const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 
 export const FLOW_READ_DEFAULTS = {
   minScore: 50,      // a mark is drawn from this score
-  lookback: 10,      // bars a "new" high / low is new against
-  norm: 20,          // bars the typical selling / buying / move per delta are read over
-  zoneBars: 2,       // bars before this one whose trading at the zone's prices counts as the same fight
+  swingRanges: 1.5,  // a swing is confirmed once price comes back from it by this many of today's usual bar ranges
   nearRows: 2,       // rows within which a given level counts as "at" the extreme
+}
+const IST_MS = 5.5 * 3600_000
+const dayOf = (t) => Math.floor((msOf(t) + IST_MS) / 86_400_000)
+const clockOf = (t) => (msOf(t) + IST_MS) % 86_400_000
+export const PRIOR_CLOCK_MS = 30 * 60_000
+
+/**
+ * The market's swings as the bars go by - a zigzag whose turn is `reversal(i)` points (today's usual range, so it adapts):
+ * a high is a SWING HIGH once price has come back down from it by that much, a low the mirror. `levels()` is what is known
+ * BEFORE the next bar (call `add` after reading a bar): { swingHigh, swingLow (the last confirmed, { price, i }), moveHigh,
+ * moveLow (the current move's extreme so far - since the last opposite swing), sessionHigh, sessionLow }.
+ */
+export function swingTracker() {
+  let dir = 0, legHigh = null, legLow = null, swingHigh = null, swingLow = null, sessionHigh = null, sessionLow = null
+  return {
+    levels: () => ({ swingHigh, swingLow, moveHigh: legHigh, moveLow: legLow, sessionHigh, sessionLow }),
+    add(bar, i, reversal) {
+      sessionHigh = sessionHigh == null || bar.high > sessionHigh.price ? { price: bar.high, i } : sessionHigh
+      sessionLow = sessionLow == null || bar.low < sessionLow.price ? { price: bar.low, i } : sessionLow
+      if (legHigh == null) { legHigh = { price: bar.high, i }; legLow = { price: bar.low, i }; return }
+      if (bar.high > legHigh.price) legHigh = { price: bar.high, i }
+      if (bar.low < legLow.price) legLow = { price: bar.low, i }
+      // Up (or not yet known) and price came back down far enough from the move's high: that high is a swing.
+      if (dir >= 0 && legHigh.i < i && legHigh.price - bar.low >= reversal) {
+        swingHigh = legHigh; dir = -1; legLow = { price: bar.low, i }; legHigh = { price: bar.high, i }
+      } else if (dir <= 0 && legLow.i < i && bar.high - legLow.price >= reversal) {
+        swingLow = legLow; dir = 1; legHigh = { price: bar.high, i }; legLow = { price: bar.low, i }
+      }
+    },
+  }
+}
+
+// The price a new high / low is new against, and its name: the current move's extreme or the last swing, whichever is
+// further out (before the first swing the move is the whole session so far).
+function structureRef(lv, high) {
+  if (high) {
+    const ref = [lv.swingHigh, lv.moveHigh].filter(Boolean).reduce((a, b) => (a && a.price >= b.price ? a : b), null)
+    if (!ref) return null
+    const name = ref.price >= lv.sessionHigh.price ? 'session high' : ref === lv.swingHigh ? 'swing high' : 'high of the move'
+    return { price: ref.price, name }
+  }
+  const ref = [lv.swingLow, lv.moveLow].filter(Boolean).reduce((a, b) => (a && a.price <= b.price ? a : b), null)
+  if (!ref) return null
+  const name = ref.price <= lv.sessionLow.price ? 'session low' : ref === lv.swingLow ? 'swing low' : 'low of the move'
+  return { price: ref.price, name }
 }
 export const FLOW_READ_SCORES = [40, 50, 60, 70]
 const ABSORPTION_WEIGHTS = { effort: 30, result: 20, efficiency: 20, context: 15, book: 15 }
@@ -72,6 +125,9 @@ function bookAt(columns, fromMs, toMs, lo, hi, side, step) {
   return last == null ? null : { most, last }
 }
 
+// "a new session low", "under the swing low 24,980", "a new low of the move" (the mirror at a high).
+const breakText = (ref, low) => (ref.name.startsWith('session') ? `a new ${ref.name}` : `${low ? 'under' : 'over'} the ${ref.name} ${ref.price}`)
+
 /**
  * The scored reads of `bars` (analyzeBars' - time, open / high / low / close, buy, sell, delta, volume, cvd, poc, levels
  * [{ price, buy, sell }]; oldest first): an array beside them, each { absorption: [], exhaustion: [] } of { side ('buy' =
@@ -79,28 +135,37 @@ function bookAt(columns, fromMs, toMs, lo, hi, side, step) {
  * volume (the aggression there), score, parts { name: 0 - 1 | null }, text }. `rowSize`: the footprint's rows;
  * `timeframe`: the bars' minutes (for the book); `columns`: the book's columns ({ t, bids, asks } as [price, quantity] -
  * optional); `levels`: prices that matter ([{ price, label }], or (barIndex) => those known AT that bar - a level
- * that moves, like VWAP, must be the bar's own; optional). An estimated day's rows are a spread, not
+ * that moves, like VWAP, must be the bar's own; optional); `prior`: the previous session's bars of the same timeframe
+ * (optional - without them the first bars of the day wait for three of today's). An estimated day's rows are a spread, not
  * trades: none are read (the candle rules stay).
  */
-export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, levels = [], ...options } = {}) {
+export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, levels = [], prior = null, ...options } = {}) {
   const o = { ...FLOW_READ_DEFAULTS, ...options }
+  // Yesterday's bars of the same timeframe by their clock: a bar's yardstick takes those within PRIOR_CLOCK_MS of its own
+  // time of day (the open's heavy bars against yesterday's open, the lunch lull against yesterday's lunch).
+  const priorByClock = (prior ?? []).filter((b) => b && b.volume > 0 && b.high > b.low).map((b) => ({ b, clock: clockOf(b.time) }))
+  const priorNear = (t) => { const c = clockOf(t); return priorByClock.filter((x) => Math.abs(x.clock - c) <= PRIOR_CLOCK_MS).map((x) => x.b) }
   const step = rowSize > 0 ? rowSize : 0.05
   const list = bars ?? []
   const out = list.map(() => ({ absorption: [], exhaustion: [] }))
   const spanMs = Math.max(1, timeframe) * 60_000
-  // The last bar that made a new high / low of its own lookback, as the bars go by.
-  let lastPush = { high: null, low: null }
+  // Today's session so far: where it began, its swings, the last bar that made a new high / low of the structure.
+  let day = null, sessionFrom = 0, swings = null, lastPush = { high: null, low: null }
   for (let i = 0; i < list.length; i++) {
     const bar = list[i]
+    if (dayOf(bar.time) !== day) { day = dayOf(bar.time); sessionFrom = i; swings = swingTracker(); lastPush = { high: null, low: null } }
     const rows = [...(bar.levels ?? [])].sort((a, b) => a.price - b.price)
     const range = bar.high - bar.low
-    const from = Math.max(0, i - o.norm)
-    const before = list.slice(from, i)
-    const prior = list.slice(Math.max(0, i - o.lookback), i)
-    const priorHigh = prior.length ? Math.max(...prior.map((b) => b.high)) : null
-    const priorLow = prior.length ? Math.min(...prior.map((b) => b.low)) : null
-    const newHigh = priorHigh != null && bar.high > priorHigh
-    const newLow = priorLow != null && bar.low < priorLow
+    // The yardstick: every bar of today's session before this one, with yesterday's bars at this time of day - so it
+    // reads from the open, and today's own bars weigh more as the day goes on.
+    const before = [...priorNear(bar.time), ...list.slice(sessionFrom, i)]
+    const usualRange = median(before.map((b) => b.high - b.low))
+    const lv = swings.levels()
+    const refHigh = structureRef(lv, true), refLow = structureRef(lv, false)
+    const newHigh = refHigh != null && bar.high > refHigh.price
+    const newLow = refLow != null && bar.low < refLow.price
+    // Back at the structure's extreme without passing it: within a quarter of the swing size (at least a row).
+    const tol = Math.max(step, (o.swingRanges * usualRange) / 4)
     if (rows.length >= 3 && bar.volume > 0 && range > 0 && before.length >= 3) {
       const typical = { sell: median(before.map((b) => b.sell ?? 0)), buy: median(before.map((b) => b.buy ?? 0)) }
       // Points a bar usually moves a lot of delta.
@@ -117,9 +182,14 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         let effort = 0, against = 0
         for (const l of zone) { effort += l[hit]; against += l[other] }
         const own = effort
-        // The same prices in the bars just before: the fight at this price so far.
-        for (let j = Math.max(0, i - o.zoneBars); j < i; j++) {
-          for (const l of list[j].levels ?? []) if (l.price >= lo - 1e-9 && l.price <= hi + 1e-9) { effort += l[hit]; against += l[other] }
+        // The same prices in the bars before, back to the first bar that did not trade there: the fight at this price so
+        // far - as long as it has lasted today, not a set number of bars.
+        let fightBars = 0
+        for (let j = i - 1; j >= sessionFrom; j--) {
+          const b = list[j]
+          if (!(b.low <= hi + 1e-9 && b.high >= lo - 1e-9)) break
+          for (const l of b.levels ?? []) if (l.price >= lo - 1e-9 && l.price <= hi + 1e-9) { effort += l[hit]; against += l[other] }
+          fightBars++
         }
         const typ = typical[hit]
         // This bar's own aggression there must be real (half a usual bar's whole selling, in the zone alone) and one-sided:
@@ -136,10 +206,11 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         else parts.efficiency = 0
         const level = near(bull ? bar.low : bar.high)
         const fresh = bull ? newLow : newHigh
-        const prev = list[i - 1]
+        const ref = bull ? refLow : refHigh
+        const prev = i > sessionFrom ? list[i - 1] : null
         const pastPrev = prev && (bull ? bar.low < prev.low : bar.high > prev.high)
-        // Back at the last bars' extreme without passing it: a retest of the same price - the fight going on.
-        const retest = !fresh && (bull ? priorLow != null && bar.low <= priorLow + 1e-9 : priorHigh != null && bar.high >= priorHigh - 1e-9)
+        // Back at the structure's extreme without passing it: a retest of the same price - the fight going on.
+        const retest = !fresh && ref != null && (bull ? bar.low <= ref.price + tol + 1e-9 : bar.high >= ref.price - tol - 1e-9)
         parts.context = Math.min(1, (fresh ? 0.7 : retest ? 0.5 : pastPrev ? 0.35 : 0) + (level ? 0.5 : 0))
         const start = msOf(bar.time)
         const shown = bookAt(columns, start, start + spanMs, lo, hi, bull ? 'bids' : 'asks', step)
@@ -148,10 +219,10 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         if (parts.effort < 0.5 || score < o.minScore) continue
         const where = lo === hi ? `${lo}` : `${lo}–${round2(hi + step)}`
         const why = [
-          `${Math.round((effort / typ) * 10) / 10}x a usual bar's ${bull ? 'selling' : 'buying'} at ${where}${effort > own ? ' over the last bars' : ''}`,
+          `${Math.round((effort / typ) * 10) / 10}x a usual bar's ${bull ? 'selling' : 'buying'} at ${where}${fightBars ? ` over the last ${fightBars + 1} bars` : ''}`,
           `closed ${Math.round(closedOff * 100)}% off the ${bull ? 'low' : 'high'}`,
           parts.efficiency >= 0.7 ? `${bull ? 'sellers' : 'buyers'} ahead but price did not follow` : null,
-          fresh ? `a new ${o.lookback}-bar ${bull ? 'low' : 'high'}` : retest ? `a retest of the ${o.lookback}-bar ${bull ? 'low' : 'high'}` : null,
+          fresh ? `${breakText(ref, bull)}` : retest ? `a retest of the ${ref.name} ${ref.price}` : null,
           level ? `at ${level.label ?? level.price}` : null,
           parts.book != null && parts.book >= 0.7 ? `the ${bull ? 'bids' : 'offers'} there held / refilled` : null,
         ].filter(Boolean).join(' · ')
@@ -189,7 +260,7 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         const score = scoreOf(parts, EXHAUSTION_WEIGHTS)
         if (score < o.minScore) continue
         const why = [
-          `a new ${o.lookback}-bar ${bear ? 'high' : 'low'}`,
+          breakText(bear ? refHigh : refLow, !bear),
           parts.volume >= 0.3 ? `${Math.round(parts.volume * 100)}% less volume than ${push ? 'the last push' : 'usual'}` : null,
           way <= 0 ? `no ${bear ? 'buying' : 'selling'} delta behind it` : parts.delta >= 0.3 ? `less ${bear ? 'buying' : 'selling'} delta than ${push ? 'the last push' : 'usual'}` : null,
           parts.thin >= 0.5 ? `little traded at the ${bear ? 'top' : 'bottom'}` : null,
@@ -202,9 +273,10 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         })
       }
     }
-    // This bar is the push the next new extreme is compared with.
+    // This bar is the push the next new extreme is compared with; then the swings take it in.
     if (newHigh) lastPush = { ...lastPush, high: bar }
     if (newLow) lastPush = { ...lastPush, low: bar }
+    swings.add(bar, i, Math.max(2 * step, o.swingRanges * median([...before, bar].map((b) => b.high - b.low))))
   }
   return out
 }

@@ -502,18 +502,24 @@ export default function OrderFlowPage() {
     return () => { cancelled = true }
   }, [underlying, sessionDate, rowSize, expiryQuery])
   const prevVp = useMemo(() => (prevSession.data ? sessionVolumeProfile(prevSession.data.bars) : null), [prevSession.data])
-  // The footprint's absorption / exhaustion marks: the SCORED read (flowReads.js - an effort that failed at a price, over
-  // the last bars, with the book and the levels known at each bar: its own VWAP, yesterday's POC / VAH / VAL), or - the
+  // The footprint's absorption / exhaustion marks: the SCORED read (flowReads.js - an effort that failed at a price, for as
+  // long as the fight there lasted, against the market's swings and today's / yesterday's usual bar, with the book and the
+  // levels known at each bar: its own VWAP, yesterday's POC / VAH / VAL / high / low), or - the
   // box off, or an estimated day (its rows are a spread, not trades) - the first one-bar rules. `bars` itself (the bias,
   // the scanner's reads) keeps the first rules.
   const useScored = scoredReads && !estimated
   const minScore = FLOW_READ_SCORES.includes(readMinScore) ? readMinScore : 50
+  // Yesterday's bars in this timeframe: the reads' yardstick from the first bar of the day (with today's as they come), and
+  // yesterday's high / low as levels - a trader reads absorption / exhaustion at them first.
+  const priorBars = useMemo(() => (prevSession.data?.bars?.length ? aggregateBars(prevSession.data.bars, timeframe) : null), [prevSession.data, timeframe])
   const markedBars = useMemo(() => {
     if (!useScored) return bars
     const fixed = prevVp?.poc != null ? [{ price: prevVp.poc, label: 'yesterday\'s POC' }, { price: prevVp.vah, label: 'yesterday\'s VAH' }, { price: prevVp.val, label: 'yesterday\'s VAL' }] : []
+    const traded = (priorBars ?? []).filter((b) => b.high > 0 && b.low > 0)
+    if (traded.length) fixed.push({ price: Math.max(...traded.map((b) => b.high)), label: 'yesterday\'s high' }, { price: Math.min(...traded.map((b) => b.low)), label: 'yesterday\'s low' })
     const levels = (i) => (barVwap?.[i] != null ? [...fixed, { price: barVwap[i], label: 'VWAP' }] : fixed)
-    return withScoredReads(bars, scoredFlowReads(bars, { rowSize, timeframe, columns: noDepth ? null : view?.heatmap, levels, minScore }))
-  }, [useScored, bars, rowSize, timeframe, noDepth, view?.heatmap, prevVp, barVwap, minScore])
+    return withScoredReads(bars, scoredFlowReads(bars, { rowSize, timeframe, columns: noDepth ? null : view?.heatmap, levels, minScore, prior: priorBars }))
+  }, [useScored, bars, rowSize, timeframe, noDepth, view?.heatmap, prevVp, priorBars, barVwap, minScore])
   const shown = useMemo(() => withBackfill(markedBars, view?.backfill, timeframe, firstMinuteMs), [markedBars, view?.backfill, timeframe, firstMinuteMs])
   const tpoRow = tpoRowFor(underlying, rowSize)
   const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
@@ -801,7 +807,7 @@ export default function OrderFlowPage() {
             <Tooltip title="At each bar's high and low: FA = finished auction (no selling at the top row / no buying at the bottom row - that side ran out); UA = unfinished (both sides traded at the extreme - price tends to come back), its dotted line running on until a later bar trades back into it. Read on the footprint's rows; not on an estimated day.">
               <Checkbox checked={showAuctions} onChange={(e) => setShowAuctions(e.target.checked)}><Text style={{ fontSize: 12 }}>Auctions</Text></Checkbox>
             </Tooltip>
-            <Tooltip title="The ABS / EXH marks from the scored read: absorption = heavy aggression at a price (over the last bars) that failed - the bar closed back off it, the delta did not move price, the resting orders there held or refilled; exhaustion = a new high / low on less volume and delta than the push before it, little traded at the extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree. Off = the first one-bar rules. Not on an estimated day. The scanner's strategies keep the first rules either way.">
+            <Tooltip title="The ABS / EXH marks from the scored read: absorption = heavy aggression at a price (for as long as the fight there lasted) that failed - the bar closed back off it, the delta did not move price, the resting orders there held or refilled; exhaustion = a new high / low of the market's structure (the session, the last swing, the move) on less volume and delta than the push before it, little traded at the extreme, closed back off it. Nothing is a fixed number of bars: 'heavy' / 'usual' is against today's bars and yesterday's at the same time of day (so it reads from the open), and the swings are sized by the market's own range. The number on a mark is its score, 0 - 100: how many of those agree. Off = the first one-bar rules. Not on an estimated day.">
               <Checkbox checked={scoredReads} onChange={(e) => setScoredReads(e.target.checked)}><Text style={{ fontSize: 12 }}>Scored ABS / EXH</Text></Checkbox>
             </Tooltip>
             {scoredReads && !estimated && (
@@ -1038,9 +1044,9 @@ export default function OrderFlowPage() {
           its side comes from the book just before it - at or above the best offer = buyers aggressive, at or below the best bid = sellers
           aggressive, otherwise by tick direction. Dhan itself says its WebSocket is event-based snapshot data delivered second by second, not tick-by-tick, so several trades between two snapshots count as one print (at the last price, on one side) - the footprint rows and delta can therefore differ from a tick-by-tick chart such as GoCharting. Imbalance compares diagonally (buying
           at a price vs selling one row below); a stack is that many imbalanced rows in a row. Absorption (ABS) = heavy aggression
-          at a price - over the last bars - that failed: the bar closed back off it, the delta did not move price, the resting orders there
-          held or refilled; exhaustion (EXH) = a new high / low on less volume and delta than the push before it, little traded at the
-          extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree (the &quot;Scored ABS / EXH&quot; box;
+          at a price - for as long as the fight there lasted - that failed: the bar closed back off it, the delta did not move price, the resting orders there
+          held or refilled; exhaustion (EXH) = a new high / low of the structure (session, last swing, the move) on less volume and delta than the push before it, little traded at the
+          extreme, closed back off it. The number on a mark is its score, 0 - 100: how many of those agree, each against today's bars and yesterday's at the same time of day - no fixed bar count, so it reads from the open (the &quot;Scored ABS / EXH&quot; box;
           off = the first one-bar rules). An iceberg is a level that keeps
           trading more than twice the most it ever showed while staying in the book. Walls are levels at least 4x the book's median size.
           The volume profile is the traded volume per row over the bars shown, with its point of control (POC) and the 70% value area
