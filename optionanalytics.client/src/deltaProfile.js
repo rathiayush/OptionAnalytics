@@ -27,6 +27,7 @@
 import { barProxyDelta, deltaWeight, optionBars, spotLookup } from './optionFlow.js'
 import { pocIndexOf, rowOf, valueAreaOf } from './orderFlowMath.js'
 import { dayVolumeProfile, volumeZones } from './profileZones.js'
+import { oiProfileOf } from './oiProfile.js'
 
 const MIN = 60_000
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
@@ -285,4 +286,25 @@ export function rowAt(profile, price) {
   if (!profile?.rows?.length || !Number.isFinite(price) || !(profile.rowSize > 0)) return null
   const bottom = rowOf(price, profile.rowSize)
   return profile.rows.find((r) => Math.abs(r.price - bottom) < 1e-6) ?? null
+}
+
+/**
+ * The OPTION OI NET (CE − PE) PROFILE (asked for - "I only need net CE − PE ... negative is bullish ... as a profile"):
+ * a delta profile - a horizontal histogram by price - whose delta column is, at each SPOT row, the CALL OI added minus the
+ * PUT OI added in the minutes spot spent there (`oiSessions` - each `optionOiMinutes`, every strike from its own first
+ * reading), so NEGATIVE = puts written ahead there (a floor - BULLISH), positive = calls written (a ceiling - bearish);
+ * the volume column is the option volume there (`flowProfile` - `optionDeltaProfileOf`). `bullishNegative` tells the
+ * drawing to colour a negative row green. `totals` { ce, pe, net } - the OI added (net = ce − pe).
+ */
+export function optionOiNetProfileOf(flowProfile, oiSessions, { rowSize = 5 } = {}) {
+  const oi = oiProfileOf(oiSessions, { rowSize })
+  const rows = new Map((flowProfile?.rows ?? []).map((r) => [r.price, { price: r.price, volume: r.volume, delta: 0, ce: 0, pe: 0 }]))
+  let ce = 0, pe = 0
+  for (const r of oi.rows) {
+    let row = rows.get(r.price)
+    if (!row) rows.set(r.price, row = { price: r.price, volume: 0, delta: 0, ce: 0, pe: 0 })
+    row.ce = r.ce; row.pe = r.pe; row.delta = r.ce - r.pe
+    ce += r.ce; pe += r.pe
+  }
+  return { ...finishDeltaProfile([...rows.values()], rowSize), totals: { ce, pe, net: ce - pe }, bullishNegative: true, deltaTitle: 'CE − PE OI' }
 }

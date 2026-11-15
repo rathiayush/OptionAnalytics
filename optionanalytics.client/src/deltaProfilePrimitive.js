@@ -105,7 +105,7 @@ export class DeltaProfilePrimitive {
       ctx.fillText('VOLUME', volX, Math.round(3 * vpr))
       // Over its own centre line - beside VOLUME it ran into it on a phone.
       ctx.textAlign = 'center'
-      ctx.fillText('DELTA', mid, Math.round(3 * vpr))
+      ctx.fillText(p.deltaTitle ?? 'DELTA', mid, Math.round(3 * vpr))
       ctx.textAlign = 'left'
       ctx.fillStyle = AXIS
       ctx.fillRect(mid, head, Math.max(1, Math.round(hpr)), H - head)
@@ -121,7 +121,8 @@ export class DeltaProfilePrimitive {
         }
         if (p.maxAbsDelta > 0 && row.delta !== 0) {
           const len = Math.max(1, (Math.abs(row.delta) / p.maxAbsDelta) * (colW / 2))
-          ctx.fillStyle = row.delta > 0 ? BUY : SELL
+          // `bullishNegative` (the option OI's CE − PE): a negative row is the bullish one - green.
+          ctx.fillStyle = (p.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
           ctx.fillRect(row.delta > 0 ? mid : mid - len, top, len, height)
         }
         if (this._hover != null && row.price === this._hover) {

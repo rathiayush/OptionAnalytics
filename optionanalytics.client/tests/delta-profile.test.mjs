@@ -259,3 +259,17 @@ test('the candles: the day\'s, live before the open the session before, a replay
   assert.equal(scaleHolderCandle(null, 1), null)
   assert.deepEqual(cardCandleSource({ dayBars: [], past: [], isLive: false, date: null, price: null }), { bars: [], standIn: null, holder: false })
 })
+
+test('option OI net (CE − PE) profile: by spot row, negative = puts written; volume from the flow profile', async () => {
+  const { optionOiNetProfileOf } = await import('../src/deltaProfile.js')
+  const flow = { rows: [{ price: 100, volume: 50, delta: 3 }, { price: 105, volume: 20, delta: -1 }] }
+  // Minute 1 on row 100: calls +10, puts +40 -> -30 (bullish floor); minute 2 on rows 105 and 110 (spread 2): calls +60, puts 0.
+  const oiMinutes = [{ t: 0, low: 101, high: 104, ce: 10, pe: 40 }, { t: 60_000, low: 106, high: 111, ce: 60, pe: 0 }]
+  const p = optionOiNetProfileOf(flow, [oiMinutes], { rowSize: 5 })
+  assert.equal(p.bullishNegative, true)
+  assert.deepEqual(p.rows.map((r) => [r.price, r.volume, r.delta]), [[100, 50, -30], [105, 20, 30], [110, 0, 30]])
+  assert.deepEqual(p.totals, { ce: 70, pe: 40, net: 30 })
+  assert.equal(p.poc, 100)
+  // A cut part way = the profile of the minutes up to it.
+  assert.deepEqual(optionOiNetProfileOf(flow, [oiMinutes.slice(0, 1)]).rows.find((r) => r.price === 100).delta, -30)
+})
