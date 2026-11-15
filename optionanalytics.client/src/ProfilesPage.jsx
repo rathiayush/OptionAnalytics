@@ -68,6 +68,7 @@ const STORE = {
   vpBars: 'optionanalytics.profiles.vpBars',
   speed: 'optionanalytics.profiles.speedMs',
   delta: 'optionanalytics.profiles.delta',
+  netOrder: 'optionanalytics.profiles.netOrder',
 }
 // A past day's replay, as OI Replay's: milliseconds per market minute.
 const SPEED_OPTIONS = [
@@ -704,8 +705,8 @@ export default function ProfilesPage() {
   const [playing, setPlaying] = useState(false)
   const [speedMs, setSpeedMs] = usePersistedState(STORE.speed, 500)
   const [showDelta, setShowDelta] = usePersistedState(STORE.delta, false)
-  // The option net's order, ONE setting with OI Replay's option delta card (its side picker): CE − PE (+ bullish) or PE − CE.
-  const [netSide, setNetSide] = usePersistedState('optionanalytics.oiReplay.optionDeltaSide', 'net')
+  // The option net's order, this page's own setting (OI Replay's card keeps its own): CE − PE (+ bullish) or PE − CE.
+  const [netSide, setNetSide] = usePersistedState(STORE.netOrder, 'net')
   const netOrder = netSide === 'netpe' ? 'netpe' : 'net'
 
   const index = UNDERLYINGS.includes(underlying) ? underlying : 'NIFTY'
