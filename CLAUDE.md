@@ -271,11 +271,15 @@ All must pass before committing.
   Pro desks - the default - / Pro + FII / All but clients, `optionanalytics.oiReplay.gexHedgers`). `gexDay`'s `shares`
   { call, put } takes the place of +1 / -1 as the dealers' share of every call's / put's OI (none = exactly as before -
   +1 / -1 held deepEqual to it in `tests/gex.test.mjs`), under 'buildup' for the first reading and the changes that cannot
-  be read. `useGexDays` adds ONE day when it has them - `participant` (no flip worked out) - beside `standard` / `buildup`,
+  be read. `useGexDays` adds two days when it has them - `participant` (as held, no flip worked out - the verdict's vote) and
+  `participantBuildup` - beside `standard` / `buildup`,
   which are UNCHANGED (the entry checklist's gamma check and the Signal backtest still read those). NSE'S POSITIONS ARE NOT
   A SIGN TO PICK (they were - "NSE positions" / "NSE + build-up" in the Sign picker - and four choices left the user unable
-  to tell which to trust: "I am confused ... I do not know which to trust"; removed, with `participantBuildup`): the Sign
-  picker is Standard / OI build-up again (`GEX_SIGNS`; a saved NSE sign reads as Standard - `gexSignOf`) and the GEX card
+  to tell which to trust: "I am confused ... I do not know which to trust"; "NSE positions" as held was removed from the
+  picker). "NSE + BUILD-UP" IS A SIGN AGAIN (asked for back - "can we have option NSE desk + day OI build-up again";
+  `participantBuildup`: the first reading's OI signed by NSE's shares, then the day's OI changes read by their IV): the Sign
+  picker is Standard / OI build-up / NSE + build-up, the last only on a day with NSE's file (`GEX_SIGNS`, `gexSignOptions(days)`;
+  a saved one on a day without it, or the old "NSE positions", reads as Standard - `gexSignOf`; a dropdown on a phone) and the GEX card
   shows ONE VERDICT line, always open, in place of the folded "two signs' verdict" (`gexVerdict(standard, buildup, nse)`):
   Standard and OI build-up must agree, else "UNCLEAR - ... trade the walls only" (the rule before); NSE's positions only
   move the confidence - with them "all 3 reads agree - high confidence", against them "2 of 3 ... smaller size", no file =

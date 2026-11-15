@@ -48,13 +48,16 @@ test('the shares in words', () => {
   assert.equal(sharesText(null), '')
 })
 
-test('the signs to pick are the two assumed ones only - a saved NSE sign reads as Standard', () => {
-  const days = { standard: [], buildup: [], participant: [] }
-  assert.deepEqual(gexSignOptions().map((o) => o.value), ['standard', 'buildup'])
-  assert.deepEqual(GEX_SIGNS.map((s) => s.value), ['standard', 'buildup'])
-  assert.equal(gexSignOf(days, 'buildup'), 'buildup')
-  assert.equal(gexSignOf(days, 'participant'), 'standard')
-  assert.equal(gexSignOf(days, 'participantBuildup'), 'standard')
+test('the signs to pick: the two assumed ones, and NSE + build-up only when the day has NSE\'s file', () => {
+  const assumed = { standard: [], buildup: [] }
+  const withNse = { ...assumed, participant: [], participantBuildup: [] }
+  assert.deepEqual(gexSignOptions(assumed).map((o) => o.value), ['standard', 'buildup'])
+  assert.deepEqual(gexSignOptions(withNse).map((o) => o.value), ['standard', 'buildup', 'participantBuildup'])
+  assert.deepEqual(GEX_SIGNS.map((s) => s.value), ['standard', 'buildup', 'participantBuildup'])
+  assert.equal(gexSignOf(withNse, 'participantBuildup'), 'participantBuildup')
+  assert.equal(gexSignOf(assumed, 'participantBuildup'), 'standard')   // no file that day
+  assert.equal(gexSignOf(withNse, 'participant'), 'standard')          // NSE as held is the verdict's vote, not a sign
+  assert.equal(gexSignOf(withNse, 'buildup'), 'buildup')
   assert.equal(gexSignOf(null, 'buildup'), 'standard')
 })
 

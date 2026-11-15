@@ -21,15 +21,19 @@ export const HEDGER_GROUPS = [
 export const HEDGER_DEFAULT = 'pro'
 export const hedgerGroup = (value) => HEDGER_GROUPS.find((g) => g.value === value) ?? HEDGER_GROUPS[0]
 
-/** The GEX signs a card can show. NSE's positions are NOT a sign to pick (four choices left the user unable to tell which
- *  to trust - "I do not know which to trust"): they are the third vote of the card's one verdict (`gexVerdict`). */
+/** The GEX signs a card can show. NSE's positions AS HELD are not a sign to pick (four choices left the user unable to
+ *  tell which to trust) - they are the third vote of the card's one verdict (`gexVerdict`). "NSE + build-up" is one (asked
+ *  for back - "can we have option NSE desk + day OI build-up again"): the day started from NSE's real positions, then the
+ *  day's OI changes read by their IV - offered only when the day has NSE's file. */
 export const GEX_SIGNS = [
   { value: 'standard', label: 'Standard' },
   { value: 'buildup', label: 'OI build-up' },
+  { value: 'participantBuildup', label: 'NSE + build-up', nse: true },
 ]
-/** The sign to show: the one picked, else Standard (a saved NSE sign from when they could be picked reads as Standard). */
+/** The sign to show: the one picked when `days` (useGexDays) has it, else Standard. */
 export const gexSignOf = (days, picked) => (GEX_SIGNS.some((s) => s.value === picked) && days?.[picked] ? picked : 'standard')
-export const gexSignOptions = () => GEX_SIGNS.map(({ value, label }) => ({ value, label }))
+/** The picker's options for `days`: the NSE one only when worked out. */
+export const gexSignOptions = (days) => GEX_SIGNS.filter((s) => !s.nse || days?.[s.value]).map(({ value, label }) => ({ value, label }))
 
 const regimeOf = (minute) => (minute && Number.isFinite(minute.net) && minute.net !== 0 ? (minute.net > 0 ? 'positive' : 'negative') : null)
 
