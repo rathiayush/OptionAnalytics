@@ -293,7 +293,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
-  const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
+  const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : shownSide === 'netpe' ? 'net Δ PE − CE (+ puts ahead)' : `${shownSide.toUpperCase()} Δ (+ bought)`
   const soFar = choice.of === 'today' && choice.dayCount === 1
   return (
     <Space direction="vertical" size={6} style={{ width: '100%' }}>
@@ -308,7 +308,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
       {profile.rows.length && candles.length ? (
         <>
           <Text style={{ fontSize: 12 }}>
-            Net Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots
+            {shownSide === 'netpe' ? 'Net Δ (PE − CE)' : 'Net Δ'}{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots
             {' '}(CE <span style={{ color: deltaColor(profile.totals.ce) }}>{lots(profile.totals.ce / lotSize, true)}</span> · PE{' '}
             <span style={{ color: deltaColor(-profile.totals.pe) }}>{lots(profile.totals.pe / lotSize, true)}</span>) · POC {price(levels?.poc ?? profile.poc)}
           </Text>

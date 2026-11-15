@@ -532,7 +532,7 @@ All must pass before committing.
   added - `flowCePoints`) given a side as the Option CDV does - `barProxyDelta` (where the close sits in the bar's range) x
   `deltaWeight` (the strike's delta at that minute's spot; volume weighted the same) - added up a minute and SPREAD over the
   spot rows that minute's spot bar covered (its last price when it has none); Net = CE Δ − PE Δ (+ bullish: calls bought /
-  puts sold), CE / PE alone their own buying (+) / selling (−); in lots of the index (`PAPER_TRADE_LOT_SIZE`). FUTURES
+  puts sold; asked for - "for options PE − CE" - the side picker also has "Net (PE − CE)", + = puts ahead, the Signal backtest still reads CE − PE), CE / PE alone their own buying (+) / selling (−); in lots of the index (`PAPER_TRADE_LOT_SIZE`). FUTURES
   (`futuresDeltaProfile`): the Order Flow day's footprint (`/api/order-flow/{u}/day/{date}` at the row size, with
   `backfillBars` - the minutes the server did not record live estimated from 1-minute candles and TAGGED, a whole day
   estimated when it holds none), `dayVolumeProfile` regrouped, delta = buy − sell, in lots (`meta.lotSize`); live it is
@@ -725,21 +725,11 @@ All must pass before committing.
   candles stop short of it; buyers green right of its centre line, sellers purple left, scaled to the largest row) and a line
   over each chart (what it is of, the net, the rows of the most buying / selling - `deltaProfileLevels`). SPOT = the OPTIONS'
   flow on spot rows, OI Replay's option delta profile (`optionDeltaMinutes` / `optionDeltaProfileOf` - each strike's bars
-  given a side by where the close sits, weighted by its delta, Net CE − PE) from the day's run (`useOptionRun` -
+  given a side by where the close sits, weighted by its delta, Net CE − PE, or PE − CE: the page's CE − PE / PE − CE picker beside the tick, `optionanalytics.profiles.netOrder` - its OWN setting, not OI Replay's option delta card's, asked for) from the day's run (`useOptionRun` -
   `/api/oi-replay/{u}/run`, WEEK / BANKNIFTY MONTH; asked only while ticked; LIVE `forceLive` and again each minute, a page
   timer with `POLL_HEADERS` - the server's memory), the minutes up to the clock, the sessions before from their own runs
   (`usePastDeltaSessions`, moved to `usePastDeltaSessions.js`, shared with OI Replay's delta cards). FUTURES = the footprint's
   buy − sell at each price (`futuresDeltaProfileOf`) of the same sessions the profiles use. Display only.
-  THE "OI Δ" TICK (asked for - "delta profile ... like professional systems use it: on the futures chart futures OI, on
-  the option chart options OI"; `optionanalytics.profiles.oi`, OFF by default; `oiProfile.js`): the OI PROFILE of the
-  professional tools (Hyblock's OI profile, ATAS' options OI net) - OPEN INTEREST CHANGE added up by price - as a second
-  column ("OI Δ") left of the Delta one, and a line (net, the rows MOST BUILT / MOST UNWOUND). FUTURES = the near futures'
-  OI change each minute (`futuresOiMinutes` - the run's 1-minute futures bars, OI at the close less the minute before's) on
-  that bar's rows: + opened, − closed. SPOT = the options' OI change each minute (`optionOiMinutes` - every strike from its
-  own first reading, calls and puts apart) on the rows the spot covered: NET = PE added − CE added (+ = puts written / calls
-  closed - a floor building; − = a ceiling). Each minute spread evenly over its rows (`oiProfileOf`), the run of the day
-  (`useOptionRun`, loaded while either tick is on) cut at the clock, the sessions before from their runs (`optionDayRecord`
-  keeps `oi` / `futuresOi` too). `tests/oi-profile.test.mjs` (worked values, first readings, a cut = the minutes up to it).
   THE FLOATING REPLAY BAR (asked for - "on the market / volume profile and order flow pages a floating popover to run replay
   like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
   Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /
