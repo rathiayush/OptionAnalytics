@@ -1,4 +1,4 @@
-import { HEDGER_GROUPS, gexSignOf, gexSignOptions, sharesText } from './participantOi.js'
+import { HEDGER_GROUPS, gexSignOf, gexSignOptions, gexVerdict, sharesText } from './participantOi.js'
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Button, Col, Modal, Popover, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { InfoCircleOutlined } from '@ant-design/icons'
@@ -327,11 +327,11 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
   // closed by its ✕ - as a tooltip they ran past the bottom of a phone's screen with no way to scroll or close them.
   const touchOrNarrow = useMediaQuery('(hover: none), (max-width: 768px)')
   const [tableOpen, setTableOpen] = useState(false)
-  const narrowSigns = useMediaQuery('(max-width: 768px)')
   const both = useMemo(() => {
     const standardNow = gexUpTo(days?.standard ?? [], asOfMs).at(-1)
     const buildupNow = gexUpTo(days?.buildup ?? [], asOfMs).at(-1)
-    return { standardNow, buildupNow, ...gexAgreement(standardNow, buildupNow) }
+    const nseNow = days?.participant ? gexUpTo(days.participant, asOfMs).at(-1) ?? null : null
+    return { standardNow, buildupNow, nseNow, ...gexAgreement(standardNow, buildupNow), verdict: gexVerdict(standardNow, buildupNow, nseNow) }
   }, [days, asOfMs])
 
   const charts = useMemo(() => {
@@ -350,21 +350,12 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
 
   const controls = (
     <Space wrap size={[16, 6]} style={{ marginBottom: 8 }}>
-      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard. NSE positions: not assumed - the hedgers' real net share of the calls and of the puts from NSE's participant-wise open interest of the session before (one number a side for all NSE index options, so it leans the net and the flip, not a strike). NSE + build-up: starts from those positions, then the OI changes signed by their IV.">
+      <Tooltip title="Who holds the other side of the OI is not in the data. Standard: dealers long the calls and short the puts (calls +, puts −). OI build-up: the first reading's OI as standard, then each OI change signed by the option's own IV (spot's move and the time decay taken out) - added while its IV fell = written (dealers long), added while it rose = bought (dealers short); an IV that barely moved counts as standard. The Verdict line under the controls compares both for you (and NSE's real positions, when it has them).">
         <Space size={4}>
           <Text type="secondary" style={{ fontSize: 12 }}>Sign</Text>
-          {/* Four signs do not fit a phone's width as a row of buttons (the page came out wider than the screen). */}
-          {narrowSigns ? <Select size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} style={{ width: 150 }} /> : <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions(days)} />}
+          <Segmented size="small" value={sign} onChange={setSign} options={gexSignOptions()} />
         </Space>
       </Tooltip>
-      {participants?.shares && (
-        <Tooltip title="Whose positions count as the dealers' (the ones hedging with the index) under the NSE signs.">
-          <Space size={4}>
-            <Text type="secondary" style={{ fontSize: 12 }}>Hedgers</Text>
-            <Select size="small" value={participants.shares.group} onChange={participants.setGroup} options={HEDGER_GROUPS.map(({ value, label }) => ({ value, label }))} style={{ width: 136 }} />
-          </Space>
-        </Tooltip>
-      )}
       <Popover content={HOW_TO_READ} title="How to read GEX" trigger="click" placement="bottomLeft">
         <Button size="small" type="link" style={{ padding: 0 }}>How to read</Button>
       </Popover>
@@ -456,39 +447,40 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
       </FoldText>
       {participants && (
         <FoldText id="gex.participants" label="NSE positions" style={{ marginBottom: 8 }}
-          summary={participants.shares ? `NSE positions (${participants.shares.date}): ${sharesText(participants.shares)}` : participants.loading ? 'NSE positions: loading…' : 'NSE positions: not available for this day - the signs are the assumed ones'}>
+          summary={participants.shares ? `NSE positions (${participants.shares.date}): ${sharesText(participants.shares)}` : participants.loading ? 'NSE positions: loading…' : 'NSE positions: not available for this day - the verdict is from the two assumed signs'}>
           <div style={{ fontSize: 12 }}>
             {participants.shares ? (
               <>
                 NSE&apos;s participant-wise open interest at the close of <b>{participants.shares.date}</b> (the session before - nothing
                 later is read): <b>{sharesText(participants.shares)}</b> ({num(participants.shares.callNet)} of {num(participants.shares.callTotal)} call
-                contracts, {num(participants.shares.putNet)} of {num(participants.shares.putTotal)} put contracts). Under &quot;NSE
-                positions&quot; every call&apos;s OI counts × {participants.shares.call.toFixed(3)} and every put&apos;s × {participants.shares.put.toFixed(3)} as
+                contracts, {num(participants.shares.putNet)} of {num(participants.shares.putTotal)} put contracts). In the Verdict&apos;s
+                third read every call&apos;s OI counts × {participants.shares.call.toFixed(3)} and every put&apos;s × {participants.shares.put.toFixed(3)} as
                 the dealers&apos; (Standard: × 1 and × −1) - so the net is much smaller than Standard&apos;s: the real books are close to
                 balanced. It is one number a side for ALL NSE index options (every index, strike and expiry), so it sets which way the
                 hedgers lean and the flip; the walls and max gamma do not depend on it.
                 {participants.bse ? ' SENSEX trades on BSE - NSE\'s positions are a stand-in here.' : ''}
-                {days?.participant && (() => {
-                  const nseNow = gexUpTo(days.participant, asOfMs).at(-1)
-                  return nseNow ? <> Net GEX now: <span style={{ color: gexColor(nseNow.net) }}>{cr(nseNow.net)}</span> on NSE positions vs <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)}</span> Standard.</> : null
-                })()}
+                <div style={{ marginTop: 4 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Whose book counts as the hedgers&apos; </Text>
+                  <Select size="small" value={participants.shares.group} onChange={participants.setGroup} options={HEDGER_GROUPS.map(({ value, label }) => ({ value, label }))} style={{ width: 150 }} />
+                  <Text type="secondary" style={{ fontSize: 11 }}> (Pro desks is the one to keep)</Text>
+                </div>
               </>
-            ) : participants.loading ? 'Loading NSE\'s participant-wise open interest…' : 'NSE\'s participant-wise open interest could not be read for the session before this day - Standard and OI build-up (assumed signs) are shown.'}
+            ) : participants.loading ? 'Loading NSE\'s participant-wise open interest…' : 'NSE\'s participant-wise open interest could not be read for the session before this day - the verdict is from Standard and OI build-up alone.'}
           </div>
         </FoldText>
       )}
-      <FoldText id="gex.agreement" label="the two signs' verdict" style={{ marginBottom: 8 }}>
-        <div style={{ fontSize: 12 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>Standard </Text>
-          <span style={{ color: gexColor(both.standardNow?.net) }}>{cr(both.standardNow?.net)} ({both.standard ?? '-'})</span>
-          <Text type="secondary" style={{ fontSize: 12 }}> · OI build-up </Text>
-          <span style={{ color: gexColor(both.buildupNow?.net) }}>{cr(both.buildupNow?.net)} ({both.buildup ?? '-'})</span>
-          {' → '}
-          {both.agree
-            ? <><Tag color={both.regime === 'positive' ? 'green' : 'red'} style={{ margin: '0 6px 0 0' }}>agree</Tag>{both.regime === 'positive' ? 'range / pin day - fade the walls, aim at the max gamma strike.' : 'trend / fast day - trade with the break, do not fade it.'}</>
-            : <><Tag color="gold" style={{ margin: '0 6px 0 0' }}>disagree</Tag>regime unclear - do not lean on the flip; trade the walls and spot structure.</>}
+      {/* THE ONE VERDICT (participantOi.gexVerdict), always shown: which day it is, from the reads compared - nothing to pick. */}
+      <div style={{ fontSize: 12, marginBottom: 8, padding: '6px 8px', borderLeft: `3px solid ${both.verdict.regime == null ? '#d89614' : both.verdict.regime === 'positive' ? UP_COLOR : DOWN_COLOR}`, background: 'rgba(255,255,255,0.03)' }}>
+        <Tag color={both.verdict.regime == null ? 'gold' : both.verdict.regime === 'positive' ? 'green' : 'red'} style={{ margin: '0 6px 0 0', fontWeight: 600 }}>Verdict</Tag>
+        <b>{both.verdict.text}.</b>
+        <div style={{ marginTop: 2 }}>
+          {both.verdict.votes.map((v, i) => {
+            const net = [both.standardNow, both.buildupNow, both.nseNow][i]?.net
+            return <span key={v.name} style={{ marginRight: 12 }}><Text type="secondary" style={{ fontSize: 11 }}>{v.name} </Text><span style={{ color: gexColor(net), fontSize: 11 }}>{cr(net)} ({v.regime === 'positive' ? 'range' : v.regime === 'negative' ? 'trend' : '-'})</span></span>
+          })}
+          <Text type="secondary" style={{ fontSize: 11 }}>· the walls and max gamma hold under every read</Text>
         </div>
-      </FoldText>
+      </div>
       <Row gutter={[16, 4]} style={{ marginBottom: 8, fontSize: 12 }}>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Net GEX </Text><Text strong style={{ fontSize: 12, color: gexColor(now.net) }}>{cr(now.net)}</Text><Text type="secondary" style={{ fontSize: 12 }}> per 1% move</Text></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Calls </Text><span style={{ color: gexColor(now.calls) }}>{cr(now.calls)}</span><Text type="secondary" style={{ fontSize: 12 }}> · Puts </Text><span style={{ color: gexColor(now.puts) }}>{cr(now.puts)}</span></Col>

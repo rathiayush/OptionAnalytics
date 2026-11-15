@@ -1,6 +1,6 @@
 import { gexSignOf, gexSignOptions } from './participantOi.js'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Checkbox, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
+import { Checkbox, Segmented, Space, Tag, Tooltip, Typography } from 'antd'
 import { CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries, LineType } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, fromChartTime, istTickMarkFormatter, istTimeFormatter, useMediaQuery, usePersistedState } from './shared.jsx'
@@ -177,7 +177,7 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
       <Space size={[12, 6]} wrap style={{ marginBottom: 6 }}>
         <Segmented size="small" value={tf} onChange={setTimeframe} options={GEX_SPOT_TIMEFRAMES.map((m) => ({ value: m, label: `${m}m` }))} />
         <Tooltip title="Standard: calls +, puts −. OI build-up: each OI change signed by its own IV's move (buyers vs writers) - the GEX card's Sign.">
-          {narrow ? <Select size="small" value={gexSignOf(days, sign)} onChange={setSign} options={gexSignOptions(days)} style={{ width: 150 }} /> : <Segmented size="small" value={gexSignOf(days, sign)} onChange={setSign} options={gexSignOptions(days)} />}
+          <Segmented size="small" value={gexSignOf(days, sign)} onChange={setSign} options={gexSignOptions()} />
         </Tooltip>
         <Checkbox.Group
           value={shown} onChange={setShown}
