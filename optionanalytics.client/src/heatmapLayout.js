@@ -10,6 +10,16 @@
 //    anchor, else below it); the ones with no room become a small dot - they piled up into an unreadable stack.
 //  - restingSince: how long the side under the pointer has held at least half its size at that price - a wall that has
 //    rested 20 minutes is not one flashed a second ago (a spoof).
+//
+// As the professional heatmaps draw it (asked for - "check the liquidity heatmap for the best possible representation ...
+// how professional systems do it"; Bookmap's heatmap, its BBO lines, volume dots and current order book column):
+//  - heatScale / heatLevel: the colour between a LOWER and an UPPER cutoff (percentiles of the sizes in view - adaptive to
+//    what is on screen) with a contrast CURVE (gamma < 1 lifts the middle sizes): a straight line to the 98th percentile
+//    left the many small orders one blue and every wall alike. HEAT_CONTRASTS - Low / Normal / High.
+//  - bestQuotes: each column's best bid / best ask - drawn as the green / red BBO lines (the mid when the rows are too thin).
+//  - volumeDots: EVERY traded minute at each row as a dot sized by its volume, coloured by its aggressor (buy - sell) - not
+//    only the big orders.
+//  - cobBars: the CURRENT ORDER BOOK at the clock - the last column - as bars at the plot's right edge.
 
 /** Columns with no levels on either side: no book recorded at that moment. */
 export const isEmptyColumn = (c) => !(c?.bids?.length) && !(c?.asks?.length)
@@ -127,4 +137,73 @@ export function restingSince(columns, index, side, price, { fraction = 0.5, span
     since = columns[i].t
   }
   return { since, quantity: now }
+}
+
+/** The contrast presets: lower / upper cutoff as percentiles of the sizes in view, and the curve between them. */
+export const HEAT_CONTRASTS = {
+  low: { lo: 0.02, hi: 0.995, gamma: 0.85, label: 'Low' },
+  normal: { lo: 0.15, hi: 0.97, gamma: 0.6, label: 'Normal' },
+  high: { lo: 0.35, hi: 0.93, gamma: 0.45, label: 'High' },
+}
+
+/** The colour scale of `quantities` (the sizes in view): { lo, hi, gamma } - at or under `lo` the darkest colour, at or
+ *  over `hi` the brightest. */
+export function heatScale(quantities, contrast = 'normal') {
+  const c = HEAT_CONTRASTS[contrast] ?? HEAT_CONTRASTS.normal
+  const v = (quantities ?? []).filter((q) => q > 0).sort((a, b) => a - b)
+  if (!v.length) return { lo: 0, hi: 1, gamma: c.gamma }
+  const at = (f) => v[Math.min(v.length - 1, Math.max(0, Math.floor(v.length * f)))]
+  const lo = at(c.lo)
+  const hi = Math.max(at(c.hi), lo + 1e-9)
+  return { lo, hi, gamma: c.gamma }
+}
+
+/** A size's place on the colour scale, 0 - 1. */
+export function heatLevel(q, { lo, hi, gamma }) {
+  if (!(q > lo)) return 0
+  if (q >= hi) return 1
+  return ((q - lo) / (hi - lo)) ** gamma
+}
+
+/** A column's best bid (highest bid price) and best ask (lowest ask price); null for a side with none. */
+export function bestQuotes(column) {
+  let bid = null, ask = null
+  for (const [p] of column?.bids ?? []) if (bid == null || p > bid) bid = p
+  for (const [p] of column?.asks ?? []) if (ask == null || p < ask) ask = p
+  return { bid, ask }
+}
+
+/** The current order book of `column` as bars: { bids: [[price, q]], asks: [[price, q]], max } (max = the largest level of
+ *  either side - the bars' common scale). */
+export function cobBars(column) {
+  const bids = [...(column?.bids ?? [])].filter(([, q]) => q > 0)
+  const asks = [...(column?.asks ?? [])].filter(([, q]) => q > 0)
+  let max = 0
+  for (const [, q] of [...bids, ...asks]) if (q > max) max = q
+  return { bids, asks, max }
+}
+
+/**
+ * The traded volume as dots: each minute bar (`bars` - { time, levels: [{ price, buy, sell }] }, the footprint's minutes)
+ * between t0 and t1, its volume at each `row` (prices grouped by `rowOf`) - [{ t (the minute's middle), price, volume,
+ * delta (buy - sell), r (0 - 1, sqrt of volume over the largest dot's) }].
+ */
+export function volumeDots(bars, row, rowOf, { t0 = -Infinity, t1 = Infinity, minuteMs = 60_000 } = {}) {
+  const out = []
+  for (const bar of bars ?? []) {
+    const start = typeof bar.time === 'number' ? bar.time : new Date(bar.time).getTime()
+    if (!(start + minuteMs > t0 && start <= t1)) continue
+    const byRow = new Map()
+    for (const l of bar.levels ?? []) {
+      const r = rowOf(l.price, row)
+      const cell = byRow.get(r) ?? { buy: 0, sell: 0 }
+      cell.buy += l.buy ?? 0
+      cell.sell += l.sell ?? 0
+      byRow.set(r, cell)
+    }
+    for (const [price, c] of byRow) if (c.buy + c.sell > 0) out.push({ t: start + minuteMs / 2, price, volume: c.buy + c.sell, delta: c.buy - c.sell })
+  }
+  const most = out.reduce((m, d) => Math.max(m, d.volume), 0)
+  for (const d of out) d.r = most > 0 ? Math.sqrt(d.volume / most) : 0
+  return out
 }

@@ -6,8 +6,8 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
-import { bidShare, heatmapPriceRange, rowDeltas, unfinishedRevisits } from './orderFlowMath.js'
-import { columnAt, columnSpans, gapAt, placeLabels, restingSince } from './heatmapLayout.js'
+import { bidShare, heatmapPriceRange, rowDeltas, rowOf, unfinishedRevisits } from './orderFlowMath.js'
+import { bestQuotes, cobBars, columnAt, columnSpans, gapAt, heatLevel, heatScale, placeLabels, restingSince, volumeDots } from './heatmapLayout.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
 import { footprintTextLayout } from './footprintText.js'
 
@@ -733,7 +733,8 @@ function heatColor(t) {
 // the time axis all agree; a stretch with no book is drawn as such ("no book", the price line broken across it); the
 // signal pills never cover each other (placeLabels - the weaker ones a dot); the hover says how long the level has
 // rested (restingSince).
-export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], vwap = null, lotSize, showLots, height = 420 }) {
+export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], vwap = null, lotSize, showLots, height = 420,
+  contrast = 'normal', volumeBars = null, showCob = false }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -746,7 +747,10 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
   const [vview, setVview] = useState(null)
   const dragRef = useRef(null)
   const step = rowSize > 0 ? rowSize : 0.05
-  const plotW = Math.max(0, width - HM_AXIS_W)
+  // The current order book column at the right of the plot (Bookmap's COB): the book at the clock as bars.
+  const cobW = showCob && width >= 280 ? (width >= 700 ? 64 : width >= 480 ? 44 : 32) : 0
+  // plotW = the columns' width (time); the COB column and the price axis follow it.
+  const plotW = Math.max(0, width - HM_AXIS_W - cobW)
   const plotH = Math.max(50, height - HM_TIME_H)
   // Where every column sits in time, and the stretches with no book - worked out once for the columns.
   const timing = useMemo(() => columnSpans(columns), [columns])
@@ -773,9 +777,9 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const { hi, lo } = range
     const quantities = []
     for (const c of visible) for (const side of [c.bids, c.asks]) for (const [, q] of side) quantities.push(q)
-    quantities.sort((a, b) => a - b)
-    // Linear against the 98th percentile: ordinary liquidity stays blue, walls stand out hot.
-    const cap = quantities[Math.floor(quantities.length * 0.98)] || 1
+    // Between a lower and an upper cutoff of the sizes in view, on a contrast curve (heatScale - Bookmap's cutoffs and
+    // contrast): the small orders are the dark background, the middle sizes told apart, the walls hot.
+    const scale = heatScale(quantities, contrast)
     let hiPad = hi + step
     let nRows = Math.round((hiPad - (lo - step)) / step) + 1
     let rowH = plotH / nRows
@@ -790,9 +794,9 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const tEnd = Math.max(tStart + 1, spans.at(-1)?.end ?? visible.at(-1).t)
     const gaps = timing.gaps.filter((g) => g.end > tStart && g.start < tEnd)
     return {
-      visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, cap, t0: tStart, t1: tEnd, start, end, spans, gaps,
+      visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, scale, t0: tStart, t1: tEnd, start, end, spans, gaps,
     }
-  }, [columns, width, plotW, plotH, step, hview, vview, timing])
+  }, [columns, width, plotW, plotH, step, hview, vview, timing, contrast])
 
   // Rows `factor` times taller around the price at height y (factor > 1 = zoom in); the top stays on a row.
   const zoomRowsAt = (factor, y = plotH / 2) => {
@@ -809,7 +813,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
   }
   const resetView = () => { setHview(null); setVview(null) }
   const zoomRef = useRef({})
-  useEffect(() => { zoomRef.current = { zoomRowsAt, zoomColsBy, plotW } })
+  useEffect(() => { zoomRef.current = { zoomRowsAt, zoomColsBy, plotW: plotW + cobW } })
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return undefined
@@ -830,14 +834,14 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     if (!canvas || !width) return
     const ctx = prepareCanvas(canvas, width, height)
     ctx.fillStyle = '#0d111a'
-    ctx.fillRect(0, 0, plotW, plotH)
+    ctx.fillRect(0, 0, plotW + cobW, plotH)
     if (!layout) {
       ctx.fillStyle = AXIS_COLOR
       ctx.font = `13px ${FONT}`
       ctx.fillText('Waiting for market depth…', 16, 30)
       return
     }
-    const { visible, mids, hiPad, nRows, rowH, cap, t0, t1, spans, gaps } = layout
+    const { visible, mids, hiPad, nRows, rowH, scale, t0, t1, spans, gaps } = layout
     const rowTop = (p) => Math.round((hiPad - p) / step) * rowH
     const yPrice = (p) => ((hiPad + step - p) / step) * rowH - rowH / 2
     // Time to x: the columns, the price line, the prints, the signals, the icebergs, the VWAP and the axis alike.
@@ -855,7 +859,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
         for (const [p, q] of side) {
           const top = rowTop(p)
           if (top < -rowH || top > plotH) continue
-          ctx.fillStyle = heatColor(q / cap)
+          ctx.fillStyle = heatColor(heatLevel(q, scale))
           ctx.fillRect(x, top, w + 0.6, rowH + 0.6)
         }
       }
@@ -886,21 +890,32 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       }
     }
 
-    // Mid price - broken across a stretch with no book.
-    ctx.strokeStyle = '#ffffffdd'
+    // The BEST BID (green) and BEST ASK (red) as step lines through the day, as Bookmap draws them - the spread and which
+    // side moved first are visible; zoomed out until a row is under 3 px they merge, so the mid is drawn instead. Both
+    // broken across a stretch with no book.
+    const stepLine = (priceOf, color) => {
+      ctx.strokeStyle = color
+      ctx.beginPath()
+      let prevY = null
+      visible.forEach((c, i) => {
+        const span = spans[i]
+        const p = span && !span.empty ? priceOf(c, i) : null
+        if (p == null) { prevY = null; return }
+        const y = yPrice(p), x0 = xTime(span.start), x1 = xTime(span.end)
+        const joined = prevY != null && spans[i - 1] && spans[i - 1].end >= span.start
+        if (joined) { ctx.lineTo(x0, prevY); ctx.lineTo(x0, y) } else ctx.moveTo(x0, y)
+        ctx.lineTo(x1, y)
+        prevY = y
+      })
+      ctx.stroke()
+    }
     ctx.lineWidth = 1.5
-    ctx.beginPath()
-    let started = false
-    mids.forEach((m, i) => {
-      const span = spans[i]
-      if (m == null || !span || span.empty) { started = false; return }
-      const x = xTime((span.start + span.end) / 2)
-      const y = yPrice(m)
-      const joined = started && i > 0 && spans[i - 1] && spans[i - 1].end >= span.start
-      if (!joined) ctx.moveTo(x, y); else ctx.lineTo(x, y)
-      started = true
-    })
-    ctx.stroke()
+    if (rowH >= 3) {
+      stepLine((c) => bestQuotes(c).bid, 'rgba(38,214,154,0.95)')
+      stepLine((c) => bestQuotes(c).ask, 'rgba(255,99,99,0.95)')
+    } else {
+      stepLine((c, i) => mids[i], '#ffffffdd')
+    }
     ctx.lineWidth = 1
 
     // Icebergs
@@ -966,6 +981,24 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       ctx.lineWidth = 1
     }
 
+    // VOLUME DOTS (Bookmap's): every traded minute at each row - sized by its volume against the largest in view, split
+    // green (bought at the ask) / red (sold at the bid) by its share - then the big prints on top, ringed.
+    if (volumeBars?.length) {
+      // At most half a row and half a minute across (neighbours never run into one blob), 2.5 - 12 px.
+      const minuteW = (60_000 / Math.max(1, t1 - t0)) * plotW
+      const maxR = Math.max(2.5, Math.min(12, rowH * 0.55, minuteW * 0.5))
+      for (const d of volumeDots(volumeBars, step, rowOf, { t0, t1 })) {
+        const r = Math.max(1.2, d.r * maxR)
+        const x = xTime(d.t), y = yPrice(d.price)
+        ctx.fillStyle = 'rgba(239,83,80,0.7)'
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill()
+        const buyShare = d.volume > 0 ? (d.volume + d.delta) / 2 / d.volume : 0
+        if (buyShare > 0) {
+          ctx.fillStyle = 'rgba(38,166,154,0.8)'
+          ctx.beginPath(); ctx.moveTo(x, y); ctx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + buyShare * Math.PI * 2); ctx.closePath(); ctx.fill()
+        }
+      }
+    }
     // Large prints
     for (const trade of trades ?? []) {
       const t = new Date(trade.time).getTime()
@@ -1015,6 +1048,38 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
 
     ctx.restore()
 
+    // The CURRENT ORDER BOOK at the clock (the last column in view) as bars from the column's left edge: bids green, offers
+    // red, one scale for both sides, the best bid / ask brighter.
+    if (cobW > 0) {
+      const last = visible.at(-1)
+      const book = cobBars(last)
+      ctx.fillStyle = '#10151f'
+      ctx.fillRect(plotW, 0, cobW, plotH)
+      ctx.strokeStyle = BORDER_COLOR
+      ctx.beginPath(); ctx.moveTo(plotW + 0.5, 0); ctx.lineTo(plotW + 0.5, plotH); ctx.stroke()
+      if (book.max > 0) {
+        const { bid, ask } = bestQuotes(last)
+        const room = cobW - 4
+        ctx.save()
+        ctx.beginPath(); ctx.rect(plotW, 0, cobW, plotH); ctx.clip()
+        for (const [side, rows] of [['bid', book.bids], ['ask', book.asks]]) {
+          for (const [p, q] of rows) {
+            const top = rowTop(p)
+            if (top < -rowH || top > plotH) continue
+            const best = side === 'bid' ? p === bid : p === ask
+            ctx.fillStyle = side === 'bid' ? (best ? 'rgba(38,214,154,1)' : 'rgba(38,166,154,0.75)') : (best ? 'rgba(255,99,99,1)' : 'rgba(239,83,80,0.75)')
+            ctx.fillRect(plotW + 2, top + (rowH >= 3 ? 0.5 : 0), Math.max(1, (q / book.max) * room), Math.max(1, rowH - (rowH >= 3 ? 1 : 0)))
+          }
+        }
+        ctx.restore()
+      }
+      ctx.fillStyle = AXIS_COLOR
+      ctx.font = `600 9px ${FONT}`
+      ctx.textAlign = 'center'
+      ctx.fillText('BOOK', plotW + cobW / 2, plotH + HM_TIME_H / 2)
+      ctx.textAlign = 'left'
+    }
+
     // Axes
     ctx.font = `11px ${FONT}`
     ctx.textBaseline = 'middle'
@@ -1023,7 +1088,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     for (let i = 0; i < nRows; i++) {
       const price = Math.round((hiPad - i * step) * 100) / 100
       if (Math.round(price / step) % labelEvery !== 0) continue
-      ctx.fillText(priceText(price), plotW + 6, i * rowH + rowH / 2)
+      ctx.fillText(priceText(price), plotW + cobW + 6, i * rowH + rowH / 2)
     }
     ctx.textAlign = 'center'
     // The time axis: IST at every :00 / :30 in view (every hour, 2 h ... when zoomed out - halfHourMarks.js); with fewer than
@@ -1041,7 +1106,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
       }
     }
     ctx.textAlign = 'left'
-  }, [layout, width, height, plotW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize])
+  }, [layout, width, height, plotW, cobW, plotH, step, trades, icebergs, signals, marks, vwap, lotSize, volumeBars])
 
   // The figures of the cell under a pointer (mouse hover or a finger's touch): its price, time, the bids and offers resting
   // there and since when they have held at least half that size (restingSince); a stretch with no book says so; null off
@@ -1051,11 +1116,13 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const rect = e.currentTarget.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
-    if (x < 0 || x > plotW || y < 0 || y > plotH) return null
-    const t = layout.t0 + (x / plotW) * (layout.t1 - layout.t0)
-    const gap = gapAt(layout.gaps, t)
+    if (x < 0 || x > plotW + cobW || y < 0 || y > plotH) return null
+    const inCob = x > plotW
+    const t = inCob ? layout.t1 : layout.t0 + (x / plotW) * (layout.t1 - layout.t0)
+    const gap = inCob ? null : gapAt(layout.gaps, t)
     if (gap) return { x, y, gap }
-    const i = columnAt(layout.spans, t)
+    // Over the book column: the last column in view (the book at the clock).
+    const i = inCob ? layout.visible.length - 1 : columnAt(layout.spans, t)
     if (i == null) return null
     const col = layout.visible[i]
     const row = Math.round((layout.hiPad - Math.floor(y / layout.rowH) * step) * 100) / 100
