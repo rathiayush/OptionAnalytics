@@ -734,7 +734,7 @@ function heatColor(t) {
 // signal pills never cover each other (placeLabels - the weaker ones a dot); the hover says how long the level has
 // rested (restingSince).
 export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [], marks = [], vwap = null, lotSize, showLots, height = 420,
-  contrast = 'normal', volumeBars = null, showCob = false }) {
+  volumeBars = null, showCob = false }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -777,9 +777,9 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     const { hi, lo } = range
     const quantities = []
     for (const c of visible) for (const side of [c.bids, c.asks]) for (const [, q] of side) quantities.push(q)
-    // Between a lower and an upper cutoff of the sizes in view, on a contrast curve (heatScale - Bookmap's cutoffs and
-    // contrast): the small orders are the dark background, the middle sizes told apart, the walls hot.
-    const scale = heatScale(quantities, contrast)
+    // Between a lower and an upper cutoff of the sizes in view (heatScale - Bookmap's cutoffs): the small orders are the
+    // dark background, ordinary ones blue, the walls hot.
+    const scale = heatScale(quantities)
     let hiPad = hi + step
     let nRows = Math.round((hiPad - (lo - step)) / step) + 1
     let rowH = plotH / nRows
@@ -796,7 +796,7 @@ export function DepthHeatmap({ columns, rowSize, trades, icebergs, signals = [],
     return {
       visible, mids, hiPad, nRows, rowH, colW: plotW / visible.length, scale, t0: tStart, t1: tEnd, start, end, spans, gaps,
     }
-  }, [columns, width, plotW, plotH, step, hview, vview, timing, contrast])
+  }, [columns, width, plotW, plotH, step, hview, vview, timing])
 
   // Rows `factor` times taller around the price at height y (factor > 1 = zoom in); the top stays on a row.
   const zoomRowsAt = (factor, y = plotH / 2) => {

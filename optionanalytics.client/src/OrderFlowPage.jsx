@@ -27,7 +27,6 @@ import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, or
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { FLOW_READ_SCORES, scoredFlowReads, withScoredReads } from './flowReads.js'
-import { HEAT_CONTRASTS } from './heatmapLayout.js'
 import { BookPressureCard, LiquidityNetCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
@@ -573,9 +572,8 @@ export default function OrderFlowPage() {
   }, [view?.heatFine, view?.heatFineRow, view?.heatmap, heatRow, rowSize])
   // The heatmap's STACK / PULL pills can be hidden (a box on the card, remembered) - the read, bias and signal list keep them.
   const [heatPullStack, setHeatPullStack] = usePersistedState('optionanalytics.orderFlow.heatPullStack', true)
-  // The heatmap drawn as the professional ones are (heatmapLayout.js): the colour contrast (Bookmap's cutoffs / curve), every
-  // traded minute as a dot (volume dots) and the current order book as a column at the right.
-  const [heatContrast, setHeatContrast] = usePersistedState('optionanalytics.orderFlow.heatContrast', 'normal')
+  // The heatmap drawn as the professional ones are (heatmapLayout.js): every traded minute as a dot (volume dots) and the
+  // current order book as a column at the right.
   const [heatVolumeDots, setHeatVolumeDots] = usePersistedState('optionanalytics.orderFlow.heatVolumeDots', true)
   const [heatCob, setHeatCob] = usePersistedState('optionanalytics.orderFlow.heatCob', true)
   const heatSignals = useMemo(() => [...liquidity, ...(heatPullStack ? pullStack.signals : []), ...sweeps], [liquidity, heatPullStack, pullStack.signals, sweeps])
@@ -941,12 +939,6 @@ export default function OrderFlowPage() {
                         </Tooltip>
                       )}
                       {!estimated && (
-                        <Tooltip title="Colour contrast, as Bookmap's cutoffs: sizes under the lower cutoff are the dark background, over the upper one the brightest, a curve between. High = only the biggest walls stand out; Low = small orders show too. It adapts to the part of the day in view.">
-                          <Select size="small" value={HEAT_CONTRASTS[heatContrast] ? heatContrast : 'normal'} style={{ width: 160 }} onChange={setHeatContrast}
-                            options={Object.entries(HEAT_CONTRASTS).map(([value, c]) => ({ value, label: `Contrast: ${c.label}` }))} />
-                        </Tooltip>
-                      )}
-                      {!estimated && (
                         <Tooltip title="Volume dots: every traded minute at each price as a dot - bigger = more traded, the green share bought at the ask, red sold at the bid. Off = only the big orders.">
                           <Checkbox checked={heatVolumeDots} onChange={(e) => setHeatVolumeDots(e.target.checked)}>Volume dots</Checkbox>
                         </Tooltip>
@@ -962,11 +954,11 @@ export default function OrderFlowPage() {
                   {estimated
                     ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No liquidity heatmap for an estimated day - it needs market depth, which Dhan does not keep. Days the server saw live have it." />
                     : <DepthHeatmap columns={heatShown.columns} rowSize={heatShown.row} trades={largeTrades} icebergs={view?.icebergs} signals={heatSignals} marks={heatMarks} vwap={heatmapVwap} lotSize={lotSize} showLots={showLots} height={narrow ? 320 : 440}
-                        contrast={heatContrast} volumeBars={heatVolumeDots ? view?.minuteBars : null} showCob={heatCob} />}
+                        volumeBars={heatVolumeDots ? view?.minuteBars : null} showCob={heatCob} />}
                   {!estimated && (
                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
                       How to read: time runs left to right, price bottom to top. The colour is the size of resting limit orders at that price
-                      (dark = little, blue - yellow - red = more; Contrast sets where the scale starts and ends) - bids below the white price line, offers above it (zoomed in, dotted green / red = the best bid / ask). A bright band that price stops at and that STAYS = a real
+                      (dark = little, blue = ordinary, yellow - red = the biggest walls in view) - bids below the white price line, offers above it (zoomed in, dotted green / red = the best bid / ask). A bright band that price stops at and that STAYS = a real
                       wall (support / resistance); one that vanishes as price gets near = pulled / spoofed (not real). Price eating through a
                       bright band = absorption won - the move usually continues. Dots = the traded volume each minute at each price (bigger = more; green share bought, red sold - Volume dots), white-ringed = big trades, magenta = icebergs
                       (hidden size refilling). Drawn on it: S / R = the support / resistance walls that stay, blue bands = low-liquidity
