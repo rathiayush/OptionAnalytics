@@ -23,6 +23,8 @@
 //    moves are damped (range, pin). Negative = dealers SHORT gamma: they buy rallies and sell dips - moves run (trend).
 //  - Who the dealers are is not in the data, so the sign is an assumption (`sign`):
 //      'standard' - dealers long the calls, short the puts (calls +, puts -), as GEX is usually shown;
+//      `shares`   - not assumed: the hedgers' real net share of the calls and of the puts from NSE's participant-wise open
+//                   interest (participantOi.js), in place of +1 / -1 - one number a side, so it leans the net, not a strike;
 //      'buildup'  - the OI at the first reading signed as standard, then every reading's OI change signed by who pushed
 //                   the option: its OWN IMPLIED VOLATILITY (Black-76 from its premium at that minute's forward and time
 //                   to expiry) rising = the buyers paid up, falling = the writers sold it down. OI added while the IV
@@ -247,7 +249,7 @@ function flipOf(options, spot, years, lo, hi, carry) {
 
 // One expiry's chain for the day: its legs by strike, its expiry, and what is carried minute to minute - the time to expiry
 // last implied and (the build-up sign) each leg's book.
-function chainOf(cePoints, pePoints, expiry, sign) {
+function chainOf(cePoints, pePoints, expiry, sign, shares) {
   const ce = sideRows(cePoints)
   const pe = sideRows(pePoints)
   return {
@@ -256,6 +258,9 @@ function chainOf(cePoints, pePoints, expiry, sign) {
     expiryMs: expiry ? Date.parse(`${String(expiry).slice(0, 10)}T15:30:00+05:30`) : null,
     implied: null,
     book: sign === 'buildup' ? new Map() : null,
+    // The dealers' share of a call's / a put's OI: +1 / -1 as standard, or the hedgers' own (`shares`).
+    callShare: Number.isFinite(shares?.call) ? shares.call : 1,
+    putShare: Number.isFinite(shares?.put) ? shares.put : -1,
   }
 }
 
@@ -297,14 +302,14 @@ function chainAt(chain, t, spot) {
   for (const { strike, c, p } of readings) {
     if (!c && !p) continue
     const sigma = sigmaAt(strike)
-    const cState = chain.book && c ? stepBuildup(chain.book, `c${strike}`, c, { strike, forward, years, isCall: true, standard: 1 }) : null
-    const pState = chain.book && p ? stepBuildup(chain.book, `p${strike}`, p, { strike, forward, years, isCall: false, standard: -1 }) : null
+    const cState = chain.book && c ? stepBuildup(chain.book, `c${strike}`, c, { strike, forward, years, isCall: true, standard: chain.callShare }) : null
+    const pState = chain.book && p ? stepBuildup(chain.book, `p${strike}`, p, { strike, forward, years, isCall: false, standard: chain.putShare }) : null
     legs.push({
       strike, c, p, sigma,
       cGamma: c ? bsGamma(spot, strike, sigma, years, forward) : 0,
       pGamma: p ? bsGamma(spot, strike, sigma, years, forward) : 0,
-      cDealer: c ? dealerOi(c, 1, cState) : null,
-      pDealer: p ? dealerOi(p, -1, pState) : null,
+      cDealer: c ? dealerOi(c, chain.callShare, cState) : null,
+      pDealer: p ? dealerOi(p, chain.putShare, pState) : null,
     })
   }
   return { forward, carry, years, yearsFrom: toExpiry != null ? 'expiry' : 'straddle', implied: chain.implied, atm: atm.strike, atmIv, legs }
@@ -325,11 +330,14 @@ function chainAt(chain, t, spot) {
  * read all of them), the flip and the profile (each option at its own expiry's time and carry). The minute's forward,
  * time to expiry, ATM and IV stay the first chain's (the nearest); a minute the first chain cannot be read is left out,
  * another chain that cannot be read adds nothing that minute. `expiries` on a minute = how many were added in it.
+ * `shares`: { call, put } - the dealers' share of every call's / put's OI (-1 ... +1, + = long) in place of the standard
+ * +1 / -1: NSE's participant-wise positions (participantOi.js). Under 'buildup' the first reading's OI and the changes
+ * that cannot be read take it; a change read from its IV counts in full, as before. None = exactly as before.
  */
-export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true, chains = [] } = {}) {
+export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangePct = GEX_RANGE_PCT, expiry = null, flips = true, chains = [], shares = null } = {}) {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
-  const all = [chainOf(cePoints, pePoints, expiry, sign), ...(chains ?? []).map((c) => chainOf(c?.cePoints, c?.pePoints, c?.expiry ?? null, sign))]
+  const all = [chainOf(cePoints, pePoints, expiry, sign, shares), ...(chains ?? []).map((c) => chainOf(c?.cePoints, c?.pePoints, c?.expiry ?? null, sign, shares))]
   const strikes = [...new Set(all.flatMap((c) => c.strikes))].sort((a, b) => b - a)
   const steps = strikes.slice(1).map((k, i) => strikes[i] - k).filter((d) => d > 0)
   const strikeStep = steps.length ? Math.min(...steps) : 0

@@ -441,3 +441,44 @@ test('another expiry that cannot be read at a minute adds nothing then; nothing 
     assert.deepEqual(gexUpTo(whole, cutAt + 30_000), part)
   }
 })
+
+test('NSE positions as the sign (`shares`): each side\'s OI x the hedgers\' share; +1 / -1 is the standard; the walls do not move', () => {
+  const d = day({ minutes: 10, spot: (m) => 25000 + 3 * m, ceOi: (k) => (k === 25200 ? 4e6 : 1e6), peOi: (k) => (k === 24800 ? 3e6 : 1e6) })
+  const std = gexDay(d.ce, d.pe, d.spots)
+  // +1 / -1 is exactly the standard sign.
+  assert.deepEqual(gexDay(d.ce, d.pe, d.spots, { shares: { call: 1, put: -1 } }), std)
+  const shares = { call: 0.015, put: -0.008 }
+  const nse = gexDay(d.ce, d.pe, d.spots, { shares })
+  assert.equal(nse.length, std.length)
+  for (let i = 0; i < std.length; i++) {
+    assert.ok(close(nse[i].calls, std[i].calls * 0.015, Math.abs(std[i].calls) * 1e-9))
+    assert.ok(close(nse[i].puts, std[i].puts * 0.008, Math.abs(std[i].puts) * 1e-9))
+    assert.ok(close(nse[i].net, nse[i].calls + nse[i].puts, 1e-6))
+    // The walls and max gamma read gamma x OI, whoever holds it.
+    assert.deepEqual([nse[i].callWall, nse[i].putWall, nse[i].maxGamma], [std[i].callWall, std[i].putWall, std[i].maxGamma])
+    const row = nse[i].strikes.find((r) => r.strike === 25200), base = std[i].strikes.find((r) => r.strike === 25200)
+    assert.ok(close(row.call, base.call * 0.015, Math.abs(base.call) * 1e-9))
+    assert.equal(row.ceOi, base.ceOi)
+  }
+  // Hedgers SHORT the calls and LONG the puts: every call's GEX negative, every put's positive - the regime the other way.
+  const flipped = gexDay(d.ce, d.pe, d.spots, { shares: { call: -0.02, put: 0.07 } }).at(-1)
+  assert.ok(flipped.calls < 0 && flipped.puts > 0)
+  // The profile is worked out from the same dealers' OI: at spot it is the net.
+  const last = nse.at(-1)
+  assert.ok(close(netGexAt(last.options, last.spot, last.years, last.carry), last.net, Math.abs(last.net) * 1e-9))
+  // A cut part way = the whole day's up to it.
+  assert.deepEqual(gexDay(d.ce.filter((p) => Date.parse(p.time) < OPEN + 5 * MIN), d.pe.filter((p) => Date.parse(p.time) < OPEN + 5 * MIN), d.spots.slice(0, 5), { shares }), nse.slice(0, 5))
+})
+
+test('NSE positions + build-up: starts from the hedgers\' share, then the OI changes read by their IV count in full', () => {
+  const shares = { call: 0.1, put: -0.05 }
+  const make = (premium) => day({ minutes: 5, ceOi: (k, m) => (k === 25100 ? 1e6 + 2e6 * m : 1e6), price: (side, k, m) => (side === 'ce' && k === 25100 ? premium(m) : null) })
+  const callOf = (d, options) => gexDay(d.ce, d.pe, d.spots, options).at(-1).strikes.find((r) => r.strike === 25100).call
+  // Written (the premium falling): 0.1 x 1M + 8M; bought: 0.1 x 1M - 8M - against the 9M the standard sign counts.
+  const written = make((m) => 60 - m), bought = make((m) => 60 + m)
+  assert.ok(close(callOf(written, { sign: 'buildup', shares }) / callOf(written, {}), 8.1 / 9, 1e-9))
+  assert.ok(close(callOf(bought, { sign: 'buildup', shares }) / callOf(bought, {}), -7.9 / 9, 1e-9))
+  // The first minute: build-up from the shares == the shares.
+  const one = day({ minutes: 1 })
+  assert.ok(close(gexDay(one.ce, one.pe, one.spots, { sign: 'buildup', shares })[0].net, gexDay(one.ce, one.pe, one.spots, { shares })[0].net, 1e-6))
+})

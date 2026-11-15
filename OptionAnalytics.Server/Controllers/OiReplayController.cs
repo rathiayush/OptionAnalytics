@@ -36,6 +36,16 @@ public sealed class OiReplayController : ControllerBase
         catch (Exception) when (!cancellationToken.IsCancellationRequested) { return null; }
     }
 
+    /// <summary>NSE's participant-wise open interest (Client / DII / FII / Pro - index option calls and puts held long and
+    /// short) as known BEFORE `date`'s session: the latest day's file published before it (NseParticipantOi - NSE once a
+    /// day, then disk). OI Replay's GEX signs the dealers' positions from it. 204 when NSE has none / cannot be reached.</summary>
+    [HttpGet("participant-oi")]
+    public async Task<ActionResult> ParticipantOi([FromQuery] DateOnly date, [FromServices] NseParticipantOi participants, CancellationToken cancellationToken)
+    {
+        var day = await participants.LatestBeforeAsync(date, cancellationToken);
+        return day is null ? NoContent() : Ok(day);
+    }
+
     /// <summary>What a day load started with ?progressId= is doing - the page polls this while it waits: series done of
     /// the total, how many came from disk or from Dhan, rate limits, retries and failures, and the log entries after
     /// the first <paramref name="since"/>.</summary>

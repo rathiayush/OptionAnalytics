@@ -187,6 +187,13 @@ builder.Services.AddSingleton(sp => new NseFuturesContractArchive(
     sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseFuturesContractArchive)),
     sp.GetRequiredService<ILogger<NseFuturesContractArchive>>(),
     sp.GetRequiredService<NseDayStore>()));
+
+// NSE's participant-wise open interest (who holds the index options long / short) - OI Replay's GEX sign. See NseParticipantOi.
+builder.Services.AddHttpClient(nameof(NseParticipantOi));
+builder.Services.AddSingleton(sp => new NseParticipantOi(
+    sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(NseParticipantOi)),
+    sp.GetRequiredService<ILogger<NseParticipantOi>>(),
+    sp.GetRequiredService<NseDayStore>()));
 // An expired futures contract's past day from NSE's chart data (Dhan has no intraday history for
 // expired contracts) - see NseChartHistory. Keeps NSE's cookies, like the chart page does.
 builder.Services.AddHttpClient(nameof(NseChartHistory))

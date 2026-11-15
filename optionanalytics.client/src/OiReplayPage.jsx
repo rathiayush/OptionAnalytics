@@ -44,6 +44,7 @@ import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
 import { useGexDays } from './useGexDays.js'
+import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OrderFab } from './OrderFab.jsx'
@@ -4499,9 +4500,35 @@ export default function OiReplayPage() {
   const [quickView, setQuickView] = useState(null)
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
   // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
+  const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex'
+  // NSE's participant-wise open interest of the session BEFORE the day shown (participantOi.js) - the GEX signs read from
+  // real positions. Asked once a day shown (the server keeps it on disk); none = the assumed signs only.
+  const [hedgers, setHedgers] = usePersistedState('optionanalytics.oiReplay.gexHedgers', HEDGER_DEFAULT)
+  const [participantDay, setParticipantDay] = useState({ date: null, day: null, loading: false })
+  const participantDate = result?.success ? result.date : null
+  useEffect(() => {
+    if (!participantDate || !gexWanted) return undefined
+    if (participantDay.date === participantDate && !participantDay.loading) return undefined   // a load cut short is asked again
+    const controller = new AbortController()
+    setParticipantDay({ date: participantDate, day: null, loading: true })
+    fetch(`/api/oi-replay/participant-oi?date=${participantDate}`, { signal: controller.signal })
+      .then((r) => (r.status === 200 ? r.json() : null))
+      .then((day) => setParticipantDay({ date: participantDate, day, loading: false }))
+      .catch(() => { if (!controller.signal.aborted) setParticipantDay({ date: participantDate, day: null, loading: false }) })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participantDate, gexWanted])
+  const participantShareOf = useMemo(
+    () => (participantDay.date === participantDate && participantDay.day ? participantShares(participantDay.day, hedgers) : null),
+    [participantDay, participantDate, hedgers],
+  )
+  const gexParticipants = useMemo(
+    () => ({ shares: participantShareOf, setGroup: setHedgers, loading: participantDay.loading, bse: underlying === 'SENSEX' }),
+    [participantShareOf, setHedgers, participantDay.loading, underlying],
+  )
   const gexDays = useGexDays(flowCePoints, flowPePoints, flowSpotBars, {
-    expiry: result?.optionExpiry ?? null, live: isLive, chains: sumExtras?.chains ?? null,
-    enabled: visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex',
+    expiry: result?.optionExpiry ?? null, live: isLive, chains: sumExtras?.chains ?? null, shares: participantShareOf,
+    enabled: gexWanted,
   })
   // The session VWAP in real time (epoch ms) for the entry checklist - vwapSeries is in chart time.
   const checklistVwap = useMemo(() => vwapSeries.map((p) => ({ time: fromChartTime(p.time) * 1000, value: p.value })), [vwapSeries])
@@ -7170,6 +7197,7 @@ export default function OiReplayPage() {
                       days={gexDays}
                       asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                       dayKey={`${underlying}-${result.date}`} expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+                      participants={gexParticipants}
                     />
                   </Card>
                 </Col>
@@ -7489,6 +7517,7 @@ export default function OiReplayPage() {
               <GexCard
                 days={gexDays} asOfMs={quickClock} dayKey={`quick-${underlying}-${result.date}`}
                 expiry={result.optionExpiry ?? null} expirySource={result.optionExpirySource ?? null}
+                participants={gexParticipants}
               />
             )}
             {/* The delta profile cards' own components, with the page's inputs - their settings (timeframe, rows, previous

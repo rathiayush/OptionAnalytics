@@ -259,6 +259,28 @@ All must pass before committing.
   touch screen / phone ((hover: none) or <= 768 px), as a POPUP a tap opens - full width, its body scrolling, closed by its
   ✕ (a tooltip there ran past the bottom of the screen with no way to scroll or close it); both start with what it
   reads NOW (the read and the levels spot is at).
+  NSE POSITIONS AS THE SIGN (asked for - "check how institution based GEX works ... work on item 1": who the dealers are,
+  from data; `participantOi.js`, `NseParticipantOi`): the Standard sign ASSUMES dealers long every call, short every put (the
+  US convention). NSE publishes each evening who holds the index options - calls and puts LONG and SHORT by Client / DII /
+  FII / Pro (fao_participant_oi_{ddMMyyyy}.csv on nsearchives, in contracts): `GET /api/oi-replay/participant-oi?date=`
+  gives the latest day's file BEFORE `date` (no look-ahead - a day's file is out that evening; up to 10 days back over
+  weekends / holidays; kept on disk by `NseDayStore` "participant-oi", a holiday kept empty, yesterday's missing file asked
+  again; `NseBackoff`; 204 when none / NSE not answering - a page load, nothing polls). The page asks it once a day shown
+  (while a GEX card / the checklist / the GEX quick view is on) and `participantShares(day, group)` gives the HEDGERS' share
+  of each side: (their longs - their shorts) / all the OI of that side, the hedgers picked on the GEX card ("Hedgers":
+  Pro desks - the default - / Pro + FII / All but clients, `optionanalytics.oiReplay.gexHedgers`). `gexDay`'s `shares`
+  { call, put } takes the place of +1 / -1 as the dealers' share of every call's / put's OI (none = exactly as before -
+  +1 / -1 held deepEqual to it in `tests/gex.test.mjs`), under 'buildup' for the first reading and the changes that cannot
+  be read. `useGexDays` adds two days when it has them - `participant` ("NSE positions") and `participantBuildup` ("NSE +
+  build-up") - beside `standard` / `buildup`, which are UNCHANGED (the two signs' verdict, the entry checklist's gamma
+  check and the Signal backtest still read those); both GEX cards' Sign pickers offer them only then (`gexSignOptions` /
+  `gexSignOf` - a saved NSE sign on a day without the file shows Standard; a dropdown on a phone - four buttons made the
+  page wider than the screen). It is ONE number a side for ALL NSE index options (every index, strike, expiry): it leans
+  the net, its sign, the flip and each strike's GEX - not the walls / max gamma (gamma x OI, whoever holds it) - and the
+  net is a small share of Standard's (real books are near balanced: Pro +1.5% of calls, -0.8% of puts on 13 Nov 2026), so
+  `cr` shows a decimal under ₹10 Cr. SENSEX (BSE) uses NSE's file as a stand-in, said on the card ("NSE positions" fold:
+  the file's date, the shares, the contracts, the net against Standard's). `NseParticipantOiTests.cs`,
+  `tests/participant-oi.test.mjs`. It feeds no strategy or alert.
   (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
   reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
 - OI Replay's GEX LEVELS ON SPOT card (asked for - "on OI Replay show the GEX levels with the spot chart"; `gexSpot` -
