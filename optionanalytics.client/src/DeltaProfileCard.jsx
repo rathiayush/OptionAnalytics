@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Checkbox, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import dayjs from 'dayjs'
-import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, POLL_HEADERS, UP_COLOR, fromChartTime, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useChartUserControl } from './oiShared.jsx'
 import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { DeltaProfilePrimitive, PANEL_SHARE } from './deltaProfilePrimitive.js'
-import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
+import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaCumulative, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { EXTRA_WEEKDAYS, footprintBars } from './deltaProfileDays.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
@@ -65,7 +65,7 @@ const LEVEL_LINES = [
 
 /** The candles and the profile beside them, `levels` (deltaProfileLevels - null: no lines) as price lines.
  *  `onHover(price | null)` - the price under the crosshair. */
-function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, height: givenHeight = 380 }) {
+function DeltaProfileChart({ candles, profile, levels = null, cumulative = null, dayKey, onHover, height: givenHeight = 380 }) {
   const height = useFitHeight(givenHeight)
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -77,6 +77,7 @@ function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, h
   // The profile's price range - the price scale holds it too: the sessions before the day can reach past its candles.
   const rangeRef = useRef(null)
   const linesRef = useRef([])
+  const cumRef = useRef(null)
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
@@ -118,8 +119,28 @@ function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, h
       seriesRef.current = null
       primitiveRef.current = null
       linesRef.current = []
+      cumRef.current = null
     }
   }, [])
+  // The option flow's cumulative line (and each candle's flow as bars) in a pane under the candles - `cumulative` null = none.
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart) return
+    if (!cumulative) {
+      if (cumRef.current) { chart.removeSeries(cumRef.current.line); chart.removeSeries(cumRef.current.bars); cumRef.current = null }
+      return
+    }
+    if (!cumRef.current) {
+      const line = chart.addSeries(LineSeries, { color: '#69b1ff', lineWidth: 2, title: 'cumulative Δ', priceLineVisible: false }, 1)
+      const bars = chart.addSeries(HistogramSeries, { priceScaleId: 'left', title: 'Δ', priceLineVisible: false, lastValueVisible: false }, 1)
+      const [upper, under] = chart.panes()
+      upper?.setStretchFactor(3)
+      under?.setStretchFactor(1)
+      cumRef.current = { line, bars }
+    }
+    cumRef.current.line.setData(cumulative.map((p) => ({ time: p.time, value: p.value })))
+    cumRef.current.bars.setData(cumulative.map((p) => ({ time: p.time, value: p.delta, color: p.delta >= 0 ? `${UP_COLOR}88` : `${DOWN_COLOR}88` })))
+  }, [cumulative])
   useChartHeight(chartRef, height)
   // Dragged or zoomed: the view is the viewer's until a double-click (or a new day) hands it back.
   const userControlRef = useChartUserControl(chartRef, dayKey)
@@ -291,6 +312,13 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const profile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide }), [sessions, rowSize, shownSide])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
+  // The flow's CUMULATIVE line - the day so far (the sessions before are not in it: a cumulative runs from the day's open).
+  const [cumOn, setCumOn] = usePersistedState('optionanalytics.oiReplay.optionDeltaCum', true)
+  const cumulative = useMemo(() => {
+    if (!cumOn) return null
+    const tf = TIMEFRAMES.includes(timeframe) ? timeframe : 5
+    return optionDeltaCumulative(todayMinutes, { side: shownSide, timeframe: tf, chartTime: toChartTime }).map((p) => ({ ...p, value: p.value / lotSize, delta: p.delta / lotSize }))
+  }, [cumOn, todayMinutes, shownSide, timeframe, lotSize])
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
   const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : shownSide === 'netpe' ? 'net Δ PE − CE (+ puts ahead)' : `${shownSide.toUpperCase()} Δ (+ bought)`
@@ -303,6 +331,9 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         {rowSelect}
         {choice.control}
         {levelsTick}
+        <Tooltip title="A pane under the candles: the option flow of the side picked ADDED UP from the day's open - a cumulative line, as the OI totals' net cumulative - with each candle's own flow as bars, in lots. The day so far only (a cumulative starts at the open), up to the replay clock.">
+          <Checkbox checked={cumOn} onChange={(e) => setCumOn(e.target.checked)}>Cumulative</Checkbox>
+        </Tooltip>
       </Space>
       <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
@@ -313,7 +344,14 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
             <span style={{ color: deltaColor(-profile.totals.pe) }}>{lots(profile.totals.pe / lotSize, true)}</span>) · POC {price(levels?.poc ?? profile.poc)}
           </Text>
           <LevelsLine levels={levels} show={levelsOn} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
+          {cumulative?.length ? (
+            <Text style={{ fontSize: 12 }}>
+              {shownSide === 'netpe' ? 'Net (PE − CE)' : shownSide === 'net' ? 'Net (CE − PE)' : shownSide.toUpperCase()} cumulative Δ today{' '}
+              <Text strong style={{ fontSize: 12, color: deltaColor(cumulative.at(-1).value) }}>{lots(cumulative.at(-1).value, true)}</Text> lots
+              {' '}· last candle <span style={{ color: deltaColor(cumulative.at(-1).delta) }}>{lots(cumulative.at(-1).delta, true)}</span>
+            </Text>
+          ) : null}
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} cumulative={cumulative} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>

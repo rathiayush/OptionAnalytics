@@ -564,7 +564,7 @@ All must pass before committing.
   well"; the "Levels" tick, on by default, `optionanalytics.oiReplay.deltaProfileLevels`): the profile's POC (solid), VAH /
   VAL (dashed) and ONE HVN / LVN (dotted - `volumeZones`' `topHvn` / `thinLvn`, the Profiles page's) as price lines labelled
   on the axis, in its colours (`PREV_PROFILE`), and a line naming them with the rows of the most buying / selling -
-  `deltaProfileLevels`, the same the Signal backtest reads. The cards themselves feed no strategy or alert.
+  `deltaProfileLevels`, the same the Signal backtest reads. CUMULATIVE (asked for - "add net delta of option like we have net cumulative"; the option card's "Cumulative" tick, ON by default, `optionanalytics.oiReplay.optionDeltaCum`): a pane under the candles - the option flow of the side picked (Net CE − PE / PE − CE / CE / PE) ADDED UP from the day's open as a line, each candle's own flow as bars, in lots, on the card's timeframe, and a line over the chart ("cumulative Δ today", the last candle's) - `optionDeltaCumulative` on the day's `optionDeltaMinutes` up to the clock (the sessions before are not in it), `tests/delta-profile.test.mjs`. The cards themselves feed no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is
