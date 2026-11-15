@@ -144,7 +144,16 @@ test('no look-ahead: a bar\'s read is the same whatever comes after it; the bars
   const analyzed = analyzeBars(bars, { rowSize: 1 })
   const whole = scoredFlowReads(analyzed, { rowSize: 1 })
   assert.ok(whole.some((x) => x.absorption.length) && whole.some((x) => x.exhaustion.length))
-  for (let k = 1; k <= bars.length; k++) assert.deepEqual(scoredFlowReads(analyzed.slice(0, k), { rowSize: 1 }), whole.slice(0, k))
+  // The marks never change after their bar; a status is the one known at the clock - decided by a bar the clock has reached.
+  const asOf = (reads, lastMs) => reads.map((x) => Object.fromEntries(Object.entries(x).map(([k, marks]) => [k, marks.map((m) => {
+    const known = m.statusAt != null && new Date(m.statusAt).getTime() <= lastMs
+    return { ...m, status: known ? m.status : 'pending', statusAt: known ? m.statusAt : null, text: known ? m.text : m.text.replace(/ · (CONFIRMED|FAILED) .*$/, '') }
+  })])))
+  assert.ok(whole.some((x) => [...x.absorption, ...x.exhaustion].some((m) => m.status !== 'pending')), 'some read was decided')
+  for (let k = 1; k <= bars.length; k++) {
+    const lastMs = new Date(analyzed[k - 1].time).getTime()
+    assert.deepEqual(scoredFlowReads(analyzed.slice(0, k), { rowSize: 1 }), asOf(whole.slice(0, k), lastMs))
+  }
   const shown = withScoredReads(analyzed, whole)
   assert.deepEqual(shown.map((b) => b.absorption), whole.map((x) => x.absorption))
   assert.deepEqual(shown.map((b) => [b.cvd, b.poc, b.stacked]), analyzed.map((b) => [b.cvd, b.poc, b.stacked]))
@@ -216,4 +225,58 @@ test('a new day starts fresh: yesterday\'s bars in the list are not today\'s str
   const r = read(bars).at(-1).absorption
   assert.equal(r.length, 1)
   assert.match(r[0].text, /a new session low/, 'under today\'s low 98, though yesterday traded lower')
+})
+
+test('confirmation: a read waits for the market - confirmed when price leaves the level, failed when it trades through it', () => {
+  const bars = [...base(), absorbed()]
+  assert.equal(read(bars).at(-1).absorption[0].status, 'pending', 'just printed: waiting')
+  // Next bar closes above the absorption bar's high (99): confirmed, at that bar.
+  const up = bar(9, 99, 100.5, [[98, 300, 100], [99, 400, 120], [100, 300, 100], [101, 200, 80]])
+  const c = read([...bars, up])[8].absorption[0]
+  assert.equal(c.status, 'confirmed')
+  assert.equal(new Date(c.statusAt).getTime(), T0 + 9 * MIN)
+  assert.match(c.text, / · CONFIRMED \d\d:\d\d \(closed past 99\)$/)
+  assert.equal(c.score, read(bars).at(-1).absorption[0].score, 'the score never changes')
+  // A bar that trades under the zone's low (94): failed - even if it closes back up (it swept the level).
+  const sweep = bar(9, 97, 100.5, [[93, 100, 500], [94, 100, 200], [95, 200, 100], [96, 200, 100], [97, 300, 100], [98, 300, 100], [99, 300, 100], [100, 300, 100], [101, 300, 100]])
+  const f = read([...bars, sweep])[8].absorption[0]
+  assert.equal(f.status, 'failed')
+  assert.match(f.text, /FAILED \d\d:\d\d \(traded through 94\)$/)
+  // Inside the bar's range: still waiting.
+  assert.equal(read([...bars, quiet(9, 97)])[8].absorption[0].status, 'pending')
+  // A new day: the read is not carried over.
+  const tomorrow = { ...up, time: T0 + 86_400_000 }
+  assert.equal(read([...bars, tomorrow])[8].absorption[0].status, 'pending')
+})
+
+test('confirmation of exhaustion: a close under the bar\'s low confirms it, a higher high fails it', () => {
+  const bars = [...base(), push(8), pause(9), fade(10)]
+  const down = bar(11, 104, 101.5, [[101, 100, 300], [102, 100, 300], [103, 100, 200], [104, 80, 100]])
+  assert.equal(read([...bars, down])[10].exhaustion[0].status, 'confirmed')
+  const higher = bar(11, 105, 106, [[104, 200, 100], [105, 300, 100], [106, 300, 100], [107, 200, 100], [108, 100, 50]])
+  const f = read([...bars, higher])[10].exhaustion[0]
+  assert.equal(f.status, 'failed')
+  assert.match(f.text, /a new high past 107/)
+})
+
+test('an iceberg on the absorbing side in the zone is the strongest book evidence - only one known by the bar\'s end', () => {
+  const bars = [...base(), absorbed()]
+  const start = T0 + 8 * MIN
+  const berg = (o) => ({ id: 1, isBid: true, price: 94, startedAt: new Date(start + 5000).toISOString(), detectedAt: new Date(start + 30_000).toISOString(), endedAt: null, traded: 900, maxDisplayed: 100, refills: 6, ...o })
+  const plain = read(bars).at(-1).absorption[0]
+  const withBerg = read(bars, { icebergs: [berg()] }).at(-1).absorption[0]
+  assert.equal(withBerg.parts.book, 1)
+  assert.match(withBerg.text, /an iceberg bid at 94 \(6 refills\)/)
+  assert.ok(withBerg.score > plain.score)
+  // An offer iceberg, one outside the zone, one only detected after the bar, one that ended before it: none count.
+  for (const o of [{ isBid: false }, { price: 99 }, { detectedAt: new Date(start + 90_000).toISOString() }, { startedAt: new Date(start - 300_000).toISOString(), detectedAt: new Date(start - 200_000).toISOString(), endedAt: new Date(start - 100_000).toISOString() }]) {
+    assert.equal(read(bars, { icebergs: [berg(o)] }).at(-1).absorption[0].parts.book, null, JSON.stringify(o))
+  }
+})
+
+test('a finished auction at the new high (nothing bought at the top) is the exhaustion print', () => {
+  const finishedTop = bar(10, 105, 104, [[103, 60, 90], [104, 130, 150], [105, 90, 80], [106, 15, 10], [107, 0, 30]])
+  const e = read([...base(), push(8), pause(9), finishedTop]).at(-1).exhaustion[0]
+  assert.equal(e.parts.thin, 1)
+  assert.match(e.text, /a finished auction - nothing bought at the top/)
 })

@@ -1431,19 +1431,25 @@ All must pass before committing.
   off the low - required), efficiency (sellers ahead on the bar yet it closed up, or moved less a lot of delta than usual),
   context (a break of the STRUCTURE 0.7 - a new session low, under the last swing low, a new low of the move - a retest of
   it 0.5, past the bar before 0.35, + 0.5 at a level - the bar's OWN VWAP, yesterday's POC / VAH / VAL / HIGH / LOW), book
-  (what traded there against the most the bids showed through the bar, and how much still stands). EXHAUSTION =
+  (what traded there against the most the bids showed through the bar, and how much still stands; an ICEBERG the engine
+  caught on the bid in the zone during the bar and detected by its end - `icebergs`, the page's `view.icebergs` - = 1). EXHAUSTION =
   participation fading at a new high of the STRUCTURE (bearish; the low the mirror), closed >= 25% off it, weights 20 / 25
   / 15 / 15 / 25: less volume than the last push (the last bar that made a new high of the structure; none = the usual
   bar), less delta (none at all = 1; + 0.3 on a lower cumulative delta), little in the top TWO rows (one row is an artefact
-  of Dhan's one-second packets), the POC not following, the rejection. NO FIXED BAR COUNT (asked for - "like how a human
+  of Dhan's one-second packets; a FINISHED AUCTION there - nothing bought at the top - = 1), the POC not following, the rejection. NO FIXED BAR COUNT (asked for - "like how a human
   reads it ... not 5 - 10 candles, adaptive and dynamic"; "I am only loading the current day - 10 bars come after 50 min"):
   "usual" (volume, selling, buying, range, move per delta) = the median of TODAY's bars before the bar together with
   YESTERDAY's bars of the same timeframe within 30 min of its time of day (`prior` - the page passes the previous session it
   already loads, `aggregateBars` of `fetchPreviousSession`; `PRIOR_CLOCK_MS`), so it reads from the first bars of the day
   and today's own bars weigh more as they come; the structure = `swingTracker` (a zigzag: a swing confirmed once price comes
   back from it by `swingRanges` 1.5x the usual bar range, at least two rows - sized by the market itself), the session's
-  high / low and the current move's extreme; a new IST day starts fresh. A part that cannot be read (no book, no push) is
-  left out and the rest re-weighted. Each bar from itself and the bars before (the forming bar's read can change until it
+  high / low and the current move's extreme; a new IST day starts fresh. CONFIRMATION (asked for - "identify the best
+  solution, how professionals identify exhaustion and absorption": a read is a candidate until the market agrees): each mark
+  has `status` - 'pending' when printed, 'confirmed' once a later bar of the day CLOSES past the signal bar's other end,
+  'failed' once a later bar TRADES past the level (the zone's far edge / the extreme; checked first - a sweep that closes
+  back fails), `statusAt` that bar, the reason added to its text; the pill shows ✓ / ✗ (failed faded). The score never
+  changes; the status is the one known at the clock (`tests/flow-reads.test.mjs`). A part that cannot be read (no book, no
+  push) is left out and the rest re-weighted. Each bar from itself and the bars before (the forming bar's read can change until it
   closes, as the first rules' did). A read - no strategy, alert or order.
   POSITIONING, BOOK PRESSURE, LIQUIDITY ADDED vs PULLED (asked for - "delta + OI positioning on futures ... book pressure
   line ... net liquidity added versus pulled ... build these in separate card components"; three cards under the chart and

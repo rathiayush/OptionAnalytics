@@ -309,13 +309,15 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       // Absorption (ABS, green = bullish / red = bearish) and exhaustion (EXH, purple, arrow = the
       // expected turn): the row is outlined across the bar and a labelled pill sits on it, pointing
       // the way the signal reads.
-      const marker = (price, side, label, color) => {
+      const marker = (price, side, label, color, status) => {
         const top = rowTop(price)
+        // A scored read's verdict: confirmed ✓, failed ✗ (faded - the read was wrong), pending as it was.
+        ctx.globalAlpha = status === 'failed' ? 0.4 : 1
         ctx.strokeStyle = color
         ctx.lineWidth = 2
         ctx.strokeRect(cellX - 1, top - 0.5, cellsW + 1, Math.max(3, rowH))
         ctx.lineWidth = 1
-        const text = `${label} ${side === 'buy' ? '▲' : '▼'}`
+        const text = `${label} ${side === 'buy' ? '▲' : '▼'}${status === 'confirmed' ? ' ✓' : status === 'failed' ? ' ✗' : ''}`
         ctx.font = `700 10px ${FONT}`
         const w = ctx.measureText(text).width + 8
         const pillY = Math.max(FP_TOP, Math.min(FP_TOP + plotH - 14, top + rowH / 2 - 7))
@@ -328,10 +330,11 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillStyle = '#fff'
         ctx.textBaseline = 'middle'
         ctx.fillText(text, pillX + 4, pillY + 7.5)
+        ctx.globalAlpha = 1
       }
       // A scored read (flowReads.js) carries its score, 0 - 100, on the pill.
-      for (const a of bar.absorption ?? []) marker(a.price, a.side, a.score != null ? `ABS ${a.score}` : 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR)
-      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, e.score != null ? `EXH ${e.score}` : 'EXH', EXH_COLOR)
+      for (const a of bar.absorption ?? []) marker(a.price, a.side, a.score != null ? `ABS ${a.score}` : 'ABS', a.side === 'buy' ? UP_COLOR : DOWN_COLOR, a.status)
+      for (const e of bar.exhaustion ?? []) marker(e.price, e.side, e.score != null ? `EXH ${e.score}` : 'EXH', EXH_COLOR, e.status)
 
       // Finished / unfinished auction at the high and the low: a tag just outside the extreme row; an unfinished one a
       // dotted line on to the bar that traded back into it (until then a magnet), or to the right edge while open.

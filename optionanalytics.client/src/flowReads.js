@@ -17,12 +17,14 @@
 //     context    - the low breaks the market's STRUCTURE (a new session low, under the last swing low, a new low of the
 //                  move) or retests it, and / or sits at a level given (VWAP, a wall, yesterday's value area ...);
 //     book       - with the order book: what traded into the bids there against what they SHOWED, and whether they
-//                  are still there (traded more than was ever shown, bids still standing = refilled: the real thing).
+//                  are still there (traded more than was ever shown, bids still standing = refilled: the real thing);
+//                  an ICEBERG the engine caught on the bid in the zone during the bar (detected by its end) = 1.
 //   EXHAUSTION - PARTICIPATION FADING at a new extreme. At a new high of the STRUCTURE (bearish; the low is the mirror):
 //     volume     - less volume than the push before it (the last bar that made a new high of the structure);
 //     delta      - less buying delta than that push (or none at all), and a lower cumulative delta at a higher high;
 //     thin top   - little traded in the top two rows (two, not one: Dhan's one-second packets put a whole second's
-//                  volume on one price, so a single thin row is often an artefact);
+//                  volume on one price, so a single thin row is often an artefact); a FINISHED AUCTION at the top - nothing
+//                  at all bought there (0 offers lifted) - = 1, the classic exhaustion print;
 //     value      - the bar's busiest price (POC) did not follow price up;
 //     rejection  - how far it closed back off the high (it must close off it).
 //
@@ -34,6 +36,12 @@
 // market's SWINGS (`swingTracker` - a swing is confirmed once price comes back from it by 1.5x today's usual bar range,
 // at least two rows, so the swings grow with a fast market and shrink with a quiet one), the session's high / low and the
 // current move's extreme; the fight at a price runs back over every bar that kept trading there.
+//
+// CONFIRMATION (as the professional order-flow reads go - a read is a candidate until the market agrees): each mark is
+// `status` 'pending' when printed, 'confirmed' once a later bar of the day CLOSES past the signal bar's other end (price
+// left the level - the aggressors are trapped), 'failed' once a later bar TRADES past the level the read said would hold
+// (the zone's far edge for absorption, the extreme for exhaustion; checked first - a sweep of the level that closes back
+// is a failure); `statusAt` = that bar. The score and parts never change; the status is the one known at the clock.
 //
 // A part that cannot be read (no book, no push before) is left out and the rest re-weighted. Every bar is read from
 // itself and the bars BEFORE it - nothing after (`tests/flow-reads.test.mjs`). A read on the chart: it feeds no strategy,
@@ -125,6 +133,32 @@ function bookAt(columns, fromMs, toMs, lo, hi, side, step) {
   return last == null ? null : { most, last }
 }
 
+const hhmm = (t) => new Date(msOf(t) + IST_MS).toISOString().slice(11, 16)
+// A later bar's verdict on a waiting mark (true = settled): FAILED when it trades past the level the read said would hold
+// (checked first - a bar that sweeps the level and closes back is a failure, the read was wrong about the level), else
+// CONFIRMED when it closes past the signal bar's other end. The mark itself (score, parts) never changes - only its status,
+// from the bar that decided it, so a read at any clock shows the status known then.
+function settle(w, bar) {
+  const failed = w.bull ? bar.low < w.fail - 1e-9 : bar.high > w.fail + 1e-9
+  const confirmed = !failed && (w.bull ? bar.close > w.confirm + 1e-9 : bar.close < w.confirm - 1e-9)
+  if (!failed && !confirmed) return false
+  w.mark.status = failed ? 'failed' : 'confirmed'
+  w.mark.statusAt = bar.time
+  w.mark.text += failed ? ` · FAILED ${hhmm(bar.time)} (${w.failText})` : ` · CONFIRMED ${hhmm(bar.time)} (closed past ${w.confirm})`
+  return true
+}
+
+// The iceberg on the absorbing side (`bull` - a bid) inside [lo, hi] that was resting during [fromMs, toMs) and was already
+// detected by the bar's end - nothing the engine only found out later.
+function icebergAt(icebergs, fromMs, toMs, lo, hi, bull, step) {
+  for (const b of icebergs ?? []) {
+    if (!b || !!b.isBid !== bull || !(b.price >= lo - step / 2 && b.price <= hi + step / 2)) continue
+    const started = msOf(b.startedAt), detected = msOf(b.detectedAt ?? b.startedAt), ended = b.endedAt ? msOf(b.endedAt) : Infinity
+    if (started < toMs && ended >= fromMs && detected < toMs) return b
+  }
+  return null
+}
+
 // "a new session low", "under the swing low 24,980", "a new low of the move" (the mirror at a high).
 const breakText = (ref, low) => (ref.name.startsWith('session') ? `a new ${ref.name}` : `${low ? 'under' : 'over'} the ${ref.name} ${ref.price}`)
 
@@ -139,7 +173,7 @@ const breakText = (ref, low) => (ref.name.startsWith('session') ? `a new ${ref.n
  * (optional - without them the first bars of the day wait for three of today's). An estimated day's rows are a spread, not
  * trades: none are read (the candle rules stay).
  */
-export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, levels = [], prior = null, ...options } = {}) {
+export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, levels = [], prior = null, icebergs = null, ...options } = {}) {
   const o = { ...FLOW_READ_DEFAULTS, ...options }
   // Yesterday's bars of the same timeframe by their clock: a bar's yardstick takes those within PRIOR_CLOCK_MS of its own
   // time of day (the open's heavy bars against yesterday's open, the lunch lull against yesterday's lunch).
@@ -151,9 +185,12 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
   const spanMs = Math.max(1, timeframe) * 60_000
   // Today's session so far: where it began, its swings, the last bar that made a new high / low of the structure.
   let day = null, sessionFrom = 0, swings = null, lastPush = { high: null, low: null }
+  // The marks still waiting for the market's verdict (CONFIRMATION - what a trader waits for before acting on a read).
+  let pending = []
   for (let i = 0; i < list.length; i++) {
     const bar = list[i]
-    if (dayOf(bar.time) !== day) { day = dayOf(bar.time); sessionFrom = i; swings = swingTracker(); lastPush = { high: null, low: null } }
+    if (dayOf(bar.time) !== day) { day = dayOf(bar.time); sessionFrom = i; swings = swingTracker(); lastPush = { high: null, low: null }; pending = [] }
+    pending = pending.filter((w) => !settle(w, bar))
     const rows = [...(bar.levels ?? [])].sort((a, b) => a.price - b.price)
     const range = bar.high - bar.low
     // The yardstick: every bar of today's session before this one, with yesterday's bars at this time of day - so it
@@ -215,6 +252,10 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         const start = msOf(bar.time)
         const shown = bookAt(columns, start, start + spanMs, lo, hi, bull ? 'bids' : 'asks', step)
         if (shown && shown.most > 0) parts.book = 0.5 * clamp01(own / shown.most) + 0.5 * clamp01(shown.last / shown.most)
+        // An ICEBERG the engine caught on the absorbing side in the zone during the bar (known by the bar's end): hidden size
+        // refilling as it was hit - the strongest evidence of absorption there is.
+        const berg = icebergAt(icebergs, start, start + spanMs, lo, hi, bull, step)
+        if (berg) parts.book = 1
         const score = scoreOf(parts, ABSORPTION_WEIGHTS)
         if (parts.effort < 0.5 || score < o.minScore) continue
         const where = lo === hi ? `${lo}` : `${lo}–${round2(hi + step)}`
@@ -224,12 +265,16 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
           parts.efficiency >= 0.7 ? `${bull ? 'sellers' : 'buyers'} ahead but price did not follow` : null,
           fresh ? `${breakText(ref, bull)}` : retest ? `a retest of the ${ref.name} ${ref.price}` : null,
           level ? `at ${level.label ?? level.price}` : null,
-          parts.book != null && parts.book >= 0.7 ? `the ${bull ? 'bids' : 'offers'} there held / refilled` : null,
+          berg ? `an iceberg ${bull ? 'bid' : 'offer'} at ${berg.price} (${berg.refills} refills)` : parts.book != null && parts.book >= 0.7 ? `the ${bull ? 'bids' : 'offers'} there held / refilled` : null,
         ].filter(Boolean).join(' · ')
-        out[i].absorption.push({
+        const mark = {
           side: bull ? 'buy' : 'sell', price: bull ? rows[0].price : rows.at(-1).price, low: lo, high: hi, volume: effort, score, parts,
-          text: `${bull ? 'Selling absorbed' : 'Buying absorbed'} (score ${score}): ${why}`,
-        })
+          text: `${bull ? 'Selling absorbed' : 'Buying absorbed'} (score ${score}): ${why}`, status: 'pending', statusAt: null,
+        }
+        out[i].absorption.push(mark)
+        // Wrong once price trades through the zone (the absorbing side gave way); right once a bar closes past the bar's
+        // other end (price left the level and the aggressors are trapped).
+        pending.push({ mark, bull, fail: bull ? lo : hi, confirm: bull ? bar.high : bar.low, failText: `traded through ${bull ? lo : hi}` })
       }
 
       for (const bear of [true, false]) {
@@ -252,6 +297,11 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
         const end = bear ? rows.slice(-2) : rows.slice(0, 2)
         const endVolume = end.reduce((s, l) => s + l.buy + l.sell, 0)
         parts.thin = clamp01(1 - (endVolume / bar.volume) / (2 / rows.length))
+        // A FINISHED AUCTION at the extreme - nothing at all bought at the top (0 offers lifted; sold at the bottom the
+        // mirror): the buyers ran out there - the classic exhaustion print.
+        const extremeRow = bear ? rows.at(-1) : rows[0]
+        const finished = extremeRow && (bear ? extremeRow.buy === 0 : extremeRow.sell === 0) && extremeRow.buy + extremeRow.sell > 0
+        if (finished) parts.thin = 1
         if (Number.isFinite(bar.poc)) {
           const lowerHalf = bear ? bar.poc < bar.low + range / 2 : bar.poc > bar.low + range / 2
           const stalled = push && Number.isFinite(push.poc) ? (bear ? bar.poc <= push.poc : bar.poc >= push.poc) : false
@@ -263,14 +313,17 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
           breakText(bear ? refHigh : refLow, !bear),
           parts.volume >= 0.3 ? `${Math.round(parts.volume * 100)}% less volume than ${push ? 'the last push' : 'usual'}` : null,
           way <= 0 ? `no ${bear ? 'buying' : 'selling'} delta behind it` : parts.delta >= 0.3 ? `less ${bear ? 'buying' : 'selling'} delta than ${push ? 'the last push' : 'usual'}` : null,
-          parts.thin >= 0.5 ? `little traded at the ${bear ? 'top' : 'bottom'}` : null,
+          finished ? `a finished auction - nothing ${bear ? 'bought at the top' : 'sold at the bottom'}` : parts.thin >= 0.5 ? `little traded at the ${bear ? 'top' : 'bottom'}` : null,
           parts.value >= 0.6 ? 'the busiest price did not follow' : null,
           `closed ${Math.round(closedOff * 100)}% off it`,
         ].filter(Boolean).join(' · ')
-        out[i].exhaustion.push({
+        const mark = {
           side: bear ? 'sell' : 'buy', price: bear ? rows.at(-1).price : rows[0].price, score, parts,
-          text: `${bear ? 'Buying exhausted' : 'Selling exhausted'} (score ${score}): ${why}`,
-        })
+          text: `${bear ? 'Buying exhausted' : 'Selling exhausted'} (score ${score}): ${why}`, status: 'pending', statusAt: null,
+        }
+        out[i].exhaustion.push(mark)
+        // Wrong once a later bar makes a higher high (the push went on); right once a bar closes under the bar's low.
+        pending.push({ mark, bull: !bear, fail: bear ? bar.high : bar.low, confirm: bear ? bar.low : bar.high, failText: `a new ${bear ? 'high' : 'low'} past ${bear ? bar.high : bar.low}` })
       }
     }
     // This bar is the push the next new extreme is compared with; then the swings take it in.
