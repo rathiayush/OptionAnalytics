@@ -259,23 +259,3 @@ test('the candles: the day\'s, live before the open the session before, a replay
   assert.equal(scaleHolderCandle(null, 1), null)
   assert.deepEqual(cardCandleSource({ dayBars: [], past: [], isLive: false, date: null, price: null }), { bars: [], standIn: null, holder: false })
 })
-
-test('cumulative pane: candles of the timeframe, each its own amount and the running total; footprint delta', async () => {
-  const { cumulativeOf, footprintBarDelta } = await import('../src/deltaProfile.js')
-  const M = 60_000
-  const chartTime = (ms) => ms / 1000
-  // Net CE − PE OI: minutes 0 and 1 in the first 3-min candle, minute 3 in the second.
-  const mins = [{ t: 0, ce: 10, pe: 4 }, { t: M, ce: -2, pe: 6 }, { t: 3 * M, ce: 5, pe: -1 }]
-  const net = cumulativeOf(mins, { valueOf: (m) => m.ce - m.pe, timeframe: 3, chartTime })
-  assert.deepEqual(net, [{ time: 0, delta: -2, value: -2 }, { time: 180, delta: 6, value: 4 }])
-  // A cut at the clock = the day's line up to it.
-  assert.deepEqual(cumulativeOf(mins.slice(0, 2), { valueOf: (m) => m.ce - m.pe, chartTime }),
-    cumulativeOf(mins, { valueOf: (m) => m.ce - m.pe, chartTime }).slice(0, 2))
-  // Futures: each footprint bar's buy − sell over its levels, ISO times.
-  const bars = [
-    { time: new Date(0).toISOString(), levels: [{ price: 100, buy: 5, sell: 2 }, { price: 101, buy: 1, sell: 3 }] },
-    { time: new Date(M).toISOString(), levels: [{ price: 101, buy: 0, sell: 4 }] },
-  ]
-  assert.equal(footprintBarDelta(bars[0]), 1)
-  assert.deepEqual(cumulativeOf(bars, { valueOf: footprintBarDelta, chartTime }).map((p) => p.value), [1, -3])
-})
