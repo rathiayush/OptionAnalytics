@@ -27,7 +27,7 @@ import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, or
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { FLOW_READ_SCORES, scoredFlowReads, withScoredReads } from './flowReads.js'
-import { BookPressureCard, LiquidityNetCard, PositioningCard } from './FlowToolCards.jsx'
+import { OfiCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS } from './replaySync.jsx'
 
@@ -981,15 +981,14 @@ export default function OrderFlowPage() {
                   clockMs={nowMs} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
                 />
 
-                {/* Three reads of the futures' positioning and book (FlowToolCards.jsx, flowTools.js) - each its own card, at
-                    the page's clock: who is aggressive and whether positions open or close; the book's lean as a line; resting
-                    orders added less pulled. */}
+                {/* Two reads of the futures' positioning and book flow (FlowToolCards.jsx, flowTools.js) - each its own card,
+                    at the page's clock: who is aggressive and whether positions open or close; the order flow imbalance at the
+                    best bid / offer. */}
                 <PositioningCard
                   view={view} futuresOi={dayOi?.futures} oiLag={dayOi?.lag ?? 0} clockMs={nowMs} isReplay={isReplay} underlying={underlying}
                   lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} estimated={estimated} otherContract={!!expiry} oiError={dayOiError}
                 />
-                <BookPressureCard view={view} rowSize={rowSize} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay} underlying={underlying} />
-                <LiquidityNetCard
+                <OfiCard
                   view={view} rowSize={rowSize} lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
                   underlying={underlying}
                 />
