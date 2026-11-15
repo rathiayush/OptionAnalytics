@@ -8,7 +8,8 @@ import { useChartUserControl } from './oiShared.jsx'
 import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { DeltaProfilePrimitive, PANEL_SHARE } from './deltaProfilePrimitive.js'
-import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, rowAt } from './deltaProfile.js'
+import { OPTION_DELTA_SIDES, barsUpTo, cardCandleSource, deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf, optionOiNetProfileOf, rowAt } from './deltaProfile.js'
+import { optionOiMinutes } from './oiProfile.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { EXTRA_WEEKDAYS, footprintBars } from './deltaProfileDays.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
@@ -157,7 +158,7 @@ function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, h
 }
 
 // The levels in words, coloured as their lines - with the rows that saw the most buying and selling.
-function LevelsLine({ levels, show }) {
+function LevelsLine({ levels, show, oiNet = false }) {
   if (!levels) return null
   const at = (v) => price(v)
   return (
@@ -170,8 +171,17 @@ function LevelsLine({ levels, show }) {
           <span style={{ color: PREV_PROFILE.lvn }}>LVN {at(levels.lvn)}</span>
         </>
       ) : null}
-      <span style={{ color: UP_COLOR }}>most bought {at(levels.buy)}</span>
-      <span style={{ color: DOWN_COLOR }}>most sold {at(levels.sell)}</span>
+      {oiNet ? (
+        <>
+          <span style={{ color: UP_COLOR }}>most puts written (floor) {at(levels.sell)}</span>
+          <span style={{ color: DOWN_COLOR }}>most calls written (ceiling) {at(levels.buy)}</span>
+        </>
+      ) : (
+        <>
+          <span style={{ color: UP_COLOR }}>most bought {at(levels.buy)}</span>
+          <span style={{ color: DOWN_COLOR }}>most sold {at(levels.sell)}</span>
+        </>
+      )}
     </Space>
   )
 }
@@ -185,12 +195,13 @@ function useLevelsShown() {
 
 // The row under the crosshair, in words.
 function HoverLine({ profile, hoverPrice, unit, lotSize, deltaWord }) {
+  const color = (v) => deltaColor(profile.bullishNegative ? -v : v)
   const row = rowAt(profile, hoverPrice)
   if (!row) return <Text type="secondary" style={{ fontSize: 11 }}>Point at the chart to read a price row.</Text>
   return (
     <Text style={{ fontSize: 12 }}>
       {price(row.price)} – {price(row.price + profile.rowSize)}: volume {lots(row.volume / lotSize)} {unit} · {deltaWord}{' '}
-      <Text strong style={{ fontSize: 12, color: deltaColor(row.delta) }}>{lots(row.delta / lotSize, true)}</Text>
+      <Text strong style={{ fontSize: 12, color: color(row.delta) }}>{lots(row.delta / lotSize, true)}</Text>
       {row.price === profile.poc ? <Tag color="gold" style={{ marginLeft: 6 }}>POC</Tag> : null}
     </Text>
   )
@@ -269,6 +280,9 @@ function useCandles(dayBars, past, timeframe, { isLive = false, date = null, pri
 // The replay clock as HH:MM for the sessions line (null live - the day so far needs no clock).
 const clockText = (isLive, asOfMs) => (isLive || asOfMs == null ? null : istTimeFormatter(toChartTime(asOfMs)))
 
+// The option card's sides: the flow's (OPTION_DELTA_SIDES - the Signal backtest reads those) and the OI's net CE − PE profile.
+const CARD_SIDES = [...OPTION_DELTA_SIDES, { value: 'oi', label: 'OI (CE − PE)' }]
+
 /**
  * The OPTIONS' delta profile on the SPOT chart: `cePoints` / `pePoints` (the run's option bars, live ones added),
  * `spotBars` (the page's 1-minute spot bars in chart time, up to the clock), `asOfMs` (the clock), `underlying`, `date`
@@ -277,7 +291,8 @@ const clockText = (isLive, asOfMs) => (isLive || asOfMs == null ? null : istTime
 export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, underlying, date, expiryFlag, dayKey, isLive = false }) {
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.oiReplay.optionDeltaTf', 5)
   const [side, setSide] = usePersistedState('optionanalytics.oiReplay.optionDeltaSide', 'net')
-  const shownSide = OPTION_DELTA_SIDES.some((s) => s.value === side) ? side : 'net'
+  const shownSide = CARD_SIDES.some((s) => s.value === side) ? side : 'net'
+  const oiNet = shownSide === 'oi'
   const [rowSize, rowSelect] = useRowSize(underlying)
   const choice = useSessionChoice('optionDelta')
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
@@ -288,17 +303,25 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   // The day up to the clock always - with "Previous days" ticked too - so the profile moves with the replay (deltaCardSessions).
   const todayMinutes = useMemo(() => optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
   const sessions = useMemo(() => deltaCardSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayMinutes, past.sessions, choice.dayCount, choice.of])
-  const profile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide }), [sessions, rowSize, shownSide])
+  const flowProfile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: oiNet ? 'net' : shownSide }), [sessions, rowSize, shownSide, oiNet])
+  // "OI (CE − PE)": the same profile with the OI's net CE − PE by spot row as its delta (negative = bullish) - the day's OI
+  // minutes and the sessions before's (their `oi` - optionDayRecord), the same sessions as the flow.
+  const todayOi = useMemo(() => (oiNet ? optionOiMinutes(cePoints, pePoints, spotMs, { asOfMs }) : []), [oiNet, cePoints, pePoints, spotMs, asOfMs])
+  const profile = useMemo(() => {
+    if (!oiNet) return flowProfile
+    const oiSessions = deltaCardSessions({ today: todayOi, past: past.sessions.map((d) => d.oi ?? []), days: choice.dayCount, of: choice.of })
+    return optionOiNetProfileOf(flowProfile, oiSessions, { rowSize })
+  }, [oiNet, flowProfile, todayOi, past.sessions, choice.dayCount, choice.of, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
-  const deltaWord = shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
+  const deltaWord = oiNet ? 'CE − PE OI (− = puts written, bullish)' : shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
   const soFar = choice.of === 'today' && choice.dayCount === 1
   return (
     <Space direction="vertical" size={6} style={{ width: '100%' }}>
       <Space wrap size={[8, 6]} align="center">
-        <Segmented size="small" value={shownSide} onChange={setSide} options={OPTION_DELTA_SIDES} />
+        <Segmented size="small" value={shownSide} onChange={setSide} options={CARD_SIDES} />
         <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
         {rowSelect}
         {choice.control}
@@ -307,12 +330,21 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
       <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
         <>
+          {oiNet ? (
+            <Text style={{ fontSize: 12 }}>
+              Net CE − PE OI{soFar ? ' so far' : ''}{' '}
+              <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots -{' '}
+              <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{profile.totals.net < 0 ? 'BULLISH (puts written ahead)' : profile.totals.net > 0 ? 'BEARISH (calls written ahead)' : 'even'}</Text>
+              {' '}(CE added {lots(profile.totals.ce / lotSize, true)} · PE added {lots(profile.totals.pe / lotSize, true)}) · POC {price(levels?.poc ?? profile.poc)}
+            </Text>
+          ) : (
           <Text style={{ fontSize: 12 }}>
             Net Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots
             {' '}(CE <span style={{ color: deltaColor(profile.totals.ce) }}>{lots(profile.totals.ce / lotSize, true)}</span> · PE{' '}
             <span style={{ color: deltaColor(-profile.totals.pe) }}>{lots(profile.totals.pe / lotSize, true)}</span>) · POC {price(levels?.poc ?? profile.poc)}
           </Text>
-          <LevelsLine levels={levels} show={levelsOn} />
+          )}
+          <LevelsLine levels={levels} show={levelsOn} oiNet={oiNet} />
           <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
