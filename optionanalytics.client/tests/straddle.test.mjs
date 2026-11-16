@@ -406,3 +406,19 @@ test('a minute whose loaded chain does not reach the money is skipped, not read 
   assert.ok(read.series.every((p) => Math.abs(p.forward - p.strike) <= 75))
   assert.equal(read.series.at(-1).time, at('11:58'))   // spot 25472 - the last minute within 25400 + 75
 })
+
+test('atmSwitches: each minute the Auto ATM moved to another strike - up / down, the start not a change, the clock followed', async () => {
+  const { atmSwitches } = await import('../src/straddle.js')
+  // 25000 until 09:40, 25120 (ATM 25100) until 10:10, then back to 25000.
+  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : m < minuteOfDay('10:10') ? 25120 : 25000), tv: () => 60 })
+  const read = straddleRead(d.ce, d.pe, d.spots, { step: 50 })
+  const w = atmSwitches(read.series)
+  assert.deepEqual(w.map((x) => [x.time, x.from, x.to]), [[at('09:40'), 25000, 25100], [at('10:10'), 25100, 25000]])
+  assert.equal(w[0].value, read.series.find((p) => p.time === at('09:40')).value)
+  // Cut at the replay clock: only what happened up to it.
+  const cut = straddleRead(d.ce, d.pe, d.spots, { step: 50, asOfMs: at('10:00') })
+  assert.deepEqual(atmSwitches(cut.series).map((x) => x.time), [at('09:40')])
+  // A minute with no straddle value is skipped, not read as a switch.
+  assert.deepEqual(atmSwitches([{ time: 1, strike: 100, value: 5 }, { time: 2, strike: 150, value: NaN }, { time: 3, strike: 100, value: 6 }]), [])
+  assert.deepEqual(atmSwitches([]), [])
+})

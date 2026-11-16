@@ -371,3 +371,20 @@ function readVerdict({ position, control, change, ivChange, holdMinutes, start, 
   if (ivChange != null && control === 'buyers' && ivChange <= -IV_MOVE) verdict.note = `ATM IV is down ${(-ivChange).toFixed(1)} in ${holdMinutes} min - the straddle's rise is the spot's move, not premium buying.`
   return verdict
 }
+
+/**
+ * Where the AUTO ATM moved to another strike (asked for - "whenever you change ATM in Auto ATM please mark it on the line so
+ * that we can be aware"): each point of `series` (straddleRead's) whose strike differs from the last point that had a
+ * straddle value - { time, from, to, value }, `to > from` = the ATM moved UP a strike (spot / the futures rose). The first
+ * point is the start, not a change. Only what is in `series`, so it follows the replay clock with it.
+ */
+export function atmSwitches(series) {
+  const out = []
+  let last = null
+  for (const p of series ?? []) {
+    if (!Number.isFinite(p?.value) || !Number.isFinite(p?.strike)) continue
+    if (last != null && p.strike !== last) out.push({ time: p.time, from: last, to: p.strike, value: p.value })
+    last = p.strike
+  }
+  return out
+}
