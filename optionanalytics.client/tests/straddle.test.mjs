@@ -407,18 +407,44 @@ test('a minute whose loaded chain does not reach the money is skipped, not read 
   assert.equal(read.series.at(-1).time, at('11:58'))   // spot 25472 - the last minute within 25400 + 75
 })
 
-test('atmSwitches: each minute the Auto ATM moved to another strike - up / down, the start not a change, the clock followed', async () => {
-  const { atmSwitches } = await import('../src/straddle.js')
-  // 25000 until 09:40, 25120 (ATM 25100) until 10:10, then back to 25000.
-  const d = day({ spot: (m) => (m < minuteOfDay('09:40') ? 25000 : m < minuteOfDay('10:10') ? 25120 : 25000), tv: () => 60 })
+test('straddleTrend: trending over VWAP with EMA fast over slow, sideways under both, a change only once it holds, direction from the futures, nothing after the clock', async () => {
+  const { straddleTrend } = await import('../src/straddle.js')
+  const MINUTE = 60_000
+  // A built series: the straddle (value) against a flat VWAP of 100, the synthetic futures (forward).
+  const make = (values, forwards) => values.map((v, i) => ({ time: i * MINUTE, value: v, vwap: 100, forward: forwards[i] }))
+  // 30 minutes melting under the VWAP (sideways), then 30 expanding over it while the futures rise (trend up).
+  const values = [...Array.from({ length: 30 }, (_, i) => 99 - i * 0.2), ...Array.from({ length: 30 }, (_, i) => 101 + i * 0.6)]
+  const forwards = [...Array.from({ length: 30 }, () => 25000), ...Array.from({ length: 30 }, (_, i) => 25000 + i * 4)]
+  const t = straddleTrend(make(values, forwards), { lookback: 10 })
+  assert.deepEqual(t.changes.map((c) => [c.to, c.dir]), [['range', null], ['trend', 'up']])
+  // Confirmed only after it has held 3 minutes, never before the slow EMA's 21 minutes.
+  assert.ok(t.changes[0].time >= 20 * MINUTE)
+  const trendAt = t.changes[1].time
+  const firstRaw = t.states.find((s) => s.raw === 'trend').time
+  // Held 3 minutes from the minute the trend WITH its direction began (the futures' move may need a minute more).
+  assert.equal(trendAt, t.changes[1].started + 2 * MINUTE)
+  assert.ok(t.changes[1].started >= firstRaw && t.changes[1].started <= firstRaw + 2 * MINUTE)
+  assert.deepEqual([t.now.state, t.now.dir, t.now.from], ['trend', 'up', 'range'])
+  // Futures falling instead: trend down.
+  const down = straddleTrend(make(values, forwards.map((f) => 50000 - f)), { lookback: 10 })
+  assert.deepEqual(down.changes.at(-1).dir, 'down')
+  // A one- or two-minute poke over the VWAP is no change.
+  const poke = values.slice(0, 30).map((v, i) => (i === 25 || i === 26 ? 103 : v))
+  assert.deepEqual(straddleTrend(make(poke, forwards.slice(0, 30)), { lookback: 10 }).changes.map((c) => c.to), ['range'])
+  // No look-ahead: cut part way = the whole day's states and changes up to the cut.
+  const full = make(values, forwards)
+  for (const cut of [25, 40, 52]) {
+    const part = straddleTrend(full.slice(0, cut), { lookback: 10 })
+    assert.deepEqual(part.states, t.states.slice(0, cut))
+    assert.deepEqual(part.changes, t.changes.filter((c) => c.time < cut * MINUTE))
+  }
+  assert.deepEqual(straddleTrend([]).changes, [])
+})
+
+test('straddleRead carries the trend of its own series, cut at the clock', () => {
+  const d = day({ spot: (m) => 25000 + m * 2, tv: (m) => 60 + m * 0.3 })
   const read = straddleRead(d.ce, d.pe, d.spots, { step: 50 })
-  const w = atmSwitches(read.series)
-  assert.deepEqual(w.map((x) => [x.time, x.from, x.to]), [[at('09:40'), 25000, 25100], [at('10:10'), 25100, 25000]])
-  assert.equal(w[0].value, read.series.find((p) => p.time === at('09:40')).value)
-  // Cut at the replay clock: only what happened up to it.
-  const cut = straddleRead(d.ce, d.pe, d.spots, { step: 50, asOfMs: at('10:00') })
-  assert.deepEqual(atmSwitches(cut.series).map((x) => x.time), [at('09:40')])
-  // A minute with no straddle value is skipped, not read as a switch.
-  assert.deepEqual(atmSwitches([{ time: 1, strike: 100, value: 5 }, { time: 2, strike: 150, value: NaN }, { time: 3, strike: 100, value: 6 }]), [])
-  assert.deepEqual(atmSwitches([]), [])
+  assert.ok(read.trend && Array.isArray(read.trend.changes))
+  const cut = straddleRead(d.ce, d.pe, d.spots, { step: 50, asOfMs: at('10:30') })
+  assert.ok(cut.trend.changes.every((c) => c.time <= at('10:30')))
 })
