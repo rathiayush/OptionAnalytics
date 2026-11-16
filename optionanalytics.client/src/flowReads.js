@@ -338,3 +338,41 @@ export function scoredFlowReads(bars, { rowSize, timeframe = 1, columns = null, 
 export function withScoredReads(bars, reads) {
   return (bars ?? []).map((bar, i) => ({ ...bar, absorption: reads?.[i]?.absorption ?? [], exhaustion: reads?.[i]?.exhaustion ?? [] }))
 }
+
+const READ_KINDS = ['absorption', 'exhaustion']
+const readKey = (time, kind, side) => `${msOf(time)}|${kind}|${side}`
+
+/**
+ * A SHOWN READ NEVER VANISHES (asked for - "it gives signals, absorption / exhaustion, and then it just disappears if price
+ * went in the opposite direction"): the reads are worked out again from the bars on every update, so a bar still forming -
+ * or inputs that arrive or change later (the book, yesterday's bars) - could make a mark disappear after it was on screen.
+ * `memory` (a Map the page keeps for a LIVE day - never a replay, which is worked out again at the clock) holds every read
+ * that was ever produced for a bar (bar time, kind, side); a read that is no longer produced stays in `reads` as it was,
+ * FAILED (faded, ✗) and said so in its text - the market took the read back, the trader still sees what was shown. Returns
+ * `reads` with those added (new arrays; `reads` itself is not changed). Calling it again gives the same result.
+ */
+export function keepShownReads(memory, bars, reads) {
+  const list = reads ?? []
+  const index = new Map()
+  ;(bars ?? []).forEach((bar, i) => index.set(msOf(bar.time), i))
+  list.forEach((r, i) => {
+    const bar = bars?.[i]
+    if (!bar || !r) return
+    for (const kind of READ_KINDS) for (const mark of r[kind] ?? []) memory.set(readKey(bar.time, kind, mark.side), mark)
+  })
+  const out = list.map((r) => ({ absorption: [...(r?.absorption ?? [])], exhaustion: [...(r?.exhaustion ?? [])] }))
+  for (const [key, mark] of memory) {
+    const [t, kind, side] = key.split('|')
+    const i = index.get(Number(t))
+    if (i == null || out[i][kind].some((m) => m.side === side)) continue
+    const lastBar = bars[bars.length - 1]
+    out[i][kind].push({
+      ...mark,
+      status: mark.status === 'pending' || mark.status == null ? 'failed' : mark.status,
+      statusAt: mark.statusAt ?? lastBar?.time ?? null,
+      kept: true,
+      text: `${mark.text} · NO LONGER READ - it was shown, then the bar's read changed`,
+    })
+  }
+  return out
+}

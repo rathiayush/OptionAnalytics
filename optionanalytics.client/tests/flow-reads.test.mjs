@@ -280,3 +280,40 @@ test('a finished auction at the new high (nothing bought at the top) is the exha
   assert.equal(e.parts.thin, 1)
   assert.match(e.text, /a finished auction - nothing bought at the top/)
 })
+
+test('a shown read never vanishes: no longer produced = kept, failed, faded, said so; present reads and other bars untouched', async () => {
+  const { keepShownReads } = await import('../src/flowReads.js')
+  const bars = [{ time: '2026-11-16T04:00:00.000Z' }, { time: '2026-11-16T04:01:00.000Z' }, { time: '2026-11-16T04:02:00.000Z' }]
+  const abs = { side: 'buy', price: 100, score: 62, status: 'pending', statusAt: null, text: 'Selling absorbed (score 62)' }
+  const exh = { side: 'sell', price: 110, score: 55, status: 'pending', statusAt: null, text: 'Buying exhausted (score 55)' }
+  const none = () => ({ absorption: [], exhaustion: [] })
+  const memory = new Map()
+  // The update that shows them: bar 1 has an absorption, bar 2 an exhaustion.
+  const first = keepShownReads(memory, bars, [none(), { absorption: [abs], exhaustion: [] }, { absorption: [], exhaustion: [exh] }])
+  assert.equal(first[1].absorption[0], abs) // as produced
+  assert.equal(first[1].absorption[0].kept, undefined)
+  // The next update no longer produces either (the forming bar closed differently / the book data changed).
+  const reads = [none(), none(), none()]
+  const second = keepShownReads(memory, bars, reads)
+  assert.equal(second[1].absorption.length, 1)
+  assert.equal(second[1].absorption[0].status, 'failed')
+  assert.equal(second[1].absorption[0].kept, true)
+  assert.equal(second[1].absorption[0].score, 62)
+  assert.match(second[1].absorption[0].text, /NO LONGER READ/)
+  assert.equal(second[2].exhaustion[0].status, 'failed')
+  assert.equal(second[0].absorption.length + second[0].exhaustion.length, 0) // another bar: nothing
+  assert.equal(reads[1].absorption.length, 0) // the reads given are not changed
+  // Idempotent: asking again gives the same, the text does not grow.
+  const third = keepShownReads(memory, bars, reads)
+  assert.equal(third[1].absorption[0].text, second[1].absorption[0].text)
+  // A read that IS produced (again, with a changed score) is the produced one - not duplicated, not marked kept.
+  const back = keepShownReads(memory, bars, [none(), { absorption: [{ ...abs, score: 70 }], exhaustion: [] }, none()])
+  assert.equal(back[1].absorption.length, 1)
+  assert.equal(back[1].absorption[0].score, 70)
+  assert.equal(back[1].absorption[0].kept, undefined)
+  // A confirmed read that vanishes keeps its confirmation; a bar no longer in the list (another timeframe) is not shown.
+  const m2 = new Map()
+  keepShownReads(m2, bars, [none(), { absorption: [{ ...abs, status: 'confirmed', statusAt: bars[2].time }], exhaustion: [] }, none()])
+  assert.equal(keepShownReads(m2, bars, [none(), none(), none()])[1].absorption[0].status, 'confirmed')
+  assert.equal(keepShownReads(m2, [bars[0]], [none()]).length, 1)
+})
