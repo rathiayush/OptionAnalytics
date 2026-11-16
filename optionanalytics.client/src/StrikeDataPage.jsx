@@ -8,8 +8,7 @@ import {
   NavBar, STORED_UNDERLYING, STORED_SHOW_VWAP, usePersistedState, pickUnderlying,
   useExpirySelector, ExpirySelect, withExpiry, fmtPrice, fmtIstTime, fmtIstDateTime, istDateKey,
   CE_COLOR, PE_COLOR, UP_COLOR, DOWN_COLOR,
-  AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, dayResetMarkers,
-} from './shared.jsx'
+  AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, dayResetMarkers, asList } from './shared.jsx'
 
 const { Title, Text } = Typography
 const { RangePicker } = DatePicker
@@ -84,6 +83,8 @@ function StrikeCandleChart({ bars, height = 420, showVwap = false }) {
   useEffect(() => {
     markersRef.current?.setMarkers(dayResetMarkers(bars))
   }, [bars])
+  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times.
+  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -152,7 +153,7 @@ export default function StrikeDataPage() {
     fetch('/api/spot/underlyings')
       .then((r) => r.json())
       .then((list) => {
-        setUnderlyings(list ?? [])
+        setUnderlyings(asList(list))
         setUnderlying((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
@@ -302,8 +303,6 @@ export default function StrikeDataPage() {
 
   const hasLoaded = candles !== null
 
-  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times.
-  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>

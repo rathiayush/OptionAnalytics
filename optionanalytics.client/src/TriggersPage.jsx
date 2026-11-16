@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Select, Space, Typography, Card, Button, Table, Tag, InputNumber, Input, Switch, Popconfirm, message, TimePicker } from 'antd'
 import dayjs from 'dayjs'
 import { PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, NavBar, fmtIstDateTime, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState, pickUnderlying, useExpirySelector, asList } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -97,7 +97,7 @@ export default function TriggersPage() {
     setLoading(true)
     fetch('/api/triggers')
       .then((r) => r.json())
-      .then((data) => setTriggers(data ?? []))
+      .then((data) => setTriggers(asList(data)))
       .catch((err) => console.error('Failed to load triggers:', err))
       .finally(() => setLoading(false))
   }
@@ -106,7 +106,7 @@ export default function TriggersPage() {
     const url = orderHistoryTriggerId ? `/api/triggers/orders?triggerId=${orderHistoryTriggerId}&limit=200` : '/api/triggers/orders?limit=200'
     fetch(url)
       .then((r) => r.json())
-      .then((data) => setOrderEvents(data ?? []))
+      .then((data) => setOrderEvents(asList(data)))
       .catch((err) => console.error('Failed to load trigger order history:', err))
   }
 
@@ -123,7 +123,7 @@ export default function TriggersPage() {
     fetch('/api/spot/underlyings')
       .then((r) => r.json())
       .then((list) => {
-        setUnderlyings(list ?? [])
+        setUnderlyings(asList(list))
         setUnderlying((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
@@ -131,7 +131,7 @@ export default function TriggersPage() {
     fetch('/api/triggers/strategies')
       .then((r) => r.json())
       .then((list) => {
-        setStrategies(list ?? [])
+        setStrategies(asList(list))
         if (list?.length > 0) setStrategyKey(list[0].key)
       })
       .catch((err) => console.error('Failed to load strategies:', err))

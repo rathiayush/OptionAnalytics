@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Select, Space, Typography, Card, Table, Tag, Button, Statistic, Row, Col, Alert, Input, Switch, message } from 'antd'
 import { ReloadOutlined, ThunderboltOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, fmtPrice, fmtIstTime, STORED_UNDERLYING, usePersistedState, pickUnderlying, POLL_HEADERS } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, NavBar, fmtPrice, fmtIstTime, STORED_UNDERLYING, usePersistedState, pickUnderlying, POLL_HEADERS, asList } from './shared.jsx'
 
 const { Title, Text } = Typography
 
@@ -56,7 +56,7 @@ export default function ContractsPage() {
     fetch('/api/spot/underlyings')
       .then((r) => r.json())
       .then((list) => {
-        setUnderlyings(list ?? [])
+        setUnderlyings(asList(list))
         setUnderlying((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))

@@ -544,10 +544,15 @@ export function CardDragHandle(props) {
   )
 }
 
+/** An API answer kept as a list: anything that is not an array (an error object - `{ error }` - or null) reads as none,
+ *  so a page never calls `.map` / `.some` on it and crashes to the error screen. */
+export const asList = (v) => (Array.isArray(v) ? v : [])
+
 // Keeps a stored underlying only if the backend still offers it, otherwise falls back to the
 // first one - so a stale or renamed symbol can't leave a page stuck on nothing.
 export function pickUnderlying(list, current) {
-  if (list?.some((u) => u.underlying === current)) return current
+  list = asList(list)
+  if (list.some((u) => u.underlying === current)) return current
   return list?.[0]?.underlying ?? null
 }
 

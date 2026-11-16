@@ -24,7 +24,7 @@ import CachePage from './CachePage.jsx'
 import { reportVisit, visitPage } from './visits.js'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS, asList } from './shared.jsx'
 import './App.css'
 import { loadPreferences, pausePreferenceSync } from './prefsSync.js'
 
@@ -884,7 +884,7 @@ function StrikesButton({ underlying, expiry }) {
     setLoading(true)
     fetch(withExpiry(`/api/cdv/${underlying}/strikes`, expiry))
       .then((r) => r.json())
-      .then((data) => setRows((data ?? []).map((s, i) => ({ ...s, key: `${s.securityId}-${i}` }))))
+      .then((data) => setRows(asList(data).map((s, i) => ({ ...s, key: `${s.securityId}-${i}` }))))
       .catch((err) => console.error('Failed to load CDV strikes:', err))
       .finally(() => setLoading(false))
   }
@@ -1124,7 +1124,7 @@ function DashboardPage() {
   useEffect(() => {
     fetch('/api/alerts')
       .then((r) => r.json())
-      .then((data) => setAlerts(data ?? []))
+      .then((data) => setAlerts(asList(data)))
       .catch((err) => console.error('Failed to load alerts:', err))
   }, [])
 
@@ -1138,7 +1138,7 @@ function DashboardPage() {
   const refetchCrossoverStates = () => {
     fetch('/api/alerts/state')
       .then((r) => r.json())
-      .then((data) => setCrossoverStates(data ?? []))
+      .then((data) => setCrossoverStates(asList(data)))
       .catch((err) => console.error('Failed to load crossover state:', err))
   }
   useEffect(refetchCrossoverStates, [])
@@ -1199,7 +1199,7 @@ function DashboardPage() {
     fetch('/api/spot/underlyings')
       .then((r) => r.json())
       .then((list) => {
-        setUnderlyings(list)
+        setUnderlyings(asList(list))
         setSelected((current) => pickUnderlying(list, current))
       })
       .catch((err) => console.error('Failed to load underlyings:', err))
@@ -1222,12 +1222,12 @@ function DashboardPage() {
 
     const ce = fetch(url('CE'))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(data ?? []) })
+      .then((data) => { if (!cancelledRef.cancelled) setAtmCeCandles(asList(data)) })
       .catch((err) => console.error('Failed to load CE candles:', err))
 
     const pe = fetch(url('PE'))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(data ?? []) })
+      .then((data) => { if (!cancelledRef.cancelled) setAtmPeCandles(asList(data)) })
       .catch((err) => console.error('Failed to load PE candles:', err))
 
     const obv = fetch(withExpiry(`/api/cdv/${underlying}/obv-series`, expiryParam))
@@ -1260,7 +1260,7 @@ function DashboardPage() {
 
     const vwapSeriesP = fetch(`/api/spot/${underlying}/vwap-series`)
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setVwapSeries((data ?? []).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
+      .then((data) => { if (!cancelledRef.cancelled) setVwapSeries(asList(data).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
       .catch((err) => console.error('Failed to load VWAP series:', err))
 
     const cdvSeriesP = fetch(withExpiry(`/api/cdv/${underlying}/series`, expiryParam))
@@ -1275,12 +1275,12 @@ function DashboardPage() {
 
     const cdvPrevDayP = fetch(withExpiry(`/api/cdv/${underlying}/previous-day-series`, expiryParam))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setCdvPrevDaySeries(data ?? []) })
+      .then((data) => { if (!cancelledRef.cancelled) setCdvPrevDaySeries(asList(data)) })
       .catch((err) => console.error('Failed to load CDV previous-day series:', err))
 
     const cdvHistoryP = fetch(withExpiry(`/api/cdv/${underlying}/history-series`, expiryParam))
       .then((r) => r.json())
-      .then((data) => { if (!cancelledRef.cancelled) setCdvHistorySeries(data ?? []) })
+      .then((data) => { if (!cancelledRef.cancelled) setCdvHistorySeries(asList(data)) })
       .catch((err) => console.error('Failed to load CDV history series:', err))
 
     return Promise.allSettled([candlesP, snapshotP, vwapSeriesP, cdvSeriesP, cdvSnapshotP, cdvPrevDayP, cdvHistoryP, fetchAtmAndObv(underlying, cancelledRef)])

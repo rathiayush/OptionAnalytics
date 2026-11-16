@@ -1629,5 +1629,9 @@ All must pass before committing.
   101.59999847412109375, an IV 12.34 became 12.3399999...); .NET 8 rounded to 15 / 7 significant digits. Every double / float
   that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast (it gives the same numbers on 8 and on 11)
   (`DecimalConversionTests.cs`).
+- AN API ANSWER KEPT AS A LIST goes through `asList` (shared.jsx): anything not an array - an error object `{ error }`, null -
+  reads as none. `x ?? []` lets an error object through, and the page then called `.some` / `.map` on it and fell to the
+  "Something went wrong" screen (the dashboard, Expired backtest, Contracts, Strike data, Triggers - found by a browser
+  check with every API answering 500). Use it for any new list a page fetches.
 - Live order placement only ever happens from a confirmed order on a page (OI Replay's Live order panel) or a saved
   Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`); alerts are never orders.
