@@ -46,6 +46,7 @@ import { GexSpotCard } from './GexSpotCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
+import { floatingHost, useFloatingHost } from './floatingHost.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OrderFab } from './OrderFab.jsx'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
@@ -3510,7 +3511,10 @@ function useEvenChartBottoms(count) {
   return { cardRef, extras }
 }
 
-export default function OiReplayPage() {
+// `popupOnly` (GlobalFloating.jsx - the Profiles and Order Flow pages): the page's logic and data with NONE of its cards - only the
+// popups, the order panel and the floating buttons, so the quick views and the order button work over another page. It takes
+// no part in the replay sync / the clock the Profiles page follows, has no keyboard keys and no replay bar.
+export default function OiReplayPage({ popupOnly = false } = {}) {
   const [underlying, setUnderlying] = usePersistedState(STORED_UNDERLYING, 'NIFTY')
   const [timeframe, setTimeframe] = usePersistedState(STORED_TIMEFRAME, 5)
   // Only meaningful for a HISTORICAL (non-today) day - Dhan's rolling-option REST endpoint (what a
@@ -4423,6 +4427,21 @@ export default function OiReplayPage() {
   // Quick views (QUICK_VIEWS): which popup is open - its keyboard shortcuts (Z X C V B N M) are set up with the order
   // ticket's below.
   const [quickView, setQuickView] = useState(null)
+  // The popup host (popupOnly): the tap that launched it is carried out once the data is in, and the launchers step aside once
+  // this page draws the real buttons.
+  const { pending: hostPending } = useFloatingHost()
+  useEffect(() => {
+    if (!popupOnly) return undefined
+    floatingHost.setFabsShown(Boolean(result))
+    return () => floatingHost.setFabsShown(false)
+  }, [popupOnly, result])
+  useEffect(() => {
+    if (!popupOnly || !result) return
+    const action = floatingHost.take()
+    if (!action) return
+    if (action.type === 'order') setPaperPanelOpen(true)
+    else if (action.type === 'view' && action.key) setQuickView(action.key)
+  }, [popupOnly, result, hostPending])
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
   // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
   const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex'
@@ -5341,6 +5360,7 @@ export default function OiReplayPage() {
   const ticketBlockedRef = useRef(false)
   ticketBlockedRef.current = Boolean(ticket) || reviewOpenRef.current
   useEffect(() => {
+    if (popupOnly) return undefined
     const onKey = (e) => {
       if (e.ctrlKey || e.metaKey || e.altKey || ticketBlockedRef.current) return
       // Not while typing in a box - but a ticked checkbox, a toggle or a dropdown still holding the focus is not typing.
@@ -5352,10 +5372,11 @@ export default function OiReplayPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [popupOnly])
   // The quick views' keys - Z X C V B N M , . alone (or the old Ctrl + Shift + 1 - 9) open one, the same again closes it,
   // another switches. Not while the order ticket (its C / P pick the option) or the order review is open.
   useEffect(() => {
+    if (popupOnly) return undefined
     const onKey = (e) => {
       if (ticketBlockedRef.current) return
       const view = quickViewForKey(e)
@@ -5365,7 +5386,7 @@ export default function OiReplayPage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [])
+  }, [popupOnly])
   const placeFromTicket = (values) => {
     setTicket(null)
     // The panel shows what was just traded.
@@ -5864,12 +5885,12 @@ export default function OiReplayPage() {
   // A day whose load FAILED here is named too (failedDate), so the Profiles page neither shows "loading" for ever nor
   // keeps another day: it shows that day itself, as far as its own data goes.
   useReplayClockBroadcast({
-    underlying, date: isLive || loading ? null : result?.date ?? null, loadingDate: !isLive && loading && date ? date.format('YYYY-MM-DD') : null,
+    underlying: popupOnly ? null : underlying, date: isLive || loading ? null : result?.date ?? null, loadingDate: !isLive && loading && date ? date.format('YYYY-MM-DD') : null,
     failedDate: !isLive && !loading && error && date ? date.format('YYYY-MM-DD') : null,
     ms: isLive ? null : syncClockMs, live: isLive, playing,
   })
   const sync = useReplaySync({
-    enabled: syncEnabled, active: !isLive, kind: 'oi', label: `Screen ${screen}`,
+    enabled: syncEnabled && !popupOnly, active: !isLive, kind: 'oi', label: `Screen ${screen}`,
     view: { underlying, expiryFlag, liveExpiryFlag, sumExpiries },
     // No day while one is loading: until it lands, `result` is still the previous day's. The expiry choices go with it for
     // the other OI Replay screens (the Order Flow page reads none of them).
@@ -6541,7 +6562,8 @@ export default function OiReplayPage() {
     // row" offers six there) instead of the page sitting centred with empty space either side. It was capped at
     // 2600 px, which left a third of a 3440 px monitor empty.
     // Room at the bottom for the quick button and the replay bar floating there, so the last card can be scrolled clear of them.
-    <div className={`oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={{ margin: '0 auto', padding: `24px 16px ${!result ? 24 : orderFabOn ? 120 : quickFabOn || replayBarOn ? 72 : 24}px` }}>
+    <div className={popupOnly ? undefined : `oi-mobile-page${compact ? ' oi-dash-compact' : ''}`} style={popupOnly ? undefined : { margin: '0 auto', padding: `24px 16px ${!result ? 24 : orderFabOn ? 120 : quickFabOn || replayBarOn ? 72 : 24}px` }}>
+      {!popupOnly && (
       <Space direction="vertical" size={20} style={{ width: '100%' }}>
         {/* Over 768 px the sidebar (NavBar) carries the name and the menu, so this row is not shown at all (oiMobile.css). */}
         <Space align="center" size={16} wrap className="oa-brand-row">
@@ -7308,6 +7330,7 @@ export default function OiReplayPage() {
           </Card>
         )}
       </Space>
+      )}
 
       <Modal
         open={drilldownStrike != null}
@@ -7565,7 +7588,7 @@ export default function OiReplayPage() {
           enabled={orderFabOn} anchor={orderFabAnchor} onAnchorChange={setOrderFabAnchor}
         />
       )}
-      {replayBarOn && !isLive && result && oneMinBars.length > 0 && !replayControlsFloating && !replayInlineOnScreen && (
+      {!popupOnly && replayBarOn && !isLive && result && oneMinBars.length > 0 && !replayControlsFloating && !replayInlineOnScreen && (
         <FloatingReplayBar fabOn={quickFabOn} fabAnchor={quickFabAnchor} orderOn={orderFabOn} orderAnchor={orderFabAnchor}>{replayBarControls}</FloatingReplayBar>
       )}
       {result && (

@@ -8,6 +8,7 @@ import StrikeDataPage from './StrikeDataPage.jsx'
 import ExpiredBacktestPage from './ExpiredBacktestPage.jsx'
 import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import OiReplayPage from './OiReplayPage.jsx'
+import GlobalFloating from './GlobalFloating.jsx'
 import OrderFlowPage from './OrderFlowPage.jsx'
 import ProfilesPage from './ProfilesPage.jsx'
 import SignalBacktestPage from './SignalBacktestPage.jsx'
@@ -1831,6 +1832,8 @@ export default function App() {
         <Route path="/cache" element={<RequireAdmin><CachePage /></RequireAdmin>} />
         <Route path="/trade-settings" element={<TradeSettingsPage />} />
       </Routes>
+      {/* The Order button and the quick views' button, app-wide (OI Replay draws its own; Profiles and Order Flow launch them). */}
+      <GlobalFloating />
     </AuthContext.Provider>
   )
 }
