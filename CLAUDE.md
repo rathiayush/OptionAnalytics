@@ -204,6 +204,24 @@ All must pass before committing.
   bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
   replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
   signal and feeds no strategy.
+- OI Replay's VOLATILITY SKEW card (asked for - "add volatility skew as well in OI Replay if you think it will give some edge";
+  `volSkew` - `VolSkewCard.jsx`, the maths `volSkew.js`): the straddle card's inputs (the run's option points, live ones added,
+  spot, `optionExpiry`, the replay clock). Each minute: every strike's IV from its OWN OUT-OF-THE-MONEY premium (a put below
+  the forward, a call above - Black-76 on the put-call-parity forward to 15:30 on the expiry day, gex.js' `impliedVol` /
+  `parityForward`; no expiry = the time implied from Dhan's ATM IV, as the GEX card; an IV outside 0.5 - 2x the ATM IV, a
+  stale print, LEFT OUT), the ATM IV AT THE FORWARD (interpolated between the two strikes around it - at the nearest strike it
+  jumped whenever the ATM strike changed), the 25-DELTA put / call IVs (interpolated on the smile by Black-76 delta), RR25 =
+  call25 − put25 (vol points; an index's is negative - puts richer) and BF25 = (call25 + put25) / 2 − ATM IV. The READ
+  (`skewRead`, `SKEW_READ_TABLE`, "Read over" 15 / 30 / 60 min, `optionanalytics.oiReplay.skewWindow`): the RR25's change
+  (>= 0.3 vol pts) against spot's move (>= 0.1%) - price falling + RR falling = fear confirms the fall, falling + RR rising =
+  selling may be exhausting, rising + RR rising = calls chased, rising + RR falling = rally being hedged, flat + RR falling
+  = protection demand building, flat + RR rising = fear coming out, else steady (the table in the read's tooltip, the row
+  lit). The card: the read, the numbers (ATM IV, 25Δ IVs, RR25 / BF25 with their changes), the SMILE now against the first
+  minute's (an SVG, puts red / calls green, the forward marked) and RR25 / BF25 / ATM IV through the day (`LinesChart`). Each
+  minute from the readings up to it - a cut at the clock = the whole day's up to it (`tests/vol-skew.test.mjs` - a chain
+  priced with Black-76 from a KNOWN smile read back, the reads, no look-ahead, a stale print out, the ATM IV smooth across
+  strikes). Added ONCE to a saved "Sections shown" right after the straddle (`SECTION_ADDITIONS` version 6, `SECTIONS_VERSION`
+  '6'). A read - it feeds no strategy, alert or order.
 - OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
   option points - Black-Scholes gamma ON THE FORWARD (d1 from ln(F / K); F = put-call parity at the three strikes nearest
   spot, call - put = F - K, the middle one, spot when none or > 2% off - `parityForward`, as professional systems do; the
