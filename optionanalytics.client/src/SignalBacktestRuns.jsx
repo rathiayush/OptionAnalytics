@@ -158,20 +158,6 @@ function ResultCell({ job }) {
     if (job.state === 'failed') return <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>
     return null
   }
-  if (job.kind === 'components') {
-    if (job.state === 'done' && s) {
-      return (
-        <Text style={{ fontSize: 12 }}>
-          {(s.events ?? 0).toLocaleString('en-IN')} events · {s.okDays ?? 0} days{s.failedDays > 0 ? ` · ${s.failedDays} not run` : ''}
-          <br />Works as meant ({s.horizon ?? 30}m): <Text strong style={{ fontSize: 12 }}>{s.works?.length ? s.works.join(', ') : 'none'}</Text>
-          <Stopped s={s} />
-        </Text>
-      )
-    }
-    if (job.state === 'running' && p) return <Text type="secondary" style={{ fontSize: 12 }}>so far {(p.events ?? 0).toLocaleString('en-IN')} events · {p.okDays ?? 0} days{fromDhan(p)}</Text>
-    if (job.state === 'failed') return <Text type="danger" style={{ fontSize: 12 }}>{job.error}</Text>
-    return null
-  }
   if (job.state === 'done' && s) {
     return (
       <Text style={{ fontSize: 12 }}>
@@ -191,7 +177,6 @@ function RunCell({ job: j, me }) {
     <Space direction="vertical" size={0}>
       <Text strong style={{ fontSize: 13 }}>
         {j.kind === 'features' && <Tag color="purple" icon={<ExperimentOutlined />} style={{ marginInlineEnd: 6 }}>Feature finder</Tag>}
-        {j.kind === 'components' && <Tag color="cyan" icon={<ExperimentOutlined />} style={{ marginInlineEnd: 6 }}>Component check</Tag>}
         {j.name}
       </Text>
       {/* The strategy it ran, when its name is not already the run's name. */}
@@ -225,7 +210,7 @@ function Actions({ job: j, viewingIds, busy, onOpen, onUse, onCancel, onDelete }
           <Button size="small" icon={<DownloadOutlined />} loading={saving} onClick={csv}>CSV</Button>
         </Tooltip>
       )}
-      {j.state === 'done' && j.kind !== 'components' && (
+      {j.state === 'done' && (
         <AiAnalyse
           buildText={async () => storedRunText(await runResult(j.id))} title={`AI analysis - ${j.name ?? 'background run'}`}
           label="Analyse"

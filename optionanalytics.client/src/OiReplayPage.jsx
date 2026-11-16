@@ -41,7 +41,6 @@ import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
-import { VolSkewCard } from './VolSkewCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
 import { DexCard } from './DexCard.jsx'
@@ -742,7 +741,6 @@ const SECTION_OPTIONS = [
   { value: 'optionPremium', label: 'Option premium (CE/PE)' },
   { value: 'optionFlow', label: 'Option CDV / OBV' },
   { value: 'straddle', label: 'ATM straddle' },
-  { value: 'volSkew', label: 'Volatility skew' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
   { value: 'gexSpot', label: 'GEX levels on spot' },
   { value: 'dex', label: 'Dealer hedging (DEX)' },
@@ -789,7 +787,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'volSkew', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -7215,22 +7213,6 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   </Card>
                 </Col>
               </Row>
-              </LiveSection>
-              </DashboardCard>
-            )}
-
-            {/* The volatility skew (VolSkewCard.jsx, volSkew.js): the smile, the 25-delta risk reversal / butterfly and the ATM
-                IV, and the read of the risk reversal's change against price - the straddle card's inputs, up to the replay clock. */}
-            {visibleSections.includes('volSkew') && (
-              <DashboardCard key="volSkew" {...dash('volSkew')}>
-              <LiveSection version={sectionVersion}>
-                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Volatility skew (smile, 25Δ risk reversal){isLive ? ' · live' : ''}</Space>}>
-                  <VolSkewCard
-                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={flowSpotBars} expiry={result.optionExpiry ?? null}
-                    asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
-                    dayKey={`${underlying}-${result.date}`}
-                  />
-                </Card>
               </LiveSection>
               </DashboardCard>
             )}

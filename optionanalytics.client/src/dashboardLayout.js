@@ -54,7 +54,6 @@ const CARD_ROWS = {
   optionPremium: 14,
   optionFlow: 14,
   straddle: 19,
-  volSkew: 20,
   gex: 19,
   gexSpot: 22,
   dex: 22,
@@ -323,8 +322,6 @@ export const SECTION_ADDITIONS = [
   { version: 4, card: 'futuresDeltaProfile', after: 'futures' },
   // The GEX levels drawn on the spot candles (asked for - "on OI Replay show the GEX levels with the spot chart").
   { version: 5, card: 'gexSpot', after: 'gex' },
-  // The volatility skew (asked for - "add volatility skew as well in OI Replay").
-  { version: 6, card: 'volSkew', after: 'straddle' },
   // Dealer hedging (asked for - "can you also add delta exposure" - the hedging-flow DEX).
   { version: 7, card: 'dex', after: 'gexSpot' },
 ]

@@ -523,9 +523,7 @@ export default function SignalBacktestPage() {
   const localReport = useMemo(() => backtestReport(outcomes, engine), [outcomes, engine])
 
   // The background runs (the server's queue) and the one opened here, if any - its report is shown instead of the page's.
-  const { jobs: allJobs, refresh: refreshJobs } = useBackgroundRuns()
-  // The Component check page's runs are listed there, not here.
-  const jobs = useMemo(() => allJobs.filter((j) => j.kind !== 'components'), [allJobs])
+  const { jobs, refresh: refreshJobs } = useBackgroundRuns()
   const [bgTelegram, setBgTelegram] = usePersistedState(STORE.bgTelegram, true)
   // The dialog's kind of run when open ('backtest' / 'features'), else false.
   const [bgOpen, setBgOpen] = useState(false)

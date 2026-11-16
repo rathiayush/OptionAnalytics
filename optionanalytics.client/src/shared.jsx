@@ -1116,7 +1116,6 @@ const NAV_ITEMS = [
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
   { key: '/telegram-signals', label: 'Telegram signals', icon: <SendOutlined /> },
-  { key: '/component-check', label: 'Component check', icon: <ExperimentOutlined /> },
   { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
   { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
   { key: '/contracts', label: 'Contracts', icon: <FileTextOutlined /> },

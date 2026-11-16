@@ -204,24 +204,9 @@ All must pass before committing.
   bought / trend / breakout / not confirmed) is the Auto ATM straddle vs its VWAP and spot vs that range. It runs on the
   replay clock (nothing after it - `tests/straddle.test.mjs`) and live; it describes the day, it is not a measured
   signal and feeds no strategy.
-- OI Replay's VOLATILITY SKEW card (asked for - "add volatility skew as well in OI Replay if you think it will give some edge";
-  `volSkew` - `VolSkewCard.jsx`, the maths `volSkew.js`): the straddle card's inputs (the run's option points, live ones added,
-  spot, `optionExpiry`, the replay clock). Each minute: every strike's IV from its OWN OUT-OF-THE-MONEY premium (a put below
-  the forward, a call above - Black-76 on the put-call-parity forward to 15:30 on the expiry day, gex.js' `impliedVol` /
-  `parityForward`; no expiry = the time implied from Dhan's ATM IV, as the GEX card; an IV outside 0.5 - 2x the ATM IV, a
-  stale print, LEFT OUT), the ATM IV AT THE FORWARD (interpolated between the two strikes around it - at the nearest strike it
-  jumped whenever the ATM strike changed), the 25-DELTA put / call IVs (interpolated on the smile by Black-76 delta), RR25 =
-  call25 − put25 (vol points; an index's is negative - puts richer) and BF25 = (call25 + put25) / 2 − ATM IV. The READ
-  (`skewRead`, `SKEW_READ_TABLE`, "Read over" 15 / 30 / 60 min, `optionanalytics.oiReplay.skewWindow`): the RR25's change
-  (>= 0.3 vol pts) against spot's move (>= 0.1%) - price falling + RR falling = fear confirms the fall, falling + RR rising =
-  selling may be exhausting, rising + RR rising = calls chased, rising + RR falling = rally being hedged, flat + RR falling
-  = protection demand building, flat + RR rising = fear coming out, else steady (the table in the read's tooltip, the row
-  lit). The card: the read, the numbers (ATM IV, 25Δ IVs, RR25 / BF25 with their changes), the SMILE now against the first
-  minute's (an SVG, puts red / calls green, the forward marked) and RR25 / BF25 / ATM IV through the day (`LinesChart`). Each
-  minute from the readings up to it - a cut at the clock = the whole day's up to it (`tests/vol-skew.test.mjs` - a chain
-  priced with Black-76 from a KNOWN smile read back, the reads, no look-ahead, a stale print out, the ATM IV smooth across
-  strikes). Added ONCE to a saved "Sections shown" right after the straddle (`SECTION_ADDITIONS` version 6, `SECTIONS_VERSION`
-  '6'). A read - it feeds no strategy, alert or order.
+- OI Replay's VOLATILITY SKEW card (`VolSkewCard.jsx`, `volSkew.js` - the smile, RR25 / BF25, the read against price) was
+  REMOVED on request ("remove IV skew ... we do not need it"), code and tests: a saved "Sections shown" or layout naming
+  `volSkew` just drops it (`reconcileSections`); `SECTION_ADDITIONS` has no version 6 any more (`SECTIONS_VERSION` stays '7').
 - OI Replay's GEX card (`GexCard.jsx`, `gex.js` - `gexDay` / `gexUpTo`): gamma exposure minute by minute from the run's
   option points - Black-Scholes gamma ON THE FORWARD (d1 from ln(F / K); F = put-call parity at the three strikes nearest
   spot, call - put = F - K, the middle one, spot when none or > 2% off - `parityForward`, as professional systems do; the
@@ -1351,37 +1336,11 @@ All must pass before committing.
   by Log out (ended on Telegram's side too). The status never carries the hash, a code or the full phone (masked). One
   request at a time; a click, nothing polls; no Dhan call. `TelegramChannelReaderTests.cs`. The ORDER FLOW alerts are the only
   Telegram the server sends by itself (above) - nothing else moved server side.
-- The COMPONENT CHECK page (`/component-check`, `ComponentCheckPage.jsx`, the maths `componentCheck.js`; asked for - "a page
-  where each component is tested on historical data and gives the correlation between price and what they are meant for",
-  the card-reads version picked, page + background): every OI Replay card's OWN READ replayed over past days with that
-  card's code on the day's OI Replay run (`/api/oi-replay/{u}/run` - the current expiry, Standard GEX sign; `loadComponentDay`,
-  a day at a time, a click - the disk cache, Dhan once), each read an EVENT at the minute it was made, known at its END
-  (`at` = time + 1 min), and what spot did after it (telegramSignals.js' `reaction`: the close 5 / 15 / 30 / 60 / 90 / 120 min later - `HORIZONS`
-  in componentCheck.js, 90 / 120 asked for ("add higher timeframe as well like 90 120 min"; an event too late in the day
-  for one has none there; a background run saved before them shows — there) - best / worst in the hour). `CARDS`: OI totals S/R break and 🎯 (prepareDay's `breaks` / `hp`), the straddle trend changes
-  and trade ideas (`straddleRead`), the skew read (the card's table over 30 min), GEX smart detection rows with a side, the
-  GEX regime, spot reaching a GEX level (15 min before the same level again), the dealers' lean (dex.js), charm into the
-  close (read at 14:30), absorption / exhaustion by OI (5-min candles). A STATE read is an event when it changes and holds
-  `HOLD` (3) minutes. Two kinds, each tested for what it is MEANT for: DIRECTIONAL (`dir` +1 / -1) - hit %, the average move
-  its way (% / points), Pearson's correlation of the side with the move (`corr{h}`); VOLATILITY (`expect` bigger / smaller -
-  straddle sideways / trending, GEX regime, max gamma, the dealers' lean) - the move's size against the USUAL move from any
-  minute of the same days (`dayBaseline` / `baselineOf`, as sums so days add up) = `ratio{h}`, how often bigger, the
-  correlation of the expectation with the size over usual, the hour's range against usual. `componentReport`: a row a card
-  (its directional reads together, else its volatility ones) with a row a read under it, a VERDICT at the horizon picked
-  ("Verdict at", `optionanalytics.componentCheck.horizon`): directional hit >= 55% with the move its way = works, <= 45%
-  against = opposite; volatility >= 1.15x usual (<= 0.87x for smaller) = works, the other way = opposite; else no edge;
-  under `VERDICT_MIN_EVENTS` 10 = too few. Events table (a card filter, a row opens its day), Events CSV (`eventsCsv`), a
-  day chart (the day's spot candles, ▲ / ▼ per directional read with a short tag, a grey dot a volatility read; a background
-  run's day loaded when picked). Up to 60 days on the page (the latest of a longer range); RUN IN BACKGROUND = the Signal
-  backtest's queue with KIND "components" (`SignalBacktestJobService.Kinds`; the job script's `components` - each day's
-  outcome kept, the run dropped, a day failed on the way tried once more at once, `STOP_AFTER` as the others, the horizon
-  from the request's settings), up to 1 500 days; its result `{ kind: 'components', components: report }` (no events -
-  the report only), `SummaryOf` = events / days / the cards that work / are opposite, Telegram "🧪 Component check done";
-  listed on this page only (the Signal backtest page filters it out; `BackgroundRunsCard` tags it, no Use settings / AI
-  there). `DaysPicker` moved to `DaysPicker.jsx` (both pages). `tests/component-check.test.mjs` (the events, no look-ahead -
-  a day cut part way = the whole day's up to the cut, the baseline, the report by hand, the loader), `-job` (the
-  background run = the page's report), `SignalBacktestJobServiceTests.cs`. A read of the cards - it places nothing and
-  feeds no strategy or alert.
+- The COMPONENT CHECK page (`/component-check` - every OI Replay card's reads tested on past days against the price after
+  them) was REMOVED on request ("remove ... this component page, code and page, we do not need it"), with its background run
+  kind "components": `SignalBacktestJobService.Kinds` is "backtest" / "features" again, and a run of a kind no longer offered
+  still queued from before is FAILED, never started (`TryStartNext` - `SignalBacktestJobServiceTests.cs`). `DaysPicker.jsx`
+  (split out for it) stays - the Signal backtest's days picker.
 - The TELEGRAM SIGNALS page (`/telegram-signals`, `TelegramSignalsPage.jsx`, the reading `telegramSignals.js`; asked for -
   "a page which will read the messages and show me how the price reacts after those signals ... show correlation between
   price and signals"): two sources (`optionanalytics.telegramSignals.source`) - SERVER + TELEGRAM (the default: Load =
