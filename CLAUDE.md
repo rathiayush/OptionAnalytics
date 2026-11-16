@@ -318,8 +318,24 @@ All must pass before committing.
   the three; the page's OI reads (totals, heatmap, walls, alerts) still follow the Σ tick only (`oiSumExtras`). Unticked
   (and Σ off) = the current expiry alone, as before. A past day's next expiry is ATM +/- 3 (all Dhan gives), two more band
   requests a day the first time, then disk. The Signal backtest's GEX is unchanged (its own Σ option).
-  (A DEX - delta exposure - card was built beside it and removed on request, code and all: its lean repeated the OI
-  reads already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two.)
+  (A first DEX - delta exposure - card was built beside it and removed on request: its CE vs PE lean repeated the OI reads
+  already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two. It came back as the
+  DEALER HEDGING card below - flows only, no lean.)
+- OI Replay's DEALER HEDGING (DEX) card (asked for - "can you also add delta exposure", the hedging-flow version picked:
+  named so it is not read as order-flow delta, no CE vs PE lean; `dex` - `DexCard.jsx`, the maths `dex.js`): from the page's
+  GEX day (`useGexDays`, its Sign picked on the card - `optionanalytics.oiReplay.dexSign`, Standard / OI build-up / NSE +
+  build-up; gexDay's `options` now carry `call`) each minute's dealers' delta (Black-76 on the forward: call carry x N(d1),
+  put carry x (N(d1) - 1), x the dealers' OI) read as FLOWS - rupees of index the dealers BUY (+) / SELL (-) to stay hedged
+  for spot +1% / -1% (the whole move, sticky strike - the two sides' mean is the net GEX), IV -1 vol point (VANNA) and time
+  alone (CHARM - to 15:30 that day and per hour); the dealers' NET delta (of the strikes loaded only - a level for them;
+  the flows are local) and the DEX FLIP (the spot where it crosses zero, within +/- 3% and the strikes loaded, `flipEdge`
+  rough) - none under Standard (long calls and short puts are both long delta), said on the card; `dexRead` a line each
+  (moves damped / chased / mixed, charm into the close, vanna), the profile (`dexProfile`, an SVG) and the flows through the
+  day (`LinesChart`, charm per hour in its own pane). Each minute from its own GEX minute - a cut at the clock = the whole
+  day's up to it (`tests/dex.test.mjs` - the delta = the price's slope, the moves = the GEX, charm / vanna signs, the flip,
+  no look-ahead under both signs). Added ONCE to a saved "Sections shown" right after the GEX levels on spot
+  (`SECTION_ADDITIONS` version 7, `SECTIONS_VERSION` '7'); shown, it turns the page's GEX on (`gexWanted`). A read - it
+  feeds no strategy, alert or order.
 - OI Replay's GEX LEVELS ON SPOT card (asked for - "on OI Replay show the GEX levels with the spot chart"; `gexSpot` -
   `GexSpotCard.jsx`, the maths `gexSpot.js`): the spot candles of its own timeframe (1 / 3 / 5 / 15, default 5,
   `optionanalytics.oiReplay.gexSpotTf`) with the CALL WALL, PUT WALL, MAX GAMMA and GAMMA FLIP drawn THROUGH the day as

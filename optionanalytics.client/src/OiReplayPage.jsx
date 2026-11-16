@@ -44,6 +44,7 @@ import { StraddleCard } from './StraddleCard.jsx'
 import { VolSkewCard } from './VolSkewCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
+import { DexCard } from './DexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
 import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
@@ -744,6 +745,7 @@ const SECTION_OPTIONS = [
   { value: 'volSkew', label: 'Volatility skew' },
   { value: 'gex', label: 'GEX (gamma exposure)' },
   { value: 'gexSpot', label: 'GEX levels on spot' },
+  { value: 'dex', label: 'Dealer hedging (DEX)' },
   { value: 'futures', label: 'Futures' },
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
@@ -787,7 +789,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'volSkew', 'gex', 'gexSpot', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'volSkew', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -4446,7 +4448,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
   }, [popupOnly, result, hostPending])
   const [quickTotalsTimeframe, setQuickTotalsTimeframe] = useState(1)
   // The day's GEX (both signs), worked out once for the GEX card, the entry checklist's gamma check and the GEX quick view.
-  const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('entryChecklist') || quickView === 'gex'
+  const gexWanted = visibleSections.includes('gex') || visibleSections.includes('gexSpot') || visibleSections.includes('dex') || visibleSections.includes('entryChecklist') || quickView === 'gex'
   // GEX OVER ALL THREE EXPIRIES BY DEFAULT (asked for - "how standard systems use GEX, I need to use it the same way; if
   // there are gaps, fix": the GEX platforms add up the expiries - SpotGamma the nearest four - where this read only the
   // current one unless the page's Σ was ticked). The GEX card's "All expiries" tick (on by default): the next and the
@@ -7265,6 +7267,22 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                 <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />GEX levels on spot (walls, max gamma, flip){isLive ? ' · live' : ''}</Space>}>
                   <GexSpotCard
                     days={gexDays} spotBars={deltaSpotBars} isLive={isLive}
+                    asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
+                    dayKey={`${underlying}-${result.date}`}
+                  />
+                </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+
+            {/* Dealer hedging (DexCard.jsx, dex.js): the index the dealers trade for spot +/- 1%, an IV fall (vanna) and time
+                passing (charm), the DEX flip - from the same day's GEX, up to the replay clock. */}
+            {visibleSections.includes('dex') && (
+              <DashboardCard key="dex" {...dash('dex')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Dealer hedging (DEX){isLive ? ' · live' : ''}</Space>}>
+                  <DexCard
+                    days={gexDays} isLive={isLive}
                     asOfMs={isLive ? null : replayEndTime == null ? 0 : fromChartTime(replayEndTime) * 1000}
                     dayKey={`${underlying}-${result.date}`}
                   />
