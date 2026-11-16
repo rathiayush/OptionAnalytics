@@ -66,7 +66,8 @@ const LEVEL_LINES = [
 
 /** The candles and the profile beside them, `levels` (deltaProfileLevels - null: no lines) as price lines.
  *  `onHover(price | null)` - the price under the crosshair. */
-function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, height: givenHeight = 380 }) {
+function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, lotSize = 1, deltaWord = 'Δ', height: givenHeight = 380 }) {
+  const [tip, setTip] = useState(null)
   const height = useFitHeight(givenHeight)
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -109,6 +110,7 @@ function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, h
     chart.subscribeCrosshairMove((param) => {
       const p = param?.point ? series.coordinateToPrice(param.point.y) : null
       hoverRef.current?.(Number.isFinite(p) ? p : null)
+      setTip(param?.point && Number.isFinite(p) ? { price: p, x: param.point.x, y: param.point.y } : null)
     })
     const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
     resize.observe(containerRef.current)
@@ -154,7 +156,26 @@ function DeltaProfileChart({ candles, profile, levels = null, dayKey, onHover, h
       price: levels[l.key], color: l.color, title: l.title, lineWidth: l.width, lineStyle: l.style, axisLabelVisible: true,
     }))
   }, [levels])
-  return <div ref={containerRef} style={{ width: '100%', height }} />
+  const row = tip ? rowAt(profile, tip.price) : null
+  const width = containerRef.current?.clientWidth ?? 0
+  const flip = tip && tip.x > width * 0.5
+  const lv = tip && levels ? LEVEL_LINES.filter((l) => Number.isFinite(levels[l.key]) && Math.abs(tip.price - levels[l.key]) <= (profile?.rowSize ?? 0)).map((l) => l.title) : []
+  return (
+    <div style={{ position: 'relative', width: '100%', height }}>
+      <div ref={containerRef} style={{ width: '100%', height }} />
+      {tip && row ? (
+        <div style={{
+          position: 'absolute', top: Math.max(4, tip.y - 24), pointerEvents: 'none', zIndex: 5, fontSize: 11, lineHeight: 1.45,
+          [flip ? 'right' : 'left']: flip ? Math.max(4, width - tip.x + 14) : tip.x + 14,
+          background: 'rgba(13,17,23,0.92)', border: `1px solid ${BORDER_COLOR}`, borderRadius: 4, padding: '4px 8px', color: '#d6dbe4', whiteSpace: 'nowrap',
+        }}>
+          <div>{price(row.price)} – {price(row.price + profile.rowSize)}{lv.length ? ` · ${lv.join(' / ')}` : ''}{row.price === profile.poc ? ' · POC' : ''}</div>
+          <div>Volume {lots(row.volume / lotSize)} lots</div>
+          <div>{deltaWord} <span style={{ color: deltaColor(profile.bullishNegative ? -row.delta : row.delta), fontWeight: 600 }}>{lots(row.delta / lotSize, true)}</span> lots</div>
+        </div>
+      ) : null}
+    </div>
+  )
 }
 
 // The levels in words, coloured as their lines - with the rows that saw the most buying and selling.
@@ -345,7 +366,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           </Text>
           )}
           <LevelsLine levels={levels} show={levelsOn} oiNet={oiNet} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} lotSize={lotSize} deltaWord={deltaWord} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
@@ -440,7 +461,7 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
             Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.delta) }}>{lots(profile.delta, true)}</Text> lots · volume {lots(profile.volume)} lots · POC {price(levels?.poc ?? profile.poc)}
           </Text>
           <LevelsLine levels={levels} show={levelsOn} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}`} onHover={setHover} />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}`} onHover={setHover} lotSize={1} deltaWord="Δ" />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={1} deltaWord="Δ" />
         </>
       ) : day.loading || past.loading ? <Text type="secondary">{past.loading && !day.loading ? 'Loading the days before…' : 'Loading the futures footprint…'}</Text>

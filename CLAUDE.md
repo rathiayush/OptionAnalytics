@@ -527,7 +527,7 @@ All must pass before committing.
   leaving it empty, at least `MIN_SPAN` candle widths), a VOLUME column (how much traded at each price row - grey, the value
   area brighter, the POC amber, also a faint band across the candles: the big volume node) and a DELTA column (buyers minus
   sellers there - green right of its centre line, red left); the row under the crosshair outlined and read out under the
-  chart; timeframe 1 / 3 / 5 / 15 and the row size per index (`PROFILE_ROWS` / `PROFILE_ROW_CHOICES`, shared by both cards -
+  chart AND in a small tooltip beside the pointer (price row, any level it holds, volume, delta in lots - asked for: "I should be able to hover over and see data"; flips to the left of the pointer on the right half); timeframe 1 / 3 / 5 / 15 and the row size per index (`PROFILE_ROWS` / `PROFILE_ROW_CHOICES`, shared by both cards -
   `optionanalytics.oiReplay.deltaProfileRows`). OPTIONS ON SPOT (`optionDeltaProfile`): the run's option bars (live ones
   added - `flowCePoints`) given a side as the Option CDV does - `barProxyDelta` (where the close sits in the bar's range) x
   `deltaWeight` (the strike's delta at that minute's spot; volume weighted the same) - added up a minute and SPREAD over the
