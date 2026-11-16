@@ -1356,8 +1356,9 @@ All must pass before committing.
   the card-reads version picked, page + background): every OI Replay card's OWN READ replayed over past days with that
   card's code on the day's OI Replay run (`/api/oi-replay/{u}/run` - the current expiry, Standard GEX sign; `loadComponentDay`,
   a day at a time, a click - the disk cache, Dhan once), each read an EVENT at the minute it was made, known at its END
-  (`at` = time + 1 min), and what spot did after it (telegramSignals.js' `reaction`: the close 5 / 15 / 30 / 60 min later,
-  best / worst in the hour). `CARDS`: OI totals S/R break and 🎯 (prepareDay's `breaks` / `hp`), the straddle trend changes
+  (`at` = time + 1 min), and what spot did after it (telegramSignals.js' `reaction`: the close 5 / 15 / 30 / 60 / 90 / 120 min later - `HORIZONS`
+  in componentCheck.js, 90 / 120 asked for ("add higher timeframe as well like 90 120 min"; an event too late in the day
+  for one has none there; a background run saved before them shows — there) - best / worst in the hour). `CARDS`: OI totals S/R break and 🎯 (prepareDay's `breaks` / `hp`), the straddle trend changes
   and trade ideas (`straddleRead`), the skew read (the card's table over 30 min), GEX smart detection rows with a side, the
   GEX regime, spot reaching a GEX level (15 min before the same level again), the dealers' lean (dex.js), charm into the
   close (read at 14:30), absorption / exhaustion by OI (5-min candles). A STATE read is an event when it changes and holds

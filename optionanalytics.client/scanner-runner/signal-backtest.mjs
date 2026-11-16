@@ -27,7 +27,7 @@ import { closeSync, openSync, renameSync, writeFileSync, writeSync } from 'node:
 import { MAX_BACKGROUND_DAYS, backtestDays, deltaDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
 import { csvHeader, csvLines, dayRows, dayTable, featureReportsOfDays } from '../src/featureFinder.js'
-import { componentReport, loadComponentDay } from '../src/componentCheck.js'
+import { HORIZONS, componentReport, loadComponentDay } from '../src/componentCheck.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -215,7 +215,7 @@ async function components(dates) {
   }
   // The horizon the verdicts are read at - the page's pick (not one of the backtest's settings).
   const asked = Number(JSON.parse(process.env.BACKTEST_JOB ?? '{}')?.horizon)
-  const report = componentReport(outcomes, { horizon: [5, 15, 30, 60].includes(asked) ? asked : 30 })
+  const report = componentReport(outcomes, { horizon: HORIZONS.includes(asked) ? asked : 30 })
   if (!report.days) {
     write({ ok: false, kind: 'components', settings, dates, startedUtc, finishedUtc: new Date().toISOString(), error: `No day could be read - ${report.failed[0]?.reason ?? 'no day was asked'}`, components: report })
     process.exit(1)

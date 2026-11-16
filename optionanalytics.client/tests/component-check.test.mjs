@@ -137,7 +137,7 @@ test('the report: hit %, the move its way, the correlation and the verdict; vola
   assert.equal(wrong.cards.find((c) => c.card === 'skew').verdict.key, 'opposite')
   const csv = eventsCsv(days)
   assert.equal(csv.split('\n').length, 1 + 24)
-  assert.match(csv.split('\n')[1], /^2026-11-02,09:16,OI totals S\/R break,PE broke resistance \(bullish\),dir,bullish,1000,2,3,6,6,6,2,/)
+  assert.match(csv.split('\n')[1], /^2026-11-02,09:16,OI totals S\/R break,PE broke resistance \(bullish\),dir,bullish,1000,2,3,6,6,,,6,2,/)
 })
 
 test('a whole day through dayOutcome, and the loader: success, a server error worth a retry, a refusal', async () => {
@@ -145,6 +145,14 @@ test('a whole day through dayOutcome, and the loader: success, a server error wo
   assert.equal(o.ok, true)
   assert.ok(o.bars.length === 375 && o.events.length > 0 && o.events.every((e) => e.reaction == null || e.reaction.base > 0))
   assert.equal(dayOutcome(run()).bars, undefined)
+  // The higher horizons: 90 / 120 min after an event of the morning - the close that many minutes later; an event too late
+  // in the day for them has none there.
+  const close = (ms) => o.bars.find((b) => b.t === ms)?.c
+  const early = o.events.find((e) => e.reaction && e.at < T0 + 120 * MIN)
+  for (const h of [90, 120]) assert.ok(Math.abs(early.reaction.moves[h] - (close(early.at - MIN + h * MIN) - early.reaction.base)) < 1e-9, `${h}m`)
+  const late = o.events.find((e) => e.reaction && e.at > T0 + 300 * MIN)
+  assert.ok(late && late.reaction.moves[90] === null && late.reaction.moves[120] === null && late.reaction.moves[5] != null)
+  assert.ok(o.baseline.abs[120][1] > 0 && o.baseline.abs[120][1] < o.baseline.abs[90][1])
   const ok = await loadComponentDay('NIFTY', '2026-11-10', { fetch: async (url) => {
     assert.match(url, /^\/api\/oi-replay\/NIFTY\/run\?date=2026-11-10&timeframeMinutes=1&expiryFlag=WEEK$/)
     return { ok: true, status: 200, headers: { get: () => '0' }, json: async () => run() }

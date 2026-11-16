@@ -11,10 +11,9 @@ import { MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, backtestDays } from './signalBa
 import { BACKTEST_UNDERLYINGS, loadSourceText } from './signalBacktestJob.js'
 import { BackgroundRunsCard } from './SignalBacktestRuns.jsx'
 import { queueRun, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
-import { CARDS, CARD_TITLE, HOLD, componentReport, eventsCsv, loadComponentDay } from './componentCheck.js'
+import { CARDS, CARD_TITLE, HOLD, HORIZONS, componentReport, eventsCsv, loadComponentDay } from './componentCheck.js'
 
 const { Text, Title } = Typography
-const HORIZONS = [5, 15, 30, 60]
 const IST_MS = 330 * 60_000
 const STORE = {
   index: 'optionanalytics.componentCheck.index',
@@ -110,13 +109,13 @@ function ReportTable({ report, horizon }) {
       title: <Tooltip title="Directional: the read's side (+1 / −1) against the move that followed. Volatility: the expectation (+1 bigger / −1 smaller) against the move's size over usual. + = it tells, 0 = nothing, − = the opposite.">Correlation</Tooltip>, key: 'corr', width: 120,
       render: (_, r) => (r.events ? <Text strong style={{ color: corrColor(r[`corr${h}`]) }}>{corr(r[`corr${h}`])}</Text> : null),
     },
-    { title: 'By horizon (correlation)', key: 'strip', width: 260, render: (_, r) => (r.events ? <CorrStrip r={r} /> : null) },
+    { title: 'By horizon (correlation)', key: 'strip', width: 380, render: (_, r) => (r.events ? <CorrStrip r={r} /> : null) },
     {
       title: <Tooltip title="Directional reads: the average most the price went its way / against it in the hour (points).">Best / worst 60m</Tooltip>, key: 'bw', width: 120,
       render: (_, r) => (r.kind === 'dir' && Number.isFinite(r.avgBest) ? `${r.avgBest.toFixed(0)} / ${r.avgWorst.toFixed(0)}` : r.kind === 'vol' && Number.isFinite(r.rangeRatio) ? <Tooltip title="the hour's range after it against usual">range {ratio(r.rangeRatio)}</Tooltip> : null),
     },
   ]
-  return <Table size="small" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1240 }} expandable={{ indentSize: 12 }} />
+  return <Table size="small" columns={columns} dataSource={rows} pagination={false} scroll={{ x: 1360 }} expandable={{ indentSize: 12 }} />
 }
 
 /** A day's spot candles with the events marked (green ▲ bullish under, red ▼ bearish over, a grey dot a volatility read). */
@@ -375,7 +374,7 @@ export default function ComponentCheckPage() {
           {!stored && (
             <Table
               size="small" rowKey={(e) => `${e.date}|${e.card}|${e.read}|${e.at}`} columns={eventColumns} dataSource={shownEvents}
-              pagination={{ pageSize: 25, showSizeChanger: false }} scroll={{ x: 1100 }} style={{ marginTop: 8 }}
+              pagination={{ pageSize: 25, showSizeChanger: false }} scroll={{ x: 1240 }} style={{ marginTop: 8 }}
               onRow={(e) => ({ onClick: () => setChartDay(e.date), style: { cursor: 'pointer' } })}
             />
           )}
