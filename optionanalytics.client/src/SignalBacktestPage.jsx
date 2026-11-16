@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, DatePicker, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Checkbox, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { CloudServerOutlined, CloseOutlined, DownloadOutlined, ExperimentOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
@@ -21,7 +21,7 @@ import { BacktestDayChartCard } from './SignalBacktestChart.jsx'
 import { FeatureFinderCard, StoredFeatureFinderCard } from './FeatureFinderCard.jsx'
 import { AiAnalyse } from './AiAnalyse.jsx'
 import { backtestReportText, compareText } from './llmAnalysis.js'
-import { DATE_INPUT_FORMATS, isPastDay, rangePresets, withRangeEnd } from './backtestDates.js'
+import { DaysPicker } from './DaysPicker.jsx'
 
 // The SIGNAL BACKTEST page: pick an index and a range of past days and BUILD ONE RULE with dropdowns - groups (Match ALL /
 // ANY, NOT) of conditions (an indicator, what it says, its number and look-back) and of groups (the brackets), the trade it
@@ -381,44 +381,6 @@ function EquityChart({ lines, height = 280 }) {
 // were that month's, and earlier years could not be reached), a From and a To picker of one month each and the quick
 // ranges in a dropdown. Every picker takes a date TYPED in any of DATE_INPUT_FORMATS (2025-01-06, 06/01/2025, 6-1-2025…);
 // « / » and the year in its header go back years.
-function DaysPicker({ range, setRange, disabled }) {
-  const narrow = useMediaQuery('(max-width: 768px)')
-  const today = dayjs().format('YYYY-MM-DD')
-  const presets = useMemo(() => rangePresets(today), [today])
-  const at = (k) => (range?.[k] && dayjs(range[k]).isValid() ? dayjs(range[k]) : null)
-  const common = {
-    size: 'small', allowClear: false, disabled, format: DATE_INPUT_FORMATS, className: 'oa-date-input', showNow: false,
-    disabledDate: (d) => !isPastDay(d, today),
-  }
-  if (!narrow) {
-    return (
-      <DatePicker.RangePicker
-        {...common} value={[at(0), at(1)]} aria-label="Days to run"
-        presets={presets.map((p) => ({ label: p.label, value: [dayjs(p.from), dayjs(p.to)] }))}
-        onChange={(v) => v?.[0] && v?.[1] && setRange([v[0].format('YYYY-MM-DD'), v[1].format('YYYY-MM-DD')])}
-      />
-    )
-  }
-  const pick = (side) => (d) => d && setRange(withRangeEnd(range, side, d.format('YYYY-MM-DD')))
-  return (
-    <Space wrap size={[8, 8]} align="center">
-      <Space size={4} align="center">
-        <Text type="secondary" style={{ fontSize: 12 }}>From</Text>
-        <DatePicker {...common} value={at(0)} onChange={pick('from')} aria-label="From date" style={{ width: 132 }} />
-      </Space>
-      <Space size={4} align="center">
-        <Text type="secondary" style={{ fontSize: 12 }}>To</Text>
-        <DatePicker {...common} value={at(1)} onChange={pick('to')} aria-label="To date" style={{ width: 132 }} />
-      </Space>
-      <Select
-        size="small" value={null} placeholder="Quick range" disabled={disabled} aria-label="Quick range" style={{ width: 150 }}
-        options={presets.map((p) => ({ value: p.key, label: p.label }))}
-        onChange={(key) => { const p = presets.find((x) => x.key === key); if (p) setRange([p.from, p.to]) }}
-      />
-    </Space>
-  )
-}
-
 export default function SignalBacktestPage() {
   const [underlying, setUnderlying] = usePersistedState(STORE.underlying, 'NIFTY')
   const [range, setRange] = usePersistedState(STORE.range, [dayjs().subtract(14, 'day').format('YYYY-MM-DD'), dayjs().subtract(1, 'day').format('YYYY-MM-DD')])
@@ -561,7 +523,9 @@ export default function SignalBacktestPage() {
   const localReport = useMemo(() => backtestReport(outcomes, engine), [outcomes, engine])
 
   // The background runs (the server's queue) and the one opened here, if any - its report is shown instead of the page's.
-  const { jobs, refresh: refreshJobs } = useBackgroundRuns()
+  const { jobs: allJobs, refresh: refreshJobs } = useBackgroundRuns()
+  // The Component check page's runs are listed there, not here.
+  const jobs = useMemo(() => allJobs.filter((j) => j.kind !== 'components'), [allJobs])
   const [bgTelegram, setBgTelegram] = usePersistedState(STORE.bgTelegram, true)
   // The dialog's kind of run when open ('backtest' / 'features'), else false.
   const [bgOpen, setBgOpen] = useState(false)

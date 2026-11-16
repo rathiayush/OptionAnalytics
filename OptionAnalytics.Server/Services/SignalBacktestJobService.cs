@@ -19,7 +19,8 @@ namespace OptionAnalytics.Server.Services;
 /// changes no setting and feeds no strategy or alert; its Dhan calls are the page's (each past day once - the cache keeps it).
 /// A run is one of two <see cref="Kinds"/>: "backtest" (the rule's report) or "features" - the page's FEATURE FINDER over the
 /// days (featureFinder.js: every reading at every candle against what came next, its report for each label in the result and
-/// the whole table as a CSV beside it, {id}.features.csv).
+/// the whole table as a CSV beside it, {id}.features.csv) - or "components" - the COMPONENT CHECK page's run (componentCheck.js:
+/// every OI Replay card's reads as events and what price did after each, per card and read).
 /// </summary>
 public sealed class SignalBacktestJobService : BackgroundService
 {
@@ -36,7 +37,7 @@ public sealed class SignalBacktestJobService : BackgroundService
     /// <summary>MAX_BACKGROUND_DAYS - the job runs the latest 1 500 weekdays (about six years) of a longer range.</summary>
     public const int MaxDays = 1500;
     /// <summary>What a run is: the rule's backtest, or the Feature finder's table and report.</summary>
-    public static readonly string[] Kinds = { "backtest", "features" };
+    public static readonly string[] Kinds = { "backtest", "features", "components" };
     /// <summary>The Feature finder's labels (featureFinder.js LABELS) - each one's report is in a features run's result.</summary>
     internal static readonly (string Key, string Name)[] FeatureTargets =
     {
@@ -371,6 +372,26 @@ public sealed class SignalBacktestJobService : BackgroundService
                 ["stopped"] = stopped,
             };
         }
+        if ((body["kind"] as JsonValue)?.TryGetValue<string>(out var k2) == true && k2 == "components")
+        {
+            var c = body["components"];
+            var cards = (c?["cards"] as JsonArray) ?? new JsonArray();
+            string? Verdict(JsonNode? card) => card?["verdict"]?["key"] is JsonValue v && v.TryGetValue<string>(out var key) ? key : null;
+            string Title(JsonNode? card) => card?["label"] is JsonValue v && v.TryGetValue<string>(out var t) ? t : "?";
+            var works = new JsonArray(cards.Where(x => Verdict(x) == "works").Select(x => (JsonNode)Title(x)).ToArray());
+            var opposite = new JsonArray(cards.Where(x => Verdict(x) == "opposite").Select(x => (JsonNode)Title(x)).ToArray());
+            return new JsonObject
+            {
+                ["kind"] = "components",
+                ["events"] = Num(c?["events"]),
+                ["okDays"] = Num(c?["days"]),
+                ["failedDays"] = (double)((c?["failed"] as JsonArray)?.Count ?? 0),
+                ["horizon"] = Num(c?["horizon"]),
+                ["works"] = works,
+                ["opposite"] = opposite,
+                ["stopped"] = stopped,
+            };
+        }
         var report = body["report"];
         var all = report?["all"];
         return new JsonObject
@@ -388,7 +409,7 @@ public sealed class SignalBacktestJobService : BackgroundService
     internal static string TelegramText(SignalBacktestJob job)
     {
         var name = WebUtility.HtmlEncode(job.Name);
-        var what = job.Kind == "features" ? "Feature finder" : "Signal backtest";
+        var what = job.Kind == "features" ? "Feature finder" : job.Kind == "components" ? "Component check" : "Signal backtest";
         if (job.State != "done") return $"⚠️ <b>{what} failed</b> - {name}\n{WebUtility.HtmlEncode(job.Error ?? "unknown error")}";
         var s = job.Summary;
         double? Num(string key) => s?[key] is JsonValue v && v.TryGetValue<double>(out var d) ? d : null;
@@ -404,6 +425,12 @@ public sealed class SignalBacktestJobService : BackgroundService
             var best = FeatureTargets.Where(t => TelegramBest.Contains(t.Key))
                 .Select(t => s?["best"]?[t.Key] is JsonValue b && b.TryGetValue<string>(out var bn) ? $"\nBest for {t.Name}: {WebUtility.HtmlEncode(bn)}" : "");
             return $"{head}\nReadings that held on the later days: {lines}{string.Concat(best)}{stoppedNote}";
+        }
+        if (job.Kind == "components")
+        {
+            string List(string key) => s?[key] is JsonArray a && a.Count > 0 ? WebUtility.HtmlEncode(string.Join(", ", a.Select(x => x?.GetValue<string>()))) : "none";
+            var notRun = Num("failedDays") is > 0 and var cnr ? $" · {cnr:0} day(s) not run" : "";
+            return $"🧪 <b>Component check done</b> - {name}\n{(Num("events") ?? 0):0} events · {(Num("okDays") ?? 0):0} days{notRun}\nWorks as meant ({(Num("horizon") ?? 30):0} min): {List("works")}\nOpposite of meant: {List("opposite")}{stoppedNote}";
         }
         var net = Num("net") ?? 0;
         var india = CultureInfo.GetCultureInfo("en-IN");
@@ -447,7 +474,7 @@ public sealed class SignalBacktestJobService : BackgroundService
         clean["from"] = from.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         clean["to"] = to.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         var kind = string.IsNullOrWhiteSpace(request.Kind) ? "backtest" : request.Kind.Trim().ToLowerInvariant();
-        if (!Kinds.Contains(kind)) return (null, "A run is a backtest or the Feature finder.");
+        if (!Kinds.Contains(kind)) return (null, "A run is a backtest, the Feature finder or the Component check.");
         var name = (request.Name ?? "").Trim();
         if (name.Length > 80) name = name[..80];
         if (name.Length == 0) name = $"{underlying} {from.ToString("d MMM", CultureInfo.InvariantCulture)} – {to.ToString("d MMM", CultureInfo.InvariantCulture)}";

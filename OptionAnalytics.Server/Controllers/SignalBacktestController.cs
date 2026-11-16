@@ -27,7 +27,7 @@ public sealed class SignalBacktestController : ControllerBase
     public IReadOnlyList<SignalBacktestJob> Jobs() => _jobs.List(Scope);
 
     /// <summary>POST /api/signal-backtest/jobs - queues a run: { settings, name, startAtUtc (null = now), telegram, kind
-    /// ("backtest" - the default - or "features") }.</summary>
+    /// ("backtest" - the default -, "features" or "components") }.</summary>
     [HttpPost("jobs")]
     public IActionResult Queue([FromBody] SignalBacktestRequest request)
     {
