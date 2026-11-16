@@ -731,6 +731,16 @@ All must pass before committing.
   timer with `POLL_HEADERS` - the server's memory), the minutes up to the clock, the sessions before from their own runs
   (`usePastDeltaSessions`, moved to `usePastDeltaSessions.js`, shared with OI Replay's delta cards). FUTURES = the footprint's
   buy − sell at each price (`futuresDeltaProfileOf`) of the same sessions the profiles use. Display only.
+  WHY IT DID NOT MATCH OI REPLAY (asked - "delta is not matching with our OI Replay, why?"): (1) LIVE, the futures minutes the
+  pushes add are CANDLES with no buy / sell rows, and `spreadLevels` gives a candle's whole volume to one side by its colour -
+  so every minute since the page loaded read as 100% buying or selling. Now the futures delta reads only the LOADED day's
+  footprint rows (`futuresDelta.known` - `barsKnownAt(loadedFutures)`, not the live-merged day; the volume / market profiles
+  still take the live candles) and, live with the tick on, the futures day is loaded again EVERY MINUTE (`futuresPoll`, a
+  page timer with `POLL_HEADERS` - the server's memory), as OI Replay's futures delta card is. (2) The options were always the
+  WEEKLY (BANKNIFTY monthly); while FOLLOWING OI Replay they are now ITS series - the clock message carries `expiryFlag`
+  (`useReplayClockBroadcast`), `useOptionRun`'s `seriesFlag`. Still each page's own choice, so set them alike to compare: the
+  row size, Days / Previous, and OI Replay's side (Net / CE / PE / OI) - the Delta line names the series and the row size. The
+  volume bars and POC / VAH / VAL differ by design: OI Replay's card = OPTION volume, this page = the index's / futures' volume.
   THE FLOATING REPLAY BAR (asked for - "on the market / volume profile and order flow pages a floating popover to run replay
   like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
   Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /

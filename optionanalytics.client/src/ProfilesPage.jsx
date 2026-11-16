@@ -108,8 +108,10 @@ const dayUrl = {
  *  Replay having just loaded the same day): a past futures day can fail while the server is still fetching it from
  *  Dhan / NSE - for OI Replay at the same moment - and without asking again the futures stayed on the error while the
  *  spot had moved on. Once a day, never a loop of a failing request. */
-function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
+function useInstrumentDay(kind, underlying, dateKey, reload = 0, pollNonce = 0) {
   const [state, setState] = useState({ loading: false, error: null, day: null })
+  // A load the minute timer asked for (`pollNonce` moved) is a page TIMER refresh - it carries POLL_HEADERS.
+  const lastPollRef = useRef(pollNonce)
   const [attempt, setAttempt] = useState(0)
   const autoRetriedRef = useRef(null)
   const retry = useCallback(() => setAttempt((a) => a + 1), [])
@@ -124,7 +126,9 @@ function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
     let cancelled = false
     const key = `${kind}|${underlying}|${dateKey}`
     setState((s) => ({ loading: true, error: null, day: s.day?.key === key ? s.day : null }))
-    fetch(dayUrl[kind](underlying, dateKey))
+    const poll = pollNonce !== lastPollRef.current
+    lastPollRef.current = pollNonce
+    fetch(dayUrl[kind](underlying, dateKey), poll ? { headers: POLL_HEADERS } : undefined)
       .then((r) => (r.ok ? r.json() : r.json().catch(() => ({})).then((b) => Promise.reject(new Error(b?.error ?? `HTTP ${r.status}`)))))
       .then((body) => {
         if (cancelled) return
@@ -133,7 +137,7 @@ function useInstrumentDay(kind, underlying, dateKey, reload = 0) {
       })
       .catch((err) => { if (!cancelled) setState((s) => ({ ...s, loading: false, error: err.message })) })
     return () => { cancelled = true }
-  }, [kind, underlying, dateKey, reload, attempt])
+  }, [kind, underlying, dateKey, reload, attempt, pollNonce])
   return useMemo(() => ({ ...state, retry }), [state, retry])
 }
 
@@ -469,9 +473,13 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
   // option flow); null = off.
   const delta = useMemo(() => {
     if (!deltaSource) return null
-    if (deltaSource.from === 'bars') return { ...deltaSource, profile: futuresDeltaProfileOf([profileBars], { rowSize: row }) }
+    if (deltaSource.from === 'bars') {
+      // Its own bars when given (the loaded footprint - no live candle minute), the same sessions as the profiles.
+      const bars = deltaSource.known ? deltaCardSessions({ today: deltaSource.known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }).flat() : profileBars
+      return { ...deltaSource, profile: futuresDeltaProfileOf([bars], { rowSize: row }) }
+    }
     return deltaSource
-  }, [deltaSource, profileBars, row])
+  }, [deltaSource, profileBars, row, past, dayCount, profileOf])
   const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
   const chartHeight = useChartHeight()
   // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
@@ -633,8 +641,9 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
 // memory): { key, ce, pe, loading, error }. Asked only while the tick is on; LIVE asked again each minute (a page timer -
 // POLL_HEADERS; the server's memory, not Dhan). A failure waits for the next minute / the next day picked - never a loop.
 const OPTION_REFRESH_MS = 60_000
-function useOptionRun(underlying, dateKey, live, enabled) {
-  const flag = underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK'
+function useOptionRun(underlying, dateKey, live, enabled, seriesFlag = null) {
+  // OI Replay's own series (Weekly / Monthly) while following it, else the index's default - BANKNIFTY lists monthlies only.
+  const flag = underlying === 'BANKNIFTY' ? 'MONTH' : seriesFlag === 'MONTH' ? 'MONTH' : 'WEEK'
   const key = enabled && underlying && dateKey ? `${underlying}|${dateKey}|${flag}|${live ? 'live' : 'day'}` : null
   const [state, setState] = useState({ key: null, ce: NO_BARS, pe: NO_BARS, loading: false, error: null })
   useEffect(() => {
@@ -703,9 +712,11 @@ export default function ProfilesPage() {
   const row = rows?.[index] > 0 ? rows[index] : PROFILE_ROWS[index]
 
   // Following OI Replay: its index, its day, its clock.
+  const [followedFlag, setFollowedFlag] = useState(null)
   const onClock = useCallback((msg) => {
     if (!UNDERLYINGS.includes(msg.underlying)) return
     setUnderlying(msg.underlying)
+    setFollowedFlag(msg.expiryFlag === 'MONTH' || msg.expiryFlag === 'WEEK' ? msg.expiryFlag : null)
     if (msg.live) { setLive(true); setDateKey(istDateKey(new Date())); setClockMs(null); setPlaying(false); return }
     if (!msg.date) {
       // OI Replay is loading a past day: this page starts the same day fresh at once - never the old day kept on
@@ -729,7 +740,16 @@ export default function ProfilesPage() {
   // Live: what the pushes brought since the day loaded, for this index, day and mode only.
   const liveKey = live ? `${index}|${effectiveDate}` : null
   const [reload, setReload] = useState(0)
-  const futures = useInstrumentDay('futures', index, effectiveDate, reload)
+  // LIVE with the Delta tick: the futures day loaded again every minute (the server's memory - a page timer), as OI Replay's
+  // futures delta card does: the minutes the pushes add are candles with no buy / sell rows, and their delta would be the
+  // candle's whole volume one way (spreadLevels) - only the loaded footprint's rows give the delta (futuresDelta below).
+  const [futuresPoll, setFuturesPoll] = useState(0)
+  useEffect(() => {
+    if (!live || !showDelta) return undefined
+    const id = setInterval(() => setFuturesPoll((n) => n + 1), 60_000)
+    return () => clearInterval(id)
+  }, [live, showDelta])
+  const futures = useInstrumentDay('futures', index, effectiveDate, reload, futuresPoll)
   const spot = useInstrumentDay('spot', index, effectiveDate, reload)
   const [liveData, setLiveData] = useState({ key: null, spot: [], feed: [], futures: [], at: null })
   const pushed = liveData.key === liveKey ? liveData : { spot: [], feed: [], futures: [], at: null }
@@ -844,7 +864,7 @@ export default function ProfilesPage() {
   // bars given a side - where the close sits in the bar's range - weighted by its delta, Net = CE − PE: + calls bought / puts
   // sold), the minutes up to the clock, the sessions before from their own runs. FUTURES: its footprint's buy − sell at
   // each price (ProfilePair, from the bars the profiles use).
-  const optionRun = useOptionRun(index, effectiveDate, live, showDelta)
+  const optionRun = useOptionRun(index, effectiveDate, live, showDelta, following ? followedFlag : null)
   const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta ? pastCount : 0, optionRun.flag)
   const optionMinutes = useMemo(
     () => (showDelta ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
@@ -857,9 +877,11 @@ export default function ProfilesPage() {
     const profile = optionDeltaProfileOf(sessions, { rowSize: row })
     const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
-    return { profile, label: 'options', text: 'options on spot (CE − PE, delta-weighted)', note }
-  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, optionMinutes, row, optionRun.loading, optionRun.error])
-  const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
+    return { profile, label: 'options', text: `options on spot (Net CE − PE, delta-weighted · ${optionRun.flag === 'MONTH' ? 'Monthly' : 'Weekly'} options · ${row} pt rows)`, note }
+  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, optionMinutes, row, optionRun.loading, optionRun.error, optionRun.flag])
+  // The futures' delta from the LOADED day's footprint rows only (reloaded each minute live) - never the live candle minutes.
+  const futuresDeltaKnown = useMemo(() => (showDelta ? barsKnownAt(loadedFutures?.bars, clock) : NO_BARS), [showDelta, loadedFutures, clock])
+  const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', known: futuresDeltaKnown, label: 'futures', text: `futures (buy − sell at each price · ${row} pt rows${live ? ' · footprint reloaded each minute' : ''})` } : null), [showDelta, futuresDeltaKnown, row, live])
   // The floating replay bar (FloatingReplayBar.jsx, OI Replay's): once the inline replay controls are out of sight.
   const [replayInlineEl, setReplayInlineEl] = useState(null)
   const replayInlineOnScreen = useOnScreen(replayInlineEl)
