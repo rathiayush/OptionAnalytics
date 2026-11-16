@@ -21,7 +21,7 @@ import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
 import {
   DEFAULT_VP_BARS, FETCH_ROWS, MAX_PROFILE_DAYS, PROFILE_ROWS, PROFILE_ROW_CHOICES, VP_BAR_SIZES, barsKnownAt, candlesOf, compositeMarketProfile, dayVolumeProfile,
-  lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, profileSessions, volumeZones, vpBarSize, withBackfillBars,
+  deltaCardSessions, lastPeriodRunningAt, marketProfileZones, mergeSpotLive, pastSessionsNeeded, volumeZones, vpBarSize, withBackfillBars,
 } from './profileZones.js'
 import { useFollowReplayClock } from './replaySync.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -459,7 +459,8 @@ function DeltaLine({ delta, levels }) {
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
 function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
   const sessions = useMemo(
-    () => profileSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
+    // "Previous" = the N sessions BEFORE with the day up to the clock / live ON TOP (as OI Replay's delta cards); "today" = the day and the N - 1 before.
+    () => deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
     [known, past, dayCount, profileOf],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
@@ -824,9 +825,9 @@ export default function ProfilesPage() {
   // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)" - the futures' sessions (the spot's
   // are the same trading days).
   const usedPast = futuresPast.sessions.slice(-pastCount)
-  const coverDates = [...usedPast.map((d) => d.date), ...(profileOf === 'today' && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
+  const coverDates = [...usedPast.map((d) => d.date), ...(futuresKnown.length || spotKnown.length ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
-  const estimated = (profileOf === 'today' && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
+  const estimated = futuresDay?.source === 'estimated' || usedPast.some((d) => d.source === 'estimated')
   // A replay is named by the minute it shows (as OI Replay's): the clock is that minute's END.
   const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `replay · ${fmtClock(clock - 60_000)} candle` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
@@ -846,17 +847,18 @@ export default function ProfilesPage() {
   const optionRun = useOptionRun(index, effectiveDate, live, showDelta)
   const optionPast = usePastDeltaSessions('options', index, effectiveDate, showDelta ? pastCount : 0, optionRun.flag)
   const optionMinutes = useMemo(
-    () => (showDelta && profileOf === 'today' ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
-    [showDelta, profileOf, optionRun.ce, optionRun.pe, spotDay, live, clock],
+    () => (showDelta ? optionDeltaMinutes(optionRun.ce, optionRun.pe, spotDay?.bars ?? NO_BARS, { asOfMs: live || clock == null ? null : clock - 60_000 }) : NO_BARS),
+    [showDelta, optionRun.ce, optionRun.pe, spotDay, live, clock],
   )
   const spotDelta = useMemo(() => {
     if (!showDelta) return null
-    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...(profileOf === 'today' ? [optionMinutes] : [])]
+    // The sessions before with the day up to the clock on top - with "Previous" too.
+    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), optionMinutes]
     const profile = optionDeltaProfileOf(sessions, { rowSize: row })
     const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
     return { profile, label: 'options', text: 'options on spot (CE − PE, delta-weighted)', note }
-  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, profileOf, optionMinutes, row, optionRun.loading, optionRun.error])
+  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, optionMinutes, row, optionRun.loading, optionRun.error])
   const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', label: 'futures', text: 'futures (buy − sell at each price)' } : null), [showDelta])
   // The floating replay bar (FloatingReplayBar.jsx, OI Replay's): once the inline replay controls are out of sight.
   const [replayInlineEl, setReplayInlineEl] = useState(null)

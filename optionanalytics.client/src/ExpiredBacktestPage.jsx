@@ -10,8 +10,7 @@ import {
   TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, usePersistedState,
   AXIS_COLOR, GRID_COLOR, BORDER_COLOR, istTimeFormatter, istTickMarkFormatter, toBar, toChartTime, dayResetMarkers,
   CeVsPeChart, VolumeVwapChart, scrollChartToTime, highlightChartAtTime, lastValueAtOrBeforeChartTime,
-  useChartSyncGroup, registerChartForSyncAfterSettling,
-} from './shared.jsx'
+  useChartSyncGroup, registerChartForSyncAfterSettling, asList } from './shared.jsx'
 
 const { Title, Text } = Typography
 const { RangePicker } = DatePicker
@@ -427,8 +426,8 @@ export default function ExpiredBacktestPage() {
     fetch(`/api/expired-backtest/strategies?timeframe=${timeframe}`)
       .then((r) => r.json())
       .then((list) => {
-        setStrategies(list ?? [])
-        setStrategyKey((current) => (list?.some((s) => s.key === current) ? current : list?.[0]?.key ?? null))
+        setStrategies(asList(list))
+        setStrategyKey((current) => (asList(list).some((s) => s.key === current) ? current : asList(list)[0]?.key ?? null))
       })
       .catch((err) => console.error('Failed to load expired-backtest strategies:', err))
   }, [timeframe])

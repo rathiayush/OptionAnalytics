@@ -460,7 +460,7 @@ All must pass before committing.
   kept as its distance from the NEAREST CORNER (`fabAnchor` / `fabFromAnchor`, `optionanalytics.oiReplay.quickFabAnchor`)
   - an account preference, so a phone and a monitor share it: kept in pixels from the top left (the old
   `...quickFab`, no longer read), a spot picked on a phone put the button in the middle of a monitor's spot chart. It
-  shows on EVERY screen (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off.
+  shows on EVERY screen (it saves the same scrolling on a monitor) - the page's "Quick button" tick turns it off. APP-WIDE (asked for - "the order float and this popover should not be specific to a page but to the overall application ... available to OI Replay, the Profiles page and the Order Flow page ... the same OI Replay component available for quick view to other pages"): both buttons are on OI Replay (its own), the PROFILES page and the ORDER FLOW page (`floatingModeFor` in `floatingHost.js`; no other page, never the External account) - on the other two `GlobalFloating` (mounted once in App, outside the routes) draws them as LAUNCHERS (the same buttons in the same places - the anchors and the "Quick button" / "Order button" ticks are OI Replay's own account preferences). Nothing is loaded until one is tapped: the tap mounts a POPUP-ONLY OI Replay page (`<OiReplayPage popupOnly />` - its whole logic and live data, none of its cards: no body, no NavBar, no keyboard keys, no replay bar, no replay sync and no clock broadcast, so the Profiles page's "Follow OI Replay" never sees it), which loads today's live run as OI Replay does, draws the real buttons (the launchers step aside - `fabsShown`) and carries the tap out (`pending`: the order panel, or the quick view picked - GEX, straddle, the delta profiles... the same popups with the same content). It stays mounted across Profiles <-> Order Flow, and goes when OI Replay opens (that page has its own). `tests/floating-host.test.mjs`. A LIVE order from there is the same Live order panel with the same confirm - the server alert runner and the Runner key are untouched.
   The REPLAY BAR (`FloatingReplayBar.jsx`, asked for - "replay bar also should be floating"): on a REPLAYED day, once the
   Spot card's own replay controls are out of sight (`useOnScreen` on them; or that card is hidden), a slim bar floats at
   the bottom of the window - Start / Pause, Reset, the minute shown, the slider (no handle tooltip), the speed - the SAME
@@ -527,7 +527,7 @@ All must pass before committing.
   leaving it empty, at least `MIN_SPAN` candle widths), a VOLUME column (how much traded at each price row - grey, the value
   area brighter, the POC amber, also a faint band across the candles: the big volume node) and a DELTA column (buyers minus
   sellers there - green right of its centre line, red left); the row under the crosshair outlined and read out under the
-  chart; timeframe 1 / 3 / 5 / 15 and the row size per index (`PROFILE_ROWS` / `PROFILE_ROW_CHOICES`, shared by both cards -
+  chart AND in a small tooltip beside the pointer (price row, any level it holds, volume, delta in lots - asked for: "I should be able to hover over and see data"; flips to the left of the pointer on the right half); timeframe 1 / 3 / 5 / 15 and the row size per index (`PROFILE_ROWS` / `PROFILE_ROW_CHOICES`, shared by both cards -
   `optionanalytics.oiReplay.deltaProfileRows`). OPTIONS ON SPOT (`optionDeltaProfile`): the run's option bars (live ones
   added - `flowCePoints`) given a side as the Option CDV does - `barProxyDelta` (where the close sits in the bar's range) x
   `deltaWeight` (the strike's delta at that minute's spot; volume weighted the same) - added up a minute and SPREAD over the
@@ -719,6 +719,7 @@ All must pass before committing.
   zoomed at all), and a drag / pinch / zoom button / price-axis drag (the time range moved, or the price scale's
   auto-scale off) takes the view - kept until a double-click / double tap or ⟲ hands it back. NO LOOK-AHEAD: a minute counts once it has COMPLETED at the clock (`barsKnownAt`, session minutes only).
   It does not touch `profiles.js`' scanner rules (`profileNodes`, `lvnRun`) - `tests/profile-zones.test.mjs`.
+  "PREVIOUS" ADDS THE DAY RUNNING EVERYWHERE (asked for - "add previous + current as well": the Profiles page showed 2 sessions where OI Replay's delta card showed 3): with "Previous session(s)" every profile on this page - volume, market (TPO) and Delta (spot's options, futures' footprint) - is the N sessions BEFORE with the day up to the clock / live ON TOP (`deltaCardSessions`, as OI Replay's delta cards - it was the sessions before ONLY), the cover line and the "estimated" tag counting the day.
   THE "DELTA" TICK (asked for - "a tick which will show delta: for spot the OI data, for futures the futures delta, on the
   market and volume profile"; `optionanalytics.profiles.delta`, OFF by default): a DELTA column just left of the profile on
   BOTH charts of each instrument (`DeltaColumnPrimitive` in `profilePrimitives.js`, `DELTA_COLUMN_SHARE` 14% of the plot - the
@@ -1528,7 +1529,7 @@ All must pass before committing.
   has `status` - 'pending' when printed, 'confirmed' once a later bar of the day CLOSES past the signal bar's other end,
   'failed' once a later bar TRADES past the level (the zone's far edge / the extreme; checked first - a sweep that closes
   back fails), `statusAt` that bar, the reason added to its text; the pill shows ✓ / ✗ (failed faded). The score never
-  changes; the status is the one known at the clock (`tests/flow-reads.test.mjs`). A part that cannot be read (no book, no
+  changes; the status is the one known at the clock (`tests/flow-reads.test.mjs`). A SHOWN READ NEVER VANISHES (asked for - "it gives signals, absorption / exhaustion, and then it just disappears if price went in the opposite direction"): the reads are worked out again from the bars on every update, so a bar still forming - or an input that arrives or changes later (the book, yesterday's bars) - made a mark disappear after it was on screen. LIVE, `keepShownReads` (flowReads.js; the page keeps its `memory` per index / day / timeframe / row / minimum score) remembers every read produced for a bar (bar time, kind, side) and one that is no longer produced STAYS - FAILED (✗, faded to 65% - readable, it was 40%), a DASHED outline (`kept`), its text ending "NO LONGER READ - it was shown, then the bar's read changed"; a confirmed one keeps its ✓. A replayed day keeps nothing (worked out again at its clock), and a page reload starts the memory empty. `tests/flow-reads.test.mjs`. A part that cannot be read (no book, no
   push) is left out and the rest re-weighted. Each bar from itself and the bars before (the forming bar's read can change until it
   closes, as the first rules' did). A read - no strategy, alert or order.
   POSITIONING, BOOK PRESSURE, LIQUIDITY ADDED vs PULLED, ORDER FLOW IMBALANCE (asked for - "delta + OI positioning on futures ... book pressure
@@ -1628,5 +1629,9 @@ All must pass before committing.
   101.59999847412109375, an IV 12.34 became 12.3399999...); .NET 8 rounded to 15 / 7 significant digits. Every double / float
   that reaches a decimal goes through `DecimalConversion.FromDouble` / `FromSingle` - never a plain cast (it gives the same numbers on 8 and on 11)
   (`DecimalConversionTests.cs`).
+- AN API ANSWER KEPT AS A LIST goes through `asList` (shared.jsx): anything not an array - an error object `{ error }`, null -
+  reads as none. `x ?? []` lets an error object through, and the page then called `.some` / `.map` on it and fell to the
+  "Something went wrong" screen (the dashboard, Expired backtest, Contracts, Strike data, Triggers - found by a browser
+  check with every API answering 500). Use it for any new list a page fetches.
 - Live order placement only ever happens from a confirmed order on a page (OI Replay's Live order panel) or a saved
   Signal strategy's admin-only, confirmed "Live orders (Dhan)" switch (`SignalLiveOrders`); alerts are never orders.

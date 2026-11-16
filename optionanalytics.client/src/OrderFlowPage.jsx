@@ -26,7 +26,7 @@ import { DeltaRulesCard } from './OrderFlowDeltaRules.jsx'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
-import { FLOW_READ_SCORES, scoredFlowReads, withScoredReads } from './flowReads.js'
+import { FLOW_READ_SCORES, keepShownReads, scoredFlowReads, withScoredReads } from './flowReads.js'
 import { BookPressureCard, LiquidityNetCard, OfiCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
@@ -514,14 +514,22 @@ export default function OrderFlowPage() {
   // Yesterday's bars in this timeframe: the reads' yardstick from the first bar of the day (with today's as they come), and
   // yesterday's high / low as levels - a trader reads absorption / exhaustion at them first.
   const priorBars = useMemo(() => (prevSession.data?.bars?.length ? aggregateBars(prevSession.data.bars, timeframe) : null), [prevSession.data, timeframe])
+  // The reads shown live, kept for the day (keepShownReads) - per index / day / timeframe / row / score.
+  const shownReadsRef = useRef({ scope: null, memory: new Map() })
   const markedBars = useMemo(() => {
     if (!useScored) return bars
     const fixed = prevVp?.poc != null ? [{ price: prevVp.poc, label: 'yesterday\'s POC' }, { price: prevVp.vah, label: 'yesterday\'s VAH' }, { price: prevVp.val, label: 'yesterday\'s VAL' }] : []
     const traded = (priorBars ?? []).filter((b) => b.high > 0 && b.low > 0)
     if (traded.length) fixed.push({ price: Math.max(...traded.map((b) => b.high)), label: 'yesterday\'s high' }, { price: Math.min(...traded.map((b) => b.low)), label: 'yesterday\'s low' })
     const levels = (i) => (barVwap?.[i] != null ? [...fixed, { price: barVwap[i], label: 'VWAP' }] : fixed)
-    return withScoredReads(bars, scoredFlowReads(bars, { rowSize, timeframe, columns: noDepth ? null : view?.heatmap, levels, minScore, prior: priorBars, icebergs: view?.icebergs }))
-  }, [useScored, bars, rowSize, timeframe, noDepth, view?.heatmap, view?.icebergs, prevVp, priorBars, barVwap, minScore])
+    const reads = scoredFlowReads(bars, { rowSize, timeframe, columns: noDepth ? null : view?.heatmap, levels, minScore, prior: priorBars, icebergs: view?.icebergs })
+    // LIVE: a read that was shown stays (failed, faded) if a later update no longer produces it - see keepShownReads. A
+    // replayed day is worked out again at its clock, so it keeps nothing.
+    if (isReplay) return withScoredReads(bars, reads)
+    const scope = `${underlying}|${sessionDate}|${timeframe}|${rowSize}|${minScore}`
+    if (shownReadsRef.current.scope !== scope) shownReadsRef.current = { scope, memory: new Map() }
+    return withScoredReads(bars, keepShownReads(shownReadsRef.current.memory, bars, reads))
+  }, [useScored, isReplay, underlying, sessionDate, bars, rowSize, timeframe, noDepth, view?.heatmap, view?.icebergs, prevVp, priorBars, barVwap, minScore])
   const shown = useMemo(() => withBackfill(markedBars, view?.backfill, timeframe, firstMinuteMs), [markedBars, view?.backfill, timeframe, firstMinuteMs])
   const tpoRow = tpoRowFor(underlying, rowSize)
   const prevTpo = useMemo(() => (prevSession.data ? tpoProfile(prevSession.data.bars, tpoRow) : null), [prevSession.data, tpoRow])
