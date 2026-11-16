@@ -5,7 +5,7 @@ import { CrosshairMode, LineSeries, LineStyle, LineType, createSeriesMarkers } f
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
-import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, atmSwitches, straddleRead } from './straddle.js'
+import { STRADDLE_START_DEFAULT, STRADDLE_TREND_DEFAULTS, TRADE_DEFAULTS, straddleRead } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
 import { useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -13,8 +13,8 @@ import { FoldText } from './FoldText.jsx'
 const { Text } = Typography
 
 const STRADDLE_COLOR = '#f5a623'
-// The Auto ATM's strike switches on its line - a blue that stands apart from the amber line and its VWAP.
-const ATM_SWITCH_COLOR = '#69c0ff'
+// The straddle's trend (straddleTrend): a range / back-to-range mark is grey.
+const RANGE_COLOR = '#8c8c8c'
 const DECAY_COLOR = '#ffd591'
 const VWAP_COLOR = '#4c9ffe'
 const FIXED_COLOR = '#b37feb'
@@ -35,6 +35,38 @@ const signed = (v, digits = 1) => (Number.isFinite(v) ? `${v > 0 ? '+' : v < 0 ?
 // the set of ids is fixed for a chart's life (a new set rebuilds it), a line's title follows each render; `scale: 'left'`
 // puts a line on its own left price scale (one far from the others would flatten them); `pane: 1` in its own pane under
 // the others (`paneHeight` px, its own price scale, the same time axis); `markers` go on the first line.
+const trendWord = (state, dir) => (state === 'trend' ? `Trending${dir === 'up' ? ' ↑' : dir === 'down' ? ' ↓' : ''}` : state === 'range' ? 'Sideways' : '—')
+const trendColor = (state, dir) => (state === 'trend' ? (dir === 'up' ? UP_COLOR : dir === 'down' ? DOWN_COLOR : STRADDLE_COLOR) : RANGE_COLOR)
+
+/** The straddle's trend now, as the straddle-chart tools read it (straddleTrend): trending / sideways and since when. */
+function TrendLine({ trend, holdMinutes }) {
+  const { fast, slow, confirm } = STRADDLE_TREND_DEFAULTS
+  const now = trend?.now
+  return (
+    <Tooltip title={`Professional straddle-chart read: TRENDING when the Auto ATM straddle is over its VWAP and its EMA ${fast} is over its EMA ${slow} (premium expanding - the market pays for a move); SIDEWAYS when under its VWAP and EMA ${fast} under EMA ${slow} (premium melting - sellers in control). A change counts once it holds ${confirm} minutes. Direction = the synthetic futures over the last ${holdMinutes} min. Marks on the line: ▲ trend up · ▼ trend down · ● back to sideways.`}>
+      <div style={{ fontSize: 12, margin: '2px 0 4px' }}>
+        <Text type="secondary" style={{ fontSize: 12 }}>Trend (straddle): </Text>
+        {now?.state
+          ? <><Tag color={now.state === 'trend' ? (now.dir === 'down' ? 'red' : now.dir === 'up' ? 'green' : 'gold') : 'default'} style={{ marginRight: 4 }}>{trendWord(now.state, now.dir)}</Tag>
+            <Text style={{ fontSize: 12 }}>since {hhmm(now.since)}{now.from ? ` · was ${trendWord(now.from, null)}` : ''}</Text></>
+          : <Text type="secondary" style={{ fontSize: 12 }}>no confirmed trend yet (needs {slow} min and a state held {confirm} min)</Text>}
+      </div>
+    </Tooltip>
+  )
+}
+
+/** The day's confirmed trend changes, the latest 6 - the marks on the line in words. */
+function TrendChanges({ changes }) {
+  if (!changes.length) return <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>No trend change confirmed yet.</Text>
+  return (
+    <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+      Trend changes: {changes.slice(-6).map((c, i) => (
+        <span key={c.time}>{i ? ' → ' : ''}{hhmm(c.time)} <span style={{ color: trendColor(c.to, c.dir) }}>{trendWord(c.to, c.dir)}</span></span>
+      ))}{changes.length > 6 ? ` (latest 6 of ${changes.length})` : ''}
+    </Text>
+  )
+}
+
 export function LinesChart({ lines, markers = [], dayKey, height, paneHeight = 150 }) {
   const containerRef = useRef(null)
   const chartRef = useRef(null)
@@ -157,14 +189,12 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       { time: t.time, position: t.side === 'CE' ? 'belowBar' : 'aboveBar', color: t.side === 'CE' ? UP_COLOR : DOWN_COLOR, shape: t.side === 'CE' ? 'arrowUp' : 'arrowDown', text: `BUY ${t.side}` },
       ...(t.exitTime != null ? [{ time: t.exitTime, position: t.side === 'CE' ? 'aboveBar' : 'belowBar', color: t.points > 0 ? UP_COLOR : DOWN_COLOR, shape: 'circle', text: `${t.points > 0 ? '+' : ''}${num(t.pct, 0)}%` }] : []),
     ]).sort((a, b) => a.time - b.time)
-    // Every Auto ATM switch marked on its line: an arrow up when the ATM moved up a strike, down when down.
-    const atmMarkers = atmSwitches(s).map((w) => ({
-      time: w.time, position: w.to > w.from ? 'belowBar' : 'aboveBar', color: ATM_SWITCH_COLOR,
-      // No text tag: with the ATM flicking between two strikes the labels piled up over the line ("looks messy") - a small
-      // arrow only; the strikes are listed under the chart.
-      shape: w.to > w.from ? 'arrowUp' : 'arrowDown', size: 0.6,
-    }))
-    return { straddle, spot, markers, atmMarkers, switches: atmSwitches(s) }
+    // The straddle's TREND CHANGES only (straddleTrend - confirmed, a few a day), no text: ▲ green trend up, ▼ red trend down,
+    // ● grey back to sideways. Read in words over the chart and listed under it.
+    const trendMarkers = (read.trend?.changes ?? []).map((c) => (c.to === 'trend'
+      ? { time: c.time, position: c.dir === 'down' ? 'aboveBar' : 'belowBar', color: c.dir === 'down' ? DOWN_COLOR : c.dir === 'up' ? UP_COLOR : STRADDLE_COLOR, shape: c.dir === 'down' ? 'arrowDown' : 'arrowUp', size: 0.8 }
+      : { time: c.time, position: 'inBar', color: RANGE_COLOR, shape: 'circle', size: 0.7 }))
+    return { straddle, spot, markers, trendMarkers }
   }, [read])
 
   const fixedOptions = [
@@ -282,13 +312,9 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
             <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
             <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
           </FoldText>
-          <LinesChart lines={charts.straddle} markers={charts.atmMarkers} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
-          {charts.switches.length ? (
-            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
-              <span style={{ color: ATM_SWITCH_COLOR }}>Auto ATM switched {charts.switches.length} time{charts.switches.length === 1 ? '' : 's'}:</span>{' '}
-              {charts.switches.slice(-6).map((w) => `${hhmm(w.time)} ${w.from} → ${w.to}`).join(' · ')}{charts.switches.length > 6 ? ' (latest 6)' : ''}
-            </Text>
-          ) : <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Auto ATM has not switched strike yet.</Text>}
+          <TrendLine trend={read.trend} holdMinutes={holdMinutes} />
+          <LinesChart lines={charts.straddle} markers={charts.trendMarkers} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
+          <TrendChanges changes={read.trend?.changes ?? []} />
         </Col>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Spot vs the priced range</Text>

@@ -179,7 +179,7 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const spots = (spotBars ?? []).filter((b) => b && b.close > 0)
     .map((b) => ({ t: minuteOf(b.time), spot: b.close })).filter((b) => Number.isFinite(b.t)).sort((a, b) => a.t - b.t)
   const empty = {
-    trades: { list: [], open: null, summary: null }, startMs: null, series: [], day: null, now: null, fixed: null, fixedChoices: [], position: null, breaks: { up: null, down: null },
+    trades: { list: [], open: null, summary: null }, trend: { now: { state: null, dir: null, since: null, from: null }, changes: [], states: [] }, startMs: null, series: [], day: null, now: null, fixed: null, fixedChoices: [], position: null, breaks: { up: null, down: null },
     control: null, belowShare: null, change: null, ivChange: null, verdict: null,
   }
   if (!spots.length) return empty
@@ -268,7 +268,8 @@ export function straddleRead(cePoints, pePoints, spotBars, {
   const vsDecay = now.decay != null ? now.value - now.decay : null
   const verdict = readVerdict({ position, control, change, ivChange, holdMinutes, start, vsDecay })
   const trades = tradeIdeas(series, ce, pe, day, closeMs, { holdMinutes, ...trade })
-  return { trades, vsDecay, startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
+  const trend = straddleTrend(series, { lookback: holdMinutes })
+  return { trend, trades, vsDecay, startMs, series, day, now, fixed, fixedChoices, position, breaks, control, belowShare, change, ivChange, ivFrom, verdict }
 }
 
 // TRADE IDEAS - option buying from the straddle, as the option tools read it: a straddle rising over its VWAP is a buyer's
@@ -373,18 +374,56 @@ function readVerdict({ position, control, change, ivChange, holdMinutes, start, 
 }
 
 /**
- * Where the AUTO ATM moved to another strike (asked for - "whenever you change ATM in Auto ATM please mark it on the line so
- * that we can be aware"): each point of `series` (straddleRead's) whose strike differs from the last point that had a
- * straddle value - { time, from, to, value }, `to > from` = the ATM moved UP a strike (spot / the futures rose). The first
- * point is the start, not a change. Only what is in `series`, so it follows the replay clock with it.
+ * THE STRADDLE'S TREND, as the straddle-chart tools read it (asked for - "check how professional systems use straddle to
+ * identify trend change"; AlgoTest / Tradejini / Fyers / the TradingView straddle-premium scripts all read the COMBINED
+ * PREMIUM against its VWAP, and confirm with a fast / slow EMA cross on that premium to cut whipsaws): the Auto ATM straddle
+ *   - TRENDING = over its VWAP AND its EMA `fast` over its EMA `slow`: premium expanding - the market is paying for a move;
+ *   - SIDEWAYS = under its VWAP AND EMA `fast` under EMA `slow`: premium melting - option sellers in control, a range;
+ *   - anything else is MIXED and changes nothing (the state before holds).
+ * A CHANGE of state counts only once the new state has held `confirm` minutes in a row (the EMAs from the first minute,
+ * no state before `slow` minutes of it), dated the minute it was confirmed - known then, nothing after it read. A trend's
+ * DIRECTION is the straddle's own index - the synthetic futures (`forward`) over the last `lookback` minutes, at least
+ * `minMovePct` % of it, else none; in a trend a direction that turns and holds `confirm` minutes is a change too (a
+ * V-turn with the premium still expanded). `series` - straddleRead's (cut at the clock already). Returns { now, changes,
+ * states }: `now` { state, dir, since, from } - the confirmed state at the last minute; `changes` [{ time, from, to, dir,
+ * started }] in order; `states` [{ time, raw, state, dir, emaFast, emaSlow }] a minute each.
  */
-export function atmSwitches(series) {
-  const out = []
-  let last = null
-  for (const p of series ?? []) {
-    if (!Number.isFinite(p?.value) || !Number.isFinite(p?.strike)) continue
-    if (last != null && p.strike !== last) out.push({ time: p.time, from: last, to: p.strike, value: p.value })
-    last = p.strike
-  }
-  return out
+export const STRADDLE_TREND_DEFAULTS = { fast: 9, slow: 21, confirm: 3, minMovePct: 0.02 }
+export function straddleTrend(series, { fast = 9, slow = 21, confirm = 3, lookback = 15, minMovePct = 0.02 } = {}) {
+  const kF = 2 / (fast + 1), kS = 2 / (slow + 1)
+  const points = (series ?? []).filter((p) => Number.isFinite(p?.value) && Number.isFinite(p?.vwap))
+  const states = []
+  const changes = []
+  let eF = null, eS = null
+  let state = null, dir = null, since = null
+  let run = { key: null, count: 0, started: null }
+  points.forEach((p, i) => {
+    eF = eF == null ? p.value : eF + kF * (p.value - eF)
+    eS = eS == null ? p.value : eS + kS * (p.value - eS)
+    const back = points[Math.max(0, i - lookback)]
+    const move = Number.isFinite(p.forward) && Number.isFinite(back?.forward) ? p.forward - back.forward : null
+    const moveDir = move != null && Math.abs(move) >= (minMovePct / 100) * p.forward ? (move > 0 ? 'up' : 'down') : null
+    const raw = i + 1 < slow ? 'early'
+      : p.value > p.vwap && eF > eS ? 'trend'
+        : p.value < p.vwap && eF < eS ? 'range' : 'mixed'
+    // The candidate this minute: a state (a trend with its direction) - MIXED / early hold what is there.
+    const key = raw === 'trend' ? `trend:${moveDir ?? dir ?? ''}` : raw === 'range' ? 'range' : null
+    if (key == null) run = { key: null, count: 0, started: null }
+    else if (key === run.key) run.count++
+    else run = { key, count: 1, started: p.time }
+    const current = state == null ? null : state === 'trend' ? `trend:${dir ?? ''}` : state
+    if (run.key && run.key !== current && run.count >= confirm) {
+      const [to, d] = run.key.split(':')
+      // A trend whose direction cannot be told yet does not replace a trend with one.
+      if (!(to === 'trend' && !d && state === 'trend')) {
+        changes.push({ time: p.time, from: state, to, dir: to === 'trend' ? (d || null) : null, started: run.started })
+        state = to
+        dir = to === 'trend' ? (d || null) : null
+        since = p.time
+      }
+    }
+    states.push({ time: p.time, raw, state, dir, emaFast: eF, emaSlow: eS })
+  })
+  const last = changes.at(-1)
+  return { now: { state, dir, since, from: last?.from ?? null }, changes, states }
 }
