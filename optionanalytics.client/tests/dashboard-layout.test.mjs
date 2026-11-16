@@ -280,22 +280,25 @@ test('the charts are the main part: taller than they ask, up to a share of the w
 })
 
 test('cards added since a "Sections shown" was saved come in ONCE - by the version that brought them, a card hidden since stays hidden', () => {
-  assert.equal(SECTIONS_VERSION, '5')
+  assert.equal(SECTIONS_VERSION, '6')
   assert.equal(Math.max(...SECTION_ADDITIONS.map((a) => a.version)), Number(SECTIONS_VERSION))
   // Saved at version 3 (the OI totals already split out): the two delta profiles, after the option flow and the futures,
   // and the GEX levels on spot (version 5) right after the GEX card.
-  assert.deepEqual(withAddedSections(['dayOi', 'optionFlow', 'gex', 'futures'], '3'), ['dayOi', 'optionFlow', 'optionDeltaProfile', 'gex', 'gexSpot', 'futures', 'futuresDeltaProfile'])
+  assert.deepEqual(withAddedSections(['dayOi', 'optionFlow', 'gex', 'futures'], '3'), ['dayOi', 'optionFlow', 'optionDeltaProfile', 'gex', 'gexSpot', 'futures', 'futuresDeltaProfile', 'volSkew'])
   // Those cards not shown: a NEW card at the end all the same; the totals (split out of the heatmap) only with it.
-  assert.deepEqual(withAddedSections(['dayOi'], '3'), ['dayOi', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot'])
+  assert.deepEqual(withAddedSections(['dayOi'], '3'), ['dayOi', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot', 'volSkew'])
   // Saved at 3 with the totals hidden since: they are not brought back.
-  assert.deepEqual(withAddedSections(['oiHeatmap', 'futures'], '3'), ['oiHeatmap', 'futures', 'futuresDeltaProfile', 'optionDeltaProfile', 'gexSpot'])
+  assert.deepEqual(withAddedSections(['oiHeatmap', 'futures'], '3'), ['oiHeatmap', 'futures', 'futuresDeltaProfile', 'optionDeltaProfile', 'gexSpot', 'volSkew'])
   // Saved before any version: the totals too (where the heatmap is), as the split always did.
-  assert.deepEqual(withAddedSections(['oiHeatmap'], null), ['oiHeatmap', 'oiTotals', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot'])
+  assert.deepEqual(withAddedSections(['oiHeatmap'], null), ['oiHeatmap', 'oiTotals', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot', 'volSkew'])
   // Saved at 4 (the delta profiles already offered, one hidden since): only the GEX levels on spot come in.
-  assert.deepEqual(withAddedSections(['gex', 'futures'], '4'), ['gex', 'gexSpot', 'futures'])
+  assert.deepEqual(withAddedSections(['gex', 'futures'], '4'), ['gex', 'gexSpot', 'futures', 'volSkew'])
   // At the current version nothing changes; a card already there is not doubled; nothing saved stays nothing.
-  assert.deepEqual(withAddedSections(['gex'], '5'), ['gex'])
-  assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'optionDeltaProfile'])
+  // Saved at 5: the volatility skew (version 6) right after the straddle, at the end without it.
+  assert.deepEqual(withAddedSections(['straddle', 'gex'], '5'), ['straddle', 'volSkew', 'gex'])
+  assert.deepEqual(withAddedSections(['gex'], '5'), ['gex', 'volSkew'])
+  assert.deepEqual(withAddedSections(['gex'], '6'), ['gex'])
+  assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'optionDeltaProfile', 'volSkew'])
   assert.equal(withAddedSections(null, '3'), null)
 })
 

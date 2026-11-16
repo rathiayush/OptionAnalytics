@@ -54,6 +54,7 @@ const CARD_ROWS = {
   optionPremium: 14,
   optionFlow: 14,
   straddle: 19,
+  volSkew: 20,
   gex: 19,
   gexSpot: 22,
   ladder: 16,
@@ -321,6 +322,8 @@ export const SECTION_ADDITIONS = [
   { version: 4, card: 'futuresDeltaProfile', after: 'futures' },
   // The GEX levels drawn on the spot candles (asked for - "on OI Replay show the GEX levels with the spot chart").
   { version: 5, card: 'gexSpot', after: 'gex' },
+  // The volatility skew (asked for - "add volatility skew as well in OI Replay").
+  { version: 6, card: 'volSkew', after: 'straddle' },
 ]
 
 /** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
@@ -376,9 +379,9 @@ export const LAYOUT_VERSION = '2'
 // Bumped when a card is split out of another (SECTION_SPLITS) - see the page's migration. Never taken back down: '3'
 // added the DEX card (since removed - a saved "dex" is just dropped); going back to '2' would run the migration again
 // and bring back an OI totals card someone hid.
-// '4' added the two delta profiles (SECTION_ADDITIONS).
+// '4' added the two delta profiles (SECTION_ADDITIONS), '5' the GEX levels on spot, '6' the volatility skew.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '5'
+export const SECTIONS_VERSION = '6'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands
