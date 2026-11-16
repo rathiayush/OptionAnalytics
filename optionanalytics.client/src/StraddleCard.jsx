@@ -157,10 +157,12 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       { time: t.time, position: t.side === 'CE' ? 'belowBar' : 'aboveBar', color: t.side === 'CE' ? UP_COLOR : DOWN_COLOR, shape: t.side === 'CE' ? 'arrowUp' : 'arrowDown', text: `BUY ${t.side}` },
       ...(t.exitTime != null ? [{ time: t.exitTime, position: t.side === 'CE' ? 'aboveBar' : 'belowBar', color: t.points > 0 ? UP_COLOR : DOWN_COLOR, shape: 'circle', text: `${t.points > 0 ? '+' : ''}${num(t.pct, 0)}%` }] : []),
     ]).sort((a, b) => a.time - b.time)
-    // Every Auto ATM switch marked on its line: the new strike, an arrow up when the ATM moved up a strike, down when down.
+    // Every Auto ATM switch marked on its line: an arrow up when the ATM moved up a strike, down when down.
     const atmMarkers = atmSwitches(s).map((w) => ({
       time: w.time, position: w.to > w.from ? 'belowBar' : 'aboveBar', color: ATM_SWITCH_COLOR,
-      shape: w.to > w.from ? 'arrowUp' : 'arrowDown', text: `ATM ${w.to}`,
+      // No text tag: with the ATM flicking between two strikes the labels piled up over the line ("looks messy") - a small
+      // arrow only; the strikes are listed under the chart.
+      shape: w.to > w.from ? 'arrowUp' : 'arrowDown', size: 0.6,
     }))
     return { straddle, spot, markers, atmMarkers, switches: atmSwitches(s) }
   }, [read])
