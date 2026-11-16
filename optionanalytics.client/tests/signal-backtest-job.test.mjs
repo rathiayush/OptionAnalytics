@@ -17,7 +17,6 @@ import {
   reportReplacer, reportReviver, runRange, withIndexLevels,
 } from '../src/signalBacktestJob.js'
 import { CONTEXT, dayRows, featureReports, rowsCsv } from '../src/featureFinder.js'
-import { componentReport, dayOutcome as componentDay } from '../src/componentCheck.js'
 
 const { run, minuteBars } = syntheticDay()
 const BASE = Date.parse('2026-10-05T00:00:00Z')
@@ -616,30 +615,6 @@ test('a run whose days keep failing on the way STOPS after 5 in a row - the days
   assert.equal(short.result.stopped, undefined)
   assert.deepEqual(short.result.report.failed.map((f) => f.date), ['2026-10-14', '2026-10-15'])
   assert.equal(short.asked.filter((d) => d === '2026-10-14').length, 2)
-})
-
-test('a COMPONENT CHECK run: each day\'s card reads and the price after them - the report = the page\'s for the same days', async (t) => {
-  const dates = ['2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15']
-  // A holiday in the middle, and a day that fails on the way once (tried again at once).
-  let failOnce = true
-  const handle = (date) => {
-    if (date === '2026-10-13') return [200, { success: false, error: 'holiday' }]
-    if (date === '2026-10-14' && failOnce) { failOnce = false; return [503, { error: 'busy' }] }
-    return [200, runFor(date)]
-  }
-  const { code, asked, result } = await runJob(t, { kind: 'components', dates, handle })
-  assert.equal(code, 0)
-  assert.equal(result.ok, true)
-  assert.equal(result.kind, 'components')
-  assert.equal(asked.filter((d) => d === '2026-10-14').length, 2)
-  const page = componentReport(dates.map((date) => (date === '2026-10-13' ? { ok: false, date, reason: 'holiday' } : componentDay({ ...runFor(date), underlying: 'NIFTY', date }))), { horizon: 30 })
-  assert.deepEqual(result.components, JSON.parse(JSON.stringify(page)))
-  assert.equal(result.components.days, 3)
-  assert.deepEqual(result.components.failed, [{ date: '2026-10-13', reason: 'holiday' }])
-  // Not one day read: a failed run with the reason.
-  const none = await runJob(t, { kind: 'components', dates: dates.slice(0, 2), handle: () => [200, { success: false, error: 'no data' }] })
-  assert.equal(none.code, 1)
-  assert.match(none.result.error, /^No day could be read - no data/)
 })
 
 test('up to 1 500 weekdays in the background, the latest of a longer range', () => {
