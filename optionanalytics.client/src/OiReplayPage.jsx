@@ -5888,6 +5888,8 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     underlying: popupOnly ? null : underlying, date: isLive || loading ? null : result?.date ?? null, loadingDate: !isLive && loading && date ? date.format('YYYY-MM-DD') : null,
     failedDate: !isLive && !loading && error && date ? date.format('YYYY-MM-DD') : null,
     ms: isLive ? null : syncClockMs, live: isLive, playing,
+    // Its option series (Weekly / Monthly) - the Profiles page's Delta reads the same options while following it.
+    expiryFlag: result?.expiryFlag ?? expiryFlag,
   })
   const sync = useReplaySync({
     enabled: syncEnabled && !popupOnly, active: !isLive, kind: 'oi', label: `Screen ${screen}`,

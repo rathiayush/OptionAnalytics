@@ -274,7 +274,7 @@ export function useReplayClockBroadcast(state) {
     const record = lastClockRecord(stateRef.current)
     try { if (record) window.localStorage.setItem(LAST_CLOCK_KEY, record) } catch { /* only a convenience */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state?.underlying, state?.date, state?.loadingDate, state?.failedDate, state?.ms, state?.live, state?.playing])
+  }, [state?.underlying, state?.date, state?.loadingDate, state?.failedDate, state?.ms, state?.live, state?.playing, state?.expiryFlag])
 }
 
 const readKeptClock = () => {
