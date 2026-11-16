@@ -5,7 +5,7 @@ import { CrosshairMode, LineSeries, LineStyle, LineType, createSeriesMarkers } f
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
-import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, straddleRead } from './straddle.js'
+import { STRADDLE_START_DEFAULT, TRADE_DEFAULTS, atmSwitches, straddleRead } from './straddle.js'
 import { sanitizeLine } from './chartLine.js'
 import { useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
@@ -13,6 +13,8 @@ import { FoldText } from './FoldText.jsx'
 const { Text } = Typography
 
 const STRADDLE_COLOR = '#f5a623'
+// The Auto ATM's strike switches on its line - a blue that stands apart from the amber line and its VWAP.
+const ATM_SWITCH_COLOR = '#69c0ff'
 const DECAY_COLOR = '#ffd591'
 const VWAP_COLOR = '#4c9ffe'
 const FIXED_COLOR = '#b37feb'
@@ -155,7 +157,12 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
       { time: t.time, position: t.side === 'CE' ? 'belowBar' : 'aboveBar', color: t.side === 'CE' ? UP_COLOR : DOWN_COLOR, shape: t.side === 'CE' ? 'arrowUp' : 'arrowDown', text: `BUY ${t.side}` },
       ...(t.exitTime != null ? [{ time: t.exitTime, position: t.side === 'CE' ? 'aboveBar' : 'belowBar', color: t.points > 0 ? UP_COLOR : DOWN_COLOR, shape: 'circle', text: `${t.points > 0 ? '+' : ''}${num(t.pct, 0)}%` }] : []),
     ]).sort((a, b) => a.time - b.time)
-    return { straddle, spot, markers }
+    // Every Auto ATM switch marked on its line: the new strike, an arrow up when the ATM moved up a strike, down when down.
+    const atmMarkers = atmSwitches(s).map((w) => ({
+      time: w.time, position: w.to > w.from ? 'belowBar' : 'aboveBar', color: ATM_SWITCH_COLOR,
+      shape: w.to > w.from ? 'arrowUp' : 'arrowDown', text: `ATM ${w.to}`,
+    }))
+    return { straddle, spot, markers, atmMarkers, switches: atmSwitches(s) }
   }, [read])
 
   const fixedOptions = [
@@ -273,7 +280,13 @@ export function StraddleCard({ cePoints, pePoints, spotBars, asOfMs, dayKey, exp
             <Text strong style={{ fontSize: 12 }}>Straddles &amp; their VWAPs</Text>
             <Text className="oa-note" type="secondary" style={{ fontSize: 11 }}> · top: Auto ATM - the strike nearest the futures price, switching when it changes, its VWAP, and Decay only (dotted) - the {hhmm(day.time)} straddle with only time passing · below: Fixed {fixed.strike} - one strike all day, never shifted, and its VWAP</Text>
           </FoldText>
-          <LinesChart lines={charts.straddle} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
+          <LinesChart lines={charts.straddle} markers={charts.atmMarkers} dayKey={`straddle-${dayKey}-${start}-${fixed.strike}`} height={height} />
+          {charts.switches.length ? (
+            <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
+              <span style={{ color: ATM_SWITCH_COLOR }}>Auto ATM switched {charts.switches.length} time{charts.switches.length === 1 ? '' : 's'}:</span>{' '}
+              {charts.switches.slice(-6).map((w) => `${hhmm(w.time)} ${w.from} → ${w.to}`).join(' · ')}{charts.switches.length > 6 ? ' (latest 6)' : ''}
+            </Text>
+          ) : <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>Auto ATM has not switched strike yet.</Text>}
         </Col>
         <Col xs={24} lg={12}>
           <Text strong style={{ fontSize: 12 }}>Spot vs the priced range</Text>
