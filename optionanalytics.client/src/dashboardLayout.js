@@ -57,6 +57,7 @@ const CARD_ROWS = {
   volSkew: 20,
   gex: 19,
   gexSpot: 22,
+  dex: 22,
   ladder: 16,
   futures: 21,
   optionDeltaProfile: 20,
@@ -324,6 +325,8 @@ export const SECTION_ADDITIONS = [
   { version: 5, card: 'gexSpot', after: 'gex' },
   // The volatility skew (asked for - "add volatility skew as well in OI Replay").
   { version: 6, card: 'volSkew', after: 'straddle' },
+  // Dealer hedging (asked for - "can you also add delta exposure" - the hedging-flow DEX).
+  { version: 7, card: 'dex', after: 'gexSpot' },
 ]
 
 /** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
@@ -381,7 +384,7 @@ export const LAYOUT_VERSION = '2'
 // and bring back an OI totals card someone hid.
 // '4' added the two delta profiles (SECTION_ADDITIONS), '5' the GEX levels on spot, '6' the volatility skew.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '6'
+export const SECTIONS_VERSION = '7'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands
