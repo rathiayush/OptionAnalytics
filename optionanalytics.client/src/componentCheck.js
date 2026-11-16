@@ -26,11 +26,14 @@ import { gexLevelsNear, gexTrendDay } from './gexTrend.js'
 import { straddleRead } from './straddle.js'
 import { SKEW_DEFAULTS, SKEW_READ_TABLE, skewDay } from './volSkew.js'
 import { oiAbsorptionEvents } from './oiAbsorption.js'
-import { HORIZONS, REACTION_WINDOW, correlation, reaction } from './telegramSignals.js'
+import { REACTION_WINDOW, correlation, reaction } from './telegramSignals.js'
 import { prepareDay } from './signalBacktest.js'
 import { DHAN_CALLS_HEADER, runUrl } from './signalBacktestJob.js'
 
 const MIN = 60_000
+/** The horizons the price after a read is measured at (minutes) - 90 / 120 for the slower reads (asked for - "add higher
+ *  timeframe as well like 90 120 min"); an event too late in the day for one has none there. */
+export const HORIZONS = [5, 15, 30, 60, 90, 120]
 const IST_MS = 330 * MIN
 const SESSION_FIRST = 9 * 60 + 15
 const SESSION_LAST = 15 * 60 + 29
@@ -234,7 +237,7 @@ export function dayOutcome(run, { keepBars = false, ...options } = {}) {
   const d = dayEvents(run, options)
   if (!d.ok) return { ok: false, date: run?.date ?? null, reason: d.reason }
   const events = d.events.map((e) => {
-    const r = reaction({ time: e.at, dir: e.kind === 'dir' ? e.dir : 0 }, d.bars)
+    const r = reaction({ time: e.at, dir: e.kind === 'dir' ? e.dir : 0 }, d.bars, { horizons: HORIZONS })
     return { ...e, reaction: r ? { base: r.base, moves: r.moves, best: r.best, worst: r.worst, range: r.best != null && r.worst != null ? r.best + r.worst : null } : null }
   })
   return { ok: true, date: d.date, events, baseline: dayBaseline(d.bars), ...(keepBars ? { bars: d.bars } : {}) }
