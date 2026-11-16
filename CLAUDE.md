@@ -1351,6 +1351,36 @@ All must pass before committing.
   by Log out (ended on Telegram's side too). The status never carries the hash, a code or the full phone (masked). One
   request at a time; a click, nothing polls; no Dhan call. `TelegramChannelReaderTests.cs`. The ORDER FLOW alerts are the only
   Telegram the server sends by itself (above) - nothing else moved server side.
+- The COMPONENT CHECK page (`/component-check`, `ComponentCheckPage.jsx`, the maths `componentCheck.js`; asked for - "a page
+  where each component is tested on historical data and gives the correlation between price and what they are meant for",
+  the card-reads version picked, page + background): every OI Replay card's OWN READ replayed over past days with that
+  card's code on the day's OI Replay run (`/api/oi-replay/{u}/run` - the current expiry, Standard GEX sign; `loadComponentDay`,
+  a day at a time, a click - the disk cache, Dhan once), each read an EVENT at the minute it was made, known at its END
+  (`at` = time + 1 min), and what spot did after it (telegramSignals.js' `reaction`: the close 5 / 15 / 30 / 60 min later,
+  best / worst in the hour). `CARDS`: OI totals S/R break and 🎯 (prepareDay's `breaks` / `hp`), the straddle trend changes
+  and trade ideas (`straddleRead`), the skew read (the card's table over 30 min), GEX smart detection rows with a side, the
+  GEX regime, spot reaching a GEX level (15 min before the same level again), the dealers' lean (dex.js), charm into the
+  close (read at 14:30), absorption / exhaustion by OI (5-min candles). A STATE read is an event when it changes and holds
+  `HOLD` (3) minutes. Two kinds, each tested for what it is MEANT for: DIRECTIONAL (`dir` +1 / -1) - hit %, the average move
+  its way (% / points), Pearson's correlation of the side with the move (`corr{h}`); VOLATILITY (`expect` bigger / smaller -
+  straddle sideways / trending, GEX regime, max gamma, the dealers' lean) - the move's size against the USUAL move from any
+  minute of the same days (`dayBaseline` / `baselineOf`, as sums so days add up) = `ratio{h}`, how often bigger, the
+  correlation of the expectation with the size over usual, the hour's range against usual. `componentReport`: a row a card
+  (its directional reads together, else its volatility ones) with a row a read under it, a VERDICT at the horizon picked
+  ("Verdict at", `optionanalytics.componentCheck.horizon`): directional hit >= 55% with the move its way = works, <= 45%
+  against = opposite; volatility >= 1.15x usual (<= 0.87x for smaller) = works, the other way = opposite; else no edge;
+  under `VERDICT_MIN_EVENTS` 10 = too few. Events table (a card filter, a row opens its day), Events CSV (`eventsCsv`), a
+  day chart (the day's spot candles, ▲ / ▼ per directional read with a short tag, a grey dot a volatility read; a background
+  run's day loaded when picked). Up to 60 days on the page (the latest of a longer range); RUN IN BACKGROUND = the Signal
+  backtest's queue with KIND "components" (`SignalBacktestJobService.Kinds`; the job script's `components` - each day's
+  outcome kept, the run dropped, a day failed on the way tried once more at once, `STOP_AFTER` as the others, the horizon
+  from the request's settings), up to 1 500 days; its result `{ kind: 'components', components: report }` (no events -
+  the report only), `SummaryOf` = events / days / the cards that work / are opposite, Telegram "🧪 Component check done";
+  listed on this page only (the Signal backtest page filters it out; `BackgroundRunsCard` tags it, no Use settings / AI
+  there). `DaysPicker` moved to `DaysPicker.jsx` (both pages). `tests/component-check.test.mjs` (the events, no look-ahead -
+  a day cut part way = the whole day's up to the cut, the baseline, the report by hand, the loader), `-job` (the
+  background run = the page's report), `SignalBacktestJobServiceTests.cs`. A read of the cards - it places nothing and
+  feeds no strategy or alert.
 - The TELEGRAM SIGNALS page (`/telegram-signals`, `TelegramSignalsPage.jsx`, the reading `telegramSignals.js`; asked for -
   "a page which will read the messages and show me how the price reacts after those signals ... show correlation between
   price and signals"): two sources (`optionanalytics.telegramSignals.source`) - SERVER + TELEGRAM (the default: Load =

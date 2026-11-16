@@ -7,6 +7,8 @@
 // (featureFinder.js - dayRows of each day, featureReport for every label): each day's lines written to BACKTEST_CSV as it
 // comes and only its rows as COLUMNS kept (dayTable - 1 500 days of 1-minute rows are ~474 000 rows), the reports to the
 // result file at the end.
+// A COMPONENT CHECK run (BACKTEST_KIND=components) loads each day's run and keeps only its outcome (componentCheck.js -
+// every OI Replay card's reads as events and the price after each); the report over all of them to the result.
 // Up to MAX_BACKGROUND_DAYS (1 500) weekdays. A run whose days keep failing ON THE WAY (a timeout, the network, a server
 // error - the server or Dhan not answering) STOPS after STOP_AFTER of them in a row: the days not asked are listed as not
 // run and the result says why (`stopped`) - never hundreds of days of failing calls.
@@ -15,7 +17,7 @@
 //   RUNNER_BASE_URL, RUNNER_KEY   this server and the key it accepts from local processes
 //   BACKTEST_JOB                  the run's settings (cleanBacktestSettings: index, from / to, rule, levels, timeframe)
 //   BACKTEST_OUT                  the result file
-//   BACKTEST_KIND                 "backtest" (default) or "features"
+//   BACKTEST_KIND                 "backtest" (default), "features" or "components"
 //   BACKTEST_CSV                  a features run's dataset file
 //   BACKTEST_TODAY                (tests only) today's IST date - the days run are the weekdays before it
 //   BACKTEST_RETRY_PAUSE_MS       (tests only) the pause before a Feature finder day is tried again (5 s)
@@ -25,11 +27,12 @@ import { closeSync, openSync, renameSync, writeFileSync, writeSync } from 'node:
 import { MAX_BACKGROUND_DAYS, backtestDays, deltaDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, loadBacktestDay, reportReplacer } from '../src/signalBacktestJob.js'
 import { csvHeader, csvLines, dayRows, dayTable, featureReportsOfDays } from '../src/featureFinder.js'
+import { componentReport, loadComponentDay } from '../src/componentCheck.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
 const OUT = process.env.BACKTEST_OUT ?? 'signal-backtest-result.json'
-const KIND = process.env.BACKTEST_KIND === 'features' ? 'features' : 'backtest'
+const KIND = ['features', 'components'].includes(process.env.BACKTEST_KIND) ? process.env.BACKTEST_KIND : 'backtest'
 const CSV = process.env.BACKTEST_CSV ?? 'signal-backtest-features.csv'
 // A day the server has not kept yet comes from Dhan (spot, 42 option series, futures) at the shared 5 a second - no hurry here.
 const DAY_TIMEOUT_MS = Number(process.env.BACKTEST_DAY_TIMEOUT_MS) || 600_000
@@ -83,6 +86,7 @@ async function main() {
   const dates = backtestDays(settings.from, settings.to, istToday, MAX_BACKGROUND_DAYS)
   if (!dates.length) throw new Error('no past weekdays in the range')
   if (KIND === 'features') return features(dates)
+  if (KIND === 'components') return components(dates)
   const engine = engineSettings(settings)
   const outcomes = new Map()
   const totals = () => {
@@ -183,6 +187,44 @@ async function features(dates) {
       failed: dates.filter((d) => failed.has(d)).map((date) => ({ date, reason: failed.get(date) })),
       reports: featureReportsOfDays(tables),
     },
+  })
+}
+
+// The Component check over the days: each day's outcome (its events and the price after each) as soon as it is loaded,
+// the run dropped; a day that failed on the way tried once more at once (after a short pause). Then the report.
+async function components(dates) {
+  const outcomes = []
+  const breaker = newBreaker()
+  let events = 0
+  for (let k = 0; k < dates.length; k++) {
+    const date = dates[k]
+    if (breaker.stopped) { outcomes.push({ ok: false, date, reason: breaker.notAsked }); continue }
+    const at = { done: k, total: dates.length, events, okDays: outcomes.filter((o) => o.ok).length, sources: sourceCounts() }
+    progress({ stage: 'day', day: date, ...at })
+    const options = { timeoutMs: DAY_TIMEOUT_MS }
+    let day = await loadComponentDay(settings.underlying, date, options)
+    if (day.retry) {
+      progress({ stage: 'retry', day: date, ...at })
+      await pause(RETRY_PAUSE_MS)
+      day = await loadComponentDay(settings.underlying, date, options)
+    }
+    sources.set(date, daySource(day))
+    breaker.saw(day)
+    outcomes.push(day)
+    if (day.ok) events += day.events.length
+  }
+  // The horizon the verdicts are read at - the page's pick (not one of the backtest's settings).
+  const asked = Number(JSON.parse(process.env.BACKTEST_JOB ?? '{}')?.horizon)
+  const report = componentReport(outcomes, { horizon: [5, 15, 30, 60].includes(asked) ? asked : 30 })
+  if (!report.days) {
+    write({ ok: false, kind: 'components', settings, dates, startedUtc, finishedUtc: new Date().toISOString(), error: `No day could be read - ${report.failed[0]?.reason ?? 'no day was asked'}`, components: report })
+    process.exit(1)
+  }
+  progress({ stage: 'done', done: dates.length, total: dates.length, events, okDays: report.days, sources: sourceCounts() })
+  write({
+    ok: true, kind: 'components', settings, dates, today: istToday, startedUtc, finishedUtc: new Date().toISOString(), sources: sourceCounts(),
+    ...(breaker.stopped ? { stopped: breaker.why } : {}),
+    components: report,
   })
 }
 

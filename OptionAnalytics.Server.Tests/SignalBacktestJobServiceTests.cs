@@ -360,6 +360,45 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_component_check_run_says_which_cards_worked_as_meant()
+    {
+        var telegrams = new List<string>();
+        var s = Service(Script("""
+            import { writeFileSync } from 'node:fs'
+            const job = JSON.parse(process.env.BACKTEST_JOB)
+            writeFileSync(process.env.BACKTEST_OUT, JSON.stringify({ ok: true, kind: process.env.BACKTEST_KIND, settings: job, components: {
+              horizon: job.horizon, days: 4, events: 321, failed: [{ date: '2026-10-21', reason: 'holiday' }],
+              cards: [
+                { card: 'oiBreak', label: 'OI totals S/R break', verdict: { key: 'works' } },
+                { card: 'skew', label: 'Volatility <skew>', verdict: { key: 'opposite' } },
+                { card: 'gexRegime', label: 'GEX regime', verdict: { key: 'none' } },
+                { card: 'dexCharm', label: 'Charm into the close', events: 0 } ] } }))
+            """), telegrams);
+        var settings = Settings();
+        settings["horizon"] = 15;
+        var request = Request(settings, name: null) with { Kind = "components" };
+        var job = s.Add("me@x.com", request, Now).Job!;
+        Assert.Equal("components", job.Kind);
+        Assert.True(s.TryStartNext(Now));
+        var done = await UntilEnded(s, job.Id);
+        Assert.Equal("done", done.State);
+        var sum = done.Summary!;
+        Assert.Equal("components", sum["kind"]!.GetValue<string>());
+        Assert.Equal(321, sum["events"]!.GetValue<double>());
+        Assert.Equal(4, sum["okDays"]!.GetValue<double>());
+        Assert.Equal(1, sum["failedDays"]!.GetValue<double>());
+        Assert.Equal(15, sum["horizon"]!.GetValue<double>());
+        Assert.Equal("OI totals S/R break", Assert.Single(sum["works"]!.AsArray())!.GetValue<string>());
+        Assert.Equal("Volatility <skew>", Assert.Single(sum["opposite"]!.AsArray())!.GetValue<string>());
+        Assert.Null(s.FeaturesPath(job.Id, null));
+        var message = Assert.Single(telegrams);
+        Assert.Contains("Component check done", message);
+        Assert.Contains("321 events · 4 days · 1 day(s) not run", message);
+        Assert.Contains("Works as meant (15 min): OI totals S/R break", message);
+        Assert.Contains("Opposite of meant: Volatility &lt;skew&gt;", message);
+    }
+
+    [Fact]
     public async Task A_backtest_has_no_dataset_and_a_feature_finder_run_without_one_fails()
     {
         var s = Service(GoodScript());
@@ -384,7 +423,7 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
         File.WriteAllText(path, File.ReadAllText(path).Replace("\"kind\":\"backtest\",", ""));
         Assert.DoesNotContain("\"kind\"", File.ReadAllText(path));
         Assert.Equal("backtest", Service(GoodScript()).Get(backtest.Id, null)!.Kind);
-        Assert.Contains("backtest or the Feature finder", SignalBacktestJobService.Validate(Request() with { Kind = "tuning" }, Now).Error);
+        Assert.Contains("a backtest, the Feature finder or the Component check", SignalBacktestJobService.Validate(Request() with { Kind = "tuning" }, Now).Error);
         Assert.Equal("my run", SignalBacktestJobService.Validate(Request() with { Kind = "features" }, Now).Plan!.Name);
     }
 
