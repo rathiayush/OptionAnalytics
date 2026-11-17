@@ -284,11 +284,13 @@ export function profileSessions({ today = [], past = [], days = 1, of = 'today' 
  * it should not come all at once"): the day shown UP TO THE CLOCK always - the replay's minutes as they are played, live the
  * day so far - so the profile moves with the replay; "Previous days" ticked puts the N sessions BEFORE the day under it (they
  * were all before the clock), unticked the N - 1 before it (profileSessions). Ticked it used to be the sessions before the
- * day ONLY: whole from the replay's first minute, and nothing of the day replayed ever came into it.
+ * day ONLY: whole from the replay's first minute, and nothing of the day replayed ever came into it. `withToday: false` (the
+ * Profiles page's "+ current day" unticked) gives that back on purpose: with "previous", the N sessions before the day alone.
  */
-export function deltaCardSessions({ today = [], past = [], days = 1, of = 'today' }) {
+export function deltaCardSessions({ today = [], past = [], days = 1, of = 'today', withToday = true }) {
   if (of !== 'previous') return profileSessions({ today, past, days, of })
-  return [...profileSessions({ past, days, of }), ...(today?.length ? [today] : [])]
+  // `withToday` false (the Profiles page's "+ current day" unticked): the sessions before the day ONLY.
+  return [...profileSessions({ past, days, of }), ...(withToday && today?.length ? [today] : [])]
 }
 
 /** How many sessions BEFORE the day a profile of `days` needs. */

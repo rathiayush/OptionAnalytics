@@ -224,6 +224,10 @@ test('the delta cards always add the day up to the clock - with "Previous days" 
   // Unticked as before (profileSessions): the day and the N - 1 before it.
   assert.deepEqual(deltaCardSessions({ today, past, days: 2, of: 'today' }), [['d3'], today])
   assert.deepEqual(deltaCardSessions({ today, past, days: 1, of: 'today' }), [today])
+  // The Profiles page's "+ current day" unticked: with "previous", the sessions before ONLY; "today" never drops the day.
+  assert.deepEqual(deltaCardSessions({ today, past, days: 2, of: 'previous', withToday: false }), [['d2'], ['d3']])
+  assert.deepEqual(deltaCardSessions({ today, past, days: 1, of: 'previous', withToday: false }), [['d3']])
+  assert.deepEqual(deltaCardSessions({ today, past, days: 2, of: 'today', withToday: false }), [['d3'], today])
   // At the replay's start (nothing of the day yet) ticked = the days before alone; then it grows minute by minute.
   assert.deepEqual(deltaCardSessions({ today: [], past, days: 2, of: 'previous' }), [['d2'], ['d3']])
 })
