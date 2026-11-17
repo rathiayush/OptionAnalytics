@@ -68,6 +68,8 @@ const STORE = {
   vpBars: 'optionanalytics.profiles.vpBars',
   speed: 'optionanalytics.profiles.speedMs',
   delta: 'optionanalytics.profiles.delta',
+  // "+ current day" with "Previous session(s)": ticked = the sessions before with the day up to the clock on top, unticked = the sessions before only.
+  withToday: 'optionanalytics.profiles.withToday',
 }
 // A past day's replay, as OI Replay's: milliseconds per market minute.
 const SPEED_OPTIONS = [
@@ -461,11 +463,11 @@ function DeltaLine({ delta, levels }) {
 /** The volume profile card and the market profile card of ONE instrument (the spot, or the futures): `known` - its
  *  bars of the day known at the clock; `past` - its sessions before the day ({ date, bars }, oldest first). `neutral`:
  *  the volume has no buy / sell side (the index's) - its bars are one colour. */
-function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
+function ProfilePair({ name, known, past, dayCount, profileOf, withToday = true, clock, live, row, timeframe, showVwap, vpBars, resetKey, neutral = false, empty = null, dayError = null, delta: deltaSource = null }) {
   const sessions = useMemo(
     // "Previous" = the N sessions BEFORE with the day up to the clock / live ON TOP (as OI Replay's delta cards); "today" = the day and the N - 1 before.
-    () => deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }),
-    [known, past, dayCount, profileOf],
+    () => deltaCardSessions({ today: known, past: past.map((d) => d.bars), days: dayCount, of: profileOf, withToday }),
+    [known, past, dayCount, profileOf, withToday],
   )
   const profileBars = useMemo(() => sessions.flat(), [sessions])
   // The "Delta" tick (`deltaSource`): { from: 'bars', label } - the futures' own footprint rows, buy - sell at each price,
@@ -475,11 +477,11 @@ function ProfilePair({ name, known, past, dayCount, profileOf, clock, live, row,
     if (!deltaSource) return null
     if (deltaSource.from === 'bars') {
       // Its own bars when given (the loaded footprint - no live candle minute), the same sessions as the profiles.
-      const bars = deltaSource.known ? deltaCardSessions({ today: deltaSource.known, past: past.map((d) => d.bars), days: dayCount, of: profileOf }).flat() : profileBars
+      const bars = deltaSource.known ? deltaCardSessions({ today: deltaSource.known, past: past.map((d) => d.bars), days: dayCount, of: profileOf, withToday }).flat() : profileBars
       return { ...deltaSource, profile: futuresDeltaProfileOf([bars], { rowSize: row }) }
     }
     return deltaSource
-  }, [deltaSource, profileBars, row, past, dayCount, profileOf])
+  }, [deltaSource, profileBars, row, past, dayCount, profileOf, withToday])
   const deltaLevels = useMemo(() => (delta?.profile ? deltaProfileLevels(delta.profile) : null), [delta])
   const chartHeight = useChartHeight()
   // LIVE, no minute of today yet (before the open, a holiday) while the profile is built from earlier sessions: a chart
@@ -694,6 +696,7 @@ export default function ProfilesPage() {
   const [profileOf, setProfileOf] = usePersistedState(STORE.of, 'today')
   // How many sessions the profiles cover - 1 is the day itself (or the one session before it).
   const [days, setDays] = usePersistedState(STORE.days, 1)
+  const [withTodaySaved, setWithToday] = usePersistedState(STORE.withToday, true)
   const [follow, setFollow] = usePersistedState(STORE.follow, true)
   const [showVwap, setShowVwap] = usePersistedState(STORE.vwap, true)
   const [vpBarsKey, setVpBarsKey] = usePersistedState(STORE.vpBars, DEFAULT_VP_BARS)
@@ -737,6 +740,8 @@ export default function ProfilesPage() {
   const effectiveDate = live ? todayKey : dateKey
   const dayCount = Math.max(1, Math.min(MAX_PROFILE_DAYS, Math.round(days) || 1))
   const pastCount = pastSessionsNeeded(dayCount, profileOf)
+  // The day itself in the profiles: always with "Today so far"; with "Previous" only while "+ current day" is ticked.
+  const withToday = profileOf !== 'previous' || withTodaySaved !== false
   // Live: what the pushes brought since the day loaded, for this index, day and mode only.
   const liveKey = live ? `${index}|${effectiveDate}` : null
   const [reload, setReload] = useState(0)
@@ -840,14 +845,14 @@ export default function ProfilesPage() {
 
   const futuresKnown = useMemo(() => barsKnownAt(futuresDay?.bars, clock), [futuresDay, clock])
   const spotKnown = useMemo(() => barsKnownAt(spotDay?.bars, clock), [spotDay, clock])
-  const resetKey = `${index}|${effectiveDate}|${timeframe}|${profileOf}|${dayCount}`
+  const resetKey = `${index}|${effectiveDate}|${timeframe}|${profileOf}|${dayCount}|${withToday}`
 
   // What the profiles cover, in words: "2026-09-28 → 2026-10-02 (5 sessions)" - the futures' sessions (the spot's
   // are the same trading days).
   const usedPast = futuresPast.sessions.slice(-pastCount)
-  const coverDates = [...usedPast.map((d) => d.date), ...(futuresKnown.length || spotKnown.length ? [effectiveDate] : [])]
+  const coverDates = [...usedPast.map((d) => d.date), ...(withToday && (futuresKnown.length || spotKnown.length) ? [effectiveDate] : [])]
   const coverText = coverDates.length === 0 ? '' : coverDates.length === 1 ? coverDates[0] : `${coverDates[0]} → ${coverDates.at(-1)} (${coverDates.length} sessions)`
-  const estimated = futuresDay?.source === 'estimated' || usedPast.some((d) => d.source === 'estimated')
+  const estimated = (withToday && futuresDay?.source === 'estimated') || usedPast.some((d) => d.source === 'estimated')
   // A replay is named by the minute it shows (as OI Replay's): the clock is that minute's END.
   const asOf = live ? `live${pushed.at ? ` · last tick ${updatedAt(pushed.at)}` : ''}` : clock ? `replay · ${fmtClock(clock - 60_000)} candle` : ''
   const loadingPast = futuresPast.loading || spotPast.loading
@@ -859,7 +864,7 @@ export default function ProfilesPage() {
     if (state.error) return <Alert type="warning" showIcon message={`The ${what} of ${effectiveDate} is not available: ${state.error}`} action={<Button size="small" onClick={state.retry}>Retry</Button>} />
     return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={live ? 'No trading today yet - the profiles start with the first minute after 09:15.' : `No ${what} minutes for this day.`} />
   }
-  const pair = { dayCount, profileOf, clock, live, row, timeframe, showVwap, vpBars, resetKey }
+  const pair = { dayCount, profileOf, withToday, clock, live, row, timeframe, showVwap, vpBars, resetKey }
   // The "Delta" tick. SPOT: the OPTIONS' flow on spot rows, as OI Replay's option delta profile works it out (each strike's
   // bars given a side - where the close sits in the bar's range - weighted by its delta, Net = CE − PE: + calls bought / puts
   // sold), the minutes up to the clock, the sessions before from their own runs. FUTURES: its footprint's buy − sell at
@@ -872,13 +877,13 @@ export default function ProfilesPage() {
   )
   const spotDelta = useMemo(() => {
     if (!showDelta) return null
-    // The sessions before with the day up to the clock on top - with "Previous" too.
-    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), optionMinutes]
+    // The sessions before with the day up to the clock on top - with "Previous" too, unless "+ current day" is unticked.
+    const sessions = [...(pastCount ? optionPast.sessions.slice(-pastCount).map((d) => d.items) : []), ...(withToday ? [optionMinutes] : [])]
     const profile = optionDeltaProfileOf(sessions, { rowSize: row })
     const note = optionRun.loading || optionPast.loading ? 'loading the option bars…'
       : optionRun.error ? `the day's option bars could not be read (${optionRun.error})` : optionPast.error ? `a session before could not be read` : null
     return { profile, label: 'options', text: `options on spot (Net CE − PE, delta-weighted · ${optionRun.flag === 'MONTH' ? 'Monthly' : 'Weekly'} options · ${row} pt rows)`, note }
-  }, [showDelta, pastCount, optionPast.sessions, optionPast.loading, optionPast.error, optionMinutes, row, optionRun.loading, optionRun.error, optionRun.flag])
+  }, [showDelta, pastCount, withToday, optionPast.sessions, optionPast.loading, optionPast.error, optionMinutes, row, optionRun.loading, optionRun.error, optionRun.flag])
   // The futures' delta from the LOADED day's footprint rows only (reloaded each minute live) - never the live candle minutes.
   const futuresDeltaKnown = useMemo(() => (showDelta ? barsKnownAt(loadedFutures?.bars, clock) : NO_BARS), [showDelta, loadedFutures, clock])
   const futuresDelta = useMemo(() => (showDelta ? { from: 'bars', known: futuresDeltaKnown, label: 'futures', text: `futures (buy − sell at each price · ${row} pt rows${live ? ' · footprint reloaded each minute' : ''})` } : null), [showDelta, futuresDeltaKnown, row, live])
@@ -921,6 +926,11 @@ export default function ProfilesPage() {
                 <Text type="secondary" style={{ fontSize: 12 }}>Profile of</Text>
                 <Segmented size="small" value={profileOf} onChange={setProfileOf} options={[{ value: 'today', label: live ? 'Today so far' : 'This day so far' }, { value: 'previous', label: dayCount > 1 ? 'Previous sessions' : 'Previous session' }]} />
               </Space>
+              {profileOf === 'previous' && (
+                <Tooltip title={`Ticked: the ${dayCount > 1 ? `${dayCount} sessions` : 'session'} before ${live ? 'today' : 'the day'} with ${live ? 'today so far' : 'the day up to the clock'} on top. Unticked: the ${dayCount > 1 ? 'sessions' : 'session'} before only - nothing of ${live ? 'today' : 'the day'} in the profiles (its candles are still drawn).`}>
+                  <Checkbox checked={withTodaySaved !== false} onChange={(e) => setWithToday(e.target.checked)}>+ current day</Checkbox>
+                </Tooltip>
+              )}
               <Tooltip title={`How many sessions the profiles are built from (a composite). 1 = the day alone. With "${live ? 'Today so far' : 'This day so far'}", the day so far and the sessions before it; with "Previous session", that many sessions before the day.`}>
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12 }}>Days</Text>
