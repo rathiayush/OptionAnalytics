@@ -78,6 +78,15 @@ export function useReplayDevicesEnabled() {
   return useStoredFlag(DEVICES_KEY, DEVICES_EVENT)
 }
 
+/** Sync AND Devices on: OI Replay's clock also goes to / comes from the account's other devices (the Profiles page). */
+function useClockAcrossDevices() {
+  const [enabled] = useReplaySyncEnabled()
+  const [devices] = useReplayDevicesEnabled()
+  const wanted = enabled && devices
+  const status = useSyncRelay(wanted)
+  return { wanted, status }
+}
+
 const tabId = Math.random().toString(36).slice(2)
 
 // kind: 'oi' | 'of'. active: whether this page is replaying something it can sync right now (only
@@ -288,6 +297,10 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
 // day being loaded, while it loads), failedDate (the past day whose load failed), ms (the replay clock: the END of the
 // newest minute shown - null when live), live, playing }.
 //
+// ACROSS DEVICES (asked for - "OI page on one device, order flow on another, market profile on another"): with Sync and
+// Devices on, the clock also goes through the server relay (syncBus.js topic 'clock' - the account's other connections),
+// so the Profiles page on a phone follows OI Replay on a laptop; still one way.
+//
 // The same state is also KEPT in this browser on every change (replayClockStore.js): a follower takes the last one up
 // when no OI Replay tab answers - on a phone the pages share one tab (OI Replay is closed while the Profiles page is
 // open) and a background tab is frozen, so the channel alone left the follower on its own day.
@@ -299,6 +312,7 @@ const CLOCK_TIMEOUT_MS = 6000
 /** OI Replay: say where its replay is - on every change and every couple of seconds (a follower that
  *  opens later hears it at once too: it asks with "hello"). */
 export function useReplayClockBroadcast(state) {
+  const { wanted: viaServer } = useClockAcrossDevices()
   const channelRef = useRef(null)
   const stateRef = useRef(state)
   stateRef.current = state
@@ -308,14 +322,15 @@ export function useReplayClockBroadcast(state) {
   }
   useEffect(() => {
     if (typeof BroadcastChannel === 'undefined') return undefined
-    const channel = new BroadcastChannel(CLOCK_CHANNEL)
+    const channel = createSyncBus({ channel: new BroadcastChannel(CLOCK_CHANNEL), relay: viaServer ? relay : null, from: tabId, dev: thisDevice(), topic: 'clock' })
     channelRef.current = channel
     channel.onmessage = ({ data }) => { if (data?.type === 'hello') post() }
     const heartbeat = setInterval(post, CLOCK_HEARTBEAT_MS)
+    const offUp = viaServer ? relay.onUp(post) : null
     post()
-    return () => { clearInterval(heartbeat); channel.close(); channelRef.current = null }
+    return () => { offUp?.(); clearInterval(heartbeat); channel.close(); channelRef.current = null }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [viaServer])
   useEffect(() => {
     post()
     const record = lastClockRecord(stateRef.current)
@@ -334,6 +349,7 @@ const readKeptClock = () => {
  *  when following starts and whenever the page comes back into view, if OI Replay moved since what was last
  *  followed - and never while an OI Replay tab is answering (its messages lead). */
 export function useFollowReplayClock(enabled, onClock) {
+  const { wanted: viaServer } = useClockAcrossDevices()
   const onClockRef = useRef(onClock)
   onClockRef.current = onClock
   const [clock, setClock] = useState(null)
@@ -355,8 +371,9 @@ export function useFollowReplayClock(enabled, onClock) {
       onClockRef.current?.(last)
     }
     let channel = null
+    let offUp = null
     if (typeof BroadcastChannel !== 'undefined') {
-      channel = new BroadcastChannel(CLOCK_CHANNEL)
+      channel = createSyncBus({ channel: new BroadcastChannel(CLOCK_CHANNEL), relay: viaServer ? relay : null, from: tabId, dev: thisDevice(), topic: 'clock' })
       channel.onmessage = ({ data }) => {
         if (data?.type !== 'clock' || !data.underlying) return
         const at = Date.now()
@@ -367,19 +384,25 @@ export function useFollowReplayClock(enabled, onClock) {
         setSeenAt(at)
         onClockRef.current?.(data)
       }
-      channel.postMessage({ type: 'hello', from: tabId })
+      const hello = () => channel.postMessage({ type: 'hello', from: tabId })
+      hello()
+      // The relay joined (again): OI Replay on another device answers a fresh hello.
+      offUp = viaServer ? relay.onUp(hello) : null
     }
     takeUpKept()
     document.addEventListener('visibilitychange', takeUpKept)
     window.addEventListener('pageshow', takeUpKept)
     const tick = setInterval(() => setNow(Date.now()), CLOCK_HEARTBEAT_MS)
     return () => {
+      offUp?.()
       clearInterval(tick)
       channel?.close()
       document.removeEventListener('visibilitychange', takeUpKept)
       window.removeEventListener('pageshow', takeUpKept)
     }
-  }, [enabled])
+  }, [enabled, viaServer])
   const connected = enabled && clock != null && now - seenAt < CLOCK_TIMEOUT_MS
-  return { connected, clock, kept: connected ? null : kept }
+  // `remote`: the OI Replay followed is on another device - its kind ("Mac").
+  const remote = connected && clock?.device && clock.device !== thisDevice().id ? clock.deviceName ?? 'another device' : null
+  return { connected, clock, kept: connected ? null : kept, remote, viaServer }
 }

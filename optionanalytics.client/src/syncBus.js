@@ -55,13 +55,15 @@ export function thisDevice() {
  * (null, or { send(msg), subscribe(handler) -> unsubscribe }). Same shape as a BroadcastChannel: postMessage(data),
  * onmessage = ({ data }) => ..., close(). Every message posted gets `mid` (unique), `device` and `deviceName`.
  */
-export function createSyncBus({ channel = null, relay = null, from = 'tab', dev = { id: 'dev', name: 'device' } } = {}) {
+// `topic`: what the bus carries on the shared relay - 'sync' (the two-way replay sync; a message with none is one) or 'clock'
+// (OI Replay's one-way clock for the Profiles page) - a bus hands on its own topic's only.
+export function createSyncBus({ channel = null, relay = null, from = 'tab', dev = { id: 'dev', name: 'device' }, topic = 'sync' } = {}) {
   const seen = makeDeduper()
   let n = 0
   const bus = {
     onmessage: null,
     postMessage(data) {
-      const msg = { ...data, mid: `${from}:${++n}`, device: dev.id, deviceName: dev.name }
+      const msg = { ...data, mid: `${from}:${++n}`, device: dev.id, deviceName: dev.name, topic }
       seen(msg.mid)
       channel?.postMessage(msg)
       relay?.send(msg)
@@ -69,7 +71,7 @@ export function createSyncBus({ channel = null, relay = null, from = 'tab', dev 
     close() { if (channel) channel.onmessage = null; unsubscribe?.(); channel?.close?.() },
   }
   const receive = (data) => {
-    if (!data || typeof data !== 'object' || seen(data.mid)) return
+    if (!data || typeof data !== 'object' || (data.topic ?? 'sync') !== topic || seen(data.mid)) return
     bus.onmessage?.({ data })
   }
   if (channel) channel.onmessage = ({ data }) => receive(data)

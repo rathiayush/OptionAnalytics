@@ -949,14 +949,14 @@ export default function ProfilesPage() {
                   <Segmented size="small" value={Object.hasOwn(VP_BAR_SIZES, vpBarsKey) ? vpBarsKey : DEFAULT_VP_BARS} onChange={setVpBarsKey} options={Object.entries(VP_BAR_SIZES).map(([value, b]) => ({ value, label: b.label }))} />
                 </Space>
               </Tooltip>
-              <Tooltip title="Follow the OI Replay page open in another tab: the same index and day - live, or at its replay clock - so the profiles replay along with it. With no OI Replay running (a phone: one tab, or OI Replay's tab in the background) this page opens where OI Replay was last left, and its own controls play on from there. Nothing you do here moves OI Replay.">
+              <Tooltip title="Follow the OI Replay page open in another tab - or on another device signed in to this account, with Sync and Devices on (OI Replay's switches): the same index and day - live, or at its replay clock - so the profiles replay along with it. With no OI Replay running (a phone: one tab, or OI Replay's tab in the background) this page opens where OI Replay was last left, and its own controls play on from there. Nothing you do here moves OI Replay.">
                 <Space size={4}>
                   <Switch size="small" checked={follow} onChange={setFollow} />
                   <Text style={{ fontSize: 12 }}>Follow OI Replay</Text>
                 </Space>
               </Tooltip>
               {follow && (following
-                ? <Tag color={followed.clock?.failedDate ? 'warning' : 'cyan'} style={{ margin: 0 }}>⇄ OI Replay · {followed.clock?.underlying} {followClockText(followed.clock)}</Tag>
+                ? <Tag color={followed.clock?.failedDate ? 'warning' : 'cyan'} style={{ margin: 0 }}>⇄ OI Replay{followed.remote ? ` on ${followed.remote}` : ''} · {followed.clock?.underlying} {followClockText(followed.clock)}</Tag>
                 : followed.kept
                   ? <Tag color="blue" style={{ margin: 0, whiteSpace: 'normal' }}>Opened where OI Replay was left · {followed.kept.underlying} {keptClockText(followed.kept)} · it is not running - play on here</Tag>
                   : <Tag style={{ margin: 0 }}>OI Replay is not open - showing this page&apos;s own choice</Tag>)}
