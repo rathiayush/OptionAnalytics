@@ -1,4 +1,6 @@
 import { useSideNavInset, useViewport } from './useScreen.js'
+import { readStored } from './shared.jsx'
+import { STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR } from './dashboardLayout.js'
 import { FAB_EDGE, FAB_ROW_GAP, FAB_SIZE, fabDefault, fabFromAnchor, fabInBarRow, fabInBarRowRight, orderFabDefault } from './quickViews.js'
 
 // OI Replay's replay controls as a slim bar FLOATING at the bottom of the window (asked for - "replay bar also should be
@@ -11,9 +13,16 @@ import { FAB_EDGE, FAB_ROW_GAP, FAB_SIZE, fabDefault, fabFromAnchor, fabInBarRow
 const BAR_Z = 955 // over the floating panels (900+), under the quick button (960) and the popups (1000)
 const MAX_WIDTH = 980
 
-export function FloatingReplayBar({ fabOn = true, fabAnchor = null, orderOn = false, orderAnchor = null, children }) {
+// `appFabs`: the page's buttons are the APP-WIDE ones (GlobalFloating.jsx - the Profiles and Order Flow pages): the bar
+// reads their ticks and anchors (OI Replay's account preferences) itself at every render (the bar re-renders with each
+// replay step, so a button dragged meanwhile is followed), so it stands beside them, not under them.
+export function FloatingReplayBar({ appFabs = false, fabOn: fabOnProp = true, fabAnchor: fabAnchorProp = null, orderOn: orderOnProp = false, orderAnchor: orderAnchorProp = null, children }) {
   const viewport = useViewport()
   const inset = useSideNavInset()
+  const fabOn = appFabs ? readStored(STORED_QUICK_FAB, true) : fabOnProp
+  const fabAnchor = appFabs ? readStored(STORED_QUICK_FAB_ANCHOR, null) : fabAnchorProp
+  const orderOn = appFabs ? readStored(STORED_ORDER_FAB, true) : orderOnProp
+  const orderAnchor = appFabs ? readStored(STORED_ORDER_FAB_ANCHOR, null) : orderAnchorProp
   const fab = fabOn ? (fabFromAnchor(fabAnchor, viewport, inset) ?? fabDefault(viewport, inset)) : null
   const order = orderOn ? (fabFromAnchor(orderAnchor, viewport, inset) ?? orderFabDefault(viewport, inset)) : null
   const left = inset + FAB_EDGE + (fab && fabInBarRow(fab, viewport, inset) ? FAB_SIZE + FAB_ROW_GAP : 0)

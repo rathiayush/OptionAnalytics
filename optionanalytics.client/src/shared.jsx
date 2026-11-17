@@ -437,7 +437,7 @@ export const STORED_SHOW_VWAP = 'optionanalytics.showVwap.v2'
 export const STORED_SHOW_VOLUME_PROFILE = 'optionanalytics.showVolumeProfile'
 // The same profile as horizontal bars behind the candles, not only its levels (OI Replay's "VP bars" tick).
 export const STORED_SHOW_PROFILE_BARS = 'optionanalytics.showProfileBars'
-function readStored(key, fallback) {
+export function readStored(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key)
     return raw === null ? fallback : JSON.parse(raw)

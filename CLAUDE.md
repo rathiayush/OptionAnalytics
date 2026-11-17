@@ -819,7 +819,10 @@ All must pass before committing.
   like OI Replay"): OI Replay's `FloatingReplayBar` on the Profiles page (its own replay of a past day, not while following OI
   Replay) and the Order Flow page (a loaded day) once the inline replay controls are out of sight (`useOnScreen`): Start /
   Pause, Reset (Profiles) or −1m / +1m (Order Flow), the minute, the slider, the speed - the same state and handlers as the
-  inline controls.
+  inline controls. There the page's buttons are the APP-WIDE ones (`GlobalFloating`), so the bar is `<FloatingReplayBar
+  appFabs>`: it reads their ticks / anchors (OI Replay's preferences) at every render and starts right of the quick button /
+  ends left of the order button as on OI Replay (it sat UNDER the quick button); both pages keep 120 px at their bottom; on
+  a phone the Order Flow bar leaves out −1m / +1m (no room beside the button - the speed was cut off).
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
   I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone

@@ -757,8 +757,9 @@ export default function OrderFlowPage() {
 
   return (
     // oa-of-page: never wider than the screen (overflow-x: clip - a page wider than a phone is drawn shrunk), less side
-    // padding and 16 px inputs on a phone (index.css).
-    <div className="oa-of-page" style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px' : '24px 16px' }}>
+    // padding and 16 px inputs on a phone (index.css); 120 px at the bottom so the app-wide quick / order buttons and the
+    // floating replay bar never cover the last card.
+    <div className="oa-of-page" style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px 120px' : '24px 16px 120px' }}>
       <Space direction="vertical" size={narrow ? 12 : 16} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -1100,10 +1101,11 @@ export default function OrderFlowPage() {
         <DomDrawer open={domOpen} onClose={() => setDomOpen(false)} underlying={underlying} />
       </Space>
       {isReplay && range && !replayInlineOnScreen && (
-        <FloatingReplayBar fabOn={false}>
+        <FloatingReplayBar appFabs>
           <Button size="small" type="primary" shape="circle" aria-label={playing ? 'Pause' : 'Play'} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} onClick={togglePlay} />
-          <Button size="small" onClick={() => jump(-1)}>−1m</Button>
-          <Button size="small" onClick={() => jump(1)}>+1m</Button>
+          {/* A phone's bar is beside the app-wide quick button: no room for −1m / +1m (the slider and the inline controls have them). */}
+          {!narrow && <Button size="small" onClick={() => jump(-1)}>−1m</Button>}
+          {!narrow && <Button size="small" onClick={() => jump(1)}>+1m</Button>}
           <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{replayMs != null ? IST_HHMMSS.format(new Date(replayMs)) : ''}</Text>
           <Slider style={{ flex: 1, minWidth: 60, margin: '0 6px' }} min={range.start} max={range.end} step={1000} value={replayMs ?? range.start} tooltip={{ open: false }} onChange={(v) => { setReplayMs(v); sync.userAction() }} />
           <Select size="small" value={replaySpeed} onChange={(v) => { setReplaySpeed(v); sync.userAction() }} style={{ width: 72 }} options={withSpeedOption(REPLAY_SPEEDS, replaySpeed, speedOption)} aria-label="Speed" />
