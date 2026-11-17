@@ -445,6 +445,21 @@ All must pass before committing.
   Replay Screen 2 2026-10-05"). The chart timeframe and everything else on a card stay each screen's own.
   `tests/dashboard-layout.test.mjs` (the screen helpers); checked with two real tabs (the day, the clock, Σ, Monthly, the
   index, live and joining).
+  OTHER DEVICES (asked for - "a way to connect different devices for OI Replay ... see all components at once, maybe
+  through wifi and bluetooth"): a browser cannot reach another device over Wi-Fi / Bluetooth by itself, so the server
+  relays. The "Devices" switch beside Sync (`optionanalytics.replaySync.devices`, off by default, an account preference)
+  sends the SAME sync messages through the live hub too (`syncBus.js` - BroadcastChannel + relay, every message a `mid`, a
+  tab hearing it both ways takes it ONCE; `syncRelay.js` - one hub connection a tab while wanted, re-joined after a
+  reconnect, a fresh hello each time; `SpotHub.JoinReplaySync` / `ReplaySync` / `LeaveReplaySync`): the group is the
+  ACCOUNT's (`rs:{name}`, worked out on the server from who is signed in, Admin / User only - never External, the Runner
+  key or a name the browser sends; `JoinGroup` refuses any "rs:" name), a message goes to the account's OTHER connections
+  (`GroupExcept`), objects only, at most `MaxReplaySyncChars` 8 000, relayed as is - never read or kept
+  (`ReplaySyncHubTests.cs`). So everything Sync does between tabs works between a laptop, a tablet and a phone signed in to
+  the same account, on any network (Order Flow too). Each message names its device (`thisDevice` - an id kept in this
+  browser only, LOCAL_ONLY, and a kind from the user agent - `deviceKind`): the tag reads "⇄ OI Replay Screen 3 on iPad".
+  With Devices on, OI Replay shows a SCREEN picker (Main screen, Screen 2 - 9 - the window's ?screen=N, so a tablet with no
+  "＋ Screen" window picks its own cards). A tag says when the server is not reachable (this browser only) or the account
+  may not sync. `tests/sync-bus.test.mjs`; checked with two browser contexts (a Mac and an iPad) through a mock hub.
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   a SINGLE KEY (no Ctrl / Alt / Shift - the user's ask; Alt was tried first): Z Day OI since the open, X the OI totals
   charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart, N the OI change heatmap and totals, M the option

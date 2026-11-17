@@ -72,7 +72,7 @@ import { DashboardGrid } from './DashboardGrid.jsx'
 import {
   STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
-  screenFromSearch, screenKey, nextScreen,
+  screenFromSearch, screenKey, nextScreen, MAX_SCREENS,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
 } from './dashboardLayout.js'
 import { useReplaySync, useReplaySyncEnabled, ReplaySyncControl, withSpeedOption, SYNC_DRIFT_MS, useReplayClockBroadcast } from './replaySync.jsx'
@@ -84,6 +84,8 @@ const { Text, Title } = Typography
 // literal default is a NEW array every render, which would re-trigger any effect keyed on it even
 // when the caller never actually passes one.
 const EMPTY_ARRAY = []
+// The screen picker's choices (dashboardLayout's screens: the main one, then 2 - MAX_SCREENS).
+const SCREEN_CHOICES = Array.from({ length: MAX_SCREENS }, (_, i) => ({ value: i + 1, label: i ? `Screen ${i + 1}` : 'Main screen' }))
 
 
 // How long today's replay can go without ANY tick (spot, OI, or futures) before this page treats it
@@ -5955,9 +5957,19 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     if (!syncEnabled) setSyncEnabled(true)
     window.open(`${window.location.pathname}?screen=${next}`, `oi-replay-screen-${next}`)
   }
+  // Another screen on THIS window (a tablet / phone joined through Devices has no "＋ Screen" window to open): its own cards.
+  const pickScreen = (n) => {
+    if (n === screen) return
+    window.location.assign(n > 1 ? `${window.location.pathname}?screen=${n}` : window.location.pathname)
+  }
   const screenControls = (
     <Space size={4}>
       {screen > 1 && <Tag color="purple" style={{ margin: 0 }}>Screen {screen}</Tag>}
+      {syncEnabled && sync.devices && (
+        <Tooltip title="This device's screen: each screen keeps its own cards (Sections shown, the grid). On a tablet or phone joined through Devices, pick a screen no other device uses and choose its cards.">
+          <Select size="small" value={screen} onChange={pickScreen} options={SCREEN_CHOICES} style={{ width: 124 }} aria-label="This device's screen" />
+        </Tooltip>
+      )}
       <Tooltip title="Open OI Replay in a NEW WINDOW as another screen - drag it to another monitor and pick its own cards (Sections shown, the grid): each screen keeps its own cards; with Sync on (turned on for you) the index, expiry, Σ 3 expiries, the day and the replay clock move together on every screen.">
         <Button size="small" onClick={openScreen}>＋ Screen</Button>
       </Tooltip>
