@@ -19,6 +19,13 @@
 //    delta of 1 and is not there - so it is a level for the strikes read; the FLOWS are local (gamma, vanna and charm fade
 //    away from the money) and do not suffer from it.
 //
+//  - DEX BY STRIKE and the DEX WALLS (asked for - "DEX walls ... add in same card"): each strike's dealer delta in rupees
+//    (its calls' and puts' dealers' OI x delta at spot x spot, the expiries summed - `strikes`), and the strikes holding
+//    the most of it (|net|): DEX RESISTANCE = the strike ABOVE spot with the most, DEX SUPPORT = the one BELOW, DEX MAX =
+//    the most of any strike. As the GEX walls: a level moves to another strike only with WALL_SWITCH (10%) more, and above
+//    / below keep a dead zone of a quarter strike step (a strike becomes a wall once spot is that far from it, a wall
+//    breaks once spot is that far through it) - carried minute to minute by dexDay (`held`), nothing after the minute.
+//
 // No CE vs PE lean (the OI cards show that). Every minute from its own GEX minute - readings up to it, nothing after.
 // A read - it feeds no strategy, alert or order.
 
@@ -33,6 +40,8 @@ export const DEX_RANGE_PCT = 3
 export const DEX_MOVE_PCT = 1      // the spot move read
 export const DEX_VOL_POINT = 0.01  // the IV move read (1 vol point)
 export const CRORE = 1e7
+const WALL_SWITCH = 0.1   // a wall moves to a strike with this much more |dealer delta|
+const WALL_ZONE = 0.25    // the dead zone around spot, in strike steps
 
 const pdf = (x) => Math.exp(-x * x / 2) / SQRT_2PI
 function cdf(x) {
@@ -88,11 +97,46 @@ function flipOf(options, spot, opts, lo, hi) {
   return best
 }
 
+/** Each strike's dealer delta in rupees at spot `S` (the expiries summed): `[{ strike, call, put, net }]`, strikes rising. */
+export function dexStrikes(options, S, opts = {}) {
+  const by = new Map()
+  for (const o of options ?? []) {
+    if (typeof o.call !== 'boolean' || !Number.isFinite(o.dealerOi)) continue
+    const d = o.dealerOi * optionDelta(o.call, S, o.strike, Math.max(0.005, o.sigma), o.years ?? opts.years ?? 0, o.carry ?? opts.carry ?? 1) * S
+    const row = by.get(o.strike) ?? { strike: o.strike, call: 0, put: 0, net: 0 }
+    if (o.call) row.call += d; else row.put += d
+    row.net += d
+    by.set(o.strike, row)
+  }
+  return [...by.values()].sort((a, b) => a.strike - b.strike)
+}
+
+// The strike of `rows` with the most |net|, the one held last minute kept unless the leader has WALL_SWITCH more.
+function holdWall(rows, held) {
+  let best = null
+  for (const r of rows) if (best == null || Math.abs(r.net) > Math.abs(best.net)) best = r
+  if (!best || !(Math.abs(best.net) > 0)) return null
+  const keep = held == null ? null : rows.find((r) => r.strike === held)
+  if (keep && keep !== best && Math.abs(best.net) < Math.abs(keep.net) * (1 + WALL_SWITCH)) return keep.strike
+  return best.strike
+}
+
+/** The DEX walls of `strikes` at spot `S` given last minute's (`held` - { resistance, support, max }): a strike above spot
+ *  counts once it is a quarter strike step over it, a held one until spot is that far through it. */
+export function dexWalls(strikes, S, held = {}) {
+  const ks = strikes.map((r) => r.strike)
+  const gaps = ks.slice(1).map((k, i) => k - ks[i]).filter((g) => g > 0)
+  const zone = WALL_ZONE * (gaps.length ? Math.min(...gaps) : 0)
+  const above = strikes.filter((r) => r.strike > S + zone || (r.strike === held.resistance && r.strike > S - zone))
+  const below = strikes.filter((r) => r.strike < S - zone || (r.strike === held.support && r.strike < S + zone))
+  return { resistance: holdWall(above, held.resistance), support: holdWall(below, held.support), max: holdWall(strikes, held.max) }
+}
+
 /** One GEX minute (gexDay's) read as the dealers' hedging: `{ time, spot, net (rupees of dealer delta), up / down (flow for
  *  spot +/- 1%), vanna (flow for IV -1 vol point), charmClose (flow from now to 15:30, minutesToClose), charmHour (flow over
  *  the next hour), flip, flipEdge }` - flows in rupees, + = dealers buy. Null without options read. `flips: false` leaves
  *  the flip out. */
-export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT } = {}) {
+export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT, held = {} } = {}) {
   const options = (minute?.options ?? []).filter((o) => typeof o.call === 'boolean')
   if (!options.length || !(minute.spot > 0)) return null
   const S = minute.spot
@@ -108,7 +152,9 @@ export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT } = {}) {
   const steps = [...new Set(options.map((o) => o.strike))].sort((a, b) => a - b)
   const gaps = steps.slice(1).map((k, i) => k - steps[i]).filter((g) => g > 0)
   const edge = Math.max(gaps.length ? Math.min(...gaps) : 0, (minute.atmIv ?? 0) * Math.sqrt(minute.years ?? 0) * S)
+  const strikes = dexStrikes(options, S, opts)
   return {
+    strikes, walls: dexWalls(strikes, S, held),
     time: minute.time, spot: S,
     net: base * S,
     up: flow(dealerDelta(options, S * (1 + DEX_MOVE_PCT / 100), opts)),
@@ -125,9 +171,10 @@ export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT } = {}) {
 /** The day's dealer hedging, a minute per GEX minute (`gexMinutes` - gexDay's, already cut or whole). */
 export function dexDay(gexMinutes, { flips = true } = {}) {
   const out = []
+  let held = {}
   for (const m of gexMinutes ?? []) {
-    const d = dexAt(m, { flips })
-    if (d) out.push(d)
+    const d = dexAt(m, { flips, held })
+    if (d) { out.push(d); held = d.walls }
   }
   return out
 }

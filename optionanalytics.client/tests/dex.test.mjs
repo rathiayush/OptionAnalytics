@@ -4,7 +4,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { gexDay } from '../src/gex.js'
-import { CRORE, dealerDelta, dexAt, dexDay, dexProfile, dexRead, dexUpTo, optionDelta } from '../src/dex.js'
+import { CRORE, dealerDelta, dexAt, dexDay, dexProfile, dexRead, dexStrikes, dexUpTo, dexWalls, optionDelta } from '../src/dex.js'
 
 const MIN = 60_000
 const T0 = Date.parse('2026-11-16T09:15:00+05:30')
@@ -130,4 +130,47 @@ test('no look-ahead: the day cut at any clock = the whole day up to it, under th
   }
   // Rupees: a crore read at the scale the card shows.
   assert.ok(Math.abs(dexDay(gexDay(d.ce, d.pe, d.spots, { expiry: EXPIRY }))[0].up) / CRORE > 0.01)
+})
+
+test('DEX by strike: each strike\'s calls + puts in rupees, expiries summed; the strikes add up to the net', () => {
+  const options = [
+    { strike: 25000, call: true, sigma: 0.12, dealerOi: 1e5 }, { strike: 25000, call: false, sigma: 0.12, dealerOi: -2e5 },
+    { strike: 25100, call: true, sigma: 0.12, dealerOi: 3e5 }, { strike: 25100, call: true, sigma: 0.12, dealerOi: 1e5, years: YEARS0 * 3 },
+  ]
+  const rows = dexStrikes(options, 25040, { years: YEARS0 })
+  assert.deepEqual(rows.map((r) => r.strike), [25000, 25100])
+  const d = (call, K, oi, T = YEARS0) => oi * optionDelta(call, 25040, K, 0.12, T) * 25040
+  assert.ok(Math.abs(rows[0].call - d(true, 25000, 1e5)) < 1e-6)
+  assert.ok(Math.abs(rows[0].put - d(false, 25000, -2e5)) < 1e-6)
+  assert.ok(Math.abs(rows[1].call - (d(true, 25100, 3e5) + d(true, 25100, 1e5, YEARS0 * 3))) < 1e-6, 'the other expiry at its own time')
+  const total = rows.reduce((a, r) => a + r.net, 0)
+  assert.ok(Math.abs(total - dealerDelta(options, 25040, { years: YEARS0 }) * 25040) < 1e-6)
+})
+
+test('DEX walls: the most |dealer delta| above / below spot and of all; held unless 10% beaten; a quarter-step dead zone', () => {
+  const rows = (vals) => Object.entries(vals).map(([k, net]) => ({ strike: Number(k), call: 0, put: 0, net }))
+  const book = rows({ 24900: 5, 24950: -9, 25000: 20, 25050: 3, 25100: -12, 25150: 7 })
+  assert.deepEqual(dexWalls(book, 25020), { resistance: 25100, support: 25000, max: 25000 })
+  // Spot within a quarter step of 25000 (12.5): neither above nor below - the walls step past it.
+  assert.deepEqual(dexWalls(book, 25005), { resistance: 25100, support: 24950, max: 25000 })
+  // A new leader only 5% bigger does not take over a held wall; 15% does.
+  const close = rows({ 24900: 5, 24950: -9, 25000: 20, 25050: 3, 25100: -12, 25150: 12.6 })
+  assert.equal(dexWalls(close, 25020, { resistance: 25100 }).resistance, 25100)
+  const beaten = rows({ 24900: 5, 24950: -9, 25000: 20, 25050: 3, 25100: -12, 25150: 13.9 })
+  assert.equal(dexWalls(beaten, 25020, { resistance: 25100 }).resistance, 25150)
+  // A held support is kept until spot is a quarter step through it.
+  assert.equal(dexWalls(book, 24995, { support: 25000 }).support, 25000)
+  assert.equal(dexWalls(book, 24985, { support: 25000 }).support, 24950)
+  assert.deepEqual(dexWalls([], 25000), { resistance: null, support: null, max: null })
+})
+
+test('the day carries its walls minute to minute; a cut equals the whole day up to it', () => {
+  const d = chain({ minutes: 30, spot: (m) => 25000 + m * 6, oi: (k, isCall, m) => (isCall ? 2e6 : 1e6) + (k === 25200 && isCall ? m * 5e4 : 0) })
+  const whole = dexDay(gexDay(d.ce, d.pe, d.spots, { expiry: EXPIRY, sign: 'buildup' }))
+  assert.ok(whole.every((m) => m.strikes.length > 0 && 'resistance' in m.walls))
+  assert.ok(whole.some((m) => m.walls.resistance != null && m.walls.resistance > m.spot))
+  assert.ok(whole.every((m) => m.walls.support == null || m.walls.support < m.spot + 12.5))
+  const until = T0 + 15 * MIN
+  const part = dexDay(gexDay(d.ce.filter((p) => Date.parse(p.time) <= until), d.pe.filter((p) => Date.parse(p.time) <= until), d.spots.filter((s) => s.time <= until), { expiry: EXPIRY, sign: 'buildup' }))
+  assert.deepEqual(part, dexUpTo(whole, until))
 })
