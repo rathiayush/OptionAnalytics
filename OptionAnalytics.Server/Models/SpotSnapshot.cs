@@ -11,6 +11,8 @@ namespace OptionAnalytics.Server.Models;
 /// interval - the same "no artificial waiting" standard every other live series on this page already
 /// holds to.
 ///
+/// VwapSd is the session VWAP's volume-weighted standard deviation now (VwapCalculator.Last) - the page's VWAP +/- 2 sd bands.
+///
 /// TimestampUtc is when this server RECEIVED the last tick; ExchangeTimeUtc is the time Dhan stamped
 /// on it. A page compares both against its own clock, so it can tell a slow link to this server
 /// apart from a slow feed into it.</summary>
@@ -22,4 +24,5 @@ public sealed record SpotSnapshot(
     DateTimeOffset TimestampUtc,
     Candle? CurrentBar,
     decimal? Vwap = null,
-    DateTimeOffset? ExchangeTimeUtc = null);
+    DateTimeOffset? ExchangeTimeUtc = null,
+    decimal? VwapSd = null);

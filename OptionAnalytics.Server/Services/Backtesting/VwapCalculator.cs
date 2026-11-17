@@ -60,4 +60,41 @@ public static class VwapCalculator
 
         return result;
     }
+
+    /// <summary>The session VWAP's volume-weighted STANDARD DEVIATION at the same points as ComputeSeries (asked for -
+    /// "vwap +2 deviation" on OI Replay): sqrt(sum(volume x typicalPrice^2) / sum(volume) - VWAP^2), restarting each IST
+    /// day - the deviation TradingView's VWAP bands use; the page draws VWAP +/- 2 x it.</summary>
+    public static IReadOnlyList<ObvPoint> ComputeSdSeries(IReadOnlyList<CandleWithVolume> bars) =>
+        Bands(bars).Select(b => new ObvPoint(b.Time, b.Sd)).ToList();
+
+    /// <summary>The session VWAP and its deviation at the last bar with volume behind it (the live push), or nulls.</summary>
+    public static (decimal? Vwap, decimal? Sd) Last(IReadOnlyList<CandleWithVolume> bars) =>
+        Bands(bars) is { Count: > 0 } all ? (all[^1].Vwap, all[^1].Sd) : (null, null);
+
+    private static List<(DateTimeOffset Time, decimal Vwap, decimal Sd)> Bands(IReadOnlyList<CandleWithVolume> bars)
+    {
+        var result = new List<(DateTimeOffset, decimal, decimal)>();
+        DateOnly? currentDay = null;
+        decimal pv = 0, pv2 = 0, vol = 0;
+        foreach (var bar in bars.OrderBy(b => b.Time))
+        {
+            var day = BacktestUtil.IstDate(bar.Time);
+            if (currentDay != day) { currentDay = day; pv = 0; pv2 = 0; vol = 0; }
+            if (bar.Volume > 0)
+            {
+                var tp = (bar.High + bar.Low + bar.Close) / 3m;
+                pv += tp * bar.Volume;
+                pv2 += tp * tp * bar.Volume;
+                vol += bar.Volume;
+            }
+            if (vol > 0)
+            {
+                var vwap = pv / vol;
+                var variance = pv2 / vol - vwap * vwap;
+                var sd = variance > 0 ? DecimalConversion.FromDouble(Math.Sqrt((double)variance)) : 0m;
+                result.Add((bar.Time, vwap, sd));
+            }
+        }
+        return result;
+    }
 }

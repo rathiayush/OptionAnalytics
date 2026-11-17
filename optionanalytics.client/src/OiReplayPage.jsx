@@ -8,7 +8,7 @@ import { HIGH_PROBABILITY_WINDOWS, breakAlertKey, breakMeaning, breakText, highP
 import { ALERT_TYPES, DEFAULT_ALERT_TYPES, STORED_ALERT_TYPES, pickOiAlerts, reconcileAlertTypes } from './oiAlertTypes.js'
 import { buildOiTotalsRows, oiTotalsFlowMeaning, oiTotalsMeaning, oiTotalsTrend, withOrderFlowRows } from './oiTotalsHeatmap.js'
 import { PlayCircleOutlined, PauseCircleOutlined, CaretRightOutlined, PauseOutlined, ReloadOutlined, SoundOutlined, ExportOutlined, LineChartOutlined, UpOutlined, DownOutlined, RightOutlined, ShoppingCartOutlined } from '@ant-design/icons'
-import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode } from 'lightweight-charts'
+import { createSeriesMarkers, CandlestickSeries, LineSeries, HistogramSeries, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import * as signalR from '@microsoft/signalr'
 import './oiMobile.css'
@@ -19,7 +19,7 @@ import {
   useMediaQuery,
   syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, checkForNewDeploy, useAuth, POLL_HEADERS,
 } from './shared.jsx'
-import { alignToBars, chartVwap, sessionVwapFromBars } from './chartVwap.js'
+import { alignToBars, chartVwap, chartVwapBands, sessionVwapFromBars, sessionVwapSdFromBars, vwapBandLines, VWAP_BAND_K } from './chartVwap.js'
 import { sanitizeLine } from './chartLine.js'
 import { mergeFuturesLive, mergeLiveFuturesTicks, oiAtCandleCloses } from './futuresLive.js'
 import { expirySumText, sumExpiryOi, summedExpiries } from './expirySum.js'
@@ -980,7 +980,7 @@ function wallLabel({ prefix, strike, oi, iv, sinceOpen, srDiff, t, stale, short 
 
 // `markers` - lightweight-charts series markers on the candles (OI Replay's absorption / exhaustion reads - oiAbsorption.js);
 // only those on a candle drawn are set.
-export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null, markers = EMPTY_ARRAY }) {
+export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Only = true, shortLabels = false, vwapSeries = EMPTY_ARRAY, showVwap = false, vwapSd = EMPTY_ARRAY, showVwapBands = false, onStrikeClick, height: givenHeight = 440, extraHeight = 0, profileBars = null, markers = EMPTY_ARRAY }) {
   // In a dashboard card the trader has sized, the height the card's fit gives it (useFitHeight); anywhere else - a
   // floating panel, the review popup - the height the caller asked for. `extraHeight` on top: what lines its bottom
   // up with the charts beside it (useEvenChartBottoms).
@@ -991,6 +991,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  const vwapBandRefs = useRef([])
   const markersRef = useRef(null)
   // Refs, not effect dependencies - clicking is wired up once in the chart-creation effect below
   // ([height] only), so a new onStrikeClick/step on every render (step rarely changes; onStrikeClick
@@ -1064,6 +1065,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    vwapBandRefs.current = addVwapBandSeries(chart)
     markersRef.current = createSeriesMarkers(seriesRef.current, [])
     profilePrimitiveRef.current = new VolumeProfilePrimitive()
     seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
@@ -1111,6 +1113,7 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
       chartRef.current = null
       seriesRef.current = null
       vwapSeriesRef.current = null
+      vwapBandRefs.current = []
       markersRef.current = null
       profilePrimitiveRef.current = null
       priceLinesRef.current = [] // the series they belonged to is gone along with the chart
@@ -1140,6 +1143,12 @@ export function ReplayChart({ bars, ladderRows, dayKey, atmStrike, step, top5Onl
   useEffect(() => {
     vwapSeriesRef.current?.setData(showVwap ? chartVwap(bars, vwapSeries) : EMPTY_ARRAY)
   }, [vwapSeries, showVwap, bars])
+  // VWAP +/- 2 sd - only while its tick is on (chartVwapBands: the candles' own volume, else the server's deviation).
+  useEffect(() => {
+    const bands = showVwapBands ? chartVwapBands(bars, vwapSeries, vwapSd) : NO_VWAP_BANDS
+    vwapBandRefs.current[0]?.setData(bands.upper)
+    vwapBandRefs.current[1]?.setData(bands.lower)
+  }, [vwapSeries, vwapSd, showVwapBands, bars])
 
   // Re-fits to the WHOLE day so far as it grows, not just once when it first loads - see
   // useFitContentAsDataGrows' own doc comment. Only while the viewer is already at the live edge,
@@ -2304,6 +2313,12 @@ export function OiTotalsHeatmap({ ceByStrike, peByStrike, strikes, asOfMs, timef
 const EMA1_COLOR = '#f0b429'
 const EMA2_COLOR = '#38bdf8'
 const VWAP_COLOR = '#e072e8'
+// The VWAP +/- 2 sd bands (chartVwapBands) - the VWAP's colour, fainter and dashed.
+const VWAP_BAND_COLOR = '#e072e8aa'
+const vwapBandOptions = (title) => ({ color: VWAP_BAND_COLOR, lineWidth: 1, lineStyle: LineStyle.Dashed, priceLineVisible: false, lastValueVisible: true, title, crosshairMarkerVisible: false })
+const NO_VWAP_BANDS = { upper: EMPTY_ARRAY, lower: EMPTY_ARRAY }
+// Adds the two band series to a chart; returns [upper, lower].
+const addVwapBandSeries = (chart) => [chart.addSeries(LineSeries, vwapBandOptions(`+${VWAP_BAND_K}σ`)), chart.addSeries(LineSeries, vwapBandOptions(`−${VWAP_BAND_K}σ`))]
 
 // Previous-day volume profile overlay colors - all distinct from EMA1/EMA2/VWAP above and from the
 // main chart's own red/green R/S wall convention, so five more lines on the SAME chart never get
@@ -2336,7 +2351,7 @@ const VOLUME_PROFILE_NODE_SHADE_ALPHAS = [0.9, 0.45]
 // changes - lightweight-charts series are cheap to keep, not to keep re-adding.
 function EmaChart({
   oneMinBars, visibleCount, timeframe, onTimeframeChange, ema1Period, onEma1PeriodChange, ema2Period, onEma2PeriodChange, dayKey,
-  vwapSeries = EMPTY_ARRAY, showVwap = false, height: givenHeight = 320, extraHeight = 0, volumeProfile = null, showVolumeProfile = true, profileBars = null,
+  vwapSeries = EMPTY_ARRAY, showVwap = false, vwapSd = EMPTY_ARRAY, showVwapBands = false, height: givenHeight = 320, extraHeight = 0, volumeProfile = null, showVolumeProfile = true, profileBars = null,
 }) {
   // Its own height (fitted in a sized card), plus what lines its bottom up with the charts beside it (useEvenChartBottoms).
   const height = useFitHeight(givenHeight) + extraHeight
@@ -2348,6 +2363,7 @@ function EmaChart({
   const ema1SeriesRef = useRef(null)
   const ema2SeriesRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  const vwapBandRefs = useRef([])
   const volumeProfileLinesRef = useRef([])
   // The same previous-day profile its POC / VAH / VAL lines come from, as horizontal bars (profileBars).
   const profilePrimitiveRef = useRef(null)
@@ -2378,6 +2394,7 @@ function EmaChart({
     ema1SeriesRef.current = chart.addSeries(LineSeries, { color: EMA1_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     ema2SeriesRef.current = chart.addSeries(LineSeries, { color: EMA2_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    vwapBandRefs.current = addVwapBandSeries(chart)
     profilePrimitiveRef.current = new VolumeProfilePrimitive()
     seriesRef.current.attachPrimitive(profilePrimitiveRef.current)
 
@@ -2400,6 +2417,7 @@ function EmaChart({
       ema1SeriesRef.current = null
       ema2SeriesRef.current = null
       vwapSeriesRef.current = null
+      vwapBandRefs.current = []
       profilePrimitiveRef.current = null
       volumeProfileLinesRef.current = [] // the series they belonged to is gone along with the chart
     }
@@ -2422,6 +2440,11 @@ function EmaChart({
   useEffect(() => {
     vwapSeriesRef.current?.setData(showVwap ? chartVwap(displayBars, vwapSeries) : EMPTY_ARRAY)
   }, [vwapSeries, showVwap, displayBars])
+  useEffect(() => {
+    const bands = showVwapBands ? chartVwapBands(displayBars, vwapSeries, vwapSd) : NO_VWAP_BANDS
+    vwapBandRefs.current[0]?.setData(bands.upper)
+    vwapBandRefs.current[1]?.setData(bands.lower)
+  }, [vwapSeries, vwapSd, showVwapBands, displayBars])
 
   // Previous-day volume profile - marked on BY DEFAULT (no toggle; the user's own explicit ask), not
   // gated behind isLive the way VWAP is: yesterday's own already-closed levels are just as valid a
@@ -2517,7 +2540,7 @@ function classifyFuturesRegime(priceDelta, oiDelta, priceThreshold, oiThreshold)
 const DELTA_PANE_HEIGHT = 150
 const FLOW_TIMEFRAMES = [1, 3, 5, 15]
 const CVD_COLOR = '#f5c542'
-function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: givenHeight = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY }) {
+function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: givenHeight = 320, profile = null, profileRowSize = 0, profileLabel = '', deltaBars = null, vwap = EMPTY_ARRAY, vwapBands = NO_VWAP_BANDS }) {
   // Fitted to its dashboard card when that card was sized (useFitHeight). Applied to the chart there is by the delta
   // pane's effect below - drawn again on a new height, the chart had no candles until the next update.
   const height = useFitHeight(givenHeight)
@@ -2526,6 +2549,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: giv
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const vwapSeriesRef = useRef(null)
+  const vwapBandRefs = useRef([])
   const seriesRef = useRef(null)
   const oiSeriesRef = useRef(null)
   const markersRef = useRef(null)
@@ -2570,6 +2594,7 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: giv
       color: `${AXIS_COLOR}cc`, lineWidth: 2, priceScaleId: 'left', priceLineVisible: false, lastValueVisible: true,
     })
     vwapSeriesRef.current = chart.addSeries(LineSeries, { color: VWAP_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true, title: 'VWAP' })
+    vwapBandRefs.current = addVwapBandSeries(chart)
     chart.priceScale('left').applyOptions({ mode: 0 })
 
     const onResize = () => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) }
@@ -2595,10 +2620,16 @@ function FuturesChart({ bars, oiLine, oiUnit = 'M', markers, dayKey, height: giv
       deltaSeriesRef.current = null
       cvdSeriesRef.current = null
       vwapSeriesRef.current = null
+      vwapBandRefs.current = []
     }
   }, [])
   // The futures' session VWAP, already on these candles' times (the caller aligns it).
   useEffect(() => { vwapSeriesRef.current?.setData(sanitizeLine(vwap)) }, [vwap])
+  // Its +/- 2 sd bands, aligned the same way (empty while the tick is off).
+  useEffect(() => {
+    vwapBandRefs.current[0]?.setData(sanitizeLine(vwapBands.upper))
+    vwapBandRefs.current[1]?.setData(sanitizeLine(vwapBands.lower))
+  }, [vwapBands])
 
   // Delta (histogram, right axis) and cumulative delta (line, left axis) in their own pane under the candles - its own
   // scales and separator, the candles' time axis. Estimated minutes (before the server started recording) are fainter.
@@ -3738,6 +3769,11 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
   // clock (shownVwap). Reset on every load() like liveBars above.
   const [vwapSeries, setVwapSeries] = useState([])
   const [showVwap, setShowVwap] = usePersistedState(STORED_SHOW_VWAP, true)
+  // The VWAP +/- 2 sd bands (asked for - "vwap +2 deviation ... visible only when it is ticked"): the server's
+  // volume-weighted deviation of the spot VWAP at the same points (the run's spotVwapSd, live /vwap-sd-series grown by
+  // spotUpdate's vwapSd); the futures chart works its own out from its bars. OFF by default.
+  const [vwapSdSeries, setVwapSdSeries] = useState([])
+  const [showVwapBands, setShowVwapBands] = usePersistedState('optionanalytics.oiReplay.vwapBands', false)
 
   // Previous-day volume profile (POC/VAH/VAL/HVN/LVN) - marked on the fast entry charts (B/C) ON BY
   // DEFAULT (the user's own original ask), with this checkbox the one way to hide it once it's
@@ -4045,13 +4081,13 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     if (state.timeoutId) clearTimeout(state.timeoutId)
     const writeNow = () => {
       state.lastWriteMs = Date.now()
-      if (!writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag })) state.disabled = true
+      if (!writeLiveDayCache(underlying, date.format('YYYY-MM-DD'), { result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, vwapSdSeries, liveExpiryFlag })) state.disabled = true
     }
     const elapsedMs = Date.now() - state.lastWriteMs
     if (elapsedMs >= CACHE_WRITE_THROTTLE_MS) writeNow()
     else state.timeoutId = setTimeout(writeNow, CACHE_WRITE_THROTTLE_MS - elapsedMs)
     return () => clearTimeout(state.timeoutId)
-  }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, liveExpiryFlag, isLive, underlying, date])
+  }, [result, liveBars, liveCePoints, livePePoints, liveFuturesPoints, vwapSeries, vwapSdSeries, liveExpiryFlag, isLive, underlying, date])
 
   // Backs the live-mode expiry picker - fetched per underlying regardless of isLive, so the list is
   // already there the instant the user clicks Go Live rather than needing its own separate load.
@@ -4204,6 +4240,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
         if (cached.liveExpiryFlag) setLiveExpiryFlag(cached.liveExpiryFlag)
         setPaperPositions(serverPaperPositions(dateKey) ?? readPersistedPaperPositions(dateKey))
         setVwapSeries((cached.vwapSeries ?? []).filter((p) => inMarketSession(fromChartTime(p.time) * 1000)))
+        setVwapSdSeries((cached.vwapSdSeries ?? []).filter((p) => inMarketSession(fromChartTime(p.time) * 1000)))
       }
     }
 
@@ -4231,6 +4268,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
       // still resets to empty exactly as before.
       setPaperPositions(effectiveLive ? (serverPaperPositions(dateKey) ?? readPersistedPaperPositions(dateKey)) : [])
       setVwapSeries([])
+      setVwapSdSeries([])
     }
     // Only for today - a replayed day's VWAP comes with the run itself (see vwapSeries' own doc comment)
     // at all (its own spotCandlesOneMinute carries no volume, and the live endpoint below reflects
@@ -4242,6 +4280,10 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
         .then((r) => r.json())
         .then((vwap) => { if (vwapLoadRef.current === vwapLoad) setVwapSeries((vwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
         .catch((err) => console.error('Failed to load VWAP series:', err))
+      fetch(`/api/spot/${underlying}/vwap-sd-series`)
+        .then((r) => r.json())
+        .then((sd) => { if (vwapLoadRef.current === vwapLoad && Array.isArray(sd)) setVwapSdSeries(sd.filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv }))) })
+        .catch((err) => console.error('Failed to load the VWAP deviation:', err))
     }
     // While playing today live, expiryFlag (WEEK/MONTH - the historical picker) is not what the user
     // actually picked (liveExpiryFlag, "N1".."N6", is - see its own doc comment); Dhan's rolling-
@@ -4292,6 +4334,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
         // A replayed day's VWAP comes with the day (the server's, off the spot's own index volume); today's live
         // VWAP is the vwap-series fetch above, grown by the live feed.
         if (!effectiveLive) setVwapSeries((body.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+        if (!effectiveLive) setVwapSdSeries((body.spotVwapSd ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
         // This fresh, authoritative result now covers everything up to THIS moment - reset the live
         // arrays so only ticks arriving AFTER it (genuinely new) populate them again. Only needed on
         // the cache-restore path: its own liveBars/etc could still be holding whatever accumulated
@@ -4609,6 +4652,10 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
         if (prev.length > 0 && prev[prev.length - 1].time === point.time) return [...prev.slice(0, -1), point]
         return [...prev, point]
       })
+      if (snapshot.vwapSd != null) {
+        const sdPoint = { time: point.time, value: snapshot.vwapSd }
+        setVwapSdSeries((prev) => (prev.length > 0 && prev[prev.length - 1].time === sdPoint.time ? [...prev.slice(0, -1), sdPoint] : [...prev, sdPoint]))
+      }
     }
   }
   // Each batch (~every 300ms, one entry per leg - see LiveBroadcastBatcher) is applied as ONE state
@@ -4843,6 +4890,10 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     () => (isLive ? vwapSeries : replayEndTime == null ? EMPTY_ARRAY : vwapSeries.filter((p) => p.time <= replayEndTime)),
     [isLive, vwapSeries, replayEndTime],
   )
+  const shownVwapSd = useMemo(
+    () => (isLive ? vwapSdSeries : replayEndTime == null ? EMPTY_ARRAY : vwapSdSeries.filter((p) => p.time <= replayEndTime)),
+    [isLive, vwapSdSeries, replayEndTime],
+  )
 
   const currentBar = oneMinBars[visibleCount - 1] ?? null
   // oneMinBars' own .time is chart time (shifted +5.5h by toChartTime, for the chart library's own
@@ -4875,6 +4926,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     setResult(run)
     setError(null)
     setVwapSeries((run.spotVwap ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
+    setVwapSdSeries((run.spotVwapSd ?? []).filter((p) => inMarketSession(p.time)).map((p) => ({ time: toChartTime(p.time), value: p.obv })))
     setManualVisibleCount(barsShownAt((run.spotCandlesOneMinute ?? []).filter((c) => inMarketSession(c.time)), asOfMs))
     setTradeIndexChoice('')
     setAlsoLoadChoice(alsoLoadIndexes([...alsoLoad, underlying], u))
@@ -4961,6 +5013,16 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     const cutoff = toChartTime(asOfMs)
     return alignToBars(futuresVwapMinutes.filter((p) => p.time <= cutoff), displayFuturesBars)
   }, [showVwap, asOfMs, futuresVwapMinutes, displayFuturesBars])
+  // Its VWAP +/- 2 sd bands from the same 1-minute bars (their volume), on the displayed candles - only while ticked.
+  const futuresVwapBands = useMemo(() => {
+    if (!showVwapBands || asOfMs == null) return NO_VWAP_BANDS
+    const cutoff = toChartTime(asOfMs)
+    const minutes = sessionVwapSdFromBars(futuresPointsRaw.map((p) => ({
+      time: toChartTime(p.time), high: p.high, low: p.low, close: p.close, volume: p.volume,
+    })).filter((b) => b.time <= cutoff)) ?? []
+    const lines = vwapBandLines(minutes)
+    return { upper: alignToBars(lines.upper, displayFuturesBars), lower: alignToBars(lines.lower, displayFuturesBars) }
+  }, [showVwapBands, asOfMs, futuresPointsRaw, displayFuturesBars])
   // The day's futures volume profile up to the replay time, from each minute's volume spread over its
   // range (FUTURES_PROFILE_ROWS-point rows).
   // The day's per-minute buy/sell from the order flow server, loaded once; live, the "orderFlowDelta" push keeps it up to
@@ -6086,6 +6148,8 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
           shortLabels={wallLabelsShort}
           vwapSeries={shownVwap}
           showVwap={showVwap}
+          vwapSd={shownVwapSd}
+          showVwapBands={showVwapBands}
           onStrikeClick={setDrilldownStrike}
           height={spotChartHeight}
           extraHeight={spotFloating ? 0 : chartExtras[0]}
@@ -6520,6 +6584,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
             <FuturesChart
               bars={displayFuturesBars}
               vwap={futuresVwap}
+              vwapBands={futuresVwapBands}
               oiLine={futuresOiLine} oiUnit={futuresOiUnit}
               markers={futuresRegimeMarkers}
               dayKey={`futures-${underlying}-${result.date}-${futuresTimeframe}`}
@@ -6696,6 +6761,9 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                 <>
                   <Tooltip title={isLive ? 'Session VWAP on the spot, EMA and futures charts.' : 'Session VWAP on the futures chart (its bars carry volume). The spot VWAP comes from the live feed - today only.'}>
                     <Checkbox checked={showVwap} onChange={(e) => setShowVwap(e.target.checked)}>VWAP</Checkbox>
+                  </Tooltip>
+                  <Tooltip title={`VWAP ± ${VWAP_BAND_K} standard deviations (dashed): the session's volume-weighted deviation of the typical price about the VWAP, as TradingView's VWAP bands - on the spot, EMA and futures charts. Price beyond a band is stretched ${VWAP_BAND_K} deviations from the day's average price paid.`}>
+                    <Checkbox checked={showVwapBands} onChange={(e) => setShowVwapBands(e.target.checked)}>VWAP ±{VWAP_BAND_K}σ</Checkbox>
                   </Tooltip>
                   <Checkbox checked={showVolumeProfile} onChange={(e) => setShowVolumeProfile(e.target.checked)}>Volume Profile</Checkbox>
                   <Tooltip title="The previous day's volume by price as horizontal bars behind the candles - on the spot and both entry charts, the drawing the futures chart has. Off leaves its POC / VAH / VAL lines.">
@@ -7111,7 +7179,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                                   ema1Period={chartBEma1} onEma1PeriodChange={setChartBEma1}
                                   ema2Period={chartBEma2} onEma2PeriodChange={setChartBEma2}
                                   dayKey={`emaB-${underlying}-${result.date}`}
-                                  vwapSeries={shownVwap} showVwap={showVwap}
+                                  vwapSeries={shownVwap} showVwap={showVwap} vwapSd={shownVwapSd} showVwapBands={showVwapBands}
                                   height={560} extraHeight={chartExtras[1]}
                                   volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                                 />
@@ -7145,7 +7213,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                                 ema1Period={chartCEma1} onEma1PeriodChange={setChartCEma1}
                                 ema2Period={chartCEma2} onEma2PeriodChange={setChartCEma2}
                                 dayKey={`emaC-${underlying}-${result.date}`}
-                                vwapSeries={shownVwap} showVwap={showVwap}
+                                vwapSeries={shownVwap} showVwap={showVwap} vwapSd={shownVwapSd} showVwapBands={showVwapBands}
                                 height={560} extraHeight={chartExtras[2]}
                                 volumeProfile={volumeProfile} showVolumeProfile={showVolumeProfile} profileBars={spotProfileBars}
                               />

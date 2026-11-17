@@ -61,4 +61,30 @@ public sealed class VwapCalculatorTests
         var point = Assert.Single(series);
         Assert.Equal(Day1Start.AddMinutes(2), point.Time);
     }
+
+    [Fact]
+    public void Deviation_is_the_volume_weighted_spread_of_the_typical_price_at_the_same_points_and_resets_each_day()
+    {
+        var bars = new[]
+        {
+            new CandleWithVolume(Day1Start, 99, 102, 98, 100, 100),           // typical 100
+            new CandleWithVolume(Day1Start.AddMinutes(1), 100, 104, 100, 102, 200), // typical 102
+            new CandleWithVolume(Day1Start.AddMinutes(2), 102, 103, 101, 102, 0),   // no volume: same as before
+            new CandleWithVolume(Day2Start, 106, 110, 106, 108, 50),           // a new day: one bar, no spread
+        };
+
+        var sd = VwapCalculator.ComputeSdSeries(bars);
+        var vwap = VwapCalculator.ComputeSeries(bars);
+
+        Assert.Equal(vwap.Select(p => p.Time), sd.Select(p => p.Time));
+        Assert.Equal(0m, sd[0].Obv);
+        // mean 101.333..., E[tp^2] = (100*10000 + 200*10404) / 300 = 10269.333...; var = 10269.333 - 10268.444 = 0.8889
+        Assert.Equal(0.9428, Math.Round((double)sd[1].Obv, 4));
+        Assert.Equal(sd[1].Obv, sd[2].Obv);
+        Assert.Equal(0m, sd[3].Obv);
+        var (lastVwap, lastSd) = VwapCalculator.Last(bars);
+        Assert.Equal(vwap[^1].Obv, lastVwap);
+        Assert.Equal(0m, lastSd);
+        Assert.Equal((null, null), VwapCalculator.Last(Array.Empty<CandleWithVolume>()));
+    }
 }

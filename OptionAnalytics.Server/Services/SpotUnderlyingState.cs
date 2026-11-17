@@ -300,9 +300,11 @@ public sealed class SpotUnderlyingState
     // Runs on EVERY spot tick, on the Dhan receive thread every other live consumer shares - so only
     // the current session's bars are fed to VwapCalculator (session VWAP resets each IST day, so the
     // result is identical) instead of the full HistoryWindow (~45 days, ~17k bars) re-sorted per tick.
-    public SpotSnapshot ToSnapshot() => new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(),
-        VwapCalculator.ComputeSeries(GetCurrentSessionVolumeBars()) is { Count: > 0 } series ? series[^1].Obv : null,
-        LastExchangeTimeUtc);
+    public SpotSnapshot ToSnapshot()
+    {
+        var (vwap, sd) = VwapCalculator.Last(GetCurrentSessionVolumeBars());
+        return new(Underlying, Step, LastPrice, RoundedPrice, LastUpdateUtc, GetCurrentBar(), vwap, LastExchangeTimeUtc, sd);
+    }
 
     /// <summary>The volume bars of the latest bar's own IST day only, oldest first - a backward scan
     /// from the end, so the cost is one session's worth of bars regardless of how much history is held.</summary>

@@ -114,6 +114,17 @@ public sealed class SpotController : ControllerBase
         return Ok(VwapCalculator.ComputeSeries(state.GetVolumeBars()));
     }
 
+    /// <summary>The session VWAP's volume-weighted standard deviation at vwap-series' points (OI Replay's VWAP +/- 2 sd
+    /// bands) - the feed's memory, no Dhan call.</summary>
+    [HttpGet("{underlying}/vwap-sd-series")]
+    public IActionResult GetVwapSdSeries(string underlying)
+    {
+        if (!_feed.States.TryGetValue(underlying.ToUpperInvariant(), out var state))
+            return NotFound(new { error = $"Unknown underlying '{underlying}'." });
+
+        return Ok(VwapCalculator.ComputeSdSeries(state.GetVolumeBars()));
+    }
+
     [HttpGet("{underlying}/snapshot")]
     public IActionResult GetSnapshot(string underlying)
     {

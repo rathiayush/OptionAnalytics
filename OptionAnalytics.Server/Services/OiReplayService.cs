@@ -392,6 +392,7 @@ public sealed class OiReplayService
             spotCandlesTf, spotBars1m, cePoints, pePoints, futuresBars, futuresExpiry, futuresOiAvailable, futuresError)
         {
             SpotVwap = VwapCalculator.ComputeSeries(spotBarsRaw),
+            SpotVwapSd = VwapCalculator.ComputeSdSeries(spotBarsRaw),
             SpotNote = spotNote,
         };
     }
