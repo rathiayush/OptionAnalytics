@@ -460,6 +460,13 @@ All must pass before committing.
   With Devices on, OI Replay shows a SCREEN picker (Main screen, Screen 2 - 9 - the window's ?screen=N, so a tablet with no
   "＋ Screen" window picks its own cards). A tag says when the server is not reachable (this browser only) or the account
   may not sync. `tests/sync-bus.test.mjs`; checked with two browser contexts (a Mac and an iPad) through a mock hub.
+  THE PROFILES PAGE ON ANOTHER DEVICE (asked for - "OI page on one device, order flow on another, market profile on
+  another"): OI Replay's one-way clock (`useReplayClockBroadcast` / `useFollowReplayClock`) also goes through the relay
+  while Sync AND Devices are on (`useClockAcrossDevices`; both account preferences, so the phone has them too), on its own
+  TOPIC (`createSyncBus`'s `topic` - 'clock'; the two-way sync is 'sync', a message with none reads as 'sync') so neither
+  is read as the other; still one way - nothing on the Profiles page moves OI Replay. Its tag names the device ("⇄ OI
+  Replay on Mac · NIFTY live" - `remote`). Checked with three contexts: OI Replay on a Mac, Order Flow on an iPad, the
+  Profiles page on an iPhone.
 - OI Replay's QUICK VIEWS (`quickViews.js` - `QUICK_VIEWS` / `quickViewForKey`): a popup for a quick scan of one card -
   a SINGLE KEY (no Ctrl / Alt / Shift - the user's ask; Alt was tried first): Z Day OI since the open, X the OI totals
   charts (CE / PE / Net), C GEX, V the ATM straddle, B the futures chart, N the OI change heatmap and totals, M the option

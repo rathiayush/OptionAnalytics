@@ -92,3 +92,17 @@ test('device names from the user agent', () => {
   assert.equal(deviceKind('Mozilla/5.0 (X11; Linux x86_64)'), 'Linux PC')
   assert.equal(deviceKind(''), 'device')
 })
+
+test('a topic keeps the clock and the sync apart on the one relay - a message with none is the sync\'s', () => {
+  const net = network()
+  const sync = createSyncBus({ relay: net.relay(), from: 's' })
+  const clock = createSyncBus({ relay: net.relay(), from: 'c', topic: 'clock' })
+  const sender = net.relay()
+  const got = { sync: [], clock: [] }
+  sync.onmessage = ({ data }) => got.sync.push(data.type)
+  clock.onmessage = ({ data }) => got.clock.push(data.type)
+  const otherClock = createSyncBus({ relay: sender, from: 'o', topic: 'clock' })
+  otherClock.postMessage({ type: 'clock' })
+  sender.send({ type: 'state', mid: 'old:1' })
+  assert.deepEqual(got, { sync: ['state'], clock: ['clock'] })
+})
