@@ -893,7 +893,8 @@ export default function ProfilesPage() {
   const ownReplay = !live && !following && span
 
   return (
-    <div style={{ padding: '16px 16px 32px' }}>
+    // 120 px at the bottom: the app-wide quick / order buttons and the floating replay bar never cover the last chart.
+    <div style={{ padding: '16px 16px 120px' }}>
       <Space direction="vertical" size={14} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Typography.Title level={3} style={{ margin: 0 }}>Option Analytics</Typography.Title>
@@ -1017,7 +1018,7 @@ export default function ProfilesPage() {
         <ProfilePair {...pair} name="Futures" delta={futuresDelta} known={futuresKnown} past={pastCount ? futuresPast.sessions.slice(-pastCount) : NO_BARS} empty={emptyFor(futures, futuresSession, futuresPast, 'futures day')} dayError={futures.error} />
       </Space>
       {ownReplay && !replayInlineOnScreen && (
-        <FloatingReplayBar fabOn={false}>
+        <FloatingReplayBar appFabs>
           <Button size="small" type="primary" shape="circle" aria-label={playing ? 'Pause' : 'Start'} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)} />
           <Button size="small" shape="circle" aria-label="Reset" icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setClockMs(span.start) }} />
           <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{clock ? fmtClock(clock - 60_000) : ''}</Text>
