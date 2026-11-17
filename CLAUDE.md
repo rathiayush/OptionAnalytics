@@ -325,7 +325,14 @@ All must pass before committing.
   the flows are local) and the DEX FLIP (the spot where it crosses zero, within +/- 3% and the strikes loaded, `flipEdge`
   rough) - none under Standard (long calls and short puts are both long delta), said on the card; `dexRead` a line each
   (moves damped / chased / mixed, charm into the close, vanna), the profile (`dexProfile`, an SVG) and the flows through the
-  day (`LinesChart`, charm per hour in its own pane). Each minute from its own GEX minute - a cut at the clock = the whole
+  day (`LinesChart`, charm per hour in its own pane). DEX BY STRIKE and the DEX WALLS (asked for - "DEX walls ... add in same
+  card"; `dexStrikes` / `dexWalls`, each minute's `strikes` / `walls`): every strike's dealer delta in ₹ (its calls' + puts'
+  dealers' OI x delta at spot x spot, expiries summed) as a bar chart on the card (`DexStrikesChart` - + green / − red, the
+  row spot is in blue, a hover reads calls / puts), and three headline levels by |dealer delta|: DEX RESISTANCE (the strike
+  above spot with the most), DEX SUPPORT (below), DEX MAX (any) - the GEX walls' rules: a level moves only with 10% more, a
+  quarter-step dead zone around spot, carried minute to minute by `dexDay` (`held`). Under Standard a call's and a put's
+  deltas add to 1, so each bar is its call + put OI x spot and the walls are the biggest-OI strikes - said on the card.
+  Each minute from its own GEX minute - a cut at the clock = the whole
   day's up to it (`tests/dex.test.mjs` - the delta = the price's slope, the moves = the GEX, charm / vanna signs, the flip,
   no look-ahead under both signs). Added ONCE to a saved "Sections shown" right after the GEX levels on spot
   (`SECTION_ADDITIONS` version 7, `SECTIONS_VERSION` '7'); shown, it turns the page's GEX on (`gexWanted`). A read - it
