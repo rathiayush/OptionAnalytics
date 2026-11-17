@@ -33,6 +33,8 @@ import { chainOiDay, chainOiTotalsAt } from './chainOiTotals.js'
 import { nearAtmOiChange, oiWalls } from './marketRead.js'
 import { notifyLiveTradeEvents, notifyTrade } from './tradeNotify.js'
 import { loadTradeLevels, saveTradeLevels, subscribeTradeLevels, loadTradeDefaults, saveTradeDefaults } from './tradeDefaults.js'
+import { PositionGreeks } from './PositionGreeks.jsx'
+import { bookGreeks, orderDeltaChange } from './positionGreeks.js'
 import { TRADE_INDEXES, alsoLoadIndexes, barsShownAt, effectiveTradeIndex, tradeAtmAt, tradeExpiryFlag, tradeRunKey } from './tradeIndex.js'
 import { PREV_PROFILE } from './profileColors.js'
 import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
@@ -2845,7 +2847,7 @@ function PaperTradePanel({
   mode = 'paper', onModeChange = null, liveAvailable = false, liveUnavailableReason = null,
   liveSlippage = 1, onLiveSlippageChange = null, onLivePunch = null, canLivePunch = false, liveBusy = false,
   liveOrderSummary = '', liveContent = null, liveBlockReason = null,
-  underlying = null, onUnderlyingChange = null, onReview = null, indexHint = null, indexNote = null,
+  underlying = null, onUnderlyingChange = null, onReview = null, indexHint = null, indexNote = null, greeks = null,
 }) {
   const isLiveMode = mode === 'live'
 
@@ -2980,6 +2982,7 @@ function PaperTradePanel({
         </Space>
         {isLiveMode && liveBlockReason && <Text type="warning" style={{ fontSize: 12 }}>{liveBlockReason}</Text>}
         <Text type="secondary" className="oa-keyboard-hint" style={{ fontSize: 11 }}>Keyboard: F1 buy · S or F2 sell - a quick ticket (Lots → SL → Target → Place)</Text>
+        {greeks}
         {isLiveMode && liveContent}
         {!isLiveMode && positions.length > 0 && (
           <>
@@ -5500,6 +5503,48 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     // stale: open with no price of its own chain yet (another index's position before its first tick).
     return { ...p, underlying: p.underlying ?? underlying, ltp, mark, stale: p.status === 'OPEN' && mark == null, priceDelta, pnl: priceDelta * p.qtyLots * p.lotSize, levelsText: p.noStop ? null : paperLevelsText(paperLevelsNow(p)) }
   }), [paperPositions, markOf, underlying])
+
+  // POSITION GREEKS on the order panel (positionGreeks.js - PositionGreeks.jsx): the open paper / live positions' net delta,
+  // its notional, gamma, theta, vega, per index; what the order set on the panel would change; the delta limit. Each leg
+  // needs its index's spot at the clock and its options' expiry: the index on screen - its spot bar and the run's expiry
+  // (live: the nearest expiry's, N1); another index's day held on a replay - that day's. Anything else is not worked out.
+  const [deltaLimitLots, setDeltaLimitLots] = usePersistedState('optionanalytics.oiReplay.deltaLimitLots', 0)
+  const greeksSpotOf = (u) => {
+    if (u === underlying) return currentBar?.close ?? null
+    const chain = isLive ? null : tradeChainFor(u)
+    if (!chain || asOfMs == null) return null
+    let close = null
+    for (const b of chain.spot) { if (new Date(b.time).getTime() > asOfMs) break; if (b.close > 0) close = b.close }
+    return close
+  }
+  const greeksExpiryOf = (u, flag) => {
+    if (u === underlying) return isLive && flag && flag !== 'N1' ? null : result?.optionExpiry ?? null
+    return isLive || !heldDate ? null : dayRuns[tradeRunKey(u, heldDate)]?.run?.optionExpiry ?? null
+  }
+  const legOf = ({ id, label, u, side, strike, units, lotSize, mark, flag = null, expiry = null }) => ({
+    id, label, underlying: u, side, strike, units, lotSize, mark, spot: greeksSpotOf(u), expiry: expiry ?? greeksExpiryOf(u, flag),
+  })
+  const paperLegs = enrichedPaperPositions.filter((p) => p.status === 'OPEN').map((p) => legOf({
+    id: p.id, u: p.underlying, side: p.side, strike: p.strike, flag: p.expiryFlag,
+    units: (p.direction === 'SELL' ? -1 : 1) * p.qtyLots * p.lotSize, lotSize: p.lotSize, mark: p.ltp,
+  }))
+  const liveLegs = (livePositions?.positions ?? []).filter((p) => p.isOpen && p.contract).map((p) => legOf({
+    id: p.securityId, u: p.contract.underlying, side: p.contract.side, strike: Number(p.contract.strike), expiry: p.contract.expiry,
+    units: p.netQty, lotSize: p.lotSize || PAPER_TRADE_LOT_SIZE[p.contract.underlying] || 1, mark: p.ltp ?? p.avgPrice,
+  }))
+  // The order set on the panel, as a leg - what punching it would add.
+  const orderLeg = paperStrike != null && paperEntryPreview?.price > 0 ? legOf({
+    id: 'order', u: paperUnderlying, side: paperSide, strike: paperStrike, flag: isLive ? liveExpiryFlag : null,
+    units: (paperDirection === 'SELL' ? -1 : 1) * (paperQtyLots || 0) * (PAPER_TRADE_LOT_SIZE[paperUnderlying] ?? 1),
+    lotSize: PAPER_TRADE_LOT_SIZE[paperUnderlying] ?? 1, mark: paperEntryPreview.price,
+  }) : null
+  const greeksFor = (legs) => {
+    const book = bookGreeks(legs, asOfMs)
+    const change = orderLeg ? orderDeltaChange(book, bookGreeks([...legs, orderLeg], asOfMs), paperUnderlying, deltaLimitLots) : null
+    return { book, change }
+  }
+  const paperGreeks = greeksFor(paperLegs)
+  const liveGreeks = greeksFor(liveLegs)
   // Before the page leaves this index / expiry, the open positions it prices keep their last price.
   useEffect(() => {
     rememberMarksRef.current = () => {
@@ -7587,6 +7632,12 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
             onLivePunch={handleLivePunch} canLivePunch={liveBlockReason == null}
             liveBlockReason={liveBlockReason}
             liveBusy={liveBusy} liveOrderSummary={liveOrderSummary}
+            greeks={(() => {
+              const g = liveTradeActive ? liveGreeks : paperGreeks
+              // Shown once there is an open position, or an order set that it can read.
+              if (g.book.rows.length === 0 && !g.change) return null
+              return <PositionGreeks book={g.book} change={g.change} limitLots={deltaLimitLots} onLimitChange={setDeltaLimitLots} title={liveTradeActive ? 'Position Greeks (live)' : 'Position Greeks'} />
+            })()}
             liveContent={(
               <LivePositionsView
                 snapshot={livePositions} slippage={liveSlippage} busy={liveBusy}

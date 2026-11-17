@@ -640,6 +640,19 @@ All must pass before committing.
   is priced and exited from ITS OWN index's held day at the replay clock (`chainOfPosition`) whatever the charts show;
   one with none held waits (never the wall clock). Live it is always the index on screen - a live order is never sent
   for another index from here (`tests/trade-index.test.mjs`).
+- OI Replay's POSITION GREEKS on the order panel (asked for - "position Greeks on the order panel ... net delta, gamma,
+  theta, vega, delta notional, a warning past a limit, what one more lot adds"; `positionGreeks.js` - `legGreeks` /
+  `bookGreeks` / `deltaBreaches` / `orderDeltaChange`, the block `PositionGreeks.jsx`, the panel's `greeks`): each open
+  PAPER position (Paper mode) or LIVE Dhan position (Live mode - `LivePositionRow.Contract`, the option master's index /
+  expiry / strike / CE-PE for its security) priced Black-76 on its index's spot with the IV of its OWN premium, to 15:30
+  IST on its expiry day; x its signed quantity (+ bought, - sold) and added up PER INDEX: net delta in units and lots, its
+  NOTIONAL (delta x spot), gamma as ₹ of notional per +1%, theta ₹ a day (one calendar day, everything else kept), vega ₹ a
+  vol point, the P&L of a +/- 1% move (delta + gamma). A premium under intrinsic = delta 1 / 0, the rest 0; a leg with no
+  spot / expiry (another index live, a live expiry other than N1) is counted as not worked out. Spot / expiry: the index on
+  screen - its spot at the clock and the run's `optionExpiry`; another index's held day on a replay - that day's. "This
+  order" = what the order set on the panel adds (its preview premium), red when it takes the index past the limit;
+  "Warn past ± N lots Δ" (`optionanalytics.oiReplay.deltaLimitLots`, 0 = off) - an alert while an index is past it.
+  Shown once there is an open position or an order it can read. A read - it places nothing (`tests/position-greeks.test.mjs`).
 - OI Replay's "Σ 3 EXPIRIES" (asked for - "cumulative delta combined ... current expiry, current + 1 and the month's last
   expiry - these 3 sum ... at every component level"; then "check / uncheck ... in replay of a previous day or the current
   day which is live, and the page reflects it"; the checkbox beside the expiry picker, `optionanalytics.oiReplay.sumExpiries`,
