@@ -138,6 +138,9 @@ public sealed record OiReplayResult(
     /// (a day before Dhan sent index volume, or one read from the stored database).</summary>
     public IReadOnlyList<ObvPoint> SpotVwap { get; init; } = Array.Empty<ObvPoint>();
 
+    /// <summary>The session VWAP's volume-weighted standard deviation at SpotVwap's points (VwapCalculator.ComputeSdSeries) - the page's VWAP +/- 2 sd bands.</summary>
+    public IReadOnlyList<ObvPoint> SpotVwapSd { get; init; } = Array.Empty<ObvPoint>();
+
     /// <summary>Set when today's spot is NOT the whole day from Dhan - Dhan refused or sent nothing, and the live
     /// feed's own bars are shown instead (from when the server's feed started). Says why, for the page to show.</summary>
     public string? SpotNote { get; init; }

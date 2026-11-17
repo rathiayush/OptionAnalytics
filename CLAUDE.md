@@ -163,6 +163,15 @@ All must pass before committing.
   `config.oiBreakAlerts`, shown and saved by the page; the Telegram keys are the same (`breakAlertKey` /
   `highProbabilityAlertKey`), so a message goes once; with Telegram on, the page sends it itself only when the server is not
   covering the index. `tests/oi-break-alerts-server.test.mjs` / `tests/oi-level-breaks.test.mjs`.
+- OI Replay's VWAP ± 2σ BANDS (asked for - "vwap +2 deviation as well ... visible only when it is ticked"): the "VWAP ±2σ"
+  tick beside VWAP (`optionanalytics.oiReplay.vwapBands`, OFF by default) draws VWAP +/- 2 x the session's VOLUME-WEIGHTED
+  standard deviation of the typical price - sqrt(sum(v x tp^2) / sum(v) - VWAP^2), restarting each IST day, as TradingView's
+  VWAP bands - dashed, on the spot, both entry charts and the futures chart (`chartVwapBands` / `sessionVwapSdFromBars` /
+  `vwapBandLines` in `chartVwap.js`, `VWAP_BAND_K` 2). The spot's bars carry no volume on the page, so the SERVER sends the
+  deviation at the VWAP's points (`VwapCalculator.ComputeSdSeries` / `Last`): a run's `spotVwapSd`, live `GET
+  /api/spot/{u}/vwap-sd-series` (the feed's memory) grown by `spotUpdate`'s `vwapSd`; the futures chart works its own out
+  from its 1-minute bars. Nothing after the replay clock (`shownVwapSd`). `tests/vwap-bands.test.mjs`,
+  `VwapCalculatorTests.cs`. Drawing only.
 - OI Replay's ABSORPTION / EXHAUSTION BY OI on the spot chart (asked for - "absorption and exhaustion by OI on spot ...
   when this checkbox is ticked show, otherwise hide ... select the timeframe on which it will identify"; `oiAbsorption.js` -
   `oiAbsorptionEvents` / `absorptionMarkers`): the spot card's "Absorption / exhaustion (OI)" tick
