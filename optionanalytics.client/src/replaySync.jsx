@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Space, Switch, Tag, Tooltip, Typography } from 'antd'
 import { LAST_CLOCK_KEY, lastClockRecord, readLastClock } from './replayClockStore.js'
+import { createSyncBus, thisDevice } from './syncBus.js'
+import { relay, useSyncRelay } from './syncRelay.js'
 
 // Replay sync: keeps the OI Replay and Order Flow replays in step across browser tabs/windows of this
 // site (BroadcastChannel - nothing goes through the server). With Sync on, pressing Play/Pause,
@@ -30,6 +32,13 @@ import { LAST_CLOCK_KEY, lastClockRecord, readLastClock } from './replayClockSto
 //             bar counts once it has COMPLETED (its start + 60s <= ms).
 //   speed   - market seconds per real second (60 = a minute per second).
 //   date    - 'YYYY-MM-DD' (IST trading day), underlying - 'NIFTY' / 'BANKNIFTY' / 'SENSEX'.
+//
+// OTHER DEVICES (asked for - "connect different devices for OI Replay ... so I can see all components at once"): the
+// "Devices" switch beside Sync (`optionanalytics.replaySync.devices`, off by default, an account preference like Sync) also
+// sends every message through the server (syncBus.js / syncRelay.js - SpotHub.ReplaySync, the ACCOUNT's other connections:
+// a tablet, a phone, another computer signed in to the same account, on any network) - the same messages, so everything
+// above works between devices as between tabs; each device's OI Replay picks its own SCREEN (its own cards). A browser
+// cannot reach another device over Wi-Fi / Bluetooth by itself, hence the server.
 
 const CHANNEL = 'optionanalytics.replaySync'
 const ENABLED_KEY = 'optionanalytics.replaySync.enabled'
@@ -38,20 +47,35 @@ const PEER_TIMEOUT_MS = 5000
 // How far a follower may drift (market time) before a heartbeat snaps it back.
 export const SYNC_DRIFT_MS = 120_000
 
-const readEnabled = () => { try { return window.localStorage.getItem(ENABLED_KEY) === 'true' } catch { return false } }
+const DEVICES_KEY = 'optionanalytics.replaySync.devices'
+const DEVICES_EVENT = 'optionanalytics.replaySync.devicesChanged'
+const readFlag = (key) => { try { return window.localStorage.getItem(key) === 'true' } catch { return false } }
+
+// A switch kept in localStorage and followed live across tabs ("storage") and within this tab (`localEvent`).
+function useStoredFlag(key, localEvent = null) {
+  const [value, setValueState] = useState(() => readFlag(key))
+  useEffect(() => {
+    const onStorage = (e) => { if (e.key === key) setValueState(e.newValue === 'true') }
+    const onLocal = () => setValueState(readFlag(key))
+    window.addEventListener('storage', onStorage)
+    if (localEvent) window.addEventListener(localEvent, onLocal)
+    return () => { window.removeEventListener('storage', onStorage); if (localEvent) window.removeEventListener(localEvent, onLocal) }
+  }, [key, localEvent])
+  const setValue = (v) => {
+    try { window.localStorage.setItem(key, String(v)) } catch { /* only a convenience */ }
+    setValueState(v)
+    if (localEvent) window.dispatchEvent(new Event(localEvent))
+  }
+  return [value, setValue]
+}
 
 export function useReplaySyncEnabled() {
-  const [enabled, setEnabledState] = useState(readEnabled)
-  useEffect(() => {
-    const onStorage = (e) => { if (e.key === ENABLED_KEY) setEnabledState(e.newValue === 'true') }
-    window.addEventListener('storage', onStorage)
-    return () => window.removeEventListener('storage', onStorage)
-  }, [])
-  const setEnabled = (value) => {
-    try { window.localStorage.setItem(ENABLED_KEY, String(value)) } catch { /* only a convenience */ }
-    setEnabledState(value)
-  }
-  return [enabled, setEnabled]
+  return useStoredFlag(ENABLED_KEY)
+}
+
+/** Sync with the account's OTHER DEVICES too (through the server), not only this browser's tabs. */
+export function useReplayDevicesEnabled() {
+  return useStoredFlag(DEVICES_KEY, DEVICES_EVENT)
 }
 
 const tabId = Math.random().toString(36).slice(2)
@@ -85,6 +109,9 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
   const [leading, setLeading] = useState(false)
   const [peers, setPeers] = useState({})
   const on = enabled && typeof BroadcastChannel !== 'undefined'
+  const [devices, setDevices] = useReplayDevicesEnabled()
+  const relayStatus = useSyncRelay(on && devices)
+  const viaServer = on && devices
 
   const post = (reason) => {
     const current = stateRef.current
@@ -94,7 +121,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
 
   useEffect(() => {
     if (!on) return undefined
-    const channel = new BroadcastChannel(CHANNEL)
+    const channel = createSyncBus({ channel: new BroadcastChannel(CHANNEL), relay: viaServer ? relay : null, from: tabId, dev: thisDevice() })
     channelRef.current = channel
     channel.onmessage = ({ data }) => {
       if (!data || data.from === tabId) return
@@ -103,7 +130,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
         setPeers((prev) => Object.fromEntries(Object.entries(prev).filter(([from]) => from !== data.from)))
         return
       }
-      setPeers((prev) => ({ ...prev, [data.from]: { kind: data.kind, label: data.label ?? null, date: data.date, underlying: data.underlying, live: !!data.live, seen: Date.now() } }))
+      setPeers((prev) => ({ ...prev, [data.from]: { kind: data.kind, label: data.label ?? null, date: data.date, underlying: data.underlying, live: !!data.live, device: data.device ?? null, deviceName: data.deviceName ?? null, seen: Date.now() } }))
       // Another tab of the SAME page changed what it replays (index / expiry / Σ): only that page understands it.
       if (data.type === 'view') {
         if (data.kind === kind) onRemoteRef.current?.(data)
@@ -132,7 +159,10 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
       if (data.reason === 'user') { leadingRef.current = false; setLeading(false) }
       onRemoteRef.current?.(data)
     }
-    channel.postMessage({ type: 'hello', from: tabId, kind, label, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live })
+    const hello = () => channel.postMessage({ type: 'hello', from: tabId, kind, label, date: stateRef.current?.date, underlying: stateRef.current?.underlying, live: !!stateRef.current?.live })
+    hello()
+    // The relay joined (or joined again after a reconnect): the other devices answer a fresh hello.
+    const offUp = viaServer ? relay.onUp(hello) : null
     const heartbeat = setInterval(() => {
       if (leadingRef.current && stateRef.current?.playing) post('tick')
       setPeers((prev) => {
@@ -146,6 +176,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
     const bye = () => channel.postMessage({ type: 'bye', from: tabId, kind })
     window.addEventListener('pagehide', bye)
     return () => {
+      offUp?.()
       window.removeEventListener('pagehide', bye)
       bye()
       clearInterval(heartbeat)
@@ -157,7 +188,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
       setLeading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [on, kind])
+  }, [on, kind, viaServer])
 
   // The other page's "synced with" tag follows a change of day here at once, not at the next presence.
   useEffect(() => {
@@ -193,7 +224,7 @@ export function useReplaySync({ enabled, active, kind, state, onRemote, label = 
     channelRef.current.postMessage({ type: 'view', from: tabId, kind, label, ...view })
   }
 
-  return { userAction, announceDay, announceView, peers: Object.values(peers), leading: on && leading, on }
+  return { userAction, announceDay, announceView, peers: Object.values(peers), leading: on && leading, on, devices, setDevices, relayStatus }
 }
 
 // The option list for a speed select, with `value` added when it is not one of `options` (a speed
@@ -205,7 +236,14 @@ export function withSpeedOption(options, value, toOption) {
 const PAGE_NAMES = { oi: 'OI Replay', of: 'Order Flow' }
 
 // A peer's name in the tag: the page, and its screen when it has one ("OI Replay Screen 2").
-export const peerName = (p) => `${PAGE_NAMES[p.kind] ?? p.kind}${p.label ? ` ${p.label}` : ''}`
+// Another device's adds where it is ("OI Replay Screen 2 on iPad").
+export const peerName = (p, myDevice = null) => `${PAGE_NAMES[p.kind] ?? p.kind}${p.label ? ` ${p.label}` : ''}${p.device && myDevice && p.device !== myDevice ? ` on ${p.deviceName ?? 'another device'}` : ''}`
+
+const RELAY_TAG = {
+  connecting: { color: 'processing', text: 'Devices: connecting…' },
+  offline: { color: 'warning', text: 'Devices: server not reachable - this browser only' },
+  denied: { color: 'error', text: 'Devices: not allowed for this account' },
+}
 
 // The global Sync switch plus who this page is synced with - the other page and the other tabs of this one (OI Replay's
 // screens). `mismatch`: a short note when the other page is on a different day/underlying (shown instead of the peer list).
@@ -221,11 +259,20 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
           <Typography.Text style={{ fontSize: 12 }}>Sync</Typography.Text>
         </Space>
       </Tooltip>
+      {enabled && sync.setDevices && (
+        <Tooltip title="Also sync with your OTHER DEVICES - a tablet, a phone, another computer - signed in to this account, on any network (through this server: a browser cannot reach another device over Wi-Fi or Bluetooth by itself). Turn on Sync and Devices on each, open OI Replay there and pick its Screen, so each device shows its own cards; the day, the replay clock, the index and the expiry move together.">
+          <Space size={4}>
+            <Switch size="small" checked={!!sync.devices} onChange={sync.setDevices} aria-label="Sync other devices" />
+            <Typography.Text style={{ fontSize: 12 }}>Devices</Typography.Text>
+          </Space>
+        </Tooltip>
+      )}
+      {enabled && sync.devices && RELAY_TAG[sync.relayStatus] && <Tag color={RELAY_TAG[sync.relayStatus].color} style={{ margin: 0 }}>{RELAY_TAG[sync.relayStatus].text}</Tag>}
       {extra}
       {enabled && mismatch && <Tag color="warning" style={{ margin: 0 }}>{mismatch}</Tag>}
       {enabled && !mismatch && (sync.peers.length
-        ? <Tag color="cyan" style={{ margin: 0 }}>⇄ {sync.peers.map((p) => `${peerName(p)}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
-        : <Tag style={{ margin: 0 }}>Open the {other} page{kind === 'oi' ? ' or another OI Replay screen' : ''} in another tab</Tag>)}
+        ? <Tag color="cyan" style={{ margin: 0 }}>⇄ {sync.peers.map((p) => `${peerName(p, thisDevice().id)}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
+        : <Tag style={{ margin: 0 }}>Open the {other} page{kind === 'oi' ? ' or another OI Replay screen' : ''} in another tab{sync.devices ? ' or on another device' : ''}</Tag>)}
     </Space>
   )
 }

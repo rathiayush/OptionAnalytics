@@ -1,4 +1,6 @@
 using OptionAnalytics.Server.Auth;
+using System.Security.Claims;
+using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using OptionAnalytics.Server.Services;
 
@@ -54,6 +56,9 @@ public sealed class SpotHub : Hub
         // The External account: only its page's own live feeds (ExternalAccess.MayJoin) - nothing else.
         if (ExternalAccess.IsExternal(Context.User!) && !ExternalAccess.MayJoin(groupName))
             return Task.CompletedTask;
+        // An account's replay sync group is joined only through JoinReplaySync - never by name.
+        if (groupName.StartsWith(ReplaySyncPrefix, StringComparison.Ordinal))
+            return Task.CompletedTask;
         // Live positions and P&L are the account's real money - admins only.
         if (groupName == LiveTradingService.PositionsGroup && Context.User?.IsInRole(AuthRoles.Admin) != true)
             return Task.CompletedTask;
@@ -65,6 +70,50 @@ public sealed class SpotHub : Hub
     {
         _batcher.Leave(Context.ConnectionId, groupName);
         return Groups.RemoveFromGroupAsync(Context.ConnectionId, groupName);
+    }
+
+    // ---- Replay sync across DEVICES (asked for - "connect different devices for OI Replay ... so I can see all components
+    // at once"): the pages' BroadcastChannel sync (replaySync.jsx) only reaches tabs of ONE browser; with "Devices" on, a
+    // page also relays its sync messages here, and the server hands them to the account's OTHER connections - a tablet, a
+    // phone, another computer signed in to the same account. The group is the ACCOUNT's, worked out here from who is
+    // signed in (never a name the browser sends), Admin / User only; the message is relayed as it is, never read or kept.
+
+    public const string ReplaySyncPrefix = "rs:";
+    public const string ReplaySyncEvent = "replaySync";
+    /// <summary>A sync message is a few hundred bytes - anything far larger is not one.</summary>
+    public const int MaxReplaySyncChars = 8_000;
+
+    /// <summary>The account's replay sync group, or null for an account that may not sync (External, the Runner key, none).</summary>
+    public static string? ReplaySyncGroup(ClaimsPrincipal? user)
+    {
+        if (user?.Identity?.IsAuthenticated != true || ExternalAccess.IsExternal(user)) return null;
+        if (!user.IsInRole(AuthRoles.Admin) && !user.IsInRole(AuthRoles.User)) return null;
+        var name = user.Identity.Name;
+        return string.IsNullOrWhiteSpace(name) ? null : ReplaySyncPrefix + name.Trim().ToLowerInvariant();
+    }
+
+    /// <summary>Join this account's replay sync (a page with Devices on - again after every reconnect). False = not allowed.</summary>
+    public async Task<bool> JoinReplaySync()
+    {
+        var group = ReplaySyncGroup(Context.User);
+        if (group is null) return false;
+        await Groups.AddToGroupAsync(Context.ConnectionId, group);
+        return true;
+    }
+
+    public Task LeaveReplaySync()
+    {
+        var group = ReplaySyncGroup(Context.User);
+        return group is null ? Task.CompletedTask : Groups.RemoveFromGroupAsync(Context.ConnectionId, group);
+    }
+
+    /// <summary>Relay one sync message to the account's other connections (not back to this one).</summary>
+    public Task ReplaySync(JsonElement message)
+    {
+        var group = ReplaySyncGroup(Context.User);
+        if (group is null || message.ValueKind != JsonValueKind.Object || message.GetRawText().Length > MaxReplaySyncChars)
+            return Task.CompletedTask;
+        return Clients.GroupExcept(group, Context.ConnectionId).SendAsync(ReplaySyncEvent, message);
     }
 
     /// <summary>This server's clock, for the browser to estimate its own clock offset (NTP-style,
