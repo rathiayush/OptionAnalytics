@@ -604,7 +604,11 @@ All must pass before committing.
   (before the open) the latest session's candles stand in, said on the card; a REPLAYED day never borrows another day's
   candles (its whole day at 09:15 read as the replay loaded all at once) - one invisible candle at its 09:15 holds the scale
   (`cardCandleSource` / `scaleHolderCandle` in `deltaProfile.js`) and the day's candles come in as it plays
-  (`tests/delta-profile.test.mjs`). The days before (`deltaProfileDays.js`, `usePastDeltaSessions`): weekdays walked back ONE REQUEST
+  (`tests/delta-profile.test.mjs`). "+ CURRENT DAY" (asked for - "give current day option to consider, when ticked then
+  only add, else the previous day will be shown on the option delta profile and futures profile"; shown with "Previous day"
+  only, kept per card - `optionanalytics.oiReplay.{id}WithToday` - ticked by default = as above): unticked, the N sessions
+  BEFORE the day ALONE (`deltaCardSessions`' `withToday: false`; the day's candles still drawn, the sessions line leaves
+  the day and its clock out). The days before (`deltaProfileDays.js`, `usePastDeltaSessions`): weekdays walked back ONE REQUEST
   AT A TIME, N + 10 at most - the options' from that day's run (`/api/oi-replay/{u}/run`, the charts' series), kept as its
   minutes (`optionDeltaMinutes`), the futures' from its Order Flow day (`FETCH_ROWS`, regrouped; the footprint IN LOTS of
   its own day's lot size - `footprintBars`); a day with no session (a run without success, a 404 - a holiday) stepped

@@ -243,21 +243,30 @@ function useRowSize(underlying) {
 
 // "Previous day" / "Days" of one card (kept per card): unticked = the day so far and the N - 1 sessions before it,
 // ticked = the N sessions before the day with the day so far on top (deltaCardSessions - so the profile moves with the
-// replay either way). 1 day, unticked = the day alone.
+// replay either way). 1 day, unticked = the day alone. "+ current day" (asked for - "give current day option to consider,
+// when ticked then only add it, else the previous days"; shown with "Previous day" only, kept per card, ticked by default =
+// as before): unticked, the N sessions before the day ALONE - the day's candles are still drawn, its minutes not counted.
 const DAY_CHOICES = Array.from({ length: MAX_PROFILE_DAYS }, (_, i) => i + 1)
 function useSessionChoice(id) {
   const [prev, setPrev] = usePersistedState(`optionanalytics.oiReplay.${id}Prev`, false)
   const [days, setDays] = usePersistedState(`optionanalytics.oiReplay.${id}Days`, 1)
   const dayCount = DAY_CHOICES.includes(days) ? days : 1
   const of = prev === true ? 'previous' : 'today'
+  const [withTodaySaved, setWithToday] = usePersistedState(`optionanalytics.oiReplay.${id}WithToday`, true)
+  const withToday = of !== 'previous' || withTodaySaved !== false
   const control = (
     <Space size={6} align="center">
       <Checkbox checked={of === 'previous'} onChange={(e) => setPrev(e.target.checked)}>{dayCount > 1 ? 'Previous days' : 'Previous day'}</Checkbox>
       <Select size="small" value={dayCount} onChange={setDays} style={{ width: 88 }} aria-label="Days in the profile"
         options={DAY_CHOICES.map((n) => ({ value: n, label: n === 1 ? '1 day' : `${n} days` }))} />
+      {of === 'previous' && (
+        <Tooltip title="Ticked: the day so far (to the replay clock / live) is added on top of the sessions before. Unticked: the sessions before the day only - the day's candles still show, its minutes are not counted.">
+          <Checkbox checked={withToday} onChange={(e) => setWithToday(e.target.checked)}>+ current day</Checkbox>
+        </Tooltip>
+      )}
     </Space>
   )
-  return { of, dayCount, pastCount: pastSessionsNeeded(dayCount, of), control }
+  return { of, dayCount, withToday, pastCount: pastSessionsNeeded(dayCount, of), control }
 }
 
 const dayText = (d) => dayjs(d).format('DD MMM')
@@ -323,19 +332,19 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const spotMs = useMemo(() => (spotBars ?? []).map((b) => ({ time: fromChartTime(b.time) * 1000, open: b.open, high: b.high, low: b.low, close: b.close })), [spotBars])
   // The day up to the clock always - with "Previous days" ticked too - so the profile moves with the replay (deltaCardSessions).
   const todayMinutes = useMemo(() => optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
-  const sessions = useMemo(() => deltaCardSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayMinutes, past.sessions, choice.dayCount, choice.of])
+  const sessions = useMemo(() => deltaCardSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of, withToday: choice.withToday }), [todayMinutes, past.sessions, choice.dayCount, choice.of, choice.withToday])
   const flowProfile = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: oiNet ? 'net' : shownSide }), [sessions, rowSize, shownSide, oiNet])
   // "OI (CE − PE)": the same profile with the OI's net CE − PE by spot row as its delta (negative = bullish) - the day's OI
   // minutes and the sessions before's (their `oi` - optionDayRecord), the same sessions as the flow.
   const todayOi = useMemo(() => (oiNet ? optionOiMinutes(cePoints, pePoints, spotMs, { asOfMs }) : []), [oiNet, cePoints, pePoints, spotMs, asOfMs])
   const profile = useMemo(() => {
     if (!oiNet) return flowProfile
-    const oiSessions = deltaCardSessions({ today: todayOi, past: past.sessions.map((d) => d.oi ?? []), days: choice.dayCount, of: choice.of })
+    const oiSessions = deltaCardSessions({ today: todayOi, past: past.sessions.map((d) => d.oi ?? []), days: choice.dayCount, of: choice.of, withToday: choice.withToday })
     return optionOiNetProfileOf(flowProfile, oiSessions, { rowSize })
-  }, [oiNet, flowProfile, todayOi, past.sessions, choice.dayCount, choice.of, rowSize])
+  }, [oiNet, flowProfile, todayOi, past.sessions, choice.dayCount, choice.of, choice.withToday, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
-  const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length ? [date] : [])]
+  const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
   const deltaWord = oiNet ? 'CE − PE OI (− = puts written, bullish)' : shownSide === 'net' ? 'net Δ (+ bullish)' : `${shownSide.toUpperCase()} Δ (+ bought)`
   const soFar = choice.of === 'today' && choice.dayCount === 1
@@ -348,7 +357,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         {choice.control}
         {levelsTick}
       </Space>
-      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length ? clockText(isLive, asOfMs) : null} />
+      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length && choice.withToday ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
         <>
           {oiNet ? (
@@ -366,7 +375,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           </Text>
           )}
           <LevelsLine levels={levels} show={levelsOn} oiNet={oiNet} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}`} onHover={setHover} lotSize={lotSize} deltaWord={deltaWord} />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}|${choice.withToday}`} onHover={setHover} lotSize={lotSize} deltaWord={deltaWord} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
@@ -429,11 +438,11 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
   // The day up to the clock always - with "Previous days" ticked too - so the profile moves with the replay (deltaCardSessions).
   const day = useFuturesFootprintDay(underlying, date, isLive, rowSize)
   const todayBars = useMemo(() => barsUpTo(day.bars, asOfMs), [day.bars, asOfMs])
-  const sessions = useMemo(() => deltaCardSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of }), [todayBars, past.sessions, choice.dayCount, choice.of])
+  const sessions = useMemo(() => deltaCardSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of, withToday: choice.withToday }), [todayBars, past.sessions, choice.dayCount, choice.of, choice.withToday])
   const profile = useMemo(() => futuresDeltaProfileOf(sessions, { rowSize }), [sessions, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   const [levelsOn, levelsTick] = useLevelsShown()
-  const dates = [...past.sessions.map((d) => d.date), ...(todayBars.length ? [date] : [])]
+  const dates = [...past.sessions.map((d) => d.date), ...(todayBars.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(futuresBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
   const soFar = choice.of === 'today' && choice.dayCount === 1
   return (
@@ -449,7 +458,7 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
           </Tooltip>
         )}
       </Space>
-      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayBars.length ? clockText(isLive, asOfMs) : null} />
+      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayBars.length && choice.withToday ? clockText(isLive, asOfMs) : null} />
       {day.error && !day.bars.length
         ? (profile.rows.length
           ? <Text type="warning" style={{ fontSize: 12 }}>The day&apos;s own futures footprint is not available ({day.error}) - the sessions before it only.</Text>
@@ -461,7 +470,7 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
             Δ{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(profile.delta) }}>{lots(profile.delta, true)}</Text> lots · volume {lots(profile.volume)} lots · POC {price(levels?.poc ?? profile.poc)}
           </Text>
           <LevelsLine levels={levels} show={levelsOn} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}`} onHover={setHover} lotSize={1} deltaWord="Δ" />
+          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${choice.of}|${choice.dayCount}|${choice.withToday}`} onHover={setHover} lotSize={1} deltaWord="Δ" />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={1} deltaWord="Δ" />
         </>
       ) : day.loading || past.loading ? <Text type="secondary">{past.loading && !day.loading ? 'Loading the days before…' : 'Loading the futures footprint…'}</Text>
