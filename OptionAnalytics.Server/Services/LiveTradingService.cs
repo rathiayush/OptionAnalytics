@@ -867,6 +867,8 @@ public sealed class LiveTradingService : BackgroundService
             {
                 Protection = !p.IsOpen ? null : target is not null || stopLoss is not null ? "super" : protection is not null ? "managed" : "none",
                 LotSize = uint.TryParse(p.SecurityId, out var lotId) ? _chain.FindBySecurityId(lotId)?.LotSize ?? 0 : 0,
+                Contract = uint.TryParse(p.SecurityId, out var contractId) && _chain.FindBySecurityId(contractId) is { } c
+                    ? new LiveContract(c.Underlying, c.Expiry, c.Strike, c.IsCall ? "CE" : "PE") : null,
                 LegExcessQty = p.IsOpen ? Math.Max(0, LegQuantity(legs) - Math.Abs(p.NetQty)) : 0,
             });
         }
@@ -1880,7 +1882,13 @@ public sealed record LivePositionRow(
     public string? Protection { get; init; }
     public int LotSize { get; init; }
     public int LegExcessQty { get; init; }
+    /// <summary>The option the position is in (the option master's) - the order panel's position Greeks read it; null when
+    /// the security is not an index option the master knows.</summary>
+    public LiveContract? Contract { get; init; }
 }
+
+/// <summary>An open live position's option: its index, expiry, strike and CE / PE.</summary>
+public sealed record LiveContract(string Underlying, DateOnly Expiry, decimal Strike, string Side);
 
 /// <summary>A protection order's target watch - see LiveTradingService.FireTargetAsync.</summary>
 internal sealed record ProtectionOrder(string OrderId, uint SecurityId, string Segment, bool ClosesBySelling, decimal Target, string Symbol);
