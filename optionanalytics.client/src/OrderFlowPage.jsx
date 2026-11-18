@@ -130,7 +130,7 @@ function OrderFlowRead({ bias }) {
 // and wrapping inside the card when they do not - the longest ("unfinished auction ...") did not wrap and made the page
 // wider than a phone, which then drew the whole page shrunk. On a phone (`narrow`) the legend is ONE line until opened
 // (`open` / `onToggle` - remembered): its ten lines came before the chart.
-function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false, narrow = false, open = true, onToggle = null }) {
+function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false, cot = false, narrow = false, open = true, onToggle = null }) {
   const item = (swatch, label) => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, maxWidth: '100%', verticalAlign: 'top' }}>
       <span style={{ flex: 'none', display: 'inline-flex', alignItems: 'center' }}>{swatch}</span>
@@ -163,6 +163,7 @@ function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = fal
       {auctions && !estimated && item(<span style={{ fontSize: 9, fontWeight: 700, color: '#ffa940' }}>UA ┄</span>, 'unfinished auction (both sides at the extreme - a magnet until revisited)')}
       {rowDelta && item(<span style={{ display: 'inline-flex' }}>{box('#26a69aaa')}{box('#ef5350aa')}</span>, 'delta per row (buy − sell), third column')}
       {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
+      {cot && !estimated && item(<span style={{ fontWeight: 700 }}>COT H / L</span>, 'delta traded after the bar\'s last new high / low')}
       {narrow && <button type="button" className="oa-of-fold-toggle" onClick={onToggle} aria-expanded>▾ Hide the legend</button>}
     </div>
   )
@@ -193,6 +194,8 @@ export default function OrderFlowPage() {
   const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.orderFlow.rowDelta', false)
   // Finished (FA) / unfinished (UA) auction at each bar's high and low.
   const [showAuctions, setShowAuctions] = usePersistedState('optionanalytics.orderFlow.auctions', true)
+  // COT high / low under each footprint bar (Sierra Chart's "Commitment of Traders"): the delta after its last new high / low.
+  const [showCot, setShowCot] = usePersistedState('optionanalytics.orderFlow.cot', true)
   // The footprint's ABS / EXH marks from the SCORED read (flowReads.js) - on by default; off = the first one-bar rules.
   // The scanner and the bias keep those first rules either way.
   const [scoredReads, setScoredReads] = usePersistedState('optionanalytics.orderFlow.scoredReads', true)
@@ -829,6 +832,9 @@ export default function OrderFlowPage() {
             <Tooltip title="At each bar's high and low: FA = finished auction (no selling at the top row / no buying at the bottom row - that side ran out); UA = unfinished (both sides traded at the extreme - price tends to come back), its dotted line running on until a later bar trades back into it. Read on the footprint's rows; not on an estimated day.">
               <Checkbox checked={showAuctions} onChange={(e) => setShowAuctions(e.target.checked)}><Text style={{ fontSize: 12 }}>Auctions</Text></Checkbox>
             </Tooltip>
+            <Tooltip title="COT (Commitment of Traders, as Sierra Chart's footprint): under each bar, COT H = the delta (buy − sell) traded AFTER the bar made its last new high, COT L = after its last new low. At the high: + = buyers kept lifting near the top (the push still has fuel), − = sellers took over from the high (a rejection). At the low: − = sellers kept hitting near the bottom, + = buyers took over from the low. A big COT against the bar's own delta is the turn to watch. Worked out from every trade in order on the server; — on an estimated day or a minute recorded before it was kept.">
+              <Checkbox checked={showCot} onChange={(e) => setShowCot(e.target.checked)}><Text style={{ fontSize: 12 }}>COT</Text></Checkbox>
+            </Tooltip>
             <Tooltip title="The ABS / EXH marks from the scored read: absorption = heavy aggression at a price (for as long as the fight there lasted) that failed - the bar closed back off it, the delta did not move price, the resting orders there held or refilled; exhaustion = a new high / low of the market's structure (the session, the last swing, the move) on less volume and delta than the push before it, little traded at the extreme, closed back off it. Nothing is a fixed number of bars: 'heavy' / 'usual' is against today's bars and yesterday's at the same time of day (so it reads from the open), and the swings are sized by the market's own range. The number on a mark is its score, 0 - 100: how many of those agree (an iceberg caught there, or a finished auction at the extreme, counts as the strongest evidence). Then it waits for the market, as a trader does: ✓ CONFIRMED once a bar closes past the signal bar's other end (price left the level), ✗ FAILED (faded) once price trades back through the level. Off = the first one-bar rules. Not on an estimated day.">
               <Checkbox checked={scoredReads} onChange={(e) => setScoredReads(e.target.checked)}><Text style={{ fontSize: 12 }}>Scored ABS / EXH</Text></Checkbox>
             </Tooltip>
@@ -919,13 +925,13 @@ export default function OrderFlowPage() {
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
               <FootprintLegend
-                estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} auctions={showAuctions}
+                estimated={estimated} bigLabel={bigLabel} rowDelta={rowDelta} auctions={showAuctions} cot={showCot}
                 narrow={narrow} open={legendOpen} onToggle={() => setLegendOpen(!legendOpen)}
               />
               <FootprintChart
                 bars={shown.bars} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 480 : 660}
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
-                rowDelta={rowDelta} auctions={showAuctions && !estimated}
+                rowDelta={rowDelta} auctions={showAuctions && !estimated} cot={showCot}
               />
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>

@@ -47,8 +47,15 @@ export function aggregateBars(minuteBars, timeframeMinutes) {
     const start = Math.floor(ms / bucketMs) * bucketMs
     if (!current || current.time !== start) {
       if (current) out.push(finish(current, rows))
-      current = { time: start, open: bar.open, high: bar.high, low: bar.low, close: bar.close, buy: 0, sell: 0, trades: 0 }
+      current = { time: start, open: bar.open, high: bar.high, low: bar.low, close: bar.close, buy: 0, sell: 0, trades: 0, cotHigh: bar.cotHigh ?? null, cotLow: bar.cotLow ?? null }
       rows = new Map()
+    } else {
+      // COT (Sierra Chart's high / low): the delta after the bar's last NEW high / low. The minute that first reached the bar's
+      // high brings its own count; every later minute adds its whole delta (an equal high is not a new one). A minute with
+      // none (estimated, saved before it was kept) that made the high leaves the bar none.
+      const delta = (bar.buy ?? 0) - (bar.sell ?? 0)
+      current.cotHigh = bar.high > current.high ? (bar.cotHigh ?? null) : current.cotHigh == null ? null : current.cotHigh + delta
+      current.cotLow = bar.low < current.low ? (bar.cotLow ?? null) : current.cotLow == null ? null : current.cotLow + delta
     }
     current.high = Math.max(current.high, bar.high)
     current.low = Math.min(current.low, bar.low)

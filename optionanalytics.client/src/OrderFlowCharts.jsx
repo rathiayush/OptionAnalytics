@@ -57,6 +57,8 @@ const priceText = (p) => (Number.isInteger(p) ? p.toLocaleString('en-IN') : p.to
 const FP_AXIS_W = 70
 const FP_TIME_H = 18
 const FP_STRIP_H = 52
+// The two COT lines added under the strip when `cot` is on.
+const COT_STRIP_H = 28
 const FP_TOP = 6
 
 // Footprint: each bar is a candle plus, per price row, the volume that hit the bid (left, sellers
@@ -87,7 +89,8 @@ function zoomRows(l, factor, y, step, plotH) {
 // bar's largest row delta (the page's "Delta per row" tick; off, the cells are as they always were).
 // `auctions`: each bar's finished (FA) / unfinished (UA) auction at its high and low (analyzeBars' auction), an unfinished
 // one with a dotted line on to the bar that traded back into it (still open: to the right edge).
-export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, rowDelta = false, auctions = true }) {
+// `cot`: two more strip lines - COT H / COT L, the delta traded after the bar's last new high / low (bar.cotHigh / cotLow).
+export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620, lastPrice, profile = null, runningProfile = null, trades = [], timeframe = 1, bigLabel = 'Big order', alerts = [], levels = [], vwap = null, rowDelta = false, auctions = true, cot = false }) {
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const width = useElementWidth(wrapRef)
@@ -112,7 +115,8 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   const plotW = Math.max(0, width - FP_AXIS_W)
   const profileW = profile?.rows?.length ? (narrow ? 54 : 96) : 0
   const barsW = Math.max(0, plotW - profileW)
-  const plotH = Math.max(50, height - FP_STRIP_H - FP_TIME_H - FP_TOP)
+  const stripH = FP_STRIP_H + (cot ? COT_STRIP_H : 0)
+  const plotH = Math.max(50, height - stripH - FP_TIME_H - FP_TOP)
 
   const span = barsW / Math.max(1, colWidth)
   const endIndexFor = useCallback((p) => {
@@ -370,7 +374,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       clip(0, 0, barsW, height)
       const stripY = FP_TOP + plotH + 2
       ctx.fillStyle = 'rgba(255,255,255,0.03)'
-      ctx.fillRect(x0 + 1, stripY, colWidth - 2, FP_STRIP_H - 4)
+      ctx.fillRect(x0 + 1, stripY, colWidth - 2, stripH - 4)
       ctx.textAlign = 'center'
       ctx.textBaseline = 'middle'
       // Each line with its label while it fits the bar, else the number alone (the colour still tells the line), never
@@ -388,6 +392,17 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       ctx.font = `11px ${FONT}`
       ctx.fillStyle = AXIS_COLOR
       stripText('Vol', formatVolume(bar.volume, lotSize, showLots), stripY + 37)
+      if (cot) {
+        // COT high / low (Sierra Chart's): the delta traded after the bar's last new high / low - "—" when not known (an
+        // estimated bar, a minute saved before it was kept).
+        const cotLine = (label, value, y) => {
+          ctx.fillStyle = value == null ? AXIS_COLOR : value >= 0 ? UP_COLOR : DOWN_COLOR
+          stripText(label, value == null ? '—' : `${value >= 0 ? '+' : ''}${formatVolume(value, lotSize, showLots)}`, y)
+        }
+        ctx.font = `600 11px ${FONT}`
+        cotLine('COT H', bar.cotHigh, stripY + 51)
+        cotLine('COT L', bar.cotLow, stripY + 65)
+      }
       if (colWidth >= 56 || k % 2 === 0) ctx.fillText(IST_HHMM.format(new Date(bar.time)), x0 + colWidth / 2, height - FP_TIME_H / 2)
       ctx.textAlign = 'left'
       ctx.strokeStyle = GRID_COLOR
@@ -581,7 +596,7 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
         ctx.fillText(priceText(lastPrice), plotW + 5, y)
       }
     }
-  }, [layout, width, narrow, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta, auctions, revisits])
+  }, [layout, width, narrow, height, plotW, barsW, profileW, profile, runningProfile, plotH, colWidth, step, lotSize, showLots, lastPrice, trades, timeframe, alerts, levels, vwap, rowDelta, auctions, revisits, cot, stripH])
 
   // The wheel listener is registered once; it reads the latest geometry through this.
   const geomRef = useRef({})
