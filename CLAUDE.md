@@ -829,13 +829,18 @@ All must pass before committing.
   on a HIGHER and a LOWER timeframe (Day, 4H, 1H, 15m, 5m, 3m, 1m - the lower always under the higher, `lowerThan`; each its
   own "History" in days - `HISTORY_CHOICES` / `TIMEFRAMES` in `structureShapes.js`; all account preferences
   `optionanalytics.structure.*`). THE CANDLES: `GET /api/structure/{u}/candles?tf=&days=` (`StructureController`,
-  `SpotStructureService`): the PAST days through `DhanHistoricalDataService.GetIntradayCandlesAsync` - so the disk cache (a
-  file a day) after the first load, Dhan asked at most `ChunkDays` 80 calendar days a call (its intraday limit is 90), the
-  window ending on the last WEEKDAY before today (a weekend after the last session is never kept on disk, so a window ending
-  on it went to Dhan at every load) - read at Dhan's 60-minute interval for Day / 4H / 1H (one held set shared by the three),
-  15 / 5 for those, 1 for 3m / 1m, and HELD IN MEMORY for the IST day (a past day never changes; a failure is not held -
-  the next load asks again); TODAY from `OiReplayService.GetSpotDayAsync` (the spot feed's memory, no Dhan call, or the
-  day's one shared fetch), from 09:15 on weekdays. Bucketed on the SESSION from 09:15 IST (`Aggregate`: a 4H candle is
+  `SpotStructureService`): EVERY timeframe is BUILT FROM THE SPOT'S 1-MINUTE CANDLES (asked for - "we have OHLC candles of spot,
+  build hourly or whatever we want - first check cache, then Dhan only"): the PAST days are the very 1-minute days OI Replay's
+  runs and the backtests keep on disk (`DhanHistoricalDataService.GetIndexRangeDiskFirstAsync` - GetIndexDayCandlesAsync's
+  series): every weekday kept is read from disk, Dhan asked ONLY for the runs of weekdays not kept (`ChunkDays` 80 calendar days
+  a call at most - its intraday limit is 90; a lone day through GetIndexDayCandlesAsync, so a holiday is proved once and kept;
+  weekends never asked) - a window read whole asked Dhan again for days already kept whenever one of them was not
+  (`DhanDataCacheTests.AnIndexRange_...`); the window ends on the last WEEKDAY before today; the days are HELD IN MEMORY per day
+  for the IST day (a past day never changes; a failed read not held - asked again next load): 5-minute candles for every day
+  (Day / 4H / 1H / 15m / 5m are made from them) and the 1-minute ones for the last `MinuteDays` 14 (3m / 1m) - every timeframe
+  and the refresh read the same held days; the answer says where its days came from (`daysHeld` / `daysFromDisk` /
+  `daysAskedOfDhan` - a line under each chart); TODAY from `OiReplayService.GetSpotDayAsync` (the spot feed's memory, no Dhan
+  call, or the day's one shared fetch), from 09:15 on weekdays. Bucketed on the SESSION from 09:15 IST (`Aggregate`: a 4H candle is
   09:15 - 13:15 and 13:15 - 15:30, as TradingView draws NSE; an hour 09:15 - 10:15 ...; a day the session), minutes outside
   09:15 - 15:29 and repeated minutes left out (`SpotStructureServiceTests.cs`). The page loads a chart on a change and again
   EVERY MINUTE while today is in it (a page timer, `POLL_HEADERS` - the past from memory), a failed load waiting longer each

@@ -146,6 +146,83 @@ public sealed class DhanHistoricalDataService
         return wide.Count > 0 ? (own, null, true) : (candles, error ?? wideError, false);
     }
 
+    /// <summary>What GetIndexRangeDiskFirstAsync brought: the candles, Dhan's first error (null when every day came), and how
+    /// many weekdays were read from the disk cache / had to be asked of Dhan.</summary>
+    public sealed record IndexRange(IReadOnlyList<CandleWithVolume> Candles, string? Error, int DaysFromDisk, int DaysAskedOfDhan);
+
+    /// <summary>
+    /// An INDEX's 1-minute candles over the past days [fromDay, toDay], DISK FIRST - the very series OI Replay's runs and the
+    /// backtests keep (GetIndexDayCandlesAsync's): every weekday already on disk is read from there, and Dhan is asked ONLY for
+    /// the runs of weekdays not kept - at most <paramref name="maxSpanDays"/> calendar days a call (its intraday limit is 90),
+    /// a lone day through GetIndexDayCandlesAsync so a holiday is proved once and kept. Weekends are never asked for. A window
+    /// read whole (one call over every day) asked Dhan again for days already kept whenever any day of it was not.
+    /// </summary>
+    public async Task<IndexRange> GetIndexRangeDiskFirstAsync(
+        uint securityId, string dhanSegment, DateOnly fromDay, DateOnly toDay, int maxSpanDays, CancellationToken cancellationToken)
+    {
+        var key = IndexKey(securityId, dhanSegment, 1);
+        bool Kept(DateOnly d) => _cache is not null && _cache.HasDay(IntradayPath, key, d);
+        static bool Weekday(DateOnly d) => d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday);
+
+        var candles = new List<CandleWithVolume>();
+        string? error = null;
+        int fromDisk = 0, asked = 0;
+        // Runs of consecutive calendar days ALL on disk (weekends too when kept) - read with no call.
+        var keptRuns = new List<(DateOnly From, DateOnly To)>();
+        // Runs of weekdays NOT on disk, with no kept day between them - each asked of Dhan.
+        var missingRuns = new List<List<DateOnly>>();
+        DateOnly? runStart = null, runEnd = null;
+        var missing = new List<DateOnly>();
+        for (var d = fromDay; d <= toDay; d = d.AddDays(1))
+        {
+            var kept = Kept(d);
+            if (kept)
+            {
+                if (runStart is null) runStart = d;
+                runEnd = d;
+                if (Weekday(d)) fromDisk++;
+                if (missing.Count > 0) { missingRuns.Add(missing); missing = new List<DateOnly>(); }
+            }
+            else
+            {
+                if (runStart is not null) { keptRuns.Add((runStart.Value, runEnd!.Value)); runStart = null; }
+                if (Weekday(d)) missing.Add(d);
+            }
+        }
+        if (runStart is not null) keptRuns.Add((runStart.Value, runEnd!.Value));
+        if (missing.Count > 0) missingRuns.Add(missing);
+
+        foreach (var (from, to) in keptRuns)
+        {
+            var (part, partError) = await GetIntradayCandlesAsync(securityId, dhanSegment, from, to, 1, cancellationToken);
+            candles.AddRange(part);
+            error ??= partError;
+        }
+        foreach (var run in missingRuns)
+        {
+            for (var i = 0; i < run.Count;)
+            {
+                var j = i;
+                while (j + 1 < run.Count && run[j + 1].DayNumber - run[i].DayNumber < maxSpanDays) j++;
+                asked += j - i + 1;
+                if (i == j)
+                {
+                    var (day, dayError, _) = await GetIndexDayCandlesAsync(securityId, dhanSegment, run[i], cancellationToken);
+                    candles.AddRange(day);
+                    error ??= dayError;
+                }
+                else
+                {
+                    var (part, partError) = await GetIntradayCandlesAsync(securityId, dhanSegment, run[i], run[j], 1, cancellationToken);
+                    candles.AddRange(part);
+                    error ??= partError;
+                }
+                i = j + 1;
+            }
+        }
+        return new IndexRange(candles.OrderBy(c => c.Time).ToList(), error, fromDisk, asked);
+    }
+
     /// <summary>Same range-call shape as GetIntradayCandlesAsync, but for an option contract
     /// (instrument "OPTIDX", not "INDEX" - CDV's underlying spot backfill uses that method, this
     /// one is what CdvHostedService calls per strike). Returns the candles plus, when the call did

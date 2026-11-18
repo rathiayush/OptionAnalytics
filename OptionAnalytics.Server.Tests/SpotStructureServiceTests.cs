@@ -1,3 +1,4 @@
+using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Models;
 using OptionAnalytics.Server.Services;
 
@@ -42,59 +43,67 @@ public sealed class SpotStructureServiceTests
     }
 
     [Fact]
-    public void Past_days_are_asked_in_pieces_dhan_serves_ending_on_the_last_weekday()
+    public void A_window_of_past_days_ends_on_the_last_weekday()
     {
         Assert.Equal(new DateOnly(2026, 11, 13), SpotStructureService.LastWeekdayBefore(new DateOnly(2026, 11, 16)));   // Monday -> Friday
         Assert.Equal(new DateOnly(2026, 11, 17), SpotStructureService.LastWeekdayBefore(new DateOnly(2026, 11, 18)));
-        var chunks = SpotStructureService.Chunks(new DateOnly(2026, 1, 1), new DateOnly(2026, 6, 30)).ToList();
-        Assert.All(chunks, c => Assert.True(c.To.DayNumber - c.From.DayNumber + 1 <= SpotStructureService.ChunkDays));
-        Assert.Equal(new DateOnly(2026, 1, 1), chunks[0].From);
-        Assert.Equal(new DateOnly(2026, 6, 30), chunks[^1].To);
-        for (var i = 1; i < chunks.Count; i++) Assert.Equal(chunks[i - 1].To.AddDays(1), chunks[i].From);
     }
+
+    // One session of 1-minute candles (09:15 - 15:29) of `day`, rising a point a minute from `from`.
+    private static IEnumerable<CandleWithVolume> Session(int day, decimal from) =>
+        Enumerable.Range(0, 375).Select(i => C(At(day, 9, 15).AddMinutes(i), from + i, from + i + 1, from + i - 1, from + i + 0.5m, 1));
 
     [Fact]
-    public async Task Past_days_are_held_for_the_day_today_comes_from_the_feed_and_a_failure_is_not_held()
+    public async Task Every_timeframe_is_built_from_the_held_1_minute_days_and_the_past_is_asked_once_a_day()
     {
-        var asked = new List<(DateOnly, DateOnly, int)>();
+        var asked = new List<(DateOnly From, DateOnly To)>();
         var todayAsked = 0;
-        var fail = false;
-        var now = At(18, 10, 0);
+        string? fail = null;
+        var now = At(18, 10, 0);   // Wednesday 18 Nov, 10:00
         var service = new SpotStructureService(
-            (u, from, to, interval, ct) =>
+            (u, from, to, ct) =>
             {
-                asked.Add((from, to, interval));
-                return Task.FromResult<(IReadOnlyList<CandleWithVolume>, string?)>(fail
-                    ? (Array.Empty<CandleWithVolume>(), "Dhan is not authenticated")
-                    : (new[] { C(At(17, 9, 15), 100, 110, 90, 105) }, null));
+                asked.Add((from, to));
+                var candles = fail is null ? Session(16, 100).Concat(Session(17, 200)).Where(c => IstDate(c.Time) >= from && IstDate(c.Time) <= to).ToList() : new List<CandleWithVolume>();
+                return Task.FromResult(new DhanHistoricalDataService.IndexRange(candles, fail, fail is null ? 2 : 0, 0));
             },
-            (u, date, ct) => { todayAsked++; return Task.FromResult<(IReadOnlyList<CandleWithVolume>, string?)>((new[] { C(At(18, 9, 15), 105, 120, 104, 118) }, null)); },
+            (u, date, ct) => { todayAsked++; return Task.FromResult<(IReadOnlyList<CandleWithVolume>, string?)>((Session(18, 300).Take(45).ToList(), null)); },
             () => now);
 
-        var first = await service.CandlesAsync("nifty", 1440, 30, default);
-        Assert.Equal(2, first.Candles.Count);
-        Assert.True(first.TodayIncluded);
-        Assert.Null(first.Error);
-        Assert.Equal((new DateOnly(2026, 10, 19), new DateOnly(2026, 11, 17), 60), Assert.Single(asked));
-        // The page's refresh: the past from memory, today read again; the hourly view the same held days.
-        await service.CandlesAsync("NIFTY", 1440, 30, default);
-        await service.CandlesAsync("NIFTY", 60, 30, default);
-        Assert.Single(asked);
-        Assert.Equal(3, todayAsked);
+        var day = await service.CandlesAsync("nifty", 1440, 3, default);
+        Assert.Equal((new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 17)), Assert.Single(asked));   // 15 Nov a Sunday: never asked
+        Assert.Equal(3, day.Candles.Count);                                                               // Mon, Tue and today so far
+        Assert.Equal((100m, 475m, 99m, 474.5m), (day.Candles[0].Open, day.Candles[0].High, day.Candles[0].Low, day.Candles[0].Close));
+        Assert.Equal(375L, day.Candles[0].Volume);
+        Assert.True(day.TodayIncluded);
+        Assert.Equal((0, 2, 0), (day.DaysHeld, day.DaysFromDisk, day.DaysAskedOfDhan));
 
-        // A failure is said and not held - the next load asks again.
-        fail = true;
-        var failed = await service.CandlesAsync("NIFTY", 15, 30, default);
-        Assert.Contains("Dhan is not authenticated", failed.Error);
-        await service.CandlesAsync("NIFTY", 15, 30, default);
+        // 4H / 1H / 15m / 5m / 3m / 1m of the same held days: nothing asked again, each bucketed on the session.
+        var fourHour = await service.CandlesAsync("NIFTY", 240, 3, default);
+        Assert.Equal(new[] { At(16, 9, 15), At(16, 13, 15), At(17, 9, 15), At(17, 13, 15), At(18, 9, 15) }, fourHour.Candles.Select(c => c.Time));
+        Assert.Equal(7 * 2 + 1, (await service.CandlesAsync("NIFTY", 60, 3, default)).Candles.Count);
+        Assert.Equal(25 * 2 + 3, (await service.CandlesAsync("NIFTY", 15, 3, default)).Candles.Count);
+        Assert.Equal(125 * 2 + 15, (await service.CandlesAsync("NIFTY", 3, 3, default)).Candles.Count);
+        var one = await service.CandlesAsync("NIFTY", 1, 3, default);
+        Assert.Equal(375 * 2 + 45, one.Candles.Count);
+        Assert.Equal((2, 0, 0), (one.DaysHeld, one.DaysFromDisk, one.DaysAskedOfDhan));
+        Assert.Single(asked);
+        Assert.Equal(6, todayAsked);
+
+        // A failure is said and the days are not held - the next load asks again.
+        var other = new SpotStructureService((u, from, to, ct) => { asked.Add((from, to)); return Task.FromResult(new DhanHistoricalDataService.IndexRange(Array.Empty<CandleWithVolume>(), "Not sent", 0, 2)); },
+            (u, date, ct) => Task.FromResult<(IReadOnlyList<CandleWithVolume>, string?)>((Array.Empty<CandleWithVolume>(), null)), () => now);
+        Assert.Contains("Not sent", (await other.CandlesAsync("NIFTY", 60, 3, default)).Error);
+        await other.CandlesAsync("NIFTY", 60, 3, default);
         Assert.Equal(3, asked.Count);
 
-        // A Sunday: no today asked.
+        // A Sunday: today is not asked, the window ends on Friday.
         now = At(22, 12, 0);
-        fail = false;
-        var sunday = await service.CandlesAsync("NIFTY", 1440, 30, default);
+        var sunday = await service.CandlesAsync("NIFTY", 1440, 3, default);
         Assert.False(sunday.TodayIncluded);
-        Assert.Equal(new DateOnly(2026, 11, 20), asked[^1].Item2);
-        Assert.Equal(5, todayAsked);
+        Assert.Equal(new DateOnly(2026, 11, 20), asked[^1].To);
+        Assert.Equal(6, todayAsked);
     }
+
+    private static DateOnly IstDate(DateTimeOffset t) => DateOnly.FromDateTime(t.ToOffset(Ist).DateTime);
 }

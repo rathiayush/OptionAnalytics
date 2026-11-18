@@ -298,6 +298,42 @@ public sealed class DhanDataCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task AnIndexRange_ReadsTheDaysKeptFromDisk_AndAsksDhanOnlyForTheWeekdaysNotKept()
+    {
+        // The Spot structure page's candles: OI Replay / the backtests already kept Mon 15 - Thu 18 Sep and Wed 24 Sep, one
+        // file a day. Fri 19 Sep is a holiday.
+        var holiday = PastDay.AddDays(4);
+        int BarsOn(DateOnly d) => d == holiday || d.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday ? 0 : 375;
+        var requests = new List<string>();
+        var service = Historical(requests, Cache(), session: true, barsOn: BarsOn);
+        foreach (var d in new[] { PastDay, PastDay.AddDays(1), PastDay.AddDays(2), PastDay.AddDays(3), PastDay.AddDays(9) })
+            await service.GetIndexDayCandlesAsync(13, "IDX_I", d, CancellationToken.None);
+        requests.Clear();
+
+        var range = await service.GetIndexRangeDiskFirstAsync(13, "IDX_I", PastDay, PastDay.AddDays(11), 80, CancellationToken.None);
+        // Dhan asked only for the runs not on disk: Fri 19 - Tue 23 (the weekend between, never asked on its own) and Thu 25 -
+        // Fri 26 - never for the days kept.
+        Assert.Equal(new[] { (holiday, PastDay.AddDays(8)), (PastDay.AddDays(10), PastDay.AddDays(11)) }, requests.Select(Asked).ToArray());
+        Assert.Equal((5, 5), (range.DaysFromDisk, range.DaysAskedOfDhan));
+        Assert.Null(range.Error);
+        Assert.Equal(9 * 375, range.Candles.Count);                       // nine sessions - the holiday has none
+        Assert.True(range.Candles.Zip(range.Candles.Skip(1)).All(p => p.First.Time < p.Second.Time));
+
+        // Every day kept now (the holiday and the weekend came with a later day): the next read asks nothing.
+        var again = await Historical(requests, Cache(), session: true, barsOn: BarsOn)
+            .GetIndexRangeDiskFirstAsync(13, "IDX_I", PastDay, PastDay.AddDays(11), 80, CancellationToken.None);
+        Assert.Equal(2, requests.Count);
+        Assert.Equal((10, 0), (again.DaysFromDisk, again.DaysAskedOfDhan));
+        Assert.Equal(range.Candles, again.Candles);
+
+        // A long run is asked in pieces of at most maxSpanDays calendar days.
+        var pieces = new List<string>();
+        await Historical(pieces, Cache(), session: true, barsOn: BarsOn).GetIndexRangeDiskFirstAsync(13, "IDX_I", PastDay.AddDays(14), PastDay.AddDays(39), 10, CancellationToken.None);
+        Assert.True(pieces.Count >= 3);
+        Assert.All(pieces.Select(Asked), a => Assert.True(a.To.DayNumber - a.From.DayNumber < 10));
+    }
+
+    [Fact]
     public async Task AnIndexHoliday_AskedAlone_IsProvedOnceThroughTheDaysAfter_ThenEveryLoadReadsItFromDisk()
     {
         // Wed 17-09 a holiday, asked on its own (the backtest's day, the previous day's profile walking back, the expiry

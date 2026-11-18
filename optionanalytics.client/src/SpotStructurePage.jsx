@@ -173,6 +173,21 @@ function StructureSummary({ a, tf }) {
   )
 }
 
+// Where a chart's past days came from - every timeframe is built from the spot's 1-minute days: already in the server's
+// memory, read from its disk cache (the days OI Replay and the backtests keep), or asked of Dhan (the first time only).
+function SourceLine({ data }) {
+  const held = data.daysHeld ?? 0
+  const disk = data.daysFromDisk ?? 0
+  const dhan = data.daysAskedOfDhan ?? 0
+  if (!held && !disk && !dhan) return null
+  const parts = [held && `${held} in memory`, disk && `${disk} from the server's disk`, dhan && `${dhan} asked of Dhan (kept on disk now)`].filter(Boolean)
+  return (
+    <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+      {`Built from 1-minute spot candles - past days: ${parts.join(' · ')}${data.todayIncluded ? ' · today from the live feed' : ''}`}
+    </Text>
+  )
+}
+
 export default function SpotStructurePage() {
   const { width } = useViewport()
   const narrow = width <= 768
@@ -216,6 +231,7 @@ export default function SpotStructurePage() {
     >
       {data.error && <Alert type={a.n ? 'warning' : 'error'} showIcon style={{ marginBottom: 8 }} message={a.n ? `Partly loaded - ${data.error}` : `Could not load the candles - ${data.error}`} />}
       {a.n ? <StructureChart analysis={a} shapes={shapes} height={chartHeight} /> : <Empty description={data.loading ? 'Loading candles…' : 'No candles'} style={{ padding: 40 }} />}
+      {data.data && <SourceLine data={data.data} />}
       <StructureSummary a={a} tf={tf} />
     </Card>
   )

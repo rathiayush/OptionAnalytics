@@ -14,7 +14,8 @@ public sealed class StructureController : ControllerBase
     public StructureController(SpotStructureService service) => _service = service;
 
     /// <summary>`tf` in minutes - 1440 (a day), 240, 60, 15, 5, 3 or 1; `days` calendar days back (each timeframe has its
-    /// default and limit). Past days from the disk cache / Dhan once, today from the spot feed.</summary>
+    /// default and limit). Built from the spot's 1-minute candles: the past days from the server's disk cache first (OI Replay's
+    /// and the backtests' kept days), Dhan only for the days not kept; today from the spot feed.</summary>
     [HttpGet("{underlying}/candles")]
     public async Task<IActionResult> Candles(string underlying, [FromQuery] int tf = 60, [FromQuery] int? days = null, CancellationToken cancellationToken = default)
     {
@@ -30,6 +31,9 @@ public sealed class StructureController : ControllerBase
             to = result.To,
             todayIncluded = result.TodayIncluded,
             error = result.Error,
+            daysHeld = result.DaysHeld,
+            daysFromDisk = result.DaysFromDisk,
+            daysAskedOfDhan = result.DaysAskedOfDhan,
             candles = result.Candles.Select(c => new { time = c.Time, open = c.Open, high = c.High, low = c.Low, close = c.Close, volume = c.Volume }),
         });
     }
