@@ -525,6 +525,35 @@ All must pass before committing.
   with their "Float" panel, are unchanged; not while that panel floats, never live. It starts right of the quick button
   while that sits in its row (`fabInBarRow`), at most 980 px wide, centred; the page keeps 72 px of room at its bottom
   for both. The "Replay bar" tick beside "Quick button" turns it off (`optionanalytics.oiReplay.replayBarOn`).
+- OI Replay's VOICE COMMANDS (asked for - "integrate voice command to start replay stop replay and open any card in popup
+  or anything on oi page"): the "Voice" tick beside "Quick button" / "Replay bar" (`STORED_VOICE`
+  `optionanalytics.oiReplay.voice`, OFF by default and LOCAL_ONLY - a microphone must never switch itself on because
+  another device was left listening) turns the browser's own SpeechRecognition on (`useVoiceCommands.js`: continuous, en-IN,
+  started again after each silence, backing off and finally giving up with a message rather than spinning, aborted on
+  unmount; the recogniser is never rebuilt mid-sentence - `onCommand` is read from a ref), and every finished sentence is
+  read by `voiceCommands.js` into ONE command (`parseVoiceCommand`): a phrase matches ANYWHERE in it ("okay now start the
+  replay please"), the LONGEST phrase wins ("stop listening" over "stop", "option delta profile" over "delta profile",
+  "gex levels on spot" - the card - over "gex" - the popup), number words become digits ("go to ten thirty" = 10:30,
+  "to" / "for" / "oh" deliberately NOT numbers), the engine's own alternatives are tried in order (its first guess at
+  "gex" is often "jacks"), and the same final transcript twice within 1.2 s is one command. What can be said: the replay
+  (start / stop / pause / reset - never a toggle, so twice is harmless), the speed ("faster" / "slower" step through
+  `SPEED_OPTIONS`, "2x" / "half speed" are absolute), the minute ("go to 10 30" - a spoken 1 / 2 / 3 is 13 / 14 / 15, the
+  market is never open at 1 am - "forward 5 minutes", "back 10 minutes", "next candle"), the nine QUICK VIEWS as popups,
+  the cards with no popup (`VOICE_CARDS` - scrolled to by their `data-card` and outlined for a moment; one hidden in
+  "Sections shown" is reported, not opened), "close", the index / "go live", "open order panel", "what can I say" (the
+  list as a notification) and "stop listening" (it unticks Voice). The page carries each one out with ITS OWN handlers -
+  `toggleReplay` / `resetReplay` / `scrubReplay` / `changeReplaySpeed` / `setQuickView` / `setPaperPanelOpen` /
+  `pickUnderlying` / `goLiveAndAnnounce` - so voice can do NOTHING A CLICK CANNOT, and a command that needs a replayed day
+  says so when the page is live. IT NEVER TRADES: 'order' only OPENS the Paper / Live panel, which keeps its own confirm,
+  and any sentence mentioning buy / sell / punch / place / square off is REFUSED outright (`VOICE_NEVER`) - it does not
+  even switch the index it happened to name. The pill (`VoiceControl.jsx`, top right, below the header on a phone) shows
+  the mic state, what is being heard and the last command, with the list and the privacy line in its ⓘ: THE LISTENING IS
+  THE BROWSER'S SERVICE (Chrome sends the audio to Google's, Safari to Apple's) - said on the tick and the pill, which is
+  why it is off by default and runs only while ticked. Not in the popup-only host (`popupOnly` - the Profiles / Order Flow
+  launchers must not open a microphone). `tests/voice-commands.test.mjs` (every phrase, the aliases, the numbers, the
+  mishearings, the refusals, and that no command does anything but read the page / move the replay / open the panel);
+  checked in a browser against a FAKE SpeechRecognition (start / stop / reset / goto / forward / back / faster / 2x, the
+  popups, a card scrolled to, the refusal, the order panel, "stop listening").
 - WHATEVER IS SELECTED IS BLUE (asked for - "whatever is selected show them blue, it looks confusing on the UI; check all
   pages"): the app's ONE antd theme is `APP_THEME` in `appTheme.js` (main.jsx's ConfigProvider; a page's nested one - OI
   Replay's `COMPACT_TEXT_THEME` - merges into it): every Segmented picker's selected item (index, Paper / Live, Buy / Sell,

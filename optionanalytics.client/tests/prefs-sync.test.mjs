@@ -104,9 +104,10 @@ test('a failed send is tried again; one the server refuses for good is not', asy
   assert.deepEqual(sync.pendingKeys(), [])                     // dropped, not retried for ever
 })
 
-test('the Paper / Live choice, positions, trade levels and caches never come from or go to the server', async () => {
+test('the Paper / Live choice, the microphone, positions, trade levels and caches never come from or go to the server', async () => {
   for (const key of ['optionanalytics.strategyScanner.tradeMode', 'optionanalytics.oiReplay.livePaperPositions',
-    'optionanalytics.tradeLevels.global.v1', 'optionanalytics.oiReplay.liveDayCache', 'optionanalytics.visitorId']) {
+    'optionanalytics.tradeLevels.global.v1', 'optionanalytics.oiReplay.liveDayCache', 'optionanalytics.visitorId',
+    'optionanalytics.oiReplay.voice']) {
     assert.equal(LOCAL_ONLY.has(key), true, key)
     assert.equal(isPreferenceKey(key), false, key)
   }

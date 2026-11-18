@@ -364,6 +364,9 @@ export const STORED_ORDER_FAB = 'optionanalytics.oiReplay.orderFabOn'
 export const STORED_ORDER_FAB_ANCHOR = 'optionanalytics.oiReplay.orderFabAnchor'
 // The floating replay bar (FloatingReplayBar.jsx) on a replayed day - on by default.
 export const STORED_REPLAY_BAR = 'optionanalytics.oiReplay.replayBarOn'
+// VOICE COMMANDS (voiceCommands.js) - OFF by default, and THIS BROWSER'S ONLY (LOCAL_ONLY in prefsSync.js): a
+// microphone must never turn itself on because another device was left listening.
+export const STORED_VOICE = 'optionanalytics.oiReplay.voice'
 // The page's controls card folded to its one row of day / index / Load day (the rest behind "More").
 export const STORED_CONTROLS_COLLAPSED = 'optionanalytics.oiReplay.controlsCollapsed'
 export const STORED_FREE_PLACEMENT = 'optionanalytics.oiReplay.freePlacement'

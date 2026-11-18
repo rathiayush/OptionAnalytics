@@ -48,7 +48,10 @@ import { GexSpotCard } from './GexSpotCard.jsx'
 import { DexCard } from './DexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
-import { QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
+import { FAB_ACCENT, QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
+import { voiceCommandText, voiceHelpLines, voiceSpeed } from './voiceCommands.js'
+import { useVoiceCommands } from './useVoiceCommands.js'
+import { VoiceControl } from './VoiceControl.jsx'
 import { floatingHost, useFloatingHost } from './floatingHost.js'
 import { QuickViewFab } from './QuickViewFab.jsx'
 import { OrderFab } from './OrderFab.jsx'
@@ -72,7 +75,7 @@ import { ABSORPTION_TIMEFRAMES, absorptionMarkers, oiAbsorptionEvents } from './
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED,
+  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED, STORED_VOICE,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
   screenFromSearch, screenKey, nextScreen, MAX_SCREENS,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
@@ -3702,6 +3705,9 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
   // The floating replay bar (FloatingReplayBar.jsx): on a replayed day, once the Spot card's own replay controls are
   // out of sight - they are watched where they stand (replayInlineEl).
   const [replayBarOn, setReplayBarOn] = usePersistedState(STORED_REPLAY_BAR, true)
+  // VOICE COMMANDS (voiceCommands.js / useVoiceCommands.js) - off by default, this browser's own choice.
+  const [voiceOn, setVoiceOn] = usePersistedState(STORED_VOICE, false)
+  const [voiceLast, setVoiceLast] = useState('')
   const [replayInlineEl, setReplayInlineEl] = useState(null)
   const replayInlineOnScreen = useOnScreen(replayInlineEl)
   // The controls card folded to one row: the day, the index and Load day - the rest (chart options, sections, quick
@@ -6172,6 +6178,74 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     </>
   )
 
+  // VOICE COMMANDS (asked for - "integrate voice command to start replay stop replay and open any card in popup or
+  // anything on oi page"): while the "Voice" tick is on the browser listens (useVoiceCommands.js) and each sentence is
+  // read into ONE command (voiceCommands.js), carried out here with THE PAGE'S OWN handlers - the very ones the buttons
+  // call, so voice can do nothing a click cannot. A command that needs a replayed day says so when the page is live.
+  // IT NEVER TRADES: 'order' only OPENS the Paper / Live panel (which keeps its own confirm) and the parser refuses any
+  // sentence that mentions buying, selling, punching, placing or squaring off - that one does nothing at all.
+  const voiceSpeeds = useMemo(() => SPEED_OPTIONS.map((o) => o.value), [])
+  const runVoiceCommand = (command) => {
+    const replayReady = !isLive && Boolean(result) && oneMinBars.length > 0
+    if (['play', 'pause', 'reset', 'goto', 'skip'].includes(command.kind) && !replayReady) {
+      setVoiceLast(`${voiceCommandText(command)} - no day is being replayed`)
+      return
+    }
+    switch (command.kind) {
+      case 'play':
+        if (replayCannotPlay) { setVoiceLast('start - already at the last minute'); return }
+        setPlaying(true)
+        sync.userAction()
+        break
+      case 'pause': setPlaying(false); sync.userAction(); break
+      case 'reset': resetReplay(); break
+      case 'speed': {
+        const ms = voiceSpeed(command, voiceSpeeds, speedMs)
+        if (ms == null) { setVoiceLast(`${voiceCommandText(command)} - already at the ${command.step > 0 ? 'fastest' : 'slowest'}`); return }
+        changeReplaySpeed(ms)
+        break
+      }
+      case 'goto':
+        setPlaying(false)
+        setManualVisibleCount(replayCountAt(oneMinBars, command.hour, command.minute))
+        sync.userAction()
+        break
+      case 'skip': {
+        const to = Math.min(oneMinBars.length - 1, Math.max(0, visibleCount - 1 + command.minutes))
+        scrubReplay(to)
+        setVoiceLast(`${voiceCommandText(command)} - ${oneMinBars[to] ? istTimeFormatter(oneMinBars[to].time) : ''}`)
+        return
+      }
+      case 'view': setQuickView(command.view); break
+      case 'close': setQuickView(null); break
+      case 'card': {
+        // A card has no popup: scroll to it on the page and outline it for a moment, so it is clear which one moved in.
+        const el = typeof document === 'undefined' ? null : document.querySelector(`[data-card="${command.card}"]`)
+        if (!el) { setVoiceLast(`${command.label ?? command.card} is not on the page - tick it in "Sections shown"`); return }
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        el.style.outline = `2px solid ${FAB_ACCENT}`
+        window.setTimeout(() => { el.style.outline = '' }, 1500)
+        break
+      }
+      case 'order': setPaperPanelOpen(true); break
+      case 'orderClose': setPaperPanelOpen(false); break
+      case 'index': pickUnderlying(command.underlying); break
+      case 'live': goLiveAndAnnounce(); break
+      case 'help':
+        notification.open({
+          key: 'voice-help', message: 'Voice commands', duration: 20,
+          description: <div style={{ fontSize: 12 }}>{voiceHelpLines().map((line) => <div key={line}>{line}</div>)}</div>,
+        })
+        break
+      // The way out by voice: it unticks Voice, so the microphone stops at once.
+      case 'listenOff': setVoiceOn(false); break
+      // 'refused' - a sentence that sounded like an order: nothing happens, the pill says why.
+      default: break
+    }
+    setVoiceLast(voiceCommandText(command))
+  }
+  const voice = useVoiceCommands({ enabled: Boolean(voiceOn) && !popupOnly, onCommand: runVoiceCommand })
+
   // The Spot card's whole content, shared by its inline and floating placements (see spotFloating).
   // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
   // must not assume a loaded day: live candles keep arriving while today's fetch is being redone
@@ -6889,6 +6963,22 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                 </Tooltip>
                 <Tooltip title="On a replayed day, the replay controls (Start / Pause, Reset, the slider, the speed) as a slim bar floating at the bottom of the window once the Spot card's own controls are scrolled out of sight - the same controls, so either works.">
                   <Checkbox checked={replayBarOn} onChange={(e) => setReplayBarOn(e.target.checked)}>Replay bar</Checkbox>
+                </Tooltip>
+                <Tooltip
+                  title={(
+                    <div style={{ maxWidth: 340, fontSize: 12 }}>
+                      <div style={{ marginBottom: 4 }}>Run the page by voice. Say:</div>
+                      {voiceHelpLines().map((line) => <div key={line} style={{ marginBottom: 3 }}>{line}</div>)}
+                      <div style={{ marginTop: 6 }}>
+                        The microphone runs only while this is ticked, and the LISTENING is the browser's own speech service
+                        (Chrome sends the audio to Google, Safari to Apple) - so it is off by default and the tick stays in
+                        this browser, never on your other devices. It can do nothing a click cannot: an order is never
+                        placed, changed or closed by voice, and a sentence that mentions buying or selling is ignored.
+                      </div>
+                    </div>
+                  )}
+                >
+                  <Checkbox checked={voiceOn} onChange={(e) => { setVoiceLast(''); setVoiceOn(e.target.checked) }}>Voice</Checkbox>
                 </Tooltip>
               </Space>
             )}
@@ -7721,6 +7811,12 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
         </Modal>
       )}
       {/* On a phone (no keyboard, a long page): a small floating button, dragged anywhere, opening the quick views. */}
+      {/* The voice pill (VoiceControl.jsx): the mic state, what the browser is hearing and the last command carried
+          out - shown whenever Voice is on, a day loaded or not ("nifty" / "go live" work before one is). */}
+      <VoiceControl
+        supported={voice.supported} on={Boolean(voiceOn) && !popupOnly} listening={voice.listening}
+        heard={voice.heard} last={voiceLast} error={voice.error} onOff={() => setVoiceOn(false)}
+      />
       {result && (
         <QuickViewFab
           views={QUICK_VIEWS} active={quickView} onOpen={setQuickView} enabled={quickFabOn} anchor={quickFabAnchor} onAnchorChange={setQuickFabAnchor}
