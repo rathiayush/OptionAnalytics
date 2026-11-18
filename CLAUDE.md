@@ -1537,6 +1537,16 @@ All must pass before committing.
   sides traded at the extreme - a dotted line runs on until a later bar trades back into that row (`unfinishedRevisits`),
   to the right edge while open; the other side alone there = neither. Not on an estimated day (its rows are a spread, not
   trades). `tests/order-flow-auction.test.mjs`.
+  COT HIGH / LOW (asked for - "in order flow footprint add COT commitment of traders"; Sierra Chart's footprint COT, NOT the
+  CFTC report - NIFTY has none; NSE's participant OI is the GEX card's): the "COT" tick (`optionanalytics.orderFlow.cot`,
+  on by default) adds two lines to the strip under every footprint bar - COT H = the delta (buy − sell) traded AFTER the
+  bar's last NEW high, COT L = after its last new low (+ green / − red, "—" when not known). The ENGINE keeps it per
+  minute bar from every trade in order (`MinuteBar.Cot` [after high, after low] - a trade making a new high starts the
+  count at 0, the trade itself not counted; a neutral trade adds its half-and-half; kept with the day -
+  `OrderFlowDay.Bar.Cot`; `OrderFlowBar.CotHigh` / `CotLow`; null for an estimated bar and for a minute restored from a
+  day saved before it, even when traded on after). `aggregateBars` adds the minutes up EXACTLY for 3 / 5 / 15 min: the
+  minute that FIRST reached the bar's high brings its own count, every later minute its whole delta (an equal high is not
+  a new one); such a minute with none = the bar none (`OrderFlowCotTests.cs`, `tests/order-flow-cot.test.mjs`).
   THE LIQUIDITY HEATMAP (`DepthHeatmap` in `OrderFlowCharts.jsx` - the Order Flow page's and the External page's; asked
   for - "can we improve the liquidity heatmap on the data we have captured"; the rules pure in `heatmapLayout.js`,
   `tests/heatmap-layout.test.mjs`): each book column sits at its TIME and runs to the next (`columnSpans`) - the columns are

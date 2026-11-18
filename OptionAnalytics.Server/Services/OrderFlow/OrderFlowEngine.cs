@@ -466,7 +466,17 @@ public sealed class OrderFlowEngine
     {
         var minute = IstMinute(tradedAt);
         if (!_bars.TryGetValue(minute, out var bar))
-            _bars[minute] = bar = new MinuteBar { Time = minute, Open = price, High = price, Low = price, Close = price, RuleDelta = new long[TallyCount] };
+        {
+            // The bar's first trade makes its high and low: nothing after either yet.
+            _bars[minute] = bar = new MinuteBar { Time = minute, Open = price, High = price, Low = price, Close = price, RuleDelta = new long[TallyCount], Cot = new long[2] };
+        }
+        else if (bar.Cot is { } cot)
+        {
+            var delta = side > 0 ? quantity : side < 0 ? -quantity : (quantity - quantity / 2) - quantity / 2;
+            // A trade making a new high starts the count after it (the trade itself is the high, not what followed it).
+            cot[0] = price > bar.High ? 0 : cot[0] + delta;
+            cot[1] = price < bar.Low ? 0 : cot[1] + delta;
+        }
         if (bar.RuleDelta is { } tallies)
         {
             // A minute restored from a checkpoint saved before the LTQ + book rule or the packet counts: its comparison would
@@ -627,10 +637,10 @@ public sealed class OrderFlowEngine
 
     // A bar as copied out of the lock: its levels are the bar's frozen ones (native prices, high to low), never changed
     // afterwards - a trade into the bar makes it a new array.
-    private sealed record BarCopy(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels, long[]? Rules);
+    private sealed record BarCopy(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels, long[]? Rules, long[]? Cot = null);
 
     private static BarCopy[] CopyBars(IEnumerable<MinuteBar> bars) =>
-        bars.Select(b => new BarCopy(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Frozen ??= Freeze(b), b.RuleDelta?.ToArray())).ToArray();
+        bars.Select(b => new BarCopy(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Frozen ??= Freeze(b), b.RuleDelta?.ToArray(), b.Cot?.ToArray())).ToArray();
 
     private static FootprintLevel[] Freeze(MinuteBar bar) =>
         bar.Levels.OrderByDescending(kv => kv.Key).Select(kv => new FootprintLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToArray();
@@ -815,7 +825,11 @@ public sealed class OrderFlowEngine
             if (rows.Count > 0 && rows[^1].Price == row) rows[^1] = new FootprintLevel(row, rows[^1].Buy + level.Buy, rows[^1].Sell + level.Sell);
             else rows.Add(new FootprintLevel(row, level.Buy, level.Sell));
         }
-        return new OrderFlowBar(bar.Time, bar.Open, bar.High, bar.Low, bar.Close, bar.Buy, bar.Sell, bar.Trades, rows);
+        return new OrderFlowBar(bar.Time, bar.Open, bar.High, bar.Low, bar.Close, bar.Buy, bar.Sell, bar.Trades, rows)
+        {
+            CotHigh = bar.Cot is { Length: 2 } cot ? cot[0] : null,
+            CotLow = bar.Cot is { Length: 2 } c ? c[1] : null,
+        };
     }
 
     // A heatmap side in rowSize-point rows, low to high: HeatRows are low to high, so a row only ever takes the rows next
@@ -842,6 +856,10 @@ public sealed class OrderFlowEngine
         public int Trades;
         // Each comparison rule's delta (see DeltaRules); null on a bar recorded before they were kept.
         public long[]? RuleDelta;
+        // COT (Sierra Chart's "Commitment of Traders" high / low): the delta (buy - sell) of the trades AFTER the one that
+        // made the bar's latest new high / new low - [after high, after low]. Null on a minute restored from a day saved
+        // before it was kept (part of the minute's order is lost).
+        public long[]? Cot;
         public readonly Dictionary<decimal, LevelVolume> Levels = new();
         // The levels as an immutable array (high to low) - made when first copied, dropped by the next trade into the bar.
         public FootprintLevel[]? Frozen;
@@ -881,7 +899,7 @@ public sealed class OrderFlowEngine
                 Underlying = Underlying, SecurityId = SecurityId, ContractSymbol = ContractSymbol, ExchangeSegment = ExchangeSegment, Expiry = Expiry,
                 TickSize = TickSize, LotSize = LotSize, Day = _day, Sequence = _sequence, LastPrice = _prevLtp, LastTradeAt = _lastTradeAt,
                 Clock = _clock, DepthLevels = Math.Max(_dayDepth, _importedDepth ?? 5), RecordedFrom = _recordedFrom, UnbookedVolume = _unbookedVolume,
-                Bars = CopyBars(_bars.Values).Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Levels, b.Rules)).ToList(),
+                Bars = CopyBars(_bars.Values).Select(b => new OrderFlowDay.Bar(b.Time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Trades, b.Levels, b.Rules, b.Cot)).ToList(),
                 Trades = _trades.ToList(),
                 Icebergs = Icebergs().ToList(),
                 Snapshots = _snapshots.Select(x => new OrderFlowDay.Snapshot(x.Time, x.Bids, x.Asks)).ToList(),
@@ -911,7 +929,7 @@ public sealed class OrderFlowEngine
             foreach (var saved in day.Bars)
             {
                 if (_bars.ContainsKey(saved.Time)) continue;
-                var bar = new MinuteBar { Time = saved.Time, Open = saved.Open, High = saved.High, Low = saved.Low, Close = saved.Close, Buy = saved.Buy, Sell = saved.Sell, Trades = saved.Trades, RuleDelta = saved.Rules is { Length: TallyCount or RuleCount or RuleCountBeforeLtq } rules ? rules.ToArray() : null };
+                var bar = new MinuteBar { Time = saved.Time, Open = saved.Open, High = saved.High, Low = saved.Low, Close = saved.Close, Buy = saved.Buy, Sell = saved.Sell, Trades = saved.Trades, RuleDelta = saved.Rules is { Length: TallyCount or RuleCount or RuleCountBeforeLtq } rules ? rules.ToArray() : null, Cot = saved.Cot is { Length: 2 } cot ? cot.ToArray() : null };
                 foreach (var level in saved.Levels)
                 {
                     bar.Levels[level.Price] = new LevelVolume { Buy = level.Buy, Sell = level.Sell };
@@ -977,7 +995,8 @@ public sealed class OrderFlowDay
     public List<Snapshot> Snapshots { get; init; } = new();
 
     /// <summary>Rules: each comparison rule's delta (OrderFlowEngine.DeltaRules); null on a day saved before they were kept.</summary>
-    public sealed record Bar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels, long[]? Rules = null);
+    /// <summary>Cot: [delta after the bar's last new high, after its last new low] (OrderFlowEngine's COT); null on a day saved before it.</summary>
+    public sealed record Bar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades, FootprintLevel[] Levels, long[]? Rules = null, long[]? Cot = null);
     public sealed record Snapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
 }
 
@@ -994,7 +1013,15 @@ public sealed record FootprintLevel(decimal Price, long Buy, long Sell);
 
 public sealed record OrderFlowBar(
     DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Trades,
-    IReadOnlyList<FootprintLevel> Levels);
+    IReadOnlyList<FootprintLevel> Levels)
+{
+    /// <summary>COT HIGH (Sierra Chart's "Commitment of Traders" high): the delta (buy - sell) traded AFTER the minute's last
+    /// new high was made - buyers still lifting near the top (+) or sellers taking over from it (-). Null for an estimated bar
+    /// or a minute restored from a day saved before it was kept.</summary>
+    public long? CotHigh { get; init; }
+    /// <summary>COT LOW: the delta traded after the minute's last new low.</summary>
+    public long? CotLow { get; init; }
+}
 
 /// <summary>IsBid: a hidden buyer resting at a bid (else a hidden seller at an ask). Traded: volume
 /// done at the level during the episode; MaxDisplayed: the most ever shown there.</summary>
