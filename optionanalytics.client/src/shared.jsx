@@ -2,7 +2,7 @@ import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffec
 import { createPortal } from 'react-dom'
 import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import {
-  AlignRightOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
+  AlignRightOutlined, ApartmentOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
   LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SendOutlined, SettingOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -1114,6 +1114,7 @@ const NAV_ITEMS = [
   { key: '/oi-replay', label: 'OI Replay', icon: <LineChartOutlined /> },
   { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
+  { key: '/structure', label: 'Spot structure', icon: <ApartmentOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
   { key: '/telegram-signals', label: 'Telegram signals', icon: <SendOutlined /> },
   { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
