@@ -11,7 +11,7 @@ import { voiceHelpLines } from './voiceCommands.js'
 
 const DOT = { width: 8, height: 8, borderRadius: '50%', flexShrink: 0 }
 
-export function VoiceControl({ supported, on, listening, heard, last, error, onOff }) {
+export function VoiceControl({ supported, on, hold = true, asking = false, listening, heard, last, error, onOff }) {
   const viewport = useViewport()
   if (!on) return null
   const narrow = viewport.width <= 768
@@ -28,18 +28,20 @@ export function VoiceControl({ supported, on, listening, heard, last, error, onO
       }}
     >
       <span style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-        {listening ? <AudioOutlined style={{ color: '#1677ff' }} /> : <AudioMutedOutlined style={{ color: '#8c8c8c' }} />}
+        <Tooltip title={listening ? 'The microphone is open' : hold ? 'The microphone is shut - hold Ctrl to speak' : 'The microphone is starting'}>
+          {listening ? <AudioOutlined style={{ color: '#1677ff' }} /> : <AudioMutedOutlined style={{ color: '#8c8c8c' }} />}
+        </Tooltip>
         <span style={{ ...DOT, background: listening ? '#26a69a' : '#595959' }} />
       </span>
       <span style={{ minWidth: 0, flex: 1, lineHeight: 1.3 }}>
         {!supported ? (
-          <span style={{ color: '#ff7875' }}>This browser cannot listen - Chrome or Safari can.</span>
+          <span style={{ color: '#ff7875' }}>This browser has no speech recognition - use Chrome, Edge or Safari (not Firefox or Brave).</span>
         ) : error ? (
           <span style={{ color: '#ff7875' }}>{error}</span>
         ) : (
           <>
             <span style={{ display: 'block', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {last || (listening ? 'Listening…' : 'Starting…')}
+              {asking ? 'Allow the microphone in the browser prompt…' : listening ? (last || 'Listening…') : (last || (hold ? 'Hold Ctrl and speak' : 'Starting…'))}
             </span>
             {heard && (
               <span style={{ display: 'block', color: '#8c8c8c', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -55,8 +57,11 @@ export function VoiceControl({ supported, on, listening, heard, last, error, onO
           <div style={{ maxWidth: 320, fontSize: 12 }}>
             {help.map((line) => <div key={line} style={{ marginBottom: 4 }}>{line}</div>)}
             <div style={{ marginTop: 6, color: '#bfbfbf' }}>
-              The browser does the listening (Chrome sends the audio to Google's speech service, Safari to Apple's) and only
-              while this is on. Voice never places, changes or closes an order.
+              {hold
+                ? 'Hold Ctrl while you speak - the microphone is shut the rest of the time, and another key (Ctrl + C) closes it at once.'
+                : 'The microphone is open the whole time Voice is ticked.'}
+              {' '}The browser does the listening (Chrome sends the audio to Google's speech service, Safari to Apple's).
+              Voice never places, changes or closes an order.
             </div>
           </div>
         )}

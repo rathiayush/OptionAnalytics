@@ -10,6 +10,32 @@
 // start), the longest phrase wins ("stop listening" before "stop", "option delta profile" before "delta profile"), and
 // number words become digits ("go to ten thirty" = 10:30).
 
+/** HOW IT LISTENS (asked for - "add ctrl then i should be able to speak it should not always hear us"):
+ *  'hold' (the default) = PUSH TO TALK, the microphone is live ONLY while Ctrl is held down; 'always' = it listens
+ *  the whole time Voice is ticked. */
+export const VOICE_MODES = [
+  { value: 'hold', label: 'Hold Ctrl', title: 'Push to talk: the microphone is live only while you hold Ctrl - nothing is heard the rest of the time.' },
+  { value: 'always', label: 'Always', title: 'The microphone listens the whole time Voice is ticked.' },
+]
+export const VOICE_MODE_DEFAULT = 'hold'
+export const voiceModeOf = (value) => (VOICE_MODES.some((m) => m.value === value) ? value : VOICE_MODE_DEFAULT)
+
+/** What a key event means for push to talk, so the rule is testable without a browser:
+ *  'start' - Ctrl (or ⌘) went down on its own: open the microphone;
+ *  'stop'  - it came up: close it;
+ *  'cancel'- another key went down while it was held (Ctrl + C, Ctrl + V ...): close it, take nothing;
+ *  null    - nothing to do (a repeat, a key typed in a box, any other key).
+ *  `typing` is quickViews.isTypingField(e.target) - in a text box Ctrl + A / C / V stay the box's. */
+export function pushToTalkKey(e, { typing = false, down = true, held = false } = {}) {
+  const isCtrl = e?.key === 'Control' || e?.key === 'Meta'
+  if (down) {
+    if (e?.repeat) return null
+    if (isCtrl) return typing ? null : 'start'
+    return held ? 'cancel' : null
+  }
+  return isCtrl && held ? 'stop' : null
+}
+
 /** The recogniser's language. Indian English first - it hears "nifty", "banknifty" and Indian digits far better than
  *  en-US, which heard "nifty" as "nifty"/"knifty" about half the time. */
 export const VOICE_LANG = 'en-IN'

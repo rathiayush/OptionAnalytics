@@ -528,11 +528,28 @@ All must pass before committing.
 - OI Replay's VOICE COMMANDS (asked for - "integrate voice command to start replay stop replay and open any card in popup
   or anything on oi page"): the "Voice" tick beside "Quick button" / "Replay bar" (`STORED_VOICE`
   `optionanalytics.oiReplay.voice`, OFF by default and LOCAL_ONLY - a microphone must never switch itself on because
-  another device was left listening) turns the browser's own SpeechRecognition on (`useVoiceCommands.js`: continuous, en-IN,
-  started again after each silence, backing off and finally giving up with a message rather than spinning, aborted on
-  unmount; the recogniser is never rebuilt mid-sentence - `onCommand` is read from a ref), and every finished sentence is
-  read by `voiceCommands.js` into ONE command (`parseVoiceCommand`): a phrase matches ANYWHERE in it ("okay now start the
-  replay please"), the LONGEST phrase wins ("stop listening" over "stop", "option delta profile" over "delta profile",
+  another device was left listening) turns the browser's own SpeechRecognition on (`useVoiceCommands.js`, en-IN; the
+  recogniser is never rebuilt mid-sentence - `onCommand` is read from a ref).
+  THE PERMISSION IS ASKED WHEN THE TICK IS TURNED ON (asked - "browser not asking for permission"): SpeechRecognition only
+  asks on its first start(), which on push to talk is the first Ctrl press - so ticking Voice seemed to do nothing. Ticking
+  now asks at once (`askForMicrophone`: getUserMedia, tracks stopped straight away - only for the browser's own prompt;
+  the pill says "Allow the microphone in the browser prompt...") and every failure is said on the pill: blocked (where to
+  click), no microphone, in use by another app, a page that is not https (the browser refuses the microphone there
+  silently - `isSecureContext`), a browser with no speech recognition (Firefox, Brave). A Ctrl pressed again before the
+  recogniser has finished stopping opens it the moment it has (`want` / `active` - it used to be dropped).
+  HOLD CTRL - PUSH TO TALK (asked for - "add ctrl then i should be able to speak it should not always hear us"): the
+  "Hold Ctrl / Always" picker beside the tick (`STORED_VOICE_MODE` `optionanalytics.oiReplay.voiceMode`, LOCAL_ONLY too,
+  'hold' BY DEFAULT) - on 'hold' the microphone is started on Ctrl (or ⌘) DOWN and stopped on its UP, so it is SHUT the
+  rest of the time (nothing is heard, and the recogniser is not even built until the first press); another key while Ctrl
+  is held (Ctrl + C, Ctrl + V) cancels at once, a Ctrl pressed in a text box is the box's, and a lost window or a hidden
+  tab shuts it too - the mic is never left open. 'always' is the old behaviour: it listens while the tick is on, started
+  again after each silence (Chrome stops after a few seconds even with `continuous`), backing off and finally giving up
+  with a message rather than spinning. The rule is pure and tested (`pushToTalkKey`). AS QUICK AS IT CAN BE (asked for -
+  "it should ultra quick"): a command is taken from the INTERIM text the moment the words are recognisable, not from the
+  final result that lands about a second after you stop speaking; each utterance fires at most once (`fired` by result
+  index, so the final that follows is ignored) and several commands can be said in one hold.
+  Each sentence is read by `voiceCommands.js` into ONE command (`parseVoiceCommand`): a phrase matches ANYWHERE in it
+  ("okay now start the replay please"), the LONGEST phrase wins ("stop listening" over "stop", "option delta profile" over "delta profile",
   "gex levels on spot" - the card - over "gex" - the popup), number words become digits ("go to ten thirty" = 10:30,
   "to" / "for" / "oh" deliberately NOT numbers), the engine's own alternatives are tried in order (its first guess at
   "gex" is often "jacks"), and the same final transcript twice within 1.2 s is one command. What can be said: the replay
@@ -547,13 +564,17 @@ All must pass before committing.
   says so when the page is live. IT NEVER TRADES: 'order' only OPENS the Paper / Live panel, which keeps its own confirm,
   and any sentence mentioning buy / sell / punch / place / square off is REFUSED outright (`VOICE_NEVER`) - it does not
   even switch the index it happened to name. The pill (`VoiceControl.jsx`, top right, below the header on a phone) shows
-  the mic state, what is being heard and the last command, with the list and the privacy line in its ⓘ: THE LISTENING IS
+  the mic state ("Hold Ctrl and speak" while it is shut), what is being heard and the last command, with the list and the
+  privacy line in its ⓘ: THE LISTENING IS
   THE BROWSER'S SERVICE (Chrome sends the audio to Google's, Safari to Apple's) - said on the tick and the pill, which is
   why it is off by default and runs only while ticked. Not in the popup-only host (`popupOnly` - the Profiles / Order Flow
   launchers must not open a microphone). `tests/voice-commands.test.mjs` (every phrase, the aliases, the numbers, the
   mishearings, the refusals, and that no command does anything but read the page / move the replay / open the panel);
   checked in a browser against a FAKE SpeechRecognition (start / stop / reset / goto / forward / back / faster / 2x, the
-  popups, a card scrolled to, the refusal, the order panel, "stop listening").
+  popups, a card scrolled to, the refusal, the order panel, "stop listening"), and push to talk end to end: ticked but
+  nothing held = the recogniser never started and nothing heard, Ctrl down = open, an INTERIM "open gex" opens the popup
+  at once and its final does not fire again, a second command in the same hold, Ctrl up = shut, Ctrl + C = shut,
+  "Always" = open with no key held.
 - WHATEVER IS SELECTED IS BLUE (asked for - "whatever is selected show them blue, it looks confusing on the UI; check all
   pages"): the app's ONE antd theme is `APP_THEME` in `appTheme.js` (main.jsx's ConfigProvider; a page's nested one - OI
   Replay's `COMPACT_TEXT_THEME` - merges into it): every Segmented picker's selected item (index, Paper / Live, Buy / Sell,

@@ -41,6 +41,7 @@ export const LOCAL_ONLY = new Set([
   'optionanalytics.tradeLevels.oiReplay.v1',
   // The microphone: a device left listening must not switch the mic on everywhere else (STORED_VOICE).
   'optionanalytics.oiReplay.voice',
+  'optionanalytics.oiReplay.voiceMode',
 ])
 
 const bytes = (text) => new TextEncoder().encode(text).length

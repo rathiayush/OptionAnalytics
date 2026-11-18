@@ -49,7 +49,7 @@ import { DexCard } from './DexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
 import { FAB_ACCENT, QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
-import { voiceCommandText, voiceHelpLines, voiceSpeed } from './voiceCommands.js'
+import { VOICE_MODES, voiceCommandText, voiceHelpLines, voiceModeOf, voiceSpeed } from './voiceCommands.js'
 import { useVoiceCommands } from './useVoiceCommands.js'
 import { VoiceControl } from './VoiceControl.jsx'
 import { floatingHost, useFloatingHost } from './floatingHost.js'
@@ -75,7 +75,7 @@ import { ABSORPTION_TIMEFRAMES, absorptionMarkers, oiAbsorptionEvents } from './
 import { foldAllText } from './useFold.js'
 import { DashboardGrid } from './DashboardGrid.jsx'
 import {
-  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED, STORED_VOICE,
+  STORED_COMPACT, STORED_CONTROLS_COLLAPSED, STORED_FREE_PLACEMENT, STORED_LAYOUT, STORED_ORDER_FAB, STORED_ORDER_FAB_ANCHOR, STORED_QUICK_FAB, STORED_QUICK_FAB_ANCHOR, STORED_REPLAY_BAR, STORED_SECTIONS, STORED_SIZED, STORED_VOICE, STORED_VOICE_MODE,
   STORED_DAY_READ_OPEN, STORED_LOOKBACK_OPEN, STORED_LAYOUT_VERSION, LAYOUT_VERSION, STORED_SECTIONS_VERSION, SECTIONS_VERSION, fitLayoutHeights, isStackedLayout, withAddedSections, WIDE_LAYOUT_PX,
   screenFromSearch, screenKey, nextScreen, MAX_SCREENS,
   isDefaultArrangement, presetLayout, reconcileGridLayout, reconcileSections, cardsARowChoices, SIX_A_ROW_PX, chartGrow
@@ -3707,6 +3707,8 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
   const [replayBarOn, setReplayBarOn] = usePersistedState(STORED_REPLAY_BAR, true)
   // VOICE COMMANDS (voiceCommands.js / useVoiceCommands.js) - off by default, this browser's own choice.
   const [voiceOn, setVoiceOn] = usePersistedState(STORED_VOICE, false)
+  // Push to talk on Ctrl by default - the microphone is shut the rest of the time.
+  const [voiceMode, setVoiceMode] = usePersistedState(STORED_VOICE_MODE, 'hold')
   const [voiceLast, setVoiceLast] = useState('')
   const [replayInlineEl, setReplayInlineEl] = useState(null)
   const replayInlineOnScreen = useOnScreen(replayInlineEl)
@@ -6244,7 +6246,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     }
     setVoiceLast(voiceCommandText(command))
   }
-  const voice = useVoiceCommands({ enabled: Boolean(voiceOn) && !popupOnly, onCommand: runVoiceCommand })
+  const voice = useVoiceCommands({ enabled: Boolean(voiceOn) && !popupOnly, onCommand: runVoiceCommand, mode: voiceModeOf(voiceMode) })
 
   // The Spot card's whole content, shared by its inline and floating placements (see spotFloating).
   // Built on every render now (it used to sit inside the page's own result-loaded branch), so it
@@ -6980,6 +6982,14 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                 >
                   <Checkbox checked={voiceOn} onChange={(e) => { setVoiceLast(''); setVoiceOn(e.target.checked) }}>Voice</Checkbox>
                 </Tooltip>
+                {voiceOn && (
+                  <Tooltip title={VOICE_MODES.map((m) => `${m.label} - ${m.title}`).join(' ')}>
+                    <Segmented
+                      size="small" value={voiceModeOf(voiceMode)} onChange={setVoiceMode}
+                      options={VOICE_MODES.map((m) => ({ value: m.value, label: m.label }))} aria-label="How voice listens"
+                    />
+                  </Tooltip>
+                )}
               </Space>
             )}
             {/* The dashboard: the cards tile into rows, each one as wide and as tall as it was dragged
@@ -7814,7 +7824,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
       {/* The voice pill (VoiceControl.jsx): the mic state, what the browser is hearing and the last command carried
           out - shown whenever Voice is on, a day loaded or not ("nifty" / "go live" work before one is). */}
       <VoiceControl
-        supported={voice.supported} on={Boolean(voiceOn) && !popupOnly} listening={voice.listening}
+        supported={voice.supported} on={Boolean(voiceOn) && !popupOnly} listening={voice.listening} hold={voice.hold} asking={voice.asking}
         heard={voice.heard} last={voiceLast} error={voice.error} onOff={() => setVoiceOn(false)}
       />
       {result && (
