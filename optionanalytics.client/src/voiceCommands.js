@@ -14,7 +14,7 @@
  *  'hold' (the default) = PUSH TO TALK, the microphone is live ONLY while Ctrl is held down; 'always' = it listens
  *  the whole time Voice is ticked. */
 export const VOICE_MODES = [
-  { value: 'hold', label: 'Hold Ctrl', title: 'Push to talk: the microphone is live only while you hold Ctrl - nothing is heard the rest of the time.' },
+  { value: 'hold', label: 'Hold to talk', title: 'Push to talk: the microphone is live only while you hold Ctrl (or the round mic button - the way on a phone) - nothing is heard the rest of the time.' },
   { value: 'always', label: 'Always', title: 'The microphone listens the whole time Voice is ticked.' },
 ]
 export const VOICE_MODE_DEFAULT = 'hold'
@@ -282,4 +282,21 @@ export function voiceCommandText(command) {
     case 'refused': return 'not by voice - an order is never placed or closed by voice'
     default: return command.kind
   }
+}
+
+/** What the pill says when it has nothing newer to say: how to speak. `touch` = a phone / tablet (no Ctrl key - the round
+ *  mic button is held instead). */
+export function voiceHint({ hold = true, touch = false, asking = false, listening = false, last = '' } = {}) {
+  if (asking) return 'Allow the microphone in the browser prompt…'
+  if (listening) return last || 'Listening…'
+  if (last) return last
+  if (!hold) return 'Starting…'
+  return touch ? 'Hold the mic button and speak' : 'Hold Ctrl and speak'
+}
+
+/** Whether this is a touch screen: no hover (a phone / tablet) or a narrow window - the same test the quick views use. */
+export function isTouchScreen(win = typeof window === 'undefined' ? null : window) {
+  if (!win) return false
+  try { if (win.matchMedia?.('(hover: none)').matches) return true } catch { /* no matchMedia */ }
+  return (win.innerWidth ?? 9999) <= 768
 }

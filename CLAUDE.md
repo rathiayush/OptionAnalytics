@@ -538,13 +538,19 @@ All must pass before committing.
   silently - `isSecureContext`), a browser with no speech recognition (Firefox, Brave). A Ctrl pressed again before the
   recogniser has finished stopping opens it the moment it has (`want` / `active` - it used to be dropped).
   HOLD CTRL - PUSH TO TALK (asked for - "add ctrl then i should be able to speak it should not always hear us"): the
-  "Hold Ctrl / Always" picker beside the tick (`STORED_VOICE_MODE` `optionanalytics.oiReplay.voiceMode`, LOCAL_ONLY too,
+  "Hold to talk / Always" picker beside the tick (`STORED_VOICE_MODE` `optionanalytics.oiReplay.voiceMode`, LOCAL_ONLY too,
   'hold' BY DEFAULT) - on 'hold' the microphone is started on Ctrl (or ⌘) DOWN and stopped on its UP, so it is SHUT the
   rest of the time (nothing is heard, and the recogniser is not even built until the first press); another key while Ctrl
   is held (Ctrl + C, Ctrl + V) cancels at once, a Ctrl pressed in a text box is the box's, and a lost window or a hidden
   tab shuts it too - the mic is never left open. 'always' is the old behaviour: it listens while the tick is on, started
   again after each silence (Chrome stops after a few seconds even with `continuous`), backing off and finally giving up
-  with a message rather than spinning. The rule is pure and tested (`pushToTalkKey`). AS QUICK AS IT CAN BE (asked for -
+  with a message rather than spinning. The rule is pure and tested (`pushToTalkKey`). ON A PHONE (asked - "how it works in
+  mobile?": there is no Ctrl key, so hold mode opened nothing): the pill carries a round MIC BUTTON (48 px on a touch
+  screen - `isTouchScreen`: no hover or <= 768 px) that is HELD to talk - the hook's `press()` / `release()` take the very
+  path Ctrl does (pointer capture, a long press is not a text selection or context menu), enabled once the microphone is
+  allowed (`ready`), and the pill reads "Hold the mic button and speak" (`voiceHint`). The pill sits ABOVE the quick-view
+  popups (`VOICE_Z` 1060 over antd's modal 1000): the button is how "close" is said on a phone, and a popup used to cover
+  it; the Voice tick's help tooltip is off on a touch screen (a tapped tooltip stays open, over the pill). AS QUICK AS IT CAN BE (asked for -
   "it should ultra quick"): a command is taken from the INTERIM text the moment the words are recognisable, not from the
   final result that lands about a second after you stop speaking; each utterance fires at most once (`fired` by result
   index, so the final that follows is ignored) and several commands can be said in one hold.
