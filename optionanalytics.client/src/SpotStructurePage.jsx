@@ -10,7 +10,7 @@ import { createZoomableChart } from './chartZoom.js'
 import { FoldText } from './FoldText.jsx'
 import { useViewport } from './useScreen.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
-import { DEFAULT_LAYERS, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, lowerThan, structureShapes } from './structureShapes.js'
+import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, lowerThan, structureShapes } from './structureShapes.js'
 
 const { Title, Text } = Typography
 
@@ -205,6 +205,9 @@ export default function SpotStructurePage() {
   const [layers, setLayers] = usePersistedState('optionanalytics.structure.layers', DEFAULT_LAYERS)
   // On a phone the twelve layer ticks fold behind one button (they took a whole screen).
   const [layersOpen, setLayersOpen] = usePersistedState('optionanalytics.structure.layersOpen', false)
+  // How much is drawn - Clean / Normal / Everything (DENSITY): every marking at once was unreadable.
+  const [densityPicked, setDensity] = usePersistedState('optionanalytics.structure.density', DEFAULT_DENSITY)
+  const density = DENSITY[densityPicked] ? densityPicked : DEFAULT_DENSITY
 
   const high = useStructureCandles(index, htf, htfDays)
   const low = useStructureCandles(index, ltf, ltfDays)
@@ -213,8 +216,8 @@ export default function SpotStructurePage() {
   const la = useMemo(() => analyzeStructure(low.data?.candles ?? [], opts), [low.data, opts])
   const read = useMemo(() => topDownRead(ha, la, { htf: TF_NAME[htf], ltf: TF_NAME[ltf] }), [ha, la, htf, ltf])
   const layerSet = useMemo(() => new Set(asList(layers)), [layers])
-  const htfShapes = useMemo(() => structureShapes(ha, [...layerSet].filter((k) => k !== 'htf')), [ha, layerSet])
-  const ltfShapes = useMemo(() => structureShapes(la, layerSet, { htf: ha }), [la, layerSet, ha])
+  const htfShapes = useMemo(() => structureShapes(ha, [...layerSet].filter((k) => k !== 'htf'), { density }), [ha, layerSet, density])
+  const ltfShapes = useMemo(() => structureShapes(la, layerSet, { htf: ha, density }), [la, layerSet, ha, density])
   const chartHeight = narrow ? 420 : Math.min(620, Math.max(420, Math.round(window.innerHeight * 0.6)))
 
   const card = (title, tf, data, a, shapes, days, setDays, daysPicked) => (
@@ -260,6 +263,10 @@ export default function SpotStructurePage() {
               <Space size={4}><Text style={{ fontSize: 12 }}>Internal</Text>
                 <Select value={internalLen} onChange={setInternalLen} style={{ width: 64 }} aria-label="Internal length" options={INTERNAL_CHOICES.map((v) => ({ value: v, label: v }))} />
               </Space>
+              <Space size={4}><Text style={{ fontSize: 12 }}>Detail</Text>
+                <Segmented value={density} onChange={setDensity} aria-label="Detail"
+                  options={Object.entries(DENSITY).map(([key, v]) => ({ value: key, label: v.label }))} />
+              </Space>
             </Space>
             {narrow && (
               <Button size="small" onClick={() => setLayersOpen(!layersOpen)} aria-expanded={layersOpen}>
@@ -288,7 +295,7 @@ export default function SpotStructurePage() {
             <Text strong style={{ fontSize: 15, color: sideColor(read.side) }}>{read.verdict}</Text>
             {read.lines.map((l, k) => <Text key={k} style={{ fontSize: 12 }}>{l}</Text>)}
             <Text type="secondary" style={{ fontSize: 11 }}>
-              {`On the ${TF_NAME[ltf]} chart the ${TF_NAME[htf]}'s S/R, swing order blocks and dealing range are drawn in light blue (HTF). A read of the chart - not a signal.`}
+              {`On the ${TF_NAME[ltf]} chart the ${TF_NAME[htf]}'s S/R, swing order blocks and dealing range are drawn in light blue (HTF). "Detail" sets how much is drawn; where two labels would overlap only the more important one is kept, so the rest of the reading is in the lines under each chart. A read of the chart - not a signal.`}
             </Text>
           </Space>
         </Card>
