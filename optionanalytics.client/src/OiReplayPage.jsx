@@ -49,7 +49,7 @@ import { DexCard } from './DexCard.jsx'
 import { useGexDays } from './useGexDays.js'
 import { HEDGER_DEFAULT, participantShares } from './participantOi.js'
 import { FAB_ACCENT, QUICK_VIEWS, QUICK_VIEW_KEYS_TEXT, quickViewForKey, isTypingField } from './quickViews.js'
-import { VOICE_MODES, voiceCommandText, voiceHelpLines, voiceModeOf, voiceSpeed } from './voiceCommands.js'
+import { VOICE_MODES, isTouchScreen, voiceCommandText, voiceHelpLines, voiceModeOf, voiceSpeed } from './voiceCommands.js'
 import { useVoiceCommands } from './useVoiceCommands.js'
 import { VoiceControl } from './VoiceControl.jsx'
 import { floatingHost, useFloatingHost } from './floatingHost.js'
@@ -6966,8 +6966,9 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                 <Tooltip title="On a replayed day, the replay controls (Start / Pause, Reset, the slider, the speed) as a slim bar floating at the bottom of the window once the Spot card's own controls are scrolled out of sight - the same controls, so either works.">
                   <Checkbox checked={replayBarOn} onChange={(e) => setReplayBarOn(e.target.checked)}>Replay bar</Checkbox>
                 </Tooltip>
+                {/* No tooltip on a touch screen: a tapped one stays open, over the voice pill (and its mic button). */}
                 <Tooltip
-                  title={(
+                  title={isTouchScreen() ? undefined : (
                     <div style={{ maxWidth: 340, fontSize: 12 }}>
                       <div style={{ marginBottom: 4 }}>Run the page by voice. Say:</div>
                       {voiceHelpLines().map((line) => <div key={line} style={{ marginBottom: 3 }}>{line}</div>)}
@@ -6983,7 +6984,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   <Checkbox checked={voiceOn} onChange={(e) => { setVoiceLast(''); setVoiceOn(e.target.checked) }}>Voice</Checkbox>
                 </Tooltip>
                 {voiceOn && (
-                  <Tooltip title={VOICE_MODES.map((m) => `${m.label} - ${m.title}`).join(' ')}>
+                  <Tooltip title={isTouchScreen() ? undefined : VOICE_MODES.map((m) => `${m.label} - ${m.title}`).join(' ')}>
                     <Segmented
                       size="small" value={voiceModeOf(voiceMode)} onChange={setVoiceMode}
                       options={VOICE_MODES.map((m) => ({ value: m.value, label: m.label }))} aria-label="How voice listens"
@@ -7824,7 +7825,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
       {/* The voice pill (VoiceControl.jsx): the mic state, what the browser is hearing and the last command carried
           out - shown whenever Voice is on, a day loaded or not ("nifty" / "go live" work before one is). */}
       <VoiceControl
-        supported={voice.supported} on={Boolean(voiceOn) && !popupOnly} listening={voice.listening} hold={voice.hold} asking={voice.asking}
+        supported={voice.supported} on={Boolean(voiceOn) && !popupOnly} listening={voice.listening} hold={voice.hold} asking={voice.asking} ready={voice.ready} onPress={voice.press} onRelease={voice.release}
         heard={voice.heard} last={voiceLast} error={voice.error} onOff={() => setVoiceOn(false)}
       />
       {result && (

@@ -3,7 +3,7 @@
 import { QUICK_VIEWS } from '../src/quickViews.js'
 import {
   VOICE_CARDS, VOICE_MODES, VOICE_MODE_DEFAULT, VOICE_NEVER, VOICE_VIEWS, normalizeSpeech, parseVoiceCommand,
-  pushToTalkKey, saidPhrase, voiceCommandText, voiceHelpLines, voiceModeOf, voiceSpeed,
+  isTouchScreen, pushToTalkKey, saidPhrase, voiceCommandText, voiceHelpLines, voiceHint, voiceModeOf, voiceSpeed,
 } from '../src/voiceCommands.js'
 
 let fails = 0
@@ -155,6 +155,21 @@ const is = (said, want) => check(`"${said}" -> ${json(want)}`, json(parseVoiceCo
   check('a letter released does nothing', pushToTalkKey({ key: 'c' }, { down: false, held: true }) === null)
   check('"hold" is the default mode', VOICE_MODE_DEFAULT === 'hold' && voiceModeOf(undefined) === 'hold' && voiceModeOf('nonsense') === 'hold')
   check('"always" is the only other one', voiceModeOf('always') === 'always' && VOICE_MODES.length === 2)
+}
+
+// 10. THE MIC BUTTON (a phone has no Ctrl key): what the pill says, and what counts as a touch screen.
+{
+  check('desktop, shut: hold Ctrl', voiceHint({ hold: true, touch: false }) === 'Hold Ctrl and speak')
+  check('phone, shut: hold the mic button', voiceHint({ hold: true, touch: true }) === 'Hold the mic button and speak')
+  check('asking beats everything', voiceHint({ asking: true, listening: true, last: 'x' }) === 'Allow the microphone in the browser prompt…')
+  check('listening with nothing done yet', voiceHint({ listening: true }) === 'Listening…')
+  check('listening shows the last command', voiceHint({ listening: true, last: 'open gex' }) === 'open gex')
+  check('shut, the last command stays', voiceHint({ hold: true, last: 'close' }) === 'close')
+  check('always mode, starting', voiceHint({ hold: false }) === 'Starting…')
+  check('no hover = touch', isTouchScreen({ matchMedia: () => ({ matches: true }), innerWidth: 1600 }) === true)
+  check('a narrow window = touch', isTouchScreen({ matchMedia: () => ({ matches: false }), innerWidth: 390 }) === true)
+  check('a mouse on a wide window is not', isTouchScreen({ matchMedia: () => ({ matches: false }), innerWidth: 1600 }) === false)
+  check('no window is not', isTouchScreen(null) === false)
 }
 
 console.log(fails ? `${fails} FAILED` : 'all passed')

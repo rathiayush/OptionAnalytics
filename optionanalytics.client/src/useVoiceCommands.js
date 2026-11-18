@@ -20,6 +20,11 @@ import { isTypingField } from './quickViews.js'
 // it has (it used to be dropped - "nothing happens"). 'always' keeps the old behaviour: it listens while the tick is
 // on and restarts after each silence (Chrome stops after a few seconds even with `continuous`).
 //
+// HOLD THE MIC BUTTON (asked for - a phone has no Ctrl key): `press()` / `release()` - the pill's round mic button
+// calls them on pointer down / up and they take the very same path as Ctrl (open on press, stop on release; a lost
+// window, a hidden tab or another key shuts it), so push to talk works with a finger too. Ready only once the
+// microphone has been allowed.
+//
 // AS QUICK AS IT CAN BE (asked for - "it should ultra quick"): the command is taken from the INTERIM text, the moment
 // the words are recognisable - not from the final result, which lands about a second after you stop speaking. Each
 // utterance fires at most once (`fired`), so the final that follows is ignored, and while Ctrl is still down the next
@@ -56,6 +61,8 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
   const [supported] = useState(() => Boolean(Recognition()))
   const [listening, setListening] = useState(false)      // the microphone is open right now
   const [asking, setAsking] = useState(false)            // waiting for the browser's permission prompt
+  const [ready, setReady] = useState(false)              // push to talk is wired up (the microphone is allowed)
+  const talk = useRef(null)                              // { press, release } while ready
   const [heard, setHeard] = useState('')                 // what the engine is hearing (interim), for the pill
   const [error, setError] = useState(null)
   const handler = useRef(onCommand)
@@ -163,6 +170,9 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
       if (what === 'stop') { ctrlDown = false; close(false) }   // stop(), not abort(): a sentence still being read is finished
     }
     const onAway = () => { if (ctrlDown) { ctrlDown = false; close(true) } }
+    // The mic button: the same hold as Ctrl's.
+    const press = () => { if (!ctrlDown) { ctrlDown = true; open() } }
+    const release = () => { if (ctrlDown) { ctrlDown = false; close(false) } }
 
     // Ask for the microphone first (its prompt), then listen.
     setAsking(true)
@@ -172,11 +182,14 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
       setAsking(false)
       if (problem) { setError(problem); return }
       if (hold) {
+        talk.current = { press, release }
+        setReady(true)
         window.addEventListener('keydown', onKeyDown)
         window.addEventListener('keyup', onKeyUp)
         window.addEventListener('blur', onAway)
         document.addEventListener('visibilitychange', onAway)
         cleanup = () => {
+          talk.current = null
           window.removeEventListener('keydown', onKeyDown)
           window.removeEventListener('keyup', onKeyUp)
           window.removeEventListener('blur', onAway)
@@ -190,6 +203,7 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
       stopped = true
       if (timer) clearTimeout(timer)
       cleanup()
+      talk.current = null
       rec.onstart = null
       rec.onend = null
       rec.onerror = null
@@ -197,13 +211,17 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
       rec.onaudiostart = null
       try { rec.abort() } catch { /* never started */ }
       setAsking(false)
+      setReady(false)
     }
   }, [enabled, lang, hold])
 
   const clearError = useCallback(() => setError(null), [])
+  const press = useCallback(() => talk.current?.press(), [])
+  const release = useCallback(() => talk.current?.release(), [])
   // Read as off while the tick is off, whatever the last run left behind.
   return {
     supported, hold, asking: Boolean(enabled) && asking, listening: Boolean(enabled) && listening,
     heard: enabled ? heard : '', error: enabled ? error : null, clearError,
+    ready: Boolean(enabled) && hold && ready, press, release,
   }
 }
