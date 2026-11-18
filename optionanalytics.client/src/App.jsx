@@ -11,6 +11,7 @@ import OiReplayPage from './OiReplayPage.jsx'
 import GlobalFloating from './GlobalFloating.jsx'
 import OrderFlowPage from './OrderFlowPage.jsx'
 import ProfilesPage from './ProfilesPage.jsx'
+import SpotStructurePage from './SpotStructurePage.jsx'
 import SignalBacktestPage from './SignalBacktestPage.jsx'
 import TelegramSignalsPage from './TelegramSignalsPage.jsx'
 import LiveStrikeDataPage from './LiveStrikeDataPage.jsx'
@@ -1822,6 +1823,7 @@ export default function App() {
         <Route path="/oi-replay" element={<OiReplayPage />} />
         <Route path="/order-flow" element={<OrderFlowPage />} />
         <Route path="/profiles" element={<ProfilesPage />} />
+        <Route path="/structure" element={<SpotStructurePage />} />
         <Route path="/signal-backtest" element={<SignalBacktestPage />} />
         <Route path="/telegram-signals" element={<TelegramSignalsPage />} />
         <Route path="/live-strike-data" element={<LiveStrikeDataPage />} />

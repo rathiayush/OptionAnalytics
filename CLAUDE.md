@@ -823,6 +823,40 @@ All must pass before committing.
   appFabs>`: it reads their ticks / anchors (OI Replay's preferences) at every render and starts right of the quick button /
   ends left of the order button as on OI Replay (it sat UNDER the quick button); both pages keep 120 px at their bottom; on
   a phone the Order Flow bar leaves out −1m / +1m (no room beside the button - the speed was cut off).
+- The SPOT STRUCTURE page (`/structure`, "Spot structure" in the menu - `SpotStructurePage.jsx`; asked for - "a page which will
+  only talk about spot structure, I choose higher and lower timeframe, Day / 4 hr / 1 hr ... automatically identify structure,
+  trendline, support resistance, patterns, internal / external market structure, change of character, BOS"): an index's SPOT
+  on a HIGHER and a LOWER timeframe (Day, 4H, 1H, 15m, 5m, 3m, 1m - the lower always under the higher, `lowerThan`; each its
+  own "History" in days - `HISTORY_CHOICES` / `TIMEFRAMES` in `structureShapes.js`; all account preferences
+  `optionanalytics.structure.*`). THE CANDLES: `GET /api/structure/{u}/candles?tf=&days=` (`StructureController`,
+  `SpotStructureService`): the PAST days through `DhanHistoricalDataService.GetIntradayCandlesAsync` - so the disk cache (a
+  file a day) after the first load, Dhan asked at most `ChunkDays` 80 calendar days a call (its intraday limit is 90), the
+  window ending on the last WEEKDAY before today (a weekend after the last session is never kept on disk, so a window ending
+  on it went to Dhan at every load) - read at Dhan's 60-minute interval for Day / 4H / 1H (one held set shared by the three),
+  15 / 5 for those, 1 for 3m / 1m, and HELD IN MEMORY for the IST day (a past day never changes; a failure is not held -
+  the next load asks again); TODAY from `OiReplayService.GetSpotDayAsync` (the spot feed's memory, no Dhan call, or the
+  day's one shared fetch), from 09:15 on weekdays. Bucketed on the SESSION from 09:15 IST (`Aggregate`: a 4H candle is
+  09:15 - 13:15 and 13:15 - 15:30, as TradingView draws NSE; an hour 09:15 - 10:15 ...; a day the session), minutes outside
+  09:15 - 15:29 and repeated minutes left out (`SpotStructureServiceTests.cs`). The page loads a chart on a change and again
+  EVERY MINUTE while today is in it (a page timer, `POLL_HEADERS` - the past from memory), a failed load waiting longer each
+  time (1 min doubling to 30). THE READ (`marketStructure.js`, pure, `tests/market-structure.test.mjs`): PIVOTS higher /
+  lower than `len` candles each side, known `len` candles later - nothing is read from candles after the one it is shown on
+  (a cut chart = the whole one up to the cut, held by the test); STRUCTURE twice, EXTERNAL (Swing length, 5 - 50, default
+  10) and INTERNAL (2 / 3 / 5, default 3): a CLOSE past the last unbroken pivot = BOS with the trend, CHoCH against it (an
+  internal break on the same level and bar as an external one is the external one's), HH / HL / LH / LL; SWEEPS (a wick past
+  the swing high / low closing back inside), EQUAL HIGHS / LOWS (internal pivots within 0.1 ATR, taken / swept), ORDER
+  BLOCKS (the lowest / highest candle from the broken pivot to the break, mitigated by a close through it), FAIR VALUE GAPS
+  (>= 0.15 ATR, filled when traded back across), STRONG / WEAK high and low, the DEALING RANGE's premium / discount
+  (47.5 - 52.5% equilibrium), S/R ZONES (pivots within 0.5 ATR, two turns or more), TRENDLINES (rising lows / falling highs
+  no close crossed between them, the most touches unbroken, else the last broken), CHART PATTERNS on the alternating swings
+  (double top / bottom, head & shoulders and inverse, ascending / descending / symmetrical triangles, rising / falling
+  wedges, channels, range - confirmed by a close through the neckline / boundary, failed the other way, with a target); the
+  TOP-DOWN read (`topDownRead`: the higher TF's swing trend and premium / discount against the lower TF's structure -
+  aligned / pullback - wait for the lower TF's CHoCH / against). DRAWN (`structureShapes` + `StructurePrimitive`, bar
+  indices as x so it follows scroll and zoom): twelve layers ticked (`STRUCTURE_LAYERS`, all on by default; on a phone behind
+  a "Layers" button), the higher TF's S/R, swing order blocks and dealing range across the lower chart in light blue; only the
+  newest internal breaks labelled; a summary under each chart (trend tags, last breaks, range, strong / weak, S/R, trendlines,
+  patterns, order blocks, gaps, liquidity). A read of the chart - it places nothing and feeds no alert or strategy.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
   I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone
