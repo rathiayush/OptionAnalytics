@@ -76,6 +76,51 @@ export function aggregateBars(minuteBars, timeframeMinutes) {
   }
 }
 
+// COT READ - bullish / bearish from a bar's COT high / low (aggregateBars' cotHigh / cotLow), as the footprint platforms that
+// show COT (Sierra Chart's Numbers Bars, ATAS, Exocharts) are read: what the aggressors did AFTER the extreme, against where
+// the bar then CLOSED (its close's place in its range, 0 = the low, 1 = the high). A COT counts only when it is at least
+// COT_SHARE of the bar's volume (a few lots after the high mean nothing). At the HIGH: sellers took over after it and the bar
+// closed in its lower half = REJECTED AT THE HIGH (bearish); buyers kept lifting after it yet the bar closed in its lower
+// half = BUYERS TRAPPED / ABSORBED (bearish - passive sellers took it all); buyers kept lifting and the bar closed in its top
+// 30% = BUYERS STILL PUSHING (bullish continuation). The LOW is the mirror. A bar with reads both ways takes the one with the
+// larger COT for its volume (an equal pair = no read). Returns null or { side: 'bullish' | 'bearish', kind, end: 'high' |
+// 'low', price, cot, share, text }.
+export const COT_SHARE = 0.2
+const COT_KINDS = {
+  rejectedHigh: { side: 'bearish', end: 'high', text: 'rejected at the high - sellers took over after it' },
+  trappedHigh: { side: 'bearish', end: 'high', text: 'buyers trapped at the high - they kept buying after it, price still fell back (absorbed)' },
+  pushingHigh: { side: 'bullish', end: 'high', text: 'buyers still pushing at the high - closed near it' },
+  rejectedLow: { side: 'bullish', end: 'low', text: 'rejected at the low - buyers took over after it' },
+  trappedLow: { side: 'bullish', end: 'low', text: 'sellers trapped at the low - they kept selling after it, price still bounced (absorbed)' },
+  pushingLow: { side: 'bearish', end: 'low', text: 'sellers still pushing at the low - closed near it' },
+}
+export function cotRead(bar, share = COT_SHARE) {
+  const volume = (bar?.buy ?? 0) + (bar?.sell ?? 0)
+  const range = (bar?.high ?? 0) - (bar?.low ?? 0)
+  if (!(volume > 0) || !(range > 0)) return null
+  const pos = (bar.close - bar.low) / range
+  const min = share * volume
+  const reads = []
+  const add = (kind, cot) => reads.push({ ...COT_KINDS[kind], kind, cot, share: Math.abs(cot) / volume })
+  const h = bar.cotHigh
+  const l = bar.cotLow
+  if (h != null) {
+    if (h <= -min && pos <= 0.5) add('rejectedHigh', h)
+    else if (h >= min && pos <= 0.5) add('trappedHigh', h)
+    else if (h >= min && pos >= 0.7) add('pushingHigh', h)
+  }
+  if (l != null) {
+    if (l >= min && pos >= 0.5) add('rejectedLow', l)
+    else if (l <= -min && pos >= 0.5) add('trappedLow', l)
+    else if (l <= -min && pos <= 0.3) add('pushingLow', l)
+  }
+  if (!reads.length) return null
+  reads.sort((a, b) => b.share - a.share)
+  const [best, next] = reads
+  if (next && next.side !== best.side && next.share === best.share) return null
+  return { ...best, price: best.end === 'high' ? bar.high : bar.low }
+}
+
 export const DEFAULT_ANALYSIS = {
   imbalanceRatio: 3, // 300%
   stackedCount: 3,

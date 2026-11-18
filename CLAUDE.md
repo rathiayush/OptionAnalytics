@@ -1547,6 +1547,15 @@ All must pass before committing.
   day saved before it, even when traded on after). `aggregateBars` adds the minutes up EXACTLY for 3 / 5 / 15 min: the
   minute that FIRST reached the bar's high brings its own count, every later minute its whole delta (an equal high is not
   a new one); such a minute with none = the bar none (`OrderFlowCotTests.cs`, `tests/order-flow-cot.test.mjs`).
+  THE COT READ - BULLISH / BEARISH (asked for - "show bullish or bearish ... how institutional platforms use it"; `cotRead` /
+  `COT_SHARE` in `orderFlowMath.js`): as the footprint platforms showing COT (Sierra Chart's Numbers Bars, ATAS, Exocharts)
+  are read - what the aggressors did AFTER the extreme against where the bar CLOSED (its place in its range), a COT counting
+  only at >= 20% of the bar's volume: at the HIGH, sellers after it + closed in the lower half = REJECTED (bearish), buyers
+  after it + closed in the lower half = BUYERS TRAPPED / absorbed (bearish), buyers after it + closed in the top 30% = STILL
+  PUSHING (bullish); the LOW the mirror; reads both ways = the larger COT for the volume, an equal pair none. Drawn as a pill
+  outside the extreme (green "COT ▲" / red "COT ▼", at the end the read is about), a legend entry, and a line under the
+  footprint (`CotReadLine`: the newest read with its reason, COT and share, "bar still forming" live, and the bullish /
+  bearish count on screen). With the "COT" tick. A read - no alert, strategy or order (`tests/order-flow-cot.test.mjs`).
   THE LIQUIDITY HEATMAP (`DepthHeatmap` in `OrderFlowCharts.jsx` - the Order Flow page's and the External page's; asked
   for - "can we improve the liquidity heatmap on the data we have captured"; the rules pure in `heatmapLayout.js`,
   `tests/heatmap-layout.test.mjs`): each book column sits at its TIME and runs to the next (`columnSpans`) - the columns are

@@ -8,7 +8,7 @@ import * as signalR from '@microsoft/signalr'
 import {
   NavBar, TIMEFRAME_OPTIONS, usePersistedState, RECONNECT_RETRY_POLICY, onLiveBatch, syncSignalRGroups, joinAllSignalRGroups,
   checkForNewDeploy, UP_COLOR, DOWN_COLOR, AXIS_COLOR, useAuth } from './shared.jsx'
-import { aggregateBars, analyzeBars, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap, heatmapFetchRow, rebucketColumns, rowsNest } from './orderFlowMath.js'
+import { aggregateBars, analyzeBars, cotRead, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap, heatmapFetchRow, rebucketColumns, rowsNest } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { useDayOi } from './useDayOi.js'
 import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './oiContext.js'
@@ -130,6 +130,31 @@ function OrderFlowRead({ bias }) {
 // and wrapping inside the card when they do not - the longest ("unfinished auction ...") did not wrap and made the page
 // wider than a phone, which then drew the whole page shrunk. On a phone (`narrow`) the legend is ONE line until opened
 // (`open` / `onToggle` - remembered): its ten lines came before the chart.
+// The newest COT read on the footprint (cotRead) and how many bullish / bearish reads the bars on screen hold - the line
+// under the chart, so a phone sees it without finding the pill. Live, the newest bar is still forming: its read can change.
+function CotReadLine({ bars, lotSize, showLots, live }) {
+  const reads = useMemo(() => (bars ?? []).map((bar) => ({ bar, read: cotRead(bar) })).filter((r) => r.read), [bars])
+  if (!bars?.length) return null
+  const last = reads.at(-1)
+  const bulls = reads.filter((r) => r.read.side === 'bullish').length
+  const forming = live && last && last.bar === bars.at(-1)
+  const fmt = (v) => `${v >= 0 ? '+' : ''}${formatVolume(v, lotSize, showLots)}${showLots ? ' lots' : ''}`
+  return (
+    <Text style={{ fontSize: 12, display: 'block' }}>
+      <b>COT read: </b>
+      {last ? (
+        <>
+          <span style={{ color: last.read.side === 'bullish' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>
+            {last.read.side === 'bullish' ? '▲ BULLISH' : '▼ BEARISH'}
+          </span>
+          {` ${IST_HHMMSS.format(new Date(last.bar.time)).slice(0, 5)} - ${last.read.text} (COT ${last.read.end === 'high' ? 'H' : 'L'} ${fmt(last.read.cot)}, ${Math.round(last.read.share * 100)}% of the bar)${forming ? ' · bar still forming' : ''}`}
+        </>
+      ) : 'none on these bars'}
+      <Text type="secondary" style={{ fontSize: 11 }}>{` · on screen ${bulls} bullish / ${reads.length - bulls} bearish`}</Text>
+    </Text>
+  )
+}
+
 function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = false, cot = false, narrow = false, open = true, onToggle = null }) {
   const item = (swatch, label) => (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginRight: 14, maxWidth: '100%', verticalAlign: 'top' }}>
@@ -164,6 +189,7 @@ function FootprintLegend({ estimated, bigLabel, rowDelta = false, auctions = fal
       {rowDelta && item(<span style={{ display: 'inline-flex' }}>{box('#26a69aaa')}{box('#ef5350aa')}</span>, 'delta per row (buy − sell), third column')}
       {item(<span style={{ fontWeight: 700 }}>Δ / ΣΔ</span>, 'delta / cumulative delta under each bar')}
       {cot && !estimated && item(<span style={{ fontWeight: 700 }}>COT H / L</span>, 'delta traded after the bar\'s last new high / low')}
+      {cot && !estimated && item(<span style={{ display: 'inline-flex', gap: 2 }}>{pill(UP_COLOR, 'COT ▲')}{pill(DOWN_COLOR, 'COT ▼')}</span>, 'COT read: bullish under the low / bearish over the high')}
       {narrow && <button type="button" className="oa-of-fold-toggle" onClick={onToggle} aria-expanded>▾ Hide the legend</button>}
     </div>
   )
@@ -933,6 +959,7 @@ export default function OrderFlowPage() {
                 profile={profile} runningProfile={showProfile ? todayVp : null} trades={largeTrades} timeframe={timeframe} bigLabel={bigLabel} alerts={priceAlerts.alerts} levels={suddenLevels} vwap={footprintVwap}
                 rowDelta={rowDelta} auctions={showAuctions && !estimated} cot={showCot}
               />
+              {showCot && !estimated && <CotReadLine bars={shown.bars} lotSize={lotSize} showLots={showLots} live={!isReplay} />}
               {profile?.poc != null && (
                 <Text type="secondary" style={{ fontSize: 11 }}>
                   Volume profile of the previous session ({prevSession.data?.date}): POC {profile.poc} · value area {profile.val}–{profile.vah} (70% of volume)

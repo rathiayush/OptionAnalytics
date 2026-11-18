@@ -6,7 +6,7 @@ import { UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR, toChartTime
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { useElementWidth, prepareCanvas } from './canvasUtils.js'
 import { PREV_PROFILE, RUNNING_PROFILE } from './profileColors.js'
-import { bidShare, heatmapPriceRange, rowDeltas, rowOf, unfinishedRevisits } from './orderFlowMath.js'
+import { bidShare, cotRead, heatmapPriceRange, rowDeltas, rowOf, unfinishedRevisits } from './orderFlowMath.js'
 import { bestQuotes, cobBars, columnAt, columnSpans, gapAt, heatLevel, heatScale, placeLabels, restingSince, volumeDots } from './heatmapLayout.js'
 import { checkpoints, checkpointStep } from './halfHourMarks.js'
 import { footprintTextLayout } from './footprintText.js'
@@ -366,6 +366,28 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
           ctx.fillStyle = unfinished ? UA_COLOR : FA_COLOR
           ctx.fillText(unfinished ? 'UA' : 'FA', cellX + cellsW / 2, side === 'high' ? top - 6 : top + rowH + 6)
           ctx.textAlign = 'left'
+        }
+      }
+      // The COT read (cotRead): a green "COT ▲" pill under the bar's low / a red "COT ▼" pill over its high - outside the
+      // FA / UA tag, at the end the read is about.
+      if (cot) {
+        const read = cotRead(bar)
+        if (read) {
+          const top = rowTop(Math.round(Math.floor(read.price / step + 1e-9) * step * 100) / 100)
+          const text = `COT ${read.side === 'bullish' ? '▲' : '▼'}`
+          ctx.font = `700 10px ${FONT}`
+          const w = ctx.measureText(text).width + 8
+          const pillX = Math.max(x0 + 1, Math.min(barsW - w - 1, cellX + cellsW / 2 - w / 2))
+          const pillY = read.end === 'high' ? top - 28 : top + rowH + 14
+          ctx.fillStyle = read.side === 'bullish' ? UP_COLOR : DOWN_COLOR
+          ctx.beginPath()
+          if (ctx.roundRect) ctx.roundRect(pillX, pillY, w, 14, 3)
+          else ctx.rect(pillX, pillY, w, 14)
+          ctx.fill()
+          ctx.fillStyle = '#fff'
+          ctx.textAlign = 'left'
+          ctx.textBaseline = 'middle'
+          ctx.fillText(text, pillX + 4, pillY + 7.5)
         }
       }
       ctx.restore()
