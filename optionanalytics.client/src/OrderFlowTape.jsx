@@ -9,10 +9,10 @@ const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 const MAX_ROWS = 150
 
 // Tape reading: who is aggressive (market orders bought at the offer vs sold at the bid, over 30s / 1m
-// / 5m, and how fast the tape runs), what resting limit orders are doing near price (pulled vs
-// stacked), and the Time & Sales prints themselves - big prints bold, prints that were part of a sweep
-// marked ⚡.
-export function TapeCard({ prints, aggression, pressure, sweeps, lotSize, largeLots, error, estimated }) {
+// / 5m, and how fast the tape runs) and the Time & Sales prints themselves - big prints bold, prints
+// that were part of a sweep marked ⚡. (The one-line book read that stood here was removed on request;
+// what resting orders do near price is the heatmap's PULL / STACK signals.)
+export function TapeCard({ prints, aggression, sweeps, lotSize, largeLots, error, estimated }) {
   const [minLots, setMinLots] = useState(1)
   const [bigOnly, setBigOnly] = useState(false)
   const rows = useMemo(() => {
@@ -50,7 +50,6 @@ export function TapeCard({ prints, aggression, pressure, sweeps, lotSize, largeL
       ) : (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
           <AggressionMeter windows={aggression} lotSize={lotSize} />
-          {pressure && <BookPressure pressure={pressure} />}
           {error && <Text type="secondary" style={{ fontSize: 11 }}>{error}</Text>}
           {recentSweeps.length > 0 && (
             <div aria-label="Sweeps" style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>
@@ -129,30 +128,5 @@ function AggressionMeter({ windows, lotSize }) {
         )
       })}
     </div>
-  )
-}
-
-function BookPressure({ pressure }) {
-  const line = (label, s, bullishWhenPulled) => {
-    const net = s.added - s.removed
-    const pulling = s.removed > s.added
-    // A small net change either way is just the book breathing.
-    const steady = Math.abs(net) < Math.max(1, 0.1 * s.usual)
-    const color = steady ? AXIS_COLOR : (pulling === bullishWhenPulled ? UP_COLOR : DOWN_COLOR)
-    return (
-      <span>
-        {label} <span style={{ color: UP_COLOR }}>+{s.added.toLocaleString('en-IN')}</span> / <span style={{ color: DOWN_COLOR }}>−{s.removed.toLocaleString('en-IN')}</span>
-        {' '}<span style={{ color, fontWeight: 600 }}>{steady ? 'steady' : pulling ? 'pulling' : 'stacking'}</span>
-      </span>
-    )
-  }
-  return (
-    <Tooltip title={`Resting limit orders added (+) and pulled (−) near price over the last ${Math.round(pressure.windowMs / 1000)}s, in lots - only rows away from the touch, so this is orders placed/cancelled, not trades. Usual near-touch depth: bids ~${pressure.bid.usual.toLocaleString('en-IN')}, offers ~${pressure.ask.usual.toLocaleString('en-IN')} lots.`}>
-      <div style={{ fontSize: 11, display: 'flex', gap: 14, flexWrap: 'wrap' }} aria-label="Book pressure">
-        <Text type="secondary" style={{ fontSize: 11 }}>Book {Math.round(pressure.windowMs / 1000)}s:</Text>
-        {line('bids', pressure.bid, false)}
-        {line('offers', pressure.ask, true)}
-      </div>
-    </Tooltip>
   )
 }

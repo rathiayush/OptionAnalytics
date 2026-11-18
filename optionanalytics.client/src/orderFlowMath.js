@@ -850,13 +850,13 @@ export function sweepSignals(sweeps, lotSize = 1) {
 // depth, at least `minLots` lots and `dominance` x the opposite change, is a signal:
 //   bids pulled = support withdrawn (bearish) · offers pulled = resistance withdrawn (bullish)
 //   bids stacked = support building (bullish) · offers stacked = resistance building (bearish)
-// Returns { signals, pressure } - pressure: the last window's added/removed per side vs the usual depth.
+// Returns { signals }.
 export const PULL_STACK_DEFAULTS = { bandRows: 10, windowMs: 20_000, factor: 0.35, minLots: 20, dominance: 2, maxGapMs: 60_000 }
 
 export function pullStackSignals({ columns, rowSize, lotSize = 1, ...options }) {
   const { bandRows, windowMs, factor, minLots, dominance, maxGapMs } = { ...PULL_STACK_DEFAULTS, ...options }
   const step = rowSize > 0 ? rowSize : 0.05
-  const empty = { signals: [], pressure: null }
+  const empty = { signals: [] }
   if (!columns || columns.length < 3) return empty
   const key = (p) => Math.round(p / step)
   const lots = (q) => Math.round(q / Math.max(1, lotSize))
@@ -937,12 +937,7 @@ export function pullStackSignals({ columns, rowSize, lotSize = 1, ...options }) 
       }
     }
   }
-  const pressure = {
-    windowMs,
-    bid: { added: lots(win.bid.added), removed: lots(win.bid.removed), usual: lots(baseBid) },
-    ask: { added: lots(win.ask.added), removed: lots(win.ask.removed), usual: lots(baseAsk) },
-  }
-  return { signals, pressure }
+  return { signals }
 }
 
 // ---- big orders ------------------------------------------------------------------------------------
