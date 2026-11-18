@@ -1,8 +1,9 @@
-// The Order Flow page's positioning, book pressure and liquidity added / pulled and order flow imbalance reads (flowTools.js).
+// The Order Flow page's positioning and liquidity added / pulled reads (flowTools.js). The book pressure and order flow
+// imbalance reads were removed with their cards on request.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  bookPressure, bucketFlow, emaLine, liquidityFlow, liquidityRead, positioningCandles, positioningOf, positioningRead, positioningSummary, pressureRead, ofiAgreement, ofiCandles, ofiRead, ofiSeries, ofiStep,
+  bucketFlow, emaLine, liquidityFlow, liquidityRead, positioningCandles, positioningOf, positioningRead, positioningSummary,
 } from '../src/flowTools.js'
 
 const MIN = 60_000
@@ -89,21 +90,6 @@ const column = (sec, bid, ask, bidQty, askQty) => ({
 })
 const flat = (n, q) => Array.from({ length: n }, () => q)
 
-test('book pressure: bids against offers near the touch, the nearer rows weighing more', () => {
-  assert.equal(bookPressure(column(0, 100, 101, flat(12, 50), flat(12, 50)), 1), 0)
-  assert.equal(bookPressure(column(0, 100, 101, flat(12, 50), []), 1), null, 'one side only: no read')
-  // Twice the bids: (2 - 1) / (2 + 1).
-  assert.ok(Math.abs(bookPressure(column(0, 100, 101, flat(12, 100), flat(12, 50)), 1) - 100 / 3) < 1e-9)
-  // The same extra size at the touch weighs more than far out.
-  const near = bookPressure(column(0, 100, 101, [500, ...flat(11, 50)], flat(12, 50)), 1)
-  const far = bookPressure(column(0, 100, 101, [...flat(9, 50), 500, 50, 50], flat(12, 50)), 1)
-  assert.ok(near > far && far > 0)
-  // Beyond the band (10 rows) nothing counts.
-  assert.equal(bookPressure(column(0, 100, 101, [...flat(10, 50), 5000], flat(12, 50)), 1), 0)
-  // A crossed book says nothing.
-  assert.equal(bookPressure(column(0, 101, 100, flat(5, 50), flat(5, 50)), 1), null)
-})
-
 test('added and pulled: only rows away from the touch in both columns - a level traded at the touch is not pulled', () => {
   const a = column(0, 100, 101, flat(12, 50), flat(12, 50))
   // 2 s later: the best bid traded down to 20 (not a pull), 30 pulled 3 rows under it, 40 added 5 rows under; offers: 25 pulled 2 over.
@@ -152,42 +138,26 @@ test('no look-ahead: the flow up to a clock is the same worked out from the colu
   }
   // Worked out again (the per-column cache) it is the same.
   assert.deepEqual(liquidityFlow(cols, { rowSize: 1 }), whole)
-  // Another band off the same columns (the two cards) does not disturb it, and counts further out.
+  // Another band off the same columns does not disturb it, and counts further out.
   const wide = liquidityFlow(cols, { rowSize: 1, bandRows: 13 })
   assert.deepEqual(liquidityFlow(cols, { rowSize: 1 }), whole)
-  assert.deepEqual(wide.map((p) => p.pressure), whole.map((p) => p.pressure), 'the pressure keeps its own band')
   assert.ok(wide.at(-1).bidAdded + wide.at(-1).bidPulled >= whole.at(-1).bidAdded + whole.at(-1).bidPulled)
 })
 
-test('buckets keep the last totals and the average pressure; the EMA reads only what came before', () => {
+test('buckets keep the last totals; the EMA reads only what came before', () => {
   const points = [
-    { t: T0 + 1000, mid: 100, pressure: 10, bidAdded: 5, bidPulled: 0, askAdded: 0, askPulled: 2, cumBid: 5, cumAsk: -2 },
-    { t: T0 + 6000, mid: 101, pressure: 30, bidAdded: 1, bidPulled: 4, askAdded: 0, askPulled: 0, cumBid: 2, cumAsk: -2 },
-    { t: T0 + 12_000, mid: 102, pressure: null, bidAdded: 0, bidPulled: 0, askAdded: 7, askPulled: 0, cumBid: 2, cumAsk: 5 },
+    { t: T0 + 1000, mid: 100, bidAdded: 5, bidPulled: 0, askAdded: 0, askPulled: 2, cumBid: 5, cumAsk: -2 },
+    { t: T0 + 6000, mid: 101, bidAdded: 1, bidPulled: 4, askAdded: 0, askPulled: 0, cumBid: 2, cumAsk: -2 },
+    { t: T0 + 12_000, mid: 102, bidAdded: 0, bidPulled: 0, askAdded: 7, askPulled: 0, cumBid: 2, cumAsk: 5 },
   ]
   const b = bucketFlow(points, 10)
-  assert.deepEqual(b.map((x) => [x.t, x.mid, x.pressure, x.cumBid, x.cumAsk, x.bidAdded, x.bidPulled]), [[T0, 101, 20, 2, -2, 6, 4], [T0 + 10_000, 102, 0, 2, 5, 0, 0]])
+  assert.deepEqual(b.map((x) => [x.t, x.mid, x.cumBid, x.cumAsk, x.bidAdded, x.bidPulled]), [[T0, 101, 2, -2, 6, 4], [T0 + 10_000, 102, 2, 5, 0, 0]])
   assert.deepEqual(emaLine([10, 10, 40], 3), [10, 10, 25])
   assert.deepEqual(emaLine([1, 2, 3], 1), [1, 2, 3])
   assert.deepEqual(emaLine([1, 2, 3, 9], 3).slice(0, 3), emaLine([1, 2, 3], 3))
 })
 
-const flowPoint = (sec, mid, pressure, ev = {}) => ({ t: T0 + sec * 1000, mid, pressure, bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0, cumBid: 0, cumAsk: 0, ...ev })
-
-test('the pressure read: the book\'s lean, and a move the book does not back', () => {
-  const series = (mids, pressure) => mids.map((m, i) => flowPoint(i * 10, m, pressure))
-  const rise = Array.from({ length: 31 }, (_, i) => 24000 + i)          // +30 pts over 5 min
-  assert.equal(pressureRead(series(rise, -40)).kind, 'bidThin')
-  assert.equal(pressureRead(series(rise, -40)).tone, -1)
-  assert.equal(pressureRead(series(rise, 40)).kind, 'bid')
-  assert.equal(pressureRead(series(rise.map((m) => 48000 - m), 40)).kind, 'askThin')
-  assert.equal(pressureRead(series(rise.map(() => 24000), -40)).kind, 'ask')
-  assert.equal(pressureRead(series(rise, 5)).kind, 'even')
-  // A move under 0.05% of the price is not a move.
-  assert.equal(pressureRead(series(rise.map((m) => 24000 + (m - 24000) / 10), -40)).kind, 'ask')
-  assert.equal(pressureRead([]), null)
-  assert.equal(pressureRead([flowPoint(0, 24000, null)]), null)
-})
+const flowPoint = (sec, mid, ev = {}) => ({ t: T0 + sec * 1000, mid, bidAdded: 0, bidPulled: 0, askAdded: 0, askPulled: 0, cumBid: 0, cumAsk: 0, ...ev })
 
 test('the liquidity read: which side is adding or pulling over the window - not what happened before it', () => {
   const quiet = Array.from({ length: 31 }, (_, i) => flowPoint(i * 10, 24000 + i))
@@ -204,73 +174,4 @@ test('the liquidity read: which side is adding or pulling over the window - not 
   // Outside the 5-minute window (the first point is exactly 5 min back): not counted.
   assert.equal(liquidityRead(with_({ bidPulled: 500 }, 0)).kind, 'quiet')
   assert.equal(liquidityRead([]), null)
-})
-
-// A book with its best bid / offer and the size there (and a level behind each, which OFI never reads).
-const book = (sec, bid, bidQ, ask, askQ) => ({ t: T0 + sec * 1000, bids: [[bid - 1, 999], [bid, bidQ]], asks: [[ask, askQ], [ask + 1, 999]] })
-const parsed = (bid, bidQ, ask, askQ) => ({ bid, bidQ, ask, askQ })
-
-test('OFI step - Cont, Kukanov & Stoikov: each case at the best bid and offer', () => {
-  const a = parsed(100, 50, 101, 40)
-  assert.equal(ofiStep(a, parsed(100, 70, 101, 40)), 20, 'bids join at the best bid: +20')
-  assert.equal(ofiStep(a, parsed(100, 30, 101, 40)), -20, 'bid hit / cancelled: −20')
-  assert.equal(ofiStep(a, parsed(100, 50, 101, 10)), 30, 'offer taken: +30')
-  assert.equal(ofiStep(a, parsed(100, 50, 101, 90)), -50, 'offers join: −50')
-  assert.equal(ofiStep(a, parsed(101, 25, 102, 40)), 25 + 40, 'bid steps up (its new size) and the offer is cleared (its old size)')
-  assert.equal(ofiStep(a, parsed(99, 60, 100, 35)), -50 - 35, 'bid cleared (its old size) and offer steps down (its new size)')
-  assert.equal(ofiStep(a, a), 0, 'nothing changed')
-})
-
-test('OFI series: from the best rows only, 0 across a gap / a one-sided book, running total; no look-ahead', () => {
-  const cols = [book(0, 100, 50, 101, 40), book(2, 100, 70, 101, 40), book(4, 100, 70, 101, 10), book(200, 100, 10, 101, 10),
-    { t: T0 + 202_000, bids: [[100, 5]], asks: [] }, book(204, 100, 30, 101, 10), book(206, 101, 30, 102, 10)]
-  const s = ofiSeries(cols, { rowSize: 1 })
-  assert.deepEqual(s.map((p) => p.ofi), [0, 20, 30, 0, 0, 30 + 10])
-  assert.deepEqual(s.map((p) => p.cum), [0, 20, 50, 50, 50, 90])
-  assert.equal(s[0].mid, 100.5)
-  for (let k = 1; k <= cols.length; k++) {
-    const cut = ofiSeries(cols.slice(0, k), { rowSize: 1 })
-    assert.deepEqual(cut, s.slice(0, cut.length))
-    assert.deepEqual(ofiSeries(cols, { rowSize: 1, clockMs: cols[k - 1].t }), cut)
-  }
-  // Rows: two prices in one row are one level.
-  const rows = ofiSeries([{ t: T0, bids: [[99.5, 10], [100, 20]], asks: [[101, 5]] }, { t: T0 + 2000, bids: [[99.5, 10], [100, 30]], asks: [[101, 5]] }], { rowSize: 1 })
-  assert.equal(rows[1].ofi, 10)
-})
-
-test('OFI candles: a candle\'s OFI is its points\' sum, OHLC of the mid, the move from the candle before\'s close', () => {
-  const pts = [
-    { t: T0, mid: 100, ofi: 0, cum: 0 }, { t: T0 + 30_000, mid: 102, ofi: 5, cum: 5 },
-    { t: T0 + MIN, mid: 101, ofi: -3, cum: 2 }, { t: T0 + MIN + 30_000, mid: 99, ofi: -4, cum: -2 },
-  ]
-  const c = ofiCandles(pts, 1)
-  assert.deepEqual(c.map((x) => [x.ofi, x.open, x.high, x.low, x.close, x.move, x.cum]), [[5, 100, 102, 100, 102, 2, 5], [-7, 101, 101, 99, 99, -3, -2]])
-  assert.deepEqual(ofiCandles(pts, 5).map((x) => x.ofi), [-2])
-  assert.equal(ofiCandles(pts, 5)[0].time, T0, '09:15 starts a 5-minute candle')
-})
-
-test('agreement is measured: same candle and the next, only candles with both an OFI and a move', () => {
-  const c = [{ ofi: 5, move: 2 }, { ofi: -5, move: -1 }, { ofi: 5, move: -1 }, { ofi: 0, move: 3 }, { ofi: 4, move: 0 }]
-  const a = ofiAgreement(c)
-  assert.equal(a.n, 3)
-  assert.ok(Math.abs(a.together - 2 / 3) < 1e-9)
-  // next: 5 -> -1 (no), -5 -> -1 (yes), 5 -> 3 (yes); 0 and the last have none.
-  assert.equal(a.m, 3)
-  assert.ok(Math.abs(a.next - 2 / 3) < 1e-9)
-  assert.deepEqual(ofiAgreement([]), { together: null, n: 0, next: null, m: 0 })
-})
-
-test('the OFI read: flow with the price, flow absorbed, nothing either way - both sides', () => {
-  const candle = (ofi, close, move) => ({ ofi, close, move })
-  const up = [candle(100, 24010, 10), candle(80, 24020, 10)]
-  assert.equal(ofiRead(up).kind, 'buy')
-  assert.equal(ofiRead(up).tone, 1)
-  assert.equal(ofiRead(up.map((c) => ({ ...c, ofi: -c.ofi, close: 48000 - c.close, move: -c.move }))).kind, 'sell')
-  assert.equal(ofiRead([candle(100, 24000, 0), candle(80, 24000, 0)]).kind, 'absorbedUp')
-  assert.equal(ofiRead([candle(-100, 24000, 0), candle(-80, 24000, 0)]).kind, 'absorbedDown')
-  assert.equal(ofiRead([candle(100, 24010, 10), candle(-90, 24020, 10)]).kind, 'even')
-  assert.equal(ofiRead(up).move, 20)
-  // Only the last N candles count.
-  assert.equal(ofiRead([candle(-1000, 23990, -10), ...up], { last: 2 }).kind, 'buy')
-  assert.equal(ofiRead([]), null)
 })

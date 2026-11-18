@@ -7,14 +7,14 @@ import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { formatVolume } from './OrderFlowCharts.jsx'
 import {
-  LIQUIDITY_BANDS, LIQUIDITY_BAND_DEFAULT, LIQUIDITY_FLOW_DEFAULTS, POSITIONING, POSITIONING_KEYS, POSITIONING_TIMEFRAMES, bucketFlow, emaLine, liquidityFlow, liquidityRead, positioningCandles,
-  positioningRead, positioningSummary, pressureRead, OFI_TIMEFRAMES, ofiAgreement, ofiCandles, ofiRead, ofiSeries,
+  LIQUIDITY_BANDS, LIQUIDITY_BAND_DEFAULT, LIQUIDITY_FLOW_DEFAULTS, POSITIONING, POSITIONING_KEYS, POSITIONING_TIMEFRAMES, bucketFlow, liquidityFlow, liquidityRead, positioningCandles,
+  positioningRead, positioningSummary,
 } from './flowTools.js'
 
-// The Order Flow page's four cards on the futures' positioning and book (asked for - "delta + OI positioning on futures
-// ... book pressure line ... net liquidity added versus pulled ... build these in separate card components"). The reading
-// is flowTools.js (pure, tested); these draw it at the page's clock - live, or the replay's. Reads only: they feed no
-// strategy, alert or order.
+// The Order Flow page's two cards on the futures' positioning and book (asked for - "delta + OI positioning on futures
+// ... net liquidity added versus pulled ... build these in separate card components"). The reading is flowTools.js
+// (pure, tested); these draw it at the page's clock - live, or the replay's. Reads only: they feed no strategy, alert
+// or order. (The BOOK PRESSURE and ORDER FLOW IMBALANCE cards that stood between them were REMOVED on request.)
 
 const { Text } = Typography
 const PRICE_COLOR = '#8ab4f8'
@@ -176,91 +176,17 @@ export function PositioningCard({ view, futuresOi, oiLag = 0, clockMs, isReplay,
   )
 }
 
-// ---- 2. Book pressure ------------------------------------------------------------------------------------------------
+// ---- 2. Liquidity added vs pulled --------------------------------------------------------------------------------
 
 const BUCKET_SECONDS = 10
-const SMOOTHING = [{ value: 1, label: 'Raw' }, { value: 6, label: '1 min' }, { value: 30, label: '5 min' }]
 const WINDOWS = [1, 2, 5, 10, 15]
 const priceLine = { key: 'price', type: 'line', pane: 0, options: { color: PRICE_COLOR, lineWidth: 2, title: 'price' } }
-const PRESSURE_SPECS = [
-  priceLine,
-  {
-    key: 'pressure', type: 'baseline', pane: 1,
-    options: {
-      baseValue: { type: 'price', price: 0 }, title: 'pressure', lineWidth: 2,
-      topLineColor: UP_COLOR, topFillColor1: 'rgba(38,166,154,0.35)', topFillColor2: 'rgba(38,166,154,0.05)',
-      bottomLineColor: DOWN_COLOR, bottomFillColor1: 'rgba(239,83,80,0.05)', bottomFillColor2: 'rgba(239,83,80,0.35)',
-    },
-  },
-]
 
 const useFlow = (view, rowSize, noDepth, bandRows = LIQUIDITY_FLOW_DEFAULTS.bandRows) => useMemo(
   () => (noDepth ? [] : liquidityFlow(view?.heatmap, { rowSize, bandRows })),
   [noDepth, view?.heatmap, rowSize, bandRows],
 )
 const NoBook = () => <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No order book for this day - it needs market depth, which only the days the server saw live have." />
-
-/**
- * "Book pressure": the resting bids against the resting offers near the price as a LINE through the day, under the
- * price (flowTools.liquidityFlow's `pressure`: within 10 rows of the touch, the nearer rows weighing more; +100 all bids,
- * −100 all offers) - pressure building before price moves, and a move the book does not back (price up on thinning bids).
- */
-export function BookPressureCard({ view, rowSize, dayKey, narrow, noDepth, isReplay, underlying }) {
-  const [smooth, setSmooth] = usePersistedState('optionanalytics.orderFlow.bookPressureSmooth', 6)
-  const [windowMin, setWindowMin] = usePersistedState('optionanalytics.orderFlow.bookPressureWindow', 5)
-  const length = SMOOTHING.some((s) => s.value === smooth) ? smooth : 6
-  const win = WINDOWS.includes(windowMin) ? windowMin : 5
-  const flow = useFlow(view, rowSize, noDepth)
-  const data = useMemo(() => {
-    const buckets = bucketFlow(flow, BUCKET_SECONDS)
-    const line = emaLine(buckets.map((b) => b.pressure), length)
-    return {
-      price: buckets.map((b) => ({ time: toChartTime(b.t), value: b.mid })),
-      pressure: buckets.map((b, i) => ({ time: toChartTime(b.t), value: line[i] })),
-    }
-  }, [flow, length])
-  const read = useMemo(() => pressureRead(flow, { windowMin: win }), [flow, win])
-  const lean = (v) => (v == null ? '—' : `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v).toFixed(0)}`)
-  const controls = (
-    <Space size={8} wrap>
-      <Tooltip title="How much the line is smoothed (an average of the last minute / 5 minutes of 10-second readings)">
-        <Segmented size="small" value={length} onChange={setSmooth} options={SMOOTHING} />
-      </Tooltip>
-      <Tooltip title="The read compares the book's lean with the price's move over this many minutes">
-        <Select size="small" value={win} style={{ width: 96 }} onChange={setWindowMin} options={WINDOWS.map((v) => ({ value: v, label: `last ${v}m` }))} />
-      </Tooltip>
-    </Space>
-  )
-  return (
-    <Card size="small" title="Book pressure · bids vs offers near the price" extra={!narrow && controls}>
-      {narrow && <div style={{ marginBottom: 8 }}>{controls}</div>}
-      {noDepth ? <NoBook /> : !flow.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No book yet." /> : (
-        <>
-          <Space size={[20, 8]} wrap style={{ marginBottom: 4 }}>
-            <Stat title={`${underlying} future${isReplay ? ' (replay)' : ''}`} value={price(flow.at(-1).mid)} note="mid of the book" />
-            <Stat title="Pressure now" value={lean(read?.now)} color={TONE_COLOR(read?.now >= 15 ? 1 : read?.now <= -15 ? -1 : 0)} note="last 30 s · +100 all bids" />
-            <Stat title={`Last ${win} min`} value={lean(read?.average)} color={TONE_COLOR(read?.average >= 15 ? 1 : read?.average <= -15 ? -1 : 0)} note="average" />
-            <Stat title="Price move" value={read ? `${read.move > 0 ? '+' : ''}${read.move.toFixed(1)}` : '—'} color={TONE_COLOR(read?.move)} note={`pts in ${win} min`} />
-          </Space>
-          <Read read={read} />
-          <PaneChart specs={PRESSURE_SPECS} data={data} height={narrow ? 340 : 400} dayKey={`${dayKey}-pressure`} format={(v) => v.toFixed(0)} />
-          <FoldText id="orderFlow.bookPressure" label="how to read it" className="oa-note">
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              The lower line is the size of the resting bids against the resting offers within {LIQUIDITY_FLOW_DEFAULTS.bandRows} rows
-              ({rowSize} pts each) of the best bid / offer - a row counting less the further it is from the price. Above 0 (green) the
-              bids outweigh the offers: buyers are resting under the market; below 0 (red) the sellers are. Watch it AGAINST the price
-              above: pressure building one way before price moves, or price rising while the line sinks (rising on thinning bids, into
-              supply) - a move the book does not back. Resting orders can be pulled, so read it with the liquidity added / pulled card.
-            </Text>
-          </FoldText>
-        </>
-      )}
-    </Card>
-  )
-}
-
-// ---- 3. Net liquidity added vs pulled ------------------------------------------------------------------------------
-
 const LIQUIDITY_SPECS = [
   priceLine,
   { key: 'bids', type: 'line', pane: 1, options: { color: UP_COLOR, lineWidth: 2, title: 'bids' } },
@@ -335,65 +261,3 @@ export function LiquidityNetCard({ view, rowSize, lotSize, showLots, dayKey, nar
 
 // ---- 4. Order flow imbalance at the touch --------------------------------------------------------------------------
 
-const OFI_SPECS = [
-  { key: 'candles', type: 'candles', pane: 0, options: { upColor: UP_COLOR, downColor: DOWN_COLOR, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR, borderVisible: false } },
-  { key: 'ofi', type: 'histogram', pane: 1, options: { title: 'OFI', lastValueVisible: false } },
-]
-const OFI_RECENT = 5
-const pct = (v) => (v == null ? '—' : `${Math.round(v * 100)}%`)
-
-/**
- * "Order flow imbalance": Cont, Kukanov & Stoikov's OFI at the best bid / offer (flowTools.ofiSeries) - every change at
- * the touch (orders taken, joined, stepped up / down, cancelled) as one signed number a candle, under the book's mid -
- * with how often it went with the price on this day, measured (`ofiAgreement`), and a read of the last candles.
- */
-export function OfiCard({ view, rowSize, lotSize, showLots, dayKey, narrow, noDepth, isReplay, underlying }) {
-  const [timeframe, setTimeframe] = usePersistedState('optionanalytics.orderFlow.ofiTf', 1)
-  const tf = OFI_TIMEFRAMES.includes(timeframe) ? timeframe : 1
-  const points = useMemo(() => (noDepth ? [] : ofiSeries(view?.heatmap, { rowSize })), [noDepth, view?.heatmap, rowSize])
-  const candles = useMemo(() => ofiCandles(points, tf), [points, tf])
-  const agreement = useMemo(() => ofiAgreement(candles), [candles])
-  const read = useMemo(() => ofiRead(candles, { last: OFI_RECENT }), [candles])
-  const format = useMemo(() => (q) => formatVolume(q, lotSize, showLots), [lotSize, showLots])
-  const data = useMemo(() => ({
-    candles: candles.map((c) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
-    ofi: candles.map((c) => ({ time: toChartTime(c.time), value: c.ofi, color: c.ofi >= 0 ? UP_COLOR : DOWN_COLOR })),
-  }), [candles])
-  const last = candles.at(-1)
-  const unit = showLots ? 'lots' : 'qty'
-  const controls = <Segmented size="small" value={tf} onChange={setTimeframe} options={OFI_TIMEFRAMES.map((m) => ({ value: m, label: `${m}m` }))} />
-  return (
-    <Card size="small" title={`Order flow imbalance (OFI) · best bid / offer · ${tf} min`} extra={!narrow && controls}>
-      {narrow && <div style={{ marginBottom: 8 }}>{controls}</div>}
-      {noDepth ? <NoBook /> : !candles.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No book yet." /> : (
-        <>
-          <Space size={[20, 8]} wrap style={{ marginBottom: 4 }}>
-            <Stat title={`${underlying} future${isReplay ? ' (replay)' : ''}`} value={price(last.close)} note="mid of the book" />
-            <Stat title="Last candle" value={signedText(last.ofi, format)} color={TONE_COLOR(last.ofi)} note={`OFI, ${unit}`} />
-            <Stat title={`Last ${OFI_RECENT} candles`} value={read ? signedText(read.ofi, format) : '—'} color={TONE_COLOR(read?.ofi)}
-              note={read ? `price ${read.move > 0 ? '+' : ''}${read.move.toFixed(1)} pts` : null} />
-            <Stat title="Day" value={signedText(last.cum, format)} color={TONE_COLOR(last.cum)} note="OFI since the first book" />
-            <Tooltip title="Of this day's candles with both an OFI and a price move: how often their signs agreed in the same candle, and how often a candle's OFI matched the NEXT candle's move (near 50% = it says nothing ahead).">
-              <div><Stat title="With the price" value={pct(agreement.together)} note={`same candle (${agreement.n}) · next ${pct(agreement.next)}`} /></div>
-            </Tooltip>
-          </Space>
-          <Read read={read} />
-          <PaneChart specs={OFI_SPECS} data={data} height={narrow ? 340 : 400} dayKey={`${dayKey}-ofi-${tf}`} format={format} />
-          <FoldText id="orderFlow.ofi" label="how to read it" className="oa-note">
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              Order flow imbalance (Cont, Kukanov &amp; Stoikov, 2014) adds up every change at the best bid and offer between two
-              pictures of the book: bids joining or stepping up and offers being taken or pulled count as buying (+); offers joining
-              or stepping down and bids being hit or pulled count as selling (−). It is the flow the tape&apos;s delta does not see -
-              limit orders and cancels at the touch as well as trades - and in their study it explained most of the price&apos;s move
-              over the same seconds to minutes. Green bars = buying flow in the candle, red = selling. Flow one way while the price
-              does not follow = the other side keeps refilling (absorption). &quot;With the price&quot; is measured on this day: the
-              share of candles whose OFI and move agreed, and how often it matched the next candle - a high &quot;same candle&quot;
-              and a &quot;next&quot; near 50% means it describes the move, it does not forecast it. The book is sampled (every 2 s
-              live, further apart on a loaded day), so a loaded day reads less than the same day seen live.
-            </Text>
-          </FoldText>
-        </>
-      )}
-    </Card>
-  )
-}

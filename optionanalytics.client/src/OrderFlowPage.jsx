@@ -27,7 +27,7 @@ import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, or
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { FLOW_READ_SCORES, keepShownReads, scoredFlowReads, withScoredReads } from './flowReads.js'
-import { BookPressureCard, LiquidityNetCard, OfiCard, PositioningCard } from './FlowToolCards.jsx'
+import { LiquidityNetCard, PositioningCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
@@ -1037,12 +1037,7 @@ export default function OrderFlowPage() {
                   view={view} futuresOi={dayOi?.futures} oiLag={dayOi?.lag ?? 0} clockMs={nowMs} isReplay={isReplay} underlying={underlying}
                   lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} estimated={estimated} otherContract={!!expiry} oiError={dayOiError}
                 />
-                <BookPressureCard view={view} rowSize={rowSize} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay} underlying={underlying} />
                 <LiquidityNetCard
-                  view={view} rowSize={rowSize} lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
-                  underlying={underlying}
-                />
-                <OfiCard
                   view={view} rowSize={rowSize} lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
                   underlying={underlying}
                 />
