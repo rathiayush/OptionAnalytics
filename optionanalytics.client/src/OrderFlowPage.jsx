@@ -598,7 +598,7 @@ export default function OrderFlowPage() {
   const aggressionNow = useMemo(() => (estimated ? null : aggression(tapePrints, tapeNow, undefined, view?.minuteBars)), [estimated, tapePrints, tapeNow, view?.minuteBars])
   const sweeps = useMemo(() => sweepSignals(view?.sweeps, lotSize), [view?.sweeps, lotSize])
   const pullStack = useMemo(
-    () => (estimated ? { signals: [], pressure: null } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
+    () => (estimated ? { signals: [] } : pullStackSignals({ columns: (view?.heatmap ?? []).slice(-1800), rowSize, lotSize })),
     [estimated, view?.heatmap, rowSize, lotSize],
   )
   // The heatmap's picture in its own rows: the finer copy fetched for them, else the footprint-row heatmap -
@@ -1030,9 +1030,9 @@ export default function OrderFlowPage() {
                   clockMs={nowMs} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
                 />
 
-                {/* Four reads of the futures' positioning and book (FlowToolCards.jsx, flowTools.js) - each its own card, at
-                    the page's clock: who is aggressive and whether positions open or close; the book's lean as a line; resting
-                    orders added less pulled; the order flow imbalance at the best bid / offer. */}
+                {/* Two reads of the futures' positioning and book (FlowToolCards.jsx, flowTools.js) - each its own card, at
+                    the page's clock: who is aggressive and whether positions open or close; resting orders added less pulled.
+                    (The book pressure and order flow imbalance cards that stood with them were removed on request.) */}
                 <PositioningCard
                   view={view} futuresOi={dayOi?.futures} oiLag={dayOi?.lag ?? 0} clockMs={nowMs} isReplay={isReplay} underlying={underlying}
                   lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} estimated={estimated} otherContract={!!expiry} oiError={dayOiError}
@@ -1075,7 +1075,7 @@ export default function OrderFlowPage() {
                   : <BookLadder book={view?.book} walls={walls} icebergPrices={activeIcebergs} lotSize={lotSize} showLots={showLots} maxRows={depthRows} height={depthRows > 20 ? 440 : null} />}
               </Card>
               <TapeCard
-                prints={tapePrints} aggression={aggressionNow} pressure={pullStack.pressure} sweeps={view?.sweeps} lotSize={lotSize}
+                prints={tapePrints} aggression={aggressionNow} sweeps={view?.sweeps} lotSize={lotSize}
                 largeLots={bigLots} error={tape.error} estimated={estimated}
               />
               <Card size="small" title={`Signals${shownSignals.length !== signals.length ? ` · ${shownSignals.length}/${signals.length}` : ''}`} styles={{ body: { maxHeight: 360, overflowY: 'auto' } }}

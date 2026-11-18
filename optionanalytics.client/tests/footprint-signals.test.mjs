@@ -1,6 +1,6 @@
 // Footprint absorption / exhaustion (analyzeBars): only the real thing, not every bar with thin tails.
 // Run: npm test (node --test) - see CLAUDE.md.
-import { analyzeBars, autoBigLots } from '../src/orderFlowMath.js'
+import { analyzeBars, autoBigLots, pullStackSignals } from '../src/orderFlowMath.js'
 
 let fails = 0
 const check = (name, cond, extra = '') => { console.log(`${cond ? 'PASS' : 'FAIL'} ${name}${cond ? '' : ` ${extra}`}`); if (!cond) fails++ }
@@ -83,6 +83,31 @@ const t = (m) => Date.parse('2026-10-05T04:00:00Z') + m * 300_000
   check('busy tape (5-14 lots, 60-lot prints 1 in 25): big = 75 lots', autoBigLots(busy, 75) === 75, autoBigLots(busy, 75))
   check('tiny prints only: floor of 5 lots', autoBigLots(prints(Array(500).fill(1)), 75) === 5)
   check('too few prints to judge: none', autoBigLots(prints([50, 60]), 75) === null)
+}
+// 6. PULL / STACK: resting orders taken away from, or added to, the book away from the touch.
+//    (It used to return a `pressure` readout as well - the Order Flow tape's one-line book read - which
+//    was removed on request; the signals themselves are what the heatmap's pills show.)
+{
+  const LOT = 65
+  const rows = (from, to, qty) => Array.from({ length: to - from + 1 }, (_, i) => [from + i, qty(from + i)])
+  // 40 columns 2s apart: 20 bid rows under 25399 and 20 offer rows over 25400, 650 (10 lots) each.
+  // From column 20: four bid rows inside the band go to 0 (pulled) and four offer rows double (stacked).
+  const columns = Array.from({ length: 40 }, (_, i) => ({
+    t: 1_000_000 + i * 2000,
+    bids: rows(25380, 25399, (p) => (i >= 20 && p >= 25389 && p <= 25392 ? 0 : 650)),
+    asks: rows(25400, 25419, (p) => (i >= 20 && p >= 25405 && p <= 25408 ? 1300 : 650)),
+  }))
+  const out = pullStackSignals({ columns, rowSize: 1, lotSize: LOT })
+  const kinds = out.signals.map((s) => `${s.side} ${s.kind}`)
+  check('bids pulled away from the touch is a signal', kinds.includes('bid Liquidity pulled'), JSON.stringify(kinds))
+  check('offers added away from the touch is a signal', kinds.includes('ask Liquidity stacked'), JSON.stringify(kinds))
+  const pulled = out.signals.find((s) => s.side === 'bid' && s.kind === 'Liquidity pulled')
+  const stacked = out.signals.find((s) => s.side === 'ask' && s.kind === 'Liquidity stacked')
+  check('bids pulled = support withdrawn (bearish)', pulled?.bullish === false && /40 lots .* pulled/.test(pulled?.text ?? ''), pulled?.text)
+  check('offers stacked = resistance building (bearish)', stacked?.bullish === false && /40 lots .* added/.test(stacked?.text ?? ''), stacked?.text)
+  check('a book that never changes gives none', pullStackSignals({ columns: columns.slice(0, 19), rowSize: 1, lotSize: LOT }).signals.length === 0)
+  check('too few columns to judge: none', pullStackSignals({ columns: columns.slice(0, 2), rowSize: 1, lotSize: LOT }).signals.length === 0)
+  check('it returns the signals alone', Object.keys(out).join() === 'signals', Object.keys(out).join())
 }
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0

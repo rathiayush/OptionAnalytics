@@ -1717,7 +1717,12 @@ All must pass before committing.
   remove OFI, book pressure"), code and tests: `bookPressure` / `pressureRead` and `OFI_*` / `ofiStep` / `ofiSeries` /
   `ofiCandles` / `ofiAgreement` / `ofiRead` are gone, `liquidityFlow`'s points and `bucketFlow`'s buckets no longer carry a
   `pressure`, and the page imports only the two cards left. (OFI had been kept beside them on request - "do not remove for
-  now, I will see a few days and then decide".)
+  now, I will see a few days and then decide".) The Tape / Time & Sales card's own one-line BOOK READ went with them
+  (asked for - "no pull and stack should be there but anything related to book pressure should be removed"): its
+  `BookPressure` line and the `pressure` `TapeCard` takes are gone, and `pullStackSignals` returns `{ signals }` alone -
+  the PULL / STACK pills on the heatmap, their signals in the list, the bias's pulling / stacking weight and the
+  Liquidity added vs pulled card all STAY (`tests/footprint-signals.test.mjs` holds the signals: bids pulled away from
+  the touch = support withdrawn, offers added = resistance building, and nothing from a book that never changes).
   RECORDED DAYS ON DISK (`OrderFlowDayStore`, `Storage:OrderFlowPath` - /app/data/order-flow, in docker-compose AND the
   Dockerfile; none = memory only): the days the server recorded live replay EXACTLY - footprint, imbalances, stacked
   imbalances, auctions, tape, book - through a restart / deploy (they lived in memory only, so after every deploy a past day
