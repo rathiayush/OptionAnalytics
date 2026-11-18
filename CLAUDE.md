@@ -859,8 +859,16 @@ All must pass before committing.
   TOP-DOWN read (`topDownRead`: the higher TF's swing trend and premium / discount against the lower TF's structure -
   aligned / pullback - wait for the lower TF's CHoCH / against). DRAWN (`structureShapes` + `StructurePrimitive`, bar
   indices as x so it follows scroll and zoom): twelve layers ticked (`STRUCTURE_LAYERS`, all on by default; on a phone behind
-  a "Layers" button), the higher TF's S/R, swing order blocks and dealing range across the lower chart in light blue; only the
-  newest internal breaks labelled; a summary under each chart (trend tags, last breaks, range, strong / weak, S/R, trendlines,
+  a "Layers" button), the higher TF's S/R, swing order blocks and dealing range across the lower chart in light blue. NOTHING
+  IS DRAWN OVER ANYTHING ELSE (asked for - "this is looking a bit messy": a pattern's name came out as "BOS netrical
+  triangle", an i-BOS label drawn across it): every label is gathered while the shapes are drawn and PLACED AFTERWARDS, most
+  important first (each shape's `pri` - external structure, patterns, strong / weak, HTF, zones, trendlines, premium /
+  discount, order blocks, liquidity, gaps, internal), each tried on its own side then the other, and one that would touch a
+  label already placed is DROPPED (`clears`, pure and tested) - the reading it carries is in the lines under the chart
+  anyway. HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
+  `optionanalytics.structure.density`): how many patterns, blocks, gaps, zones, equal levels, sweeps and internal breaks are
+  drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount
+  SHADING off - its two blocks coloured the whole chart - keeping the equilibrium line); a summary under each chart (trend tags, last breaks, range, strong / weak, S/R, trendlines,
   patterns, order blocks, gaps, liquidity). A read of the chart - it places nothing and feeds no alert or strategy.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when

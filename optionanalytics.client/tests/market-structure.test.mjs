@@ -209,7 +209,7 @@ test('the top-down read: aligned, a pullback, against', () => {
 })
 
 // What the page draws (structureShapes.js): every layer from the analysis, nothing for a layer that is off, numbers only.
-import { structureShapes, STRUCTURE_LAYERS, DEFAULT_LAYERS, lowerThan, TIMEFRAMES, HISTORY_CHOICES } from '../src/structureShapes.js'
+import { structureShapes, STRUCTURE_LAYERS, DEFAULT_LAYERS, DENSITY, DEFAULT_DENSITY, clears, lowerThan, TIMEFRAMES, HISTORY_CHOICES } from '../src/structureShapes.js'
 
 test('the shapes: each layer only when on, the higher TF\'s levels laid across the lower chart, no NaN anywhere', () => {
   const bars = path([[0, 100], [10, 120], [20, 110], [30, 120.3], [45, 104], [55, 114], [65, 98], [80, 125]])
@@ -235,4 +235,35 @@ test('the lower timeframe stays under the higher one; every timeframe has its hi
   assert.equal(lowerThan(1440, 1440), 240)
   assert.equal(lowerThan(3, 5), 1)
   for (const t of TIMEFRAMES) assert.ok(HISTORY_CHOICES[t.value]?.length >= 1)
+})
+
+test('Detail: Clean draws far fewer marks than Everything, and every shape carries a priority', () => {
+  const bars = path([[0, 100], [10, 120], [20, 110], [30, 120.3], [45, 104], [55, 114], [65, 98], [80, 125], [95, 108], [115, 130]])
+  const a = analyzeStructure(bars, { swingLen: 5, internalLen: 2, trendLen: 3 })
+  const count = (d) => structureShapes(a, DEFAULT_LAYERS, { htf: a, density: d })
+  const clean = count('clean')
+  const all = count('all')
+  assert.ok(clean.length < all.length, `clean ${clean.length} < all ${all.length}`)
+  // Clean labels far less: the chart reads at a glance.
+  assert.ok(clean.filter((s) => s.label || s.text).length < all.filter((s) => s.label || s.text).length)
+  // Clean leaves the premium / discount SHADING off (two blocks that coloured the whole chart) but keeps the line.
+  assert.equal(clean.filter((s) => s.label === 'Premium' || s.label === 'Discount').length, 0)
+  assert.ok(all.some((s) => s.label === 'Premium'))
+  assert.ok(clean.some((s) => s.label === 'Equilibrium'))
+  assert.equal(count('nonsense').length, count(DEFAULT_DENSITY).length)   // an unknown choice reads as the default
+  // No internal break is ever labelled in Clean; the external ones always are.
+  assert.equal(clean.filter((s) => /^i-/.test(s.label ?? '')).length, 0)
+  assert.ok(clean.some((s) => s.label === 'BOS' || s.label === 'CHoCH'))
+  for (const s of all) if (s.label || s.text) assert.ok(typeof s.pri === 'number' || s.label === 'neckline', `no priority: ${s.label ?? s.text}`)
+  assert.deepEqual(Object.keys(DENSITY), ['clean', 'normal', 'all'])
+})
+
+test('labels are placed only where they clear the ones already placed', () => {
+  const taken = [{ x: 10, y: 10, w: 40, h: 12 }]
+  assert.equal(clears(taken, { x: 10, y: 10, w: 40, h: 12 }, 0), false)   // the same spot
+  assert.equal(clears(taken, { x: 45, y: 14, w: 40, h: 12 }, 0), false)   // overlapping
+  assert.equal(clears(taken, { x: 52, y: 10, w: 40, h: 12 }, 0), true)    // clear to the right
+  assert.equal(clears(taken, { x: 52, y: 10, w: 40, h: 12 }, 4), false)   // ... but not with a 4 px gap wanted
+  assert.equal(clears(taken, { x: 10, y: 24, w: 40, h: 12 }, 0), true)    // clear below
+  assert.equal(clears([], { x: 0, y: 0, w: 10, h: 10 }), true)
 })
