@@ -2,8 +2,8 @@
 // Run: npm test (node --test) - see CLAUDE.md.
 import { QUICK_VIEWS } from '../src/quickViews.js'
 import {
-  VOICE_CARDS, VOICE_NEVER, VOICE_VIEWS, normalizeSpeech, parseVoiceCommand, saidPhrase, voiceCommandText,
-  voiceHelpLines, voiceSpeed,
+  VOICE_CARDS, VOICE_MODES, VOICE_MODE_DEFAULT, VOICE_NEVER, VOICE_VIEWS, normalizeSpeech, parseVoiceCommand,
+  pushToTalkKey, saidPhrase, voiceCommandText, voiceHelpLines, voiceModeOf, voiceSpeed,
 } from '../src/voiceCommands.js'
 
 let fails = 0
@@ -138,6 +138,23 @@ const is = (said, want) => check(`"${said}" -> ${json(want)}`, json(parseVoiceCo
   check('a refusal says so', voiceCommandText({ kind: 'refused' }).includes('never placed'))
   check('nothing reads empty', voiceCommandText(null) === '')
   check('the help lists every group', voiceHelpLines().length >= 8 && voiceHelpLines().every((l) => typeof l === 'string' && l.length > 0))
+}
+
+// 9. PUSH TO TALK (asked for - "add ctrl then i should be able to speak it should not always hear us"): the microphone
+//    opens on Ctrl down and shuts on Ctrl up; another key while it is held cancels, and nothing fires from a text box.
+{
+  const down = (key, extra = {}) => pushToTalkKey({ key, ...extra }, { down: true, ...extra })
+  check('Ctrl down opens the microphone', down('Control') === 'start')
+  check('Cmd down opens it too', down('Meta') === 'start')
+  check('a held Ctrl repeating does nothing', pushToTalkKey({ key: 'Control', repeat: true }, { down: true, held: true }) === null)
+  check('Ctrl down in a text box does nothing', pushToTalkKey({ key: 'Control' }, { down: true, typing: true }) === null)
+  check('Ctrl up shuts it', pushToTalkKey({ key: 'Control' }, { down: false, held: true }) === 'stop')
+  check('a stray Ctrl up with nothing open does nothing', pushToTalkKey({ key: 'Control' }, { down: false, held: false }) === null)
+  check('Ctrl + C cancels it', pushToTalkKey({ key: 'c' }, { down: true, held: true }) === 'cancel')
+  check('another key with no Ctrl held does nothing', pushToTalkKey({ key: 'c' }, { down: true, held: false }) === null)
+  check('a letter released does nothing', pushToTalkKey({ key: 'c' }, { down: false, held: true }) === null)
+  check('"hold" is the default mode', VOICE_MODE_DEFAULT === 'hold' && voiceModeOf(undefined) === 'hold' && voiceModeOf('nonsense') === 'hold')
+  check('"always" is the only other one', voiceModeOf('always') === 'always' && VOICE_MODES.length === 2)
 }
 
 console.log(fails ? `${fails} FAILED` : 'all passed')
