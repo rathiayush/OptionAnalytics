@@ -267,3 +267,18 @@ test('labels are placed only where they clear the ones already placed', () => {
   assert.equal(clears(taken, { x: 10, y: 24, w: 40, h: 12 }, 0), true)    // clear below
   assert.equal(clears([], { x: 0, y: 0, w: 10, h: 10 }), true)
 })
+
+test("the lower chart's own structure can be hidden - the higher timeframe's levels stay", async () => {
+  const { ltfLayers } = await import('../src/structureShapes.js')
+  const bars = path([[0, 100], [10, 120], [20, 110], [30, 120.3], [45, 104], [55, 114], [65, 98], [80, 125]])
+  const a = analyzeStructure(bars, { swingLen: 5, internalLen: 2, trendLen: 3 })
+  assert.deepEqual(ltfLayers(DEFAULT_LAYERS, true), DEFAULT_LAYERS)
+  assert.deepEqual(ltfLayers(DEFAULT_LAYERS, false), ['htf'])
+  assert.deepEqual(ltfLayers(['swing', 'zones'], false), [])        // the HTF layer unticked too: nothing drawn
+  assert.deepEqual(ltfLayers(undefined, false), [])
+  // Hidden: only the higher timeframe's levels are over the candles - none of this chart's own.
+  const hidden = structureShapes(a, ltfLayers(DEFAULT_LAYERS, false), { htf: a, density: 'normal' })
+  assert.ok(hidden.length > 0)
+  assert.ok(hidden.every((s) => /^HTF/.test(s.label ?? '')), hidden.map((s) => s.label).join(', '))
+  assert.ok(structureShapes(a, ltfLayers(DEFAULT_LAYERS, true), { htf: a, density: 'normal' }).length > hidden.length)
+})

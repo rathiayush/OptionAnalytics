@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, Empty, Row, Segmented, Select, Space, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Checkbox, Col, Empty, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
@@ -10,7 +10,7 @@ import { createZoomableChart } from './chartZoom.js'
 import { FoldText } from './FoldText.jsx'
 import { useViewport } from './useScreen.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
-import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, lowerThan, structureShapes } from './structureShapes.js'
+import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, ltfLayers, lowerThan, structureShapes } from './structureShapes.js'
 
 const { Title, Text } = Typography
 
@@ -208,6 +208,8 @@ export default function SpotStructurePage() {
   // How much is drawn - Clean / Normal / Everything (DENSITY): every marking at once was unreadable.
   const [densityPicked, setDensity] = usePersistedState('optionanalytics.structure.density', DEFAULT_DENSITY)
   const density = DENSITY[densityPicked] ? densityPicked : DEFAULT_DENSITY
+  // The lower chart's OWN markings - off, it shows the higher timeframe's levels over its candles and nothing else.
+  const [ltfOwn, setLtfOwn] = usePersistedState('optionanalytics.structure.ltfOwn', true)
 
   const high = useStructureCandles(index, htf, htfDays)
   const low = useStructureCandles(index, ltf, ltfDays)
@@ -217,15 +219,16 @@ export default function SpotStructurePage() {
   const read = useMemo(() => topDownRead(ha, la, { htf: TF_NAME[htf], ltf: TF_NAME[ltf] }), [ha, la, htf, ltf])
   const layerSet = useMemo(() => new Set(asList(layers)), [layers])
   const htfShapes = useMemo(() => structureShapes(ha, [...layerSet].filter((k) => k !== 'htf'), { density }), [ha, layerSet, density])
-  const ltfShapes = useMemo(() => structureShapes(la, layerSet, { htf: ha, density }), [la, layerSet, ha, density])
+  const ltfShapes = useMemo(() => structureShapes(la, ltfLayers(layerSet, ltfOwn), { htf: ha, density }), [la, layerSet, ltfOwn, ha, density])
   const chartHeight = narrow ? 420 : Math.min(620, Math.max(420, Math.round(window.innerHeight * 0.6)))
 
-  const card = (title, tf, data, a, shapes, days, setDays, daysPicked) => (
+  const card = (title, tf, data, a, shapes, days, setDays, daysPicked, extra = null) => (
     <Card
       size="small"
       title={<span>{title} · {TF_NAME[tf]}{data.data?.todayIncluded ? <Tag color="green" style={{ marginInlineStart: 8 }}>live</Tag> : null}</span>}
       extra={(
         <Space size={6}>
+          {extra}
           <Select size="small" value={days} onChange={(v) => setDays({ ...(daysPicked ?? {}), [tf]: v })} style={{ width: 104 }} aria-label={`${title} history`}
             options={HISTORY_CHOICES[tf].map((d) => ({ value: d, label: `${d} days` }))} />
           <Button size="small" icon={<ReloadOutlined />} onClick={data.reload} loading={data.loading} aria-label={`Reload ${title}`} />
@@ -234,6 +237,7 @@ export default function SpotStructurePage() {
     >
       {data.error && <Alert type={a.n ? 'warning' : 'error'} showIcon style={{ marginBottom: 8 }} message={a.n ? `Partly loaded - ${data.error}` : `Could not load the candles - ${data.error}`} />}
       {a.n ? <StructureChart analysis={a} shapes={shapes} height={chartHeight} /> : <Empty description={data.loading ? 'Loading candles…' : 'No candles'} style={{ padding: 40 }} />}
+      {a.n && shapes.length === 0 && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>Nothing drawn - every layer is off for this chart.</Text>}
       {data.data && <SourceLine data={data.data} />}
       <StructureSummary a={a} tf={tf} />
     </Card>
@@ -302,7 +306,15 @@ export default function SpotStructurePage() {
 
         <Row gutter={[14, 14]}>
           <Col xs={24} xl={12}>{card('Higher timeframe', htf, high, ha, htfShapes, htfDays, setHtfDays, htfDaysPicked)}</Col>
-          <Col xs={24} xl={12}>{card('Lower timeframe', ltf, low, la, ltfShapes, ltfDays, setLtfDays, ltfDaysPicked)}</Col>
+          <Col xs={24} xl={12}>
+            {card('Lower timeframe', ltf, low, la, ltfShapes, ltfDays, setLtfDays, ltfDaysPicked, (
+              <Tooltip title={`Off: only the ${TF_NAME[htf]}'s levels are drawn over the ${TF_NAME[ltf]} candles - its own structure, zones, blocks and patterns are hidden. The reading under the chart stays either way.`}>
+                <Checkbox checked={ltfOwn} onChange={(e) => setLtfOwn(e.target.checked)}>
+                  <Text style={{ fontSize: 12 }}>{narrow ? 'Own' : 'Its own structure'}</Text>
+                </Checkbox>
+              </Tooltip>
+            ))}
+          </Col>
         </Row>
         <Text type="secondary" style={{ fontSize: 11 }}>
           {'Colours: '}<span style={{ color: STRUCTURE_COLORS.bull }}>bullish</span>{' / '}<span style={{ color: STRUCTURE_COLORS.bear }}>bearish</span>

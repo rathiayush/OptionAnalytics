@@ -865,7 +865,12 @@ All must pass before committing.
   important first (each shape's `pri` - external structure, patterns, strong / weak, HTF, zones, trendlines, premium /
   discount, order blocks, liquidity, gaps, internal), each tried on its own side then the other, and one that would touch a
   label already placed is DROPPED (`clears`, pure and tested) - the reading it carries is in the lines under the chart
-  anyway. HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
+  anyway. THE LOWER CHART'S OWN MARKINGS can be hidden (asked for - "an option to hide the lower timeframe's
+  details with a tickbox, so I can see the higher timeframe on the lower timeframe, and see the lower one again when I
+  wish"): its card's "Its own structure" tick ("Own" on a phone, `optionanalytics.structure.ltfOwn`, ON by default) - off,
+  `ltfLayers` leaves only the 'htf' layer, so the higher timeframe's S/R, swing order blocks and dealing range are drawn over
+  bare candles (nothing at all when that layer is unticked too - the chart says so); the reading under it is unchanged.
+  HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
   `optionanalytics.structure.density`): how many patterns, blocks, gaps, zones, equal levels, sweeps and internal breaks are
   drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount
   SHADING off - its two blocks coloured the whole chart - keeping the equilibrium line); a summary under each chart (trend tags, last breaks, range, strong / weak, S/R, trendlines,

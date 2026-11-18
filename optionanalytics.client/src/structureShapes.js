@@ -71,6 +71,14 @@ export const DEFAULT_LAYERS = STRUCTURE_LAYERS.map((l) => l.key)
 const round = (v) => Math.round(v * 100) / 100
 const lineAt = (a, b, j) => a.price + ((b.price - a.price) / (b.index - a.index)) * (j - a.index)
 
+/** Which layers the LOWER timeframe's chart draws (asked for - "an option to hide the lower timeframe's details with a
+ *  tickbox, so I can see the higher timeframe on the lower timeframe, and see the lower one again when I wish"): with `own`
+ *  off only the higher timeframe's levels are drawn over its candles - nothing at all when that layer is unticked too. */
+export function ltfLayers(layers, own) {
+  const on = [...(layers ?? [])]
+  return own ? on : on.filter((k) => k === 'htf')
+}
+
 /** HOW MUCH IS DRAWN (asked for - "this is looking a bit messy"): Clean keeps only what a trader marks up first (external
  *  structure, the patterns, the nearest zones, the higher TF), Normal adds the internal breaks and the blocks, Everything is
  *  the lot. Each sets how many of each thing are drawn and how many of them may carry a label; `pdFill` = the premium /
