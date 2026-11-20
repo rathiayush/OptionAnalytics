@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, Empty, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
 import { ReloadOutlined } from '@ant-design/icons'
 import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
@@ -8,6 +8,7 @@ import {
 } from './shared.jsx'
 import { createZoomableChart } from './chartZoom.js'
 import { FoldText } from './FoldText.jsx'
+import { useFollowReplayClock } from './replaySync.jsx'
 import { useViewport } from './useScreen.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
 import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, ltfLayers, lowerThan, structureShapes } from './structureShapes.js'
@@ -188,6 +189,20 @@ function SourceLine({ data }) {
   )
 }
 
+// FOLLOW OI REPLAY (asked for - "replay should also work there with OI sync"): the Profiles page's one-way clock
+// (useFollowReplayClock). While OI Replay replays a past day the page shows that index with only the candles COMPLETED at
+// its clock (nothing after it - the structure is read from what was known then); the window is asked far enough back to
+// hold that day. Live, or with the tick off, as before.
+const SESSION_MINUTES = 375
+const istToday = () => new Date(Date.now() + 19_800_000).toISOString().slice(0, 10)
+const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000)
+/** The candles completed by `asOfMs` (null = all). */
+export function candlesAsOf(candles, tf, asOfMs) {
+  if (asOfMs == null) return candles
+  const dur = Math.min(tf, SESSION_MINUTES) * 60_000
+  return candles.filter((c) => c.time + dur <= asOfMs)
+}
+
 export default function SpotStructurePage() {
   const { width } = useViewport()
   const narrow = width <= 768
@@ -211,11 +226,29 @@ export default function SpotStructurePage() {
   // The lower chart's OWN markings - off, it shows the higher timeframe's levels over its candles and nothing else.
   const [ltfOwn, setLtfOwn] = usePersistedState('optionanalytics.structure.ltfOwn', true)
 
-  const high = useStructureCandles(index, htf, htfDays)
-  const low = useStructureCandles(index, ltf, ltfDays)
+  // Following OI Replay: its index, day and clock.
+  const [follow, setFollow] = usePersistedState('optionanalytics.structure.follow', true)
+  const [replay, setReplay] = useState(null)               // { date, ms } of the past day OI Replay replays; null = live
+  const onClock = useCallback((msg) => {
+    if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(msg.underlying)) return
+    setIndex(msg.underlying)
+    if (msg.live) { setReplay(null); return }
+    const day = msg.date ?? msg.loadingDate ?? msg.failedDate
+    if (!day) return
+    setReplay({ date: day, ms: msg.date ? msg.ms ?? null : null })
+  }, [setIndex])
+  const followed = useFollowReplayClock(follow, onClock)
+  const following = follow && followed.connected
+  const replayed = following ? replay : null
+  const asOfMs = replayed ? (replayed.ms ?? Date.parse(`${replayed.date}T09:15:00+05:30`)) : null
+  const back = replayed ? Math.max(0, dayDiff(istToday(), replayed.date)) : 0
+  const high = useStructureCandles(index, htf, htfDays + back)
+  const low = useStructureCandles(index, ltf, ltfDays + back)
+  const highCandles = useMemo(() => candlesAsOf(high.data?.candles ?? [], htf, asOfMs), [high.data, htf, asOfMs])
+  const lowCandles = useMemo(() => candlesAsOf(low.data?.candles ?? [], ltf, asOfMs), [low.data, ltf, asOfMs])
   const opts = useMemo(() => ({ swingLen, internalLen, trendLen: Math.max(3, Math.round((swingLen + internalLen) / 3)) }), [swingLen, internalLen])
-  const ha = useMemo(() => analyzeStructure(high.data?.candles ?? [], opts), [high.data, opts])
-  const la = useMemo(() => analyzeStructure(low.data?.candles ?? [], opts), [low.data, opts])
+  const ha = useMemo(() => analyzeStructure(highCandles, opts), [highCandles, opts])
+  const la = useMemo(() => analyzeStructure(lowCandles, opts), [lowCandles, opts])
   const read = useMemo(() => topDownRead(ha, la, { htf: TF_NAME[htf], ltf: TF_NAME[ltf] }), [ha, la, htf, ltf])
   const layerSet = useMemo(() => new Set(asList(layers)), [layers])
   const htfShapes = useMemo(() => structureShapes(ha, [...layerSet].filter((k) => k !== 'htf'), { density }), [ha, layerSet, density])
@@ -254,7 +287,11 @@ export default function SpotStructurePage() {
         <Card size="small" title="Spot structure - market structure on a higher and a lower timeframe">
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]}>
-              <Segmented value={index} onChange={setIndex} options={INDICES} />
+              <Segmented value={index} onChange={setIndex} options={INDICES} disabled={following} />
+              <Checkbox checked={follow} onChange={(e) => setFollow(e.target.checked)}>Follow OI Replay</Checkbox>
+              {follow && <Tag color={following ? (replayed ? 'blue' : 'green') : 'default'}>
+                {following ? (replayed ? `⇄ replay ${replayed.date}${replayed.ms ? ` ${new Date(replayed.ms + 19_800_000).toISOString().slice(11, 16)}` : ''}` : '⇄ OI Replay live') : 'OI Replay not open'}
+              </Tag>}
               <Space size={4}><Text style={{ fontSize: 12 }}>Higher TF</Text>
                 <Select value={htf} onChange={setHtf} style={{ width: 86 }} aria-label="Higher timeframe" options={TIMEFRAMES.filter((t) => t.value > 1)} />
               </Space>

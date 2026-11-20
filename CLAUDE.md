@@ -931,6 +931,11 @@ All must pass before committing.
   drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount
   SHADING off - its two blocks coloured the whole chart - keeping the equilibrium line); a summary under each chart (trend tags, last breaks, range, strong / weak, S/R, trendlines,
   patterns, order blocks, gaps, liquidity). A read of the chart - it places nothing and feeds no alert or strategy.
+  FOLLOWS OI REPLAY (asked for - "replay should also work there ... with OI sync"; `optionanalytics.structure.follow`, ON by default, the
+  "Follow OI Replay" tick): the Profiles page's one-way clock (`useFollowReplayClock`) - OI Replay's index (the picker locks) and,
+  while it replays a PAST day, only the candles COMPLETED at its clock (`candlesAsOf`; a day just loading = none of it yet), the
+  window asked `days` + the days back to that day so it holds it (the server clamps to the timeframe's limit - a day older than
+  that shows no candles); live or OI Replay not open = as before.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
   I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone
