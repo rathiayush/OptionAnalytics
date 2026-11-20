@@ -323,6 +323,9 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   const [side, setSide] = usePersistedState('optionanalytics.oiReplay.optionDeltaSide', 'net')
   const shownSide = CARD_SIDES.some((s) => s.value === side) ? side : 'net'
   const oiNet = shownSide === 'oi'
+  // "+ Net (CE − PE)" (asked for - show the flow's net beside the OI's): with OI picked, a second profile in its own column.
+  const [alsoNet, setAlsoNet] = usePersistedState('optionanalytics.oiReplay.optionDeltaAlsoNet', false)
+  const showNet = oiNet && alsoNet
   const [rowSize, rowSelect] = useRowSize(underlying)
   const choice = useSessionChoice('optionDelta')
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
@@ -343,6 +346,13 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
     return optionOiNetProfileOf(flowProfile, oiSessions, { rowSize })
   }, [oiNet, flowProfile, todayOi, past.sessions, choice.dayCount, choice.of, choice.withToday, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
+  // What the chart draws: the OI profile with the flow's net CE − PE as a second delta column (flowProfile IS the net profile here).
+  const drawn = useMemo(
+    () => (showNet ? { ...profile, extra: { rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' } } : profile),
+    [showNet, profile, flowProfile],
+  )
+  // TOTAL NET (asked for): the OI's CE − PE less the flow's net CE − PE. Negative = bullish (puts written and calls bought).
+  const totalNet = showNet ? profile.totals.net - flowProfile.totals.net : 0
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
@@ -356,6 +366,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         {rowSelect}
         {choice.control}
         {levelsTick}
+        {oiNet && <Checkbox checked={alsoNet} onChange={(e) => setAlsoNet(e.target.checked)}>+ Net (CE − PE)</Checkbox>}
       </Space>
       <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length && choice.withToday ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
@@ -366,6 +377,13 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
               <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots -{' '}
               <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{profile.totals.net < 0 ? 'BULLISH (puts written ahead)' : profile.totals.net > 0 ? 'BEARISH (calls written ahead)' : 'even'}</Text>
               {' '}(CE added {lots(profile.totals.ce / lotSize, true)} · PE added {lots(profile.totals.pe / lotSize, true)}) · POC {price(levels?.poc ?? profile.poc)}
+              {showNet && (
+                <>
+                  {' '}· Net CE − PE Δ <Text strong style={{ fontSize: 12, color: deltaColor(flowProfile.totals.net) }}>{lots(flowProfile.totals.net / lotSize, true)}</Text> lots
+                  {' '}· Total (OI − Net) <Text strong style={{ fontSize: 12, color: deltaColor(-totalNet) }}>{lots(totalNet / lotSize, true)}</Text> lots -{' '}
+                  <Text strong style={{ fontSize: 12, color: deltaColor(-totalNet) }}>{totalNet < 0 ? 'BULLISH' : totalNet > 0 ? 'BEARISH' : 'even'}</Text>
+                </>
+              )}
             </Text>
           ) : (
           <Text style={{ fontSize: 12 }}>
@@ -375,7 +393,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
           </Text>
           )}
           <LevelsLine levels={levels} show={levelsOn} oiNet={oiNet} />
-          <DeltaProfileChart candles={candles} profile={profile} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}|${choice.withToday}`} onHover={setHover} lotSize={lotSize} deltaWord={deltaWord} />
+          <DeltaProfileChart candles={candles} profile={drawn} levels={levelsOn ? levels : null} dayKey={`${dayKey}|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}|${choice.withToday}`} onHover={setHover} lotSize={lotSize} deltaWord={deltaWord} />
           <HoverLine profile={profile} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord={deltaWord} />
         </>
       ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
@@ -441,6 +459,13 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
   const sessions = useMemo(() => deltaCardSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of, withToday: choice.withToday }), [todayBars, past.sessions, choice.dayCount, choice.of, choice.withToday])
   const profile = useMemo(() => futuresDeltaProfileOf(sessions, { rowSize }), [sessions, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
+  // What the chart draws: the OI profile with the flow's net CE − PE as a second delta column (flowProfile IS the net profile here).
+  const drawn = useMemo(
+    () => (showNet ? { ...profile, extra: { rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' } } : profile),
+    [showNet, profile, flowProfile],
+  )
+  // TOTAL NET (asked for): the OI's CE − PE less the flow's net CE − PE. Negative = bullish (puts written and calls bought).
+  const totalNet = showNet ? profile.totals.net - flowProfile.totals.net : 0
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayBars.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(futuresBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
