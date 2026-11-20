@@ -92,13 +92,12 @@ export class DeltaProfilePrimitive {
       const pad = Math.round(6 * hpr)
       // `p.extra` (the option card's "+ Net (CE − PE)" tick: { rows [{ price, delta }], maxAbsDelta, title }): a SECOND delta column,
       // the flow's net CE − PE beside the OI's - three columns, the panel's share unchanged.
-      const x = p.extra?.rows?.length ? p.extra : null
-      const colW = Math.max(4, Math.floor((W - left - (x ? 4 : 3) * pad) / (x ? 3 : 2)))
+      const xs = (p.extras ?? []).filter((c) => c?.rows?.length)
+      const cols = 2 + xs.length
+      const colW = Math.max(4, Math.floor((W - left - (cols + 1) * pad) / cols))
       const volX = left + pad
       const deltaX = volX + colW + pad
       const mid = deltaX + Math.round(colW / 2)
-      const extraX = deltaX + colW + pad
-      const mid2 = extraX + Math.round(colW / 2)
       const head = Math.round(16 * vpr)
       ctx.fillStyle = PANEL_BG
       ctx.fillRect(left, 0, W - left, H)
@@ -111,23 +110,24 @@ export class DeltaProfilePrimitive {
       // Over its own centre line - beside VOLUME it ran into it on a phone.
       ctx.textAlign = 'center'
       ctx.fillText(p.deltaTitle ?? 'DELTA', mid, Math.round(3 * vpr))
-      if (x) ctx.fillText(x.title ?? 'NET Δ', mid2, Math.round(3 * vpr))
+      xs.forEach((x, i) => ctx.fillText(x.title ?? 'NET Δ', deltaX + (i + 1) * (colW + pad) + Math.round(colW / 2), Math.round(3 * vpr)))
       ctx.textAlign = 'left'
       ctx.fillStyle = AXIS
       ctx.fillRect(mid, head, Math.max(1, Math.round(hpr)), H - head)
-      if (x) {
+      xs.forEach((x, i) => {
+        const mid2 = deltaX + (i + 1) * (colW + pad) + Math.round(colW / 2)
         ctx.fillRect(mid2, head, Math.max(1, Math.round(hpr)), H - head)
-        // The flow's own sign: positive = bullish = green (the OI column's is the other way round).
         for (const row of x.rows) {
           if (!(x.maxAbsDelta > 0) || !row.delta) continue
           const box = this._rowBox(row, vpr)
           if (!box || box.top > H || box.top + box.height < head) continue
           const top = Math.max(head, box.top)
           const len = Math.max(1, (Math.abs(row.delta) / x.maxAbsDelta) * (colW / 2))
-          ctx.fillStyle = row.delta > 0 ? BUY : SELL
+          // Each column's own sign: `bullishNegative` (the OI's, the total's) - a negative row is the green one.
+          ctx.fillStyle = (x.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
           ctx.fillRect(row.delta > 0 ? mid2 : mid2 - len, top, len, Math.max(1, box.top + box.height - top))
         }
-      }
+      })
       for (const row of p.rows) {
         const box = this._rowBox(row, vpr)
         if (!box || box.top > H || box.top + box.height < head) continue
