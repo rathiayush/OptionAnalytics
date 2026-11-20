@@ -471,13 +471,6 @@ export function FuturesDeltaProfileCard({ futuresBars, asOfMs, underlying, date,
   const sessions = useMemo(() => deltaCardSessions({ today: todayBars, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of, withToday: choice.withToday }), [todayBars, past.sessions, choice.dayCount, choice.of, choice.withToday])
   const profile = useMemo(() => futuresDeltaProfileOf(sessions, { rowSize }), [sessions, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
-  // What the chart draws: the OI profile with the flow's net CE − PE as a second delta column (flowProfile IS the net profile here).
-  const drawn = useMemo(
-    () => (showNet ? { ...profile, extra: { rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' } } : profile),
-    [showNet, profile, flowProfile],
-  )
-  // TOTAL NET (asked for): the OI's CE − PE less the flow's net CE − PE. Negative = bullish (puts written and calls bought).
-  const totalNet = showNet ? profile.totals.net - flowProfile.totals.net : 0
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayBars.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(futuresBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
