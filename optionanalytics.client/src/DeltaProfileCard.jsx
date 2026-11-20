@@ -355,15 +355,17 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
     if (showNet) extras.push({ rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' })
     if (showTotal) {
       // Row by row: the OI's CE − PE less the flow's net CE − PE at the same price (negative = bullish).
+      // Net flow is far smaller than OI, so it is scaled to OI's size first - both then count equally: bullish OI (negative) + bullish net (positive) add up, opposite signs cancel.
+      const netScale = flowProfile.maxAbsDelta > 0 ? profile.maxAbsDelta / flowProfile.maxAbsDelta : 0
       const net = new Map(flowProfile.rows.map((r) => [r.price, r.delta]))
       const oi = new Map(profile.rows.map((r) => [r.price, r.delta]))
-      const rows = [...new Set([...net.keys(), ...oi.keys()])].map((price) => ({ price, delta: (oi.get(price) ?? 0) - (net.get(price) ?? 0) }))
+      const rows = [...new Set([...net.keys(), ...oi.keys()])].map((price) => ({ price, delta: (oi.get(price) ?? 0) - netScale * (net.get(price) ?? 0) }))
       extras.push({ rows, maxAbsDelta: Math.max(0, ...rows.map((r) => Math.abs(r.delta))), title: 'TOTAL', bullishNegative: true })
     }
     return extras.length ? { ...profile, extras } : profile
   }, [showNet, showTotal, profile, flowProfile])
   // TOTAL NET (asked for): the OI's CE − PE less the flow's net CE − PE. Negative = bullish (puts written and calls bought).
-  const totalNet = (showNet || showTotal) ? profile.totals.net - flowProfile.totals.net : 0
+  const totalNet = (showNet || showTotal) ? profile.totals.net - (flowProfile.maxAbsDelta > 0 ? profile.maxAbsDelta / flowProfile.maxAbsDelta : 0) * flowProfile.totals.net : 0
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
