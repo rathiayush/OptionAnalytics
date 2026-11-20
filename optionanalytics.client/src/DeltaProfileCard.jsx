@@ -326,6 +326,9 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   // "+ Net (CE − PE)" (asked for - show the flow's net beside the OI's): with OI picked, a second profile in its own column.
   const [alsoNet, setAlsoNet] = usePersistedState('optionanalytics.oiReplay.optionDeltaAlsoNet', false)
   const showNet = oiNet && alsoNet
+  // "+ Total (OI − Net)": a third profile, row by row.
+  const [alsoTotal, setAlsoTotal] = usePersistedState('optionanalytics.oiReplay.optionDeltaAlsoTotal', false)
+  const showTotal = oiNet && alsoTotal
   const [rowSize, rowSelect] = useRowSize(underlying)
   const choice = useSessionChoice('optionDelta')
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
@@ -347,12 +350,20 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   }, [oiNet, flowProfile, todayOi, past.sessions, choice.dayCount, choice.of, choice.withToday, rowSize])
   const levels = useMemo(() => deltaProfileLevels(profile), [profile])
   // What the chart draws: the OI profile with the flow's net CE − PE as a second delta column (flowProfile IS the net profile here).
-  const drawn = useMemo(
-    () => (showNet ? { ...profile, extra: { rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' } } : profile),
-    [showNet, profile, flowProfile],
-  )
+  const drawn = useMemo(() => {
+    const extras = []
+    if (showNet) extras.push({ rows: flowProfile.rows, maxAbsDelta: flowProfile.maxAbsDelta, title: 'NET CE − PE' })
+    if (showTotal) {
+      // Row by row: the OI's CE − PE less the flow's net CE − PE at the same price (negative = bullish).
+      const net = new Map(flowProfile.rows.map((r) => [r.price, r.delta]))
+      const oi = new Map(profile.rows.map((r) => [r.price, r.delta]))
+      const rows = [...new Set([...net.keys(), ...oi.keys()])].map((price) => ({ price, delta: (oi.get(price) ?? 0) - (net.get(price) ?? 0) }))
+      extras.push({ rows, maxAbsDelta: Math.max(0, ...rows.map((r) => Math.abs(r.delta))), title: 'TOTAL', bullishNegative: true })
+    }
+    return extras.length ? { ...profile, extras } : profile
+  }, [showNet, showTotal, profile, flowProfile])
   // TOTAL NET (asked for): the OI's CE − PE less the flow's net CE − PE. Negative = bullish (puts written and calls bought).
-  const totalNet = showNet ? profile.totals.net - flowProfile.totals.net : 0
+  const totalNet = (showNet || showTotal) ? profile.totals.net - flowProfile.totals.net : 0
   const [levelsOn, levelsTick] = useLevelsShown()
   const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length && choice.withToday ? [date] : [])]
   const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: profile.poc ?? profile.rows[0]?.price })
@@ -367,6 +378,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
         {choice.control}
         {levelsTick}
         {oiNet && <Checkbox checked={alsoNet} onChange={(e) => setAlsoNet(e.target.checked)}>+ Net (CE − PE)</Checkbox>}
+        {oiNet && <Checkbox checked={alsoTotal} onChange={(e) => setAlsoTotal(e.target.checked)}>+ Total (OI − Net)</Checkbox>}
       </Space>
       <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length && choice.withToday ? clockText(isLive, asOfMs) : null} />
       {profile.rows.length && candles.length ? (
@@ -377,7 +389,7 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
               <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{lots(profile.totals.net / lotSize, true)}</Text> lots -{' '}
               <Text strong style={{ fontSize: 12, color: deltaColor(-profile.totals.net) }}>{profile.totals.net < 0 ? 'BULLISH (puts written ahead)' : profile.totals.net > 0 ? 'BEARISH (calls written ahead)' : 'even'}</Text>
               {' '}(CE added {lots(profile.totals.ce / lotSize, true)} · PE added {lots(profile.totals.pe / lotSize, true)}) · POC {price(levels?.poc ?? profile.poc)}
-              {showNet && (
+              {(showNet || showTotal) && (
                 <>
                   {' '}· Net CE − PE Δ <Text strong style={{ fontSize: 12, color: deltaColor(flowProfile.totals.net) }}>{lots(flowProfile.totals.net / lotSize, true)}</Text> lots
                   {' '}· Total (OI − Net) <Text strong style={{ fontSize: 12, color: deltaColor(-totalNet) }}>{lots(totalNet / lotSize, true)}</Text> lots -{' '}
