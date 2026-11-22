@@ -60,6 +60,7 @@ const CARD_ROWS = {
   ladder: 16,
   futures: 21,
   optionDeltaProfile: 20,
+  optionCdvObvProfile: 20,
   futuresDeltaProfile: 20,
 }
 export const defaultRows = (id) => CARD_ROWS[id] ?? DEFAULT_ROWS
@@ -324,6 +325,8 @@ export const SECTION_ADDITIONS = [
   { version: 5, card: 'gexSpot', after: 'gex' },
   // Dealer hedging (asked for - "can you also add delta exposure" - the hedging-flow DEX).
   { version: 7, card: 'dex', after: 'gexSpot' },
+  // The option CDV / OBV profile (asked for - "another component of cdv and obv profile").
+  { version: 8, card: 'optionCdvObvProfile', after: 'optionDeltaProfile' },
 ]
 
 /** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
@@ -386,7 +389,7 @@ export const LAYOUT_VERSION = '2'
 // and bring back an OI totals card someone hid.
 // '4' added the two delta profiles (SECTION_ADDITIONS), '5' the GEX levels on spot, '6' the volatility skew.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '7'
+export const SECTIONS_VERSION = '8'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands

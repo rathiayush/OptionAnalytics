@@ -71,7 +71,7 @@ function spread(rows, low, high, rowSize, amounts) {
   for (let i = 0; i < n; i++) {
     const price = Math.round((bottom + i * rowSize) * 100) / 100
     let row = rows.get(price)
-    if (!row) rows.set(price, row = { price, ceVol: 0, peVol: 0, ce: 0, pe: 0 })
+    if (!row) rows.set(price, row = { price, ceVol: 0, peVol: 0, ce: 0, pe: 0, ceObv: 0, peObv: 0 })
     for (const [key, value] of Object.entries(amounts)) row[key] += value / n
     touched.push(row)
   }
@@ -93,8 +93,14 @@ export function optionDeltaMinutes(cePoints, pePoints, spotBars, { asOfMs = null
   const spotBar = new Map(spot.map((b) => [minuteOf(msOf(b.time)), b]))
   const minutes = new Map()
   const add = (points, isCall) => {
-    for (const b of optionBars(points)) {
+    // OBV (the Option OBV's own rule - optionFlow.js): each strike's volume signed by whether its close rose or fell from ITS
+    // previous bar's close, weighted like the delta - bars in time order so each strike's previous close is the one before.
+    const prevClose = new Map()
+    for (const b of optionBars(points).sort((x, y) => x.t - y.t)) {
       if (clock != null && b.t > clock) continue
+      const before = prevClose.get(b.strike)
+      prevClose.set(b.strike, b.close)
+      const sign = before == null ? 0 : Math.sign(b.close - before)
       const s = spotAt(b.t)
       if (!s) continue
       const w = deltaWeight(b.strike, s, isCall)
@@ -104,9 +110,9 @@ export function optionDeltaMinutes(cePoints, pePoints, spotBars, { asOfMs = null
         const bar = spotBar.get(b.t)
         const low = bar ? Math.min(bar.low ?? bar.close, bar.close) : s
         const high = bar ? Math.max(bar.high ?? bar.close, bar.close) : s
-        minutes.set(b.t, m = { t: b.t, low, high, ceVol: 0, peVol: 0, ce: 0, pe: 0 })
+        minutes.set(b.t, m = { t: b.t, low, high, ceVol: 0, peVol: 0, ce: 0, pe: 0, ceObv: 0, peObv: 0 })
       }
-      if (isCall) { m.ceVol += b.volume * w; m.ce += barProxyDelta(b) * w } else { m.peVol += b.volume * w; m.pe += barProxyDelta(b) * w }
+      if (isCall) { m.ceVol += b.volume * w; m.ce += barProxyDelta(b) * w; m.ceObv += sign * b.volume * w } else { m.peVol += b.volume * w; m.pe += barProxyDelta(b) * w; m.peObv += sign * b.volume * w }
     }
   }
   add(cePoints, true)
@@ -117,20 +123,26 @@ export function optionDeltaMinutes(cePoints, pePoints, spotBars, { asOfMs = null
 // Adds option minutes into rows one at a time (`add` returns the rows it touched); `profile(side)` - the profile so far.
 function optionDeltaAccumulator(rowSize) {
   const rows = new Map()
-  const totals = { ce: 0, pe: 0 }
+  const totals = { ce: 0, pe: 0, ceObv: 0, peObv: 0 }
   let count = 0
   return {
     rows,
     add(m) {
       totals.ce += m.ce
       totals.pe += m.pe
+      totals.ceObv += m.ceObv ?? 0
+      totals.peObv += m.peObv ?? 0
       count++
-      return spread(rows, m.low, m.high, rowSize, { ceVol: m.ceVol, peVol: m.peVol, ce: m.ce, pe: m.pe })
+      return spread(rows, m.low, m.high, rowSize, { ceVol: m.ceVol, peVol: m.peVol, ce: m.ce, pe: m.pe, ceObv: m.ceObv ?? 0, peObv: m.peObv ?? 0 })
     },
-    profile(side = 'net') {
-      const pick = side === 'ce' ? (r) => [r.ceVol, r.ce] : side === 'pe' ? (r) => [r.peVol, r.pe] : (r) => [r.ceVol + r.peVol, r.ce - r.pe]
+    // `metric` 'cdv' (the default - the bar-proxy delta, the delta profile) or 'obv' (volume signed by the close's direction).
+    profile(side = 'net', metric = 'cdv') {
+      const obv = metric === 'obv'
+      const c = obv ? 'ceObv' : 'ce', p = obv ? 'peObv' : 'pe'
+      const pick = side === 'ce' ? (r) => [r.ceVol, r[c]] : side === 'pe' ? (r) => [r.peVol, r[p]] : (r) => [r.ceVol + r.peVol, r[c] - r[p]]
       const list = [...rows.values()].map((r) => { const [volume, delta] = pick(r); return { ...r, volume, delta } })
-      return { ...finishDeltaProfile(list, rowSize), side, totals: { ce: totals.ce, pe: totals.pe, net: totals.ce - totals.pe }, minutes: count }
+      const ce = obv ? totals.ceObv : totals.ce, pe = obv ? totals.peObv : totals.pe
+      return { ...finishDeltaProfile(list, rowSize), side, metric, totals: { ce, pe, net: ce - pe }, minutes: count }
     },
   }
 }
@@ -141,10 +153,10 @@ function optionDeltaAccumulator(rowSize) {
  * covered, added up. Rows: [{ price, volume, delta, ce, pe, ceVol, peVol }] - volume and delta of the side picked, in
  * delta-weighted contracts; `totals` { ce, pe, net } (the sessions' deltas); `minutes` - the minutes counted.
  */
-export function optionDeltaProfileOf(sessions, { rowSize = 5, side = 'net' } = {}) {
+export function optionDeltaProfileOf(sessions, { rowSize = 5, side = 'net', metric = 'cdv' } = {}) {
   const acc = optionDeltaAccumulator(rowSize)
   for (const minutes of sessions ?? []) for (const m of minutes ?? []) acc.add(m)
-  return acc.profile(side)
+  return acc.profile(side, metric)
 }
 
 /**

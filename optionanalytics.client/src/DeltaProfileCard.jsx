@@ -436,6 +436,78 @@ export function OptionDeltaProfileCard({ cePoints, pePoints, spotBars, asOfMs, u
   )
 }
 
+/**
+ * The OPTIONS' CDV and OBV PROFILES on the spot chart (asked for - "another component of cdv and obv profile ... same as delta
+ * and futures profile ... previous days + current day"): the option delta profile's price rows with TWO delta columns side by
+ * side - CDV (the bar-proxy delta, the Option CDV's own - the main column) and OBV (each strike's volume signed by whether its
+ * close rose or fell, the Option OBV's own rule) - for CE, PE or Net (CE − PE), + green = bought / bullish. The same props as
+ * `OptionDeltaProfileCard`; its own "Previous day" / Days / "+ current day" ticks.
+ */
+export function OptionCdvObvProfileCard({ cePoints, pePoints, spotBars, asOfMs, underlying, date, expiryFlag, dayKey, isLive = false }) {
+  const [timeframe, setTimeframe] = usePersistedState('optionanalytics.oiReplay.optionCdvObvTf', 5)
+  const [side, setSide] = usePersistedState('optionanalytics.oiReplay.optionCdvObvSide', 'net')
+  const shownSide = OPTION_DELTA_SIDES.some((x) => x.value === side) ? side : 'net'
+  const [rowSize, rowSelect] = useRowSize(underlying)
+  const choice = useSessionChoice('optionCdvObv')
+  const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
+  const past = usePastDeltaSessions('options', underlying, date, choice.pastCount, flag)
+  const [hover, setHover] = useState(null)
+  const lotSize = PAPER_TRADE_LOT_SIZE[underlying] ?? 1
+  const spotMs = useMemo(() => (spotBars ?? []).map((b) => ({ time: fromChartTime(b.time) * 1000, open: b.open, high: b.high, low: b.low, close: b.close })), [spotBars])
+  const todayMinutes = useMemo(() => optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
+  const sessions = useMemo(() => deltaCardSessions({ today: todayMinutes, past: past.sessions.map((d) => d.items), days: choice.dayCount, of: choice.of, withToday: choice.withToday }), [todayMinutes, past.sessions, choice.dayCount, choice.of, choice.withToday])
+  const cdv = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide, metric: 'cdv' }), [sessions, rowSize, shownSide])
+  const obv = useMemo(() => optionDeltaProfileOf(sessions, { rowSize, side: shownSide, metric: 'obv' }), [sessions, rowSize, shownSide])
+  const drawn = useMemo(() => ({ ...cdv, deltaTitle: 'CDV', extras: [{ rows: obv.rows, maxAbsDelta: obv.maxAbsDelta, title: 'OBV' }] }), [cdv, obv])
+  const levels = useMemo(() => deltaProfileLevels(cdv), [cdv])
+  const [levelsOn, levelsTick] = useLevelsShown()
+  const dates = [...past.sessions.map((d) => d.date), ...(todayMinutes.length && choice.withToday ? [date] : [])]
+  const { candles, standIn, holder } = useCandles(spotBars, past, timeframe, { isLive, date, price: cdv.poc ?? cdv.rows[0]?.price })
+  const soFar = choice.of === 'today' && choice.dayCount === 1
+  const reading = (name, p) => (
+    <>
+      {name}{soFar ? ' so far' : ''} <Text strong style={{ fontSize: 12, color: deltaColor(p.totals.net) }}>{lots(p.totals.net / lotSize, true)}</Text> lots{' '}
+      <Text strong style={{ fontSize: 12, color: deltaColor(p.totals.net) }}>{p.totals.net > 0 ? 'BULLISH' : p.totals.net < 0 ? 'BEARISH' : 'even'}</Text>
+    </>
+  )
+  return (
+    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      <Space wrap size={[8, 6]} align="center">
+        <Segmented size="small" value={shownSide} onChange={setSide} options={OPTION_DELTA_SIDES} />
+        <Segmented size="small" value={timeframe} onChange={setTimeframe} options={TIMEFRAMES.map((v) => ({ value: v, label: `${v}m` }))} />
+        {rowSelect}
+        {choice.control}
+        {levelsTick}
+      </Space>
+      <SessionsLine choice={choice} past={past} dates={dates} standIn={standIn} holder={holder} upTo={todayMinutes.length && choice.withToday ? clockText(isLive, asOfMs) : null} />
+      {cdv.rows.length && candles.length ? (
+        <>
+          <Text style={{ fontSize: 12 }}>
+            {reading('CDV', cdv)} · {reading('OBV', obv)}
+            {' '}(CE CDV {lots(cdv.totals.ce / lotSize, true)} · PE CDV {lots(cdv.totals.pe / lotSize, true)} · CE OBV {lots(obv.totals.ce / lotSize, true)} · PE OBV {lots(obv.totals.pe / lotSize, true)}) · POC {price(levels?.poc ?? cdv.poc)}
+          </Text>
+          <LevelsLine levels={levels} show={levelsOn} oiNet={false} />
+          <DeltaProfileChart candles={candles} profile={drawn} levels={levelsOn ? levels : null} dayKey={`${dayKey}|cdvobv|${rowSize}|${shownSide}|${choice.of}|${choice.dayCount}|${choice.withToday}`} onHover={setHover} lotSize={lotSize} deltaWord="CDV Δ (+ bought)" />
+          <HoverLine profile={cdv} hoverPrice={hover} unit="lots" lotSize={lotSize} deltaWord="CDV Δ (+ bought)" />
+        </>
+      ) : past.loading ? <Text type="secondary">Loading the days before…</Text>
+        : <Alert type="info" showIcon message={choice.of === 'previous' ? 'No option bars with volume in the sessions before this day or up to this minute.' : 'No option bars with volume up to this minute yet.'} />}
+      <FoldText id="oiReplay.optionCdvObvProfile" label="how to read this" className="oa-note">
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          The option delta profile&apos;s price rows with two delta columns beside the volume: CDV = buy − sell estimated from
+          where each strike&apos;s 1-minute close sits in its range (the Option CDV&apos;s own formula), OBV = each strike&apos;s
+          volume counted + when its close rose from its previous bar and − when it fell (the Option OBV&apos;s own rule). Both
+          weight a strike by its delta at that minute&apos;s spot, are laid on the spot rows that minute covered and are in
+          lots; green = bought / bullish (calls bought, puts sold), red = the opposite. Where the two agree the read is
+          stronger; where they differ one of them is the price direction (OBV) and the other the candle&apos;s close in its range
+          (CDV). Pick CE, PE or Net (CE − PE). Previous day / Days / + current day work as on the delta profile. Only the minutes
+          up to the replay clock count. It feeds no strategy or alert.
+        </Text>
+      </FoldText>
+    </Space>
+  )
+}
+
 // The futures' Order Flow day with its footprint (buy / sell at each price, in lots), the minutes it did not record filled
 // from its estimate - loaded once, live again every minute (a page timer - POLL_HEADERS). `date` null = not wanted.
 function useFuturesFootprintDay(underlying, date, isLive, rowSize) {
