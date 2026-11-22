@@ -23,7 +23,7 @@
 // price below it = trend-day-down. Every reading is built only from minutes up to the clock (the inputs are cut there).
 // A read - it places nothing and feeds no strategy or alert.
 
-import { futuresDeltaProfileOf, optionDeltaProfileOf } from './deltaProfile.js'
+import { deltaZones, futuresDeltaProfileOf, optionDeltaProfileOf } from './deltaProfile.js'
 import { rowOf } from './orderFlowMath.js'
 
 const MIN = 60_000
@@ -53,6 +53,9 @@ export const SIGNIFICANT = 0.2
 export const PER_SIDE = 4
 /** The open rule: the OI written on one side of the open must be at least this share of all the OI added that day. */
 export const OPEN_RULE_SHARE = 0.15
+/** The day's own zones count in full once the day has this many minutes, in proportion before (a few minutes' profile is
+ *  noise against the sessions before). */
+export const DAY_MATURE_MIN = 30
 /** A state of the open rule counts once it holds this many minutes in a row (no flicker). */
 export const OPEN_RULE_HOLD = 3
 
@@ -207,6 +210,46 @@ export function readZones(zones, price) {
   return { zones: read, lean: up + down > 0 ? round2((up - down) / (up + down)) : 0 }
 }
 
+/** futures − spot AT THE SAME MINUTE: the last futures bar with a close against the spot close of that minute (the last
+ *  spot bar at or before it, within 5 minutes); null when there is none. The two last closes could be minutes apart (a
+ *  futures feed behind the spot's), and every futures zone would then sit off by the move in between. */
+export function basisOf(futures, spot) {
+  for (let i = (futures?.length ?? 0) - 1; i >= 0; i--) {
+    const f = futures[i]
+    if (!(f?.close > 0)) continue
+    const t = minuteOf(msOf(f.time))
+    for (let j = (spot?.length ?? 0) - 1; j >= 0; j--) {
+      const b = spot[j]
+      if (!(b?.close > 0)) continue
+      const st = minuteOf(msOf(b.time))
+      if (st > t) continue
+      return t - st <= 5 * MIN ? f.close - b.close : null
+    }
+    return null
+  }
+  return null
+}
+
+/**
+ * THE BIGGEST CDV SUPPORT AND RESISTANCE (asked for - "add the biggest CDV support and resistance of the previous day from
+ * the start and the current developing"): the net CE − PE flow (CDV) profile of `sessions` (optionDeltaMinutes each), its
+ * strongest BUYING cluster - adjacent rows of net buying, the largest added up (deltaZones' green) - = SUPPORT, its strongest
+ * SELLING cluster = RESISTANCE. Each { low, high, level (the middle of the cluster's busiest row), sum (lots) } or null;
+ * `net` the profile's total. The sessions before give it for the day from its start (fixed); the day's own minutes up to the
+ * clock give the DEVELOPING one.
+ */
+export function cdvLevels(sessions, rowSize = 5) {
+  const p = optionDeltaProfileOf(sessions, { rowSize, metric: 'cdv' })
+  const { green, red } = deltaZones(p.rows, rowSize)
+  const of = (z, sgn) => {
+    if (!z) return null
+    let peak = null
+    for (const r of p.rows) if (r.price >= z.low - 1e-6 && r.price < z.high - 1e-6 && Math.sign(r.delta) === sgn && (!peak || Math.abs(r.delta) > Math.abs(peak.delta))) peak = r
+    return { low: z.low, high: z.high, level: round2((peak?.price ?? z.low) + rowSize / 2), sum: z.sum }
+  }
+  return { support: of(green, 1), resistance: of(red, -1), net: p.totals?.net ?? 0 }
+}
+
 const lastClose = (bars) => { for (let i = (bars?.length ?? 0) - 1; i >= 0; i--) if (bars[i]?.close > 0) return bars[i].close; return null }
 
 /**
@@ -218,8 +261,8 @@ export function openingRead({ prevOptions = [], prevFutures = [], rowSize = 5 })
   const close = lastClose(last?.candles)
   const lastFut = prevFutures[prevFutures.length - 1]
   // The basis from the same session's two closes only - another day's futures would put their zones off by its own basis.
-  const futClose = lastFut && (!last?.date || !lastFut.date || lastFut.date === last.date) ? lastClose(lastFut.items) : null
-  const basis = close > 0 && futClose > 0 ? futClose - close : null
+  const sameDay = lastFut && (!last?.date || !lastFut.date || lastFut.date === last.date)
+  const basis = sameDay && close > 0 ? basisOf(lastFut.items ?? [], last?.candles ?? []) : null
   const { zones, used, futures } = positionProfile({ options: prevOptions, futures: prevFutures.map((f) => f.items ?? []), basis, rowSize })
   return { close, basis, used, futures, ...readZones(zones, close) }
 }
@@ -305,10 +348,12 @@ export function dayRead({ opening, options = [], oi = [], futures = [], spot = [
   if (!bars.length) return null
   const open = bars[0].open > 0 ? bars[0].open : bars[0].close
   const price = bars[bars.length - 1].close
-  const futClose = lastClose(futures)
-  const basis = futClose > 0 ? futClose - price : null
+  const basis = basisOf(futures, bars)
   const own = positionProfile({ options: [{ items: options, oi }], futures: [futures], basis, rowSize })
-  const today = own.zones.map((z) => ({ ...z, from: 'today' }))
+  // Each profile is scaled by its own largest row, so a day of 3 minutes would give zones as strong as a whole session's:
+  // the day's own zones count in full from its DAY_MATURE_MIN-th minute, less before it.
+  const mature = Math.min(1, bars.length / DAY_MATURE_MIN)
+  const today = own.zones.map((z) => ({ ...z, score: round2(z.score * mature), from: 'today' }))
   const prev = (opening?.zones ?? []).map(({ kind, distance, ...z }) => ({ ...z, from: 'prev' })) // eslint-disable-line no-unused-vars
   const { zones, lean } = readZones([...prev, ...today], price)
   const openRule = openRuleDay({ oi, spot: bars, open, rowSize })
@@ -393,6 +438,41 @@ export function supportResistance(zones) {
   return { support: support.sort(near), resistance: resistance.sort(near) }
 }
 
+const overlaps = (a, b) => !!a && !!b && a.low < b.high && b.low < a.high
+const zoneKey = (z) => `${z.from ?? ''}|${z.bullish}|${z.low}|${z.high}`
+
+/**
+ * THE BEST ZONE (asked for - "identify the best zone and show it on the chart"): every zone read against price (readZones)
+ * rated - its strength (score), x (1 + 0.5 per profile beyond the first agreeing), x (1 − 0.25 per profile against, at
+ * least 0.4), x 1.5 when the other read built a zone of the same side on the same prices (the sessions before AND today),
+ * x 1.3 for each biggest CDV level of its side inside it (`cdv` { prev, today } - cdvLevels: support for a bullish zone,
+ * resistance for a bearish one), x nearness 1 / (1 + distance / 0.5%). { support, resistance, best } - the best of each side
+ * (supportResistance's split) and the better of the two, each { zone, quality, reasons } or null.
+ */
+export function bestZones({ zones = [], cdv = {} } = {}) {
+  const rate = (z) => {
+    const reasons = []
+    let q = z.score ?? 0
+    const n = z.sources?.length ?? 0
+    if (n > 1) { q *= 1 + 0.5 * (n - 1); reasons.push(`${n} profiles agree`) }
+    if (z.against?.length) { q *= Math.max(0.4, 1 - 0.25 * z.against.length); reasons.push(`${z.against.length} against`) }
+    if (zones.some((o) => o !== z && o.from !== z.from && o.bullish === z.bullish && overlaps(o, z))) {
+      q *= 1.5
+      reasons.push('the sessions before and today both built it')
+    }
+    const side = z.bullish ? 'support' : 'resistance'
+    for (const [key, name] of [['prev', 'previous'], ['today', 'today\'s']]) {
+      if (overlaps(cdv[key]?.[side], z)) { q *= 1.3; reasons.push(`${name} biggest CDV ${side} in it`) }
+    }
+    q /= 1 + Math.abs(z.distance ?? 0) / 0.5
+    return { zone: z, quality: round2(q), reasons }
+  }
+  const { support, resistance } = supportResistance(zones)
+  const top = (list) => list.map(rate).sort((a, b) => b.quality - a.quality)[0] ?? null
+  const sup = top(support), res = top(resistance)
+  return { support: sup, resistance: res, best: !sup ? res : !res ? sup : sup.quality >= res.quality ? sup : res }
+}
+
 /** The day re-read every `stepMin` minutes (asked for - "continuously analyse these profiles and update the zones"): at
  *  each step only the minutes up to it, the changes from the step before - a NEW zone of the day's own (no same-side zone
  *  of the step before overlapped it), a zone that CHANGED ROLE against price, the verdict CHANGING. [{ t, type, ... }],
@@ -433,15 +513,21 @@ const hexA = (hex, a) => {
   const n = parseInt(hex.slice(1), 16)
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`
 }
-/** Zones (read against price) as the boxes the primitive draws. */
-export function zoneBoxes(zones, { showPrev = true, showToday = true } = {}) {
-  return (zones ?? []).filter((z) => (z.from === 'today' ? showToday : showPrev)).map((z) => {
+/** Zones (read against price) as the boxes the primitive draws. `best` (bestZones): its best support / resistance drawn
+ *  first (their labels placed first), brighter, a thicker outline and a ★ label - shown even when their layer is hidden. */
+export function zoneBoxes(zones, { showPrev = true, showToday = true, best = null } = {}) {
+  const starred = new Map([[best?.support?.zone, 'support'], [best?.resistance?.zone, 'resistance']].filter(([z]) => z).map(([z, side]) => [zoneKey(z), side]))
+  const list = (zones ?? []).filter((z) => starred.has(zoneKey(z)) || (z.from === 'today' ? showToday : showPrev))
+  return [...list.filter((z) => starred.has(zoneKey(z))), ...list.filter((z) => !starred.has(zoneKey(z)))].map((z) => {
     const k = ZONE_KINDS[z.kind]
     const color = k?.color ?? '#8c8c8c'
+    const star = starred.get(zoneKey(z))
+    const name = `${k?.label.split(' - ')[0] ?? ''} ${z.from === 'today' ? '(today)' : '(before)'} · ${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}`
     return {
       low: z.low, high: z.high,
-      fill: hexA(color, Math.min(0.32, 0.1 + z.score * 0.06)), stroke: hexA(color, 0.85), dashed: z.from !== 'today',
-      label: `${k?.label.split(' - ')[0] ?? ''} ${z.from === 'today' ? '(today)' : '(before)'} · ${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}`,
+      fill: hexA(color, star ? 0.4 : Math.min(0.32, 0.1 + z.score * 0.06)), stroke: hexA(color, star ? 1 : 0.85), dashed: !star && z.from !== 'today',
+      lineWidth: star ? 2 : 1,
+      label: star ? `★ BEST ${star.toUpperCase()} · ${name}` : name,
       labelColor: color,
     }
   })
@@ -453,8 +539,9 @@ export function zoneBoxes(zones, { showPrev = true, showToday = true } = {}) {
  * order. Each { id, name, side 'long' | 'short', option ('Buy CE' / 'Buy PE'), status 'ready' (price is at the trigger now)
  * or 'watch' (wait for it), entry, stop, targets [t1, t2?], rr (t1's reward / risk), entryText, why, aligned (with the day's
  * read - the verdict's score, else the bias from the open; null = no lean) }:
- *   FLOOR BOUNCE - the nearest support below (floor / trapped shorts): a dip into it that closes back above; stop under it.
- *   CEILING REJECTION - the nearest resistance above (ceiling / trapped longs): a rally into it that closes back below.
+ *   FLOOR BOUNCE - the best support (`best` - bestZones; none given: the nearest): a dip into it that closes back above;
+ *     stop under it.
+ *   CEILING REJECTION - the best resistance (else the nearest): a rally into it that closes back below.
  *   SQUEEZE CONTINUATION - a short squeeze still standing: buy the retest of the broken sellers' zone (now support); the
  *     long liquidation the mirror.
  *   OPEN-RULE TREND - the open rule on: buy dips toward the open (the writers' floor), the mirror under the open.
@@ -463,7 +550,7 @@ export function zoneBoxes(zones, { showPrev = true, showToday = true } = {}) {
  * Targets are the next zones the other way (their near edge); none = no target given. Ready first, then those with the read,
  * then the better reward / risk; at most 4.
  */
-export function tradeSetups({ day, bias = null, rowSize = 5 }) {
+export function tradeSetups({ day, bias = null, rowSize = 5, best = null }) {
   if (!day || !(day.price > 0)) return []
   const price = day.price
   const buf = Math.max(rowSize, price * 0.0005)
@@ -484,7 +571,9 @@ export function tradeSetups({ day, bias = null, rowSize = 5 }) {
   }
   const out = []
   const zoneName = (z) => `${ZONE_KINDS[z.kind]?.label.split(' - ')[0]} ${z.low}–${z.high} (${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')})`
-  const s = support[0]
+  // The bounce / rejection trade the BEST zone of each side (bestZones - strength, agreement, nearness), not merely the
+  // nearest: a weak cluster next to price is noise, not a level anyone defends.
+  const s = best?.support?.zone ?? support[0]
   if (s) {
     const entry = Math.min(price, s.high)
     out.push(make({
@@ -492,10 +581,10 @@ export function tradeSetups({ day, bias = null, rowSize = 5 }) {
       status: price >= s.low - buf && price <= s.high * 1.0015 ? 'ready' : 'watch',
       entry, stop: s.low - buf, targets: above(entry),
       entryText: `On a dip into ${s.low}–${s.high} that closes back above ${s.high}`,
-      why: `Nearest support: ${zoneName(s)} - its side defends it.`,
+      why: `${best?.support ? 'Best' : 'Nearest'} support: ${zoneName(s)} - its side defends it.`,
     }))
   }
-  const r = resistance[0]
+  const r = best?.resistance?.zone ?? resistance[0]
   if (r) {
     const entry = Math.max(price, r.low)
     out.push(make({
@@ -503,7 +592,7 @@ export function tradeSetups({ day, bias = null, rowSize = 5 }) {
       status: price <= r.high + buf && price >= r.low * 0.9985 ? 'ready' : 'watch',
       entry, stop: r.high + buf, targets: below(entry),
       entryText: `On a rally into ${r.low}–${r.high} that closes back below ${r.low}`,
-      why: `Nearest resistance: ${zoneName(r)} - its side defends it.`,
+      why: `${best?.resistance ? 'Best' : 'Nearest'} resistance: ${zoneName(r)} - its side defends it.`,
     }))
   }
   const live = day.liveSqueeze

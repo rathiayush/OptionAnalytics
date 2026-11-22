@@ -65,7 +65,7 @@ export class ZoneBoxesPrimitive extends BasePrimitive {
         ctx.fillRect(0, band.top, bitmapSize.width, band.height)
         if (z.stroke) {
           ctx.strokeStyle = z.stroke
-          ctx.lineWidth = Math.max(1, Math.round(hpr))
+          ctx.lineWidth = Math.max(1, Math.round((z.lineWidth ?? 1) * hpr))
           ctx.setLineDash(z.dashed ? [4 * hpr, 3 * hpr] : [])
           ctx.strokeRect(0.5, band.top + 0.5, bitmapSize.width - 1, band.height - 1)
           ctx.setLineDash([])
@@ -150,7 +150,7 @@ export class TpoProfilePrimitive extends BasePrimitive {
         })
         if (row.price === tpo.poc) {
           ctx.strokeStyle = POC_STROKE
-          ctx.lineWidth = Math.max(1, Math.round(hpr))
+          ctx.lineWidth = Math.max(1, Math.round((z.lineWidth ?? 1) * hpr))
           ctx.strokeRect(left - 1, band.top, bitmapSize.width - left, height)
         }
       }

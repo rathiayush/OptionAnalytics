@@ -194,3 +194,61 @@ test('trade setups: floor bounce / ceiling rejection from the nearest zones, squ
   assert.ok(f.stop > zone.high)
   assert.deepEqual(tradeSetups({ day: null }), [])
 })
+
+test('the basis is read at the same minute: the last futures close against the spot close of that minute', async () => {
+  const { basisOf } = await import('../src/trapZones.js')
+  const spot = [0, 1, 2, 3].map((k) => ({ time: T0 + k * MIN, close: 25000 + k * 10 }))
+  // The futures' last bar is at minute 1 (its feed behind): basis = 25100 − 25010, not − 25030 (the spot's last close).
+  assert.equal(basisOf([{ time: T0, close: 25095 }, { time: new Date(T0 + MIN).toISOString(), close: 25100 }], spot), 90)
+  assert.equal(basisOf([{ time: T0 + 20 * MIN, close: 25100 }], spot), null)   // no spot within 5 min before it
+  assert.equal(basisOf([], spot), null)
+})
+
+test('the biggest CDV support / resistance: the strongest buying and selling clusters, the level at the busiest row', async () => {
+  const { cdvLevels } = await import('../src/trapZones.js')
+  const m = (low, high, ce, pe) => ({ t: T0, low, high, ce, pe, ceVol: 1, peVol: 1 })
+  // Buying 100 - 110 (60 + 20), a smaller buying run at 130, selling 150 - 160.
+  const lv = cdvLevels([[m(100, 100, 60, 0), m(105, 105, 20, 0), m(130, 130, 30, 0), m(150, 150, 0, 15), m(155, 155, 0, 40)]], 5)
+  assert.deepEqual([lv.support.low, lv.support.high, lv.support.level, lv.support.sum], [100, 110, 102.5, 80])
+  assert.deepEqual([lv.resistance.low, lv.resistance.high, lv.resistance.level, lv.resistance.sum], [150, 160, 157.5, -55])
+  assert.equal(lv.net, 110 - 55)
+  assert.deepEqual(cdvLevels([[]], 5), { support: null, resistance: null, net: 0 })
+})
+
+test('the best zone: strength, agreement, both reads building it, a CDV level in it, nearness; starred on the chart', async () => {
+  const { bestZones, zoneBoxes, tradeSetups } = await import('../src/trapZones.js')
+  const zones = [
+    { from: 'today', bullish: true, low: 24990, high: 25000, kind: 'support', distance: -0.04, score: 0.6, sources: ['cdv'], against: [] },
+    { from: 'today', bullish: true, low: 24940, high: 24960, kind: 'support', distance: -0.2, score: 1.5, sources: ['oi', 'cdv', 'obv'], against: [] },
+    { from: 'prev', bullish: true, low: 24945, high: 24965, kind: 'support', distance: -0.18, score: 1, sources: ['oi'], against: [] },
+    { from: 'today', bullish: false, low: 25060, high: 25080, kind: 'resistance', distance: 0.24, score: 1, sources: ['cdv'], against: ['oi'] },
+  ]
+  const cdv = { prev: { support: { low: 24950, high: 24955 } }, today: null }
+  const b = bestZones({ zones, cdv })
+  // The strong agreeing zone both reads built, with yesterday's CDV support in it, beats the weak one at price.
+  assert.equal(b.support.zone, zones[1])
+  assert.ok(b.support.reasons.some((r) => /3 profiles agree/.test(r)) && b.support.reasons.some((r) => /both built/.test(r)) && b.support.reasons.some((r) => /CDV support/.test(r)))
+  assert.equal(b.resistance.zone, zones[3])
+  assert.equal(b.best, b.support)
+  // Starred boxes first, even with their layer hidden.
+  const boxes = zoneBoxes(zones, { showToday: false, best: b })
+  assert.match(boxes[0].label, /^★ BEST SUPPORT/)
+  assert.match(boxes[1].label, /^★ BEST RESISTANCE/)
+  assert.equal(boxes[0].lineWidth, 2)
+  assert.deepEqual(boxes.slice(2).map((x) => x.low), [24945])   // the rest: only the 'before' layer
+  // The bounce trades the best support, not the weak nearest one.
+  const day = { price: 25010, open: 25000, score: 0, openRule: { state: null }, crossings: [], liveSqueeze: null, zones }
+  assert.equal(tradeSetups({ day, rowSize: 5, best: b }).find((x) => x.id === 'floorBounce').stop, Math.round((24940 - 12.505) * 100) / 100)
+  assert.equal(tradeSetups({ day, rowSize: 5 }).find((x) => x.id === 'floorBounce').stop, Math.round((24990 - 12.505) * 100) / 100)
+})
+
+test('the day\'s own zones count in full from its 30th minute, in proportion before', async () => {
+  const { DAY_MATURE_MIN } = await import('../src/trapZones.js')
+  const spot = spotDay(40, (k) => 25000 + k)
+  const oi = spot.map((b) => ({ t: b.time, low: 24980, high: 24985, ce: 5, pe: 300 }))
+  const at = (n) => dayRead({ opening: { zones: [] }, oi: oi.slice(0, n), spot: spot.slice(0, n), rowSize: 5 }).zones.filter((z) => z.from === 'today')
+  const early = at(3), full = at(DAY_MATURE_MIN), late = at(40)
+  assert.ok(early.length && full.length)
+  assert.equal(early[0].score, Math.round(full[0].score * 3 / DAY_MATURE_MIN * 100) / 100)
+  assert.equal(late[0].score, full[0].score)
+})

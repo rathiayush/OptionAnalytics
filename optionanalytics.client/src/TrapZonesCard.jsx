@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -72,7 +72,7 @@ function candlesOf(bars, minutes) {
   }
   return out
 }
-function ZonesSpotChart({ candles, boxes, open, prevClose, dayKey, height: givenHeight = 380 }) {
+function ZonesSpotChart({ candles, boxes, lines, dayKey, height: givenHeight = 380 }) {
   const height = useFitHeight(givenHeight)
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -133,11 +133,9 @@ function ZonesSpotChart({ candles, boxes, open, prevClose, dayKey, height: given
     const series = seriesRef.current
     if (!series) return
     for (const l of linesRef.current) series.removePriceLine(l)
-    linesRef.current = [
-      Number.isFinite(open) ? series.createPriceLine({ price: open, color: '#d9d9d9', title: 'Open', lineWidth: 1, lineStyle: 2, axisLabelVisible: true }) : null,
-      Number.isFinite(prevClose) ? series.createPriceLine({ price: prevClose, color: '#8c8c8c', title: 'Prev close', lineWidth: 1, lineStyle: 1, axisLabelVisible: true }) : null,
-    ].filter(Boolean)
-  }, [open, prevClose])
+    linesRef.current = (lines ?? []).filter((l) => Number.isFinite(l.price))
+      .map((l) => series.createPriceLine({ price: l.price, color: l.color, title: l.title, lineWidth: l.width ?? 1, lineStyle: l.style ?? 0, axisLabelVisible: true }))
+  }, [lines])
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
@@ -190,6 +188,43 @@ function SideList({ title, zones, color }) {
   )
 }
 
+/** The best zone of each side (bestZones), the better one first, with why - starred on the chart. */
+function BestZones({ best }) {
+  const list = [best?.best, best?.best === best?.support ? best?.resistance : best?.support].filter(Boolean)
+  if (!list.length) return null
+  return (
+    <div style={{ border: '1px solid #faad14', borderRadius: 6, padding: '6px 10px' }}>
+      {list.map((b, i) => {
+        const z = b.zone
+        const support = best.support === b
+        return (
+          <div key={support ? 's' : 'r'} style={{ fontSize: 12, marginTop: i ? 2 : 0 }}>
+            <Text strong style={{ fontSize: i ? 12 : 13, color: '#faad14' }}>★ {i ? 'Other side' : 'Best zone now'}:</Text>{' '}
+            <Text strong style={{ fontSize: 12, color: support ? '#52c41a' : '#ff4d4f' }}>{support ? 'support' : 'resistance'} {px(z.low)} – {px(z.high)}</Text>{' '}
+            <KindTag kind={z.kind} />{' '}
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {z.distance === 0 ? 'at price' : pct(z.distance)} · {z.from === 'today' ? 'today' : 'before'} · {shortOf(z.sources)} · quality {b.quality}
+              {b.reasons.length ? ` - ${b.reasons.join(', ')}` : ''}
+            </Text>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+const lots = (v) => `${v > 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')} lots`
+/** The biggest CDV support / resistance - the sessions before and the day so far (cdvLevels). */
+function CdvLevelsLine({ prev, today }) {
+  const part = (lv, side) => (lv?.[side] ? `${side === 'support' ? 'S' : 'R'} ${px(lv[side].low)}–${px(lv[side].high)} (peak ${px(lv[side].level)}, ${lots(lv[side].sum)})` : `${side === 'support' ? 'S' : 'R'} none`)
+  return (
+    <Text style={{ fontSize: 12 }}>
+      <b>Biggest CDV (net CE − PE) support / resistance</b> - before (fixed from the start): {prev?.support || prev?.resistance ? `${part(prev, 'support')} · ${part(prev, 'resistance')}` : 'none loaded'}
+      {' '}| today, developing: {today ? `${part(today, 'support')} · ${part(today, 'resistance')}` : 'not yet'}
+    </Text>
+  )
+}
+
 /** The trade setups (tradeSetups) - ideas, each with its trigger, stop, targets and reward / risk. */
 function SetupList({ setups }) {
   if (!setups.length) return <Text type="secondary" style={{ fontSize: 12 }}>No setup near price yet.</Text>
@@ -236,6 +271,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [chartTf, setChartTf] = usePersistedState('optionanalytics.oiReplay.trapZonesTf', 5)
   const [showPrev, setShowPrev] = usePersistedState('optionanalytics.oiReplay.trapZonesPrev', true)
   const [showToday, setShowToday] = usePersistedState('optionanalytics.oiReplay.trapZonesToday', true)
+  const [showCdv, setShowCdv] = usePersistedState('optionanalytics.oiReplay.trapZonesCdv', true)
   const rowSize = PROFILE_ROWS[underlying] ?? 5
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
   const pastOpt = usePastDeltaSessions('options', underlying, date, dayCount, flag)
@@ -253,10 +289,25 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const dayOpen = spotMs.length ? (spotMs[0].open > 0 ? spotMs[0].open : spotMs[0].close) : null
   const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
   const chartCandles = useMemo(() => candlesOf((spotBars ?? []).filter((b) => clock == null || fromChartTime(b.time) * 1000 <= clock), CHART_TF.includes(chartTf) ? chartTf : 5), [spotBars, clock, chartTf])
-  const chartBoxes = useMemo(() => zoneBoxes(day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' })), { showPrev, showToday }), [day, opening.zones, showPrev, showToday])
-  const setups = useMemo(() => tradeSetups({ day, bias, rowSize }), [day, bias, rowSize])
   const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
   const tableZones = useMemo(() => (day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))), [day, opening.zones])
+  // The biggest CDV support / resistance: the sessions before (fixed from the start of the day) and the day so far
+  // (developing - the minutes up to the clock).
+  const cdvPrev = useMemo(() => cdvLevels(pastOpt.sessions.map((x) => x.items ?? []), rowSize), [pastOpt.sessions, rowSize])
+  const cdvToday = useMemo(() => (todayOptions.length ? cdvLevels([todayOptions], rowSize) : null), [todayOptions, rowSize])
+  const best = useMemo(() => bestZones({ zones: tableZones, cdv: { prev: cdvPrev, today: cdvToday } }), [tableZones, cdvPrev, cdvToday])
+  const chartBoxes = useMemo(() => zoneBoxes(tableZones, { showPrev, showToday, best }), [tableZones, showPrev, showToday, best])
+  const chartLines = useMemo(() => [
+    { price: day?.open, color: '#d9d9d9', title: 'Open', style: 2 },
+    { price: opening.close, color: '#8c8c8c', title: 'Prev close', style: 1 },
+    ...(showCdv ? [
+      { price: cdvPrev.support?.level, color: '#73d13d', title: 'Prev CDV S', style: 2, width: 2 },
+      { price: cdvPrev.resistance?.level, color: '#ff7875', title: 'Prev CDV R', style: 2, width: 2 },
+      { price: cdvToday?.support?.level, color: '#52c41a', title: 'CDV S', width: 2 },
+      { price: cdvToday?.resistance?.level, color: '#ff4d4f', title: 'CDV R', width: 2 },
+    ] : []),
+  ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday])
+  const setups = useMemo(() => tradeSetups({ day, bias, rowSize, best }), [day, bias, rowSize, best])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
@@ -338,14 +389,18 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <SideList title="Resistance above (ceilings / trapped longs)" zones={sides.resistance} color="#ff4d4f" />
       </Space>
 
+      <BestZones best={best} />
+      <CdvLevelsLine prev={cdvPrev} today={cdvToday} />
+
       <Space wrap size={[8, 4]} align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>On spot</Text>
         <Segmented size="small" value={CHART_TF.includes(chartTf) ? chartTf : 5} onChange={setChartTf} options={CHART_TF.map((v) => ({ value: v, label: `${v}m` }))} />
         <Checkbox checked={showPrev} onChange={(e) => setShowPrev(e.target.checked)}>Zones from before (dashed)</Checkbox>
         <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
+        <Checkbox checked={showCdv} onChange={(e) => setShowCdv(e.target.checked)}>CDV S / R lines</Checkbox>
       </Space>
       {chartCandles.length ? (
-        <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} open={day?.open} prevClose={opening.close} dayKey={`${underlying}|${date}|${chartTf}`} />
+        <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={chartLines} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
 
       <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
@@ -391,7 +446,13 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           of a zone price broke through and holds beyond), the open-rule trend day (dips toward the open) and a failed squeeze /
           breakdown (back inside within 15 minutes - the breakout traders trapped); targets = the next zones the other way, R:R =
           the first target against the stop; READY = price at the trigger now, WATCH = wait for it; one against the day&apos;s
-          read is flagged for a smaller size. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
+          read is flagged for a smaller size. BEST ZONE (★ on the chart, outlined thicker): each zone rated by its strength,
+          the profiles agreeing (+50% each beyond one) and against (−25% each), the sessions before and today both building it
+          (×1.5), a biggest CDV level of its side inside it (×1.3 each) and its nearness to price; the best support and the best
+          resistance are starred - the bounce / rejection setups trade those. BIGGEST CDV SUPPORT / RESISTANCE: the net CE − PE
+          flow&apos;s strongest buying cluster (support) and selling cluster (resistance) - of the sessions before, fixed from the
+          start of the day (dashed &quot;Prev CDV S / R&quot; lines at each cluster&apos;s busiest row), and of the day so far,
+          developing (solid &quot;CDV S / R&quot;). Only the minutes up to the clock count. A read - it feeds no strategy or alert.
         </Text>
       </FoldText>
     </Space>
