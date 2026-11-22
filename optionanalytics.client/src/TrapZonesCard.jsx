@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -203,6 +203,35 @@ function SideList({ title, zones, color }) {
   )
 }
 
+/** The trade setups (tradeSetups) - ideas, each with its trigger, stop, targets and reward / risk. */
+function SetupList({ setups }) {
+  if (!setups.length) return <Text type="secondary" style={{ fontSize: 12 }}>No setup near price yet.</Text>
+  return (
+    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      {setups.map((x) => (
+        <div key={x.id} style={{ border: `1px solid ${x.side === 'long' ? '#237804' : '#a8071a'}`, borderRadius: 6, padding: '6px 10px' }}>
+          <Space wrap size={[6, 2]} align="center">
+            <Tag color={x.side === 'long' ? 'green' : 'red'} style={{ margin: 0 }}>{x.side === 'long' ? 'LONG' : 'SHORT'}</Tag>
+            <Tag color={x.status === 'ready' ? 'gold' : 'default'} style={{ margin: 0 }}>{x.status === 'ready' ? 'READY - price at the trigger' : 'WATCH'}</Tag>
+            <Text strong style={{ fontSize: 12 }}>{x.name}</Text>
+            {x.aligned === true && <Tag color="blue" style={{ margin: 0 }}>with the day&apos;s read</Tag>}
+            {x.aligned === false && <Tag style={{ margin: 0 }}>against the read - smaller size</Tag>}
+          </Space>
+          <div style={{ fontSize: 12, marginTop: 2 }}>
+            {x.entryText}. <Text type="secondary" style={{ fontSize: 12 }}>{x.option}</Text>
+          </div>
+          <div style={{ fontSize: 12 }}>
+            Entry ~{px(x.entry)} · Stop {px(x.stop)} ({px(Math.abs(x.entry - x.stop))} pts)
+            {x.targets.length ? ` · Target ${x.targets.map(px).join(' / ')}` : ' · no zone the other way - trail it'}
+            {x.rr != null && <> · <Text strong style={{ fontSize: 12, color: x.rr >= 1.5 ? '#52c41a' : x.rr < 1 ? '#ff4d4f' : undefined }}>R:R {x.rr}</Text></>}
+          </div>
+          <Text type="secondary" style={{ fontSize: 11 }}>{x.why}</Text>
+        </div>
+      ))}
+    </Space>
+  )
+}
+
 const eventText = (e) => {
   if (e.type === 'verdict') return `Bias now ${e.to} (was ${e.from})`
   if (e.type === 'newZone') return `New ${ZONE_KINDS[e.zone.kind]?.label.split(' - ')[0].toLowerCase() ?? 'zone'} of the day ${px(e.zone.low)}–${px(e.zone.high)} (${e.zone.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')})`
@@ -238,6 +267,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
   const chartCandles = useMemo(() => candlesOf((spotBars ?? []).filter((b) => clock == null || fromChartTime(b.time) * 1000 <= clock), CHART_TF.includes(chartTf) ? chartTf : 5), [spotBars, clock, chartTf])
   const chartBoxes = useMemo(() => zoneBoxes(day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' })), { showPrev, showToday }), [day, opening.zones, showPrev, showToday])
+  const setups = useMemo(() => tradeSetups({ day, bias, rowSize }), [day, bias, rowSize])
   const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
@@ -291,6 +321,11 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       ) : (
         <Alert type="info" showIcon message="Before the open" description="The day's first minute is not in yet - the read below is from the sessions before." />
       )}
+
+      <Space direction="vertical" size={4} style={{ width: '100%' }}>
+        <Text strong style={{ fontSize: 13 }}>Trade setups <Text type="secondary" style={{ fontSize: 11, fontWeight: 400 }}>(ideas from the zones at this minute - not orders; levels are spot)</Text></Text>
+        <SetupList setups={setups} />
+      </Space>
 
       <Text style={{ fontSize: 12 }}>
         <b>Before the open</b> ({pastOpt.sessions.map((s) => s.date).join(', ') || 'no session loaded'}): close {px(opening.close)} - positioning {openingLean}
@@ -353,7 +388,12 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           the basis. DAY BIAS: fixed once the day's first minute is in, from what was known then - the previous zones' lean at the close
           and at the open, a gap through a zone (its side trapped from the open), the last session's OI and CDV. Through the day
           the profiles are re-read every 5 minutes: a new zone of the day, a previous zone changing role and the bias changing are
-          listed under &quot;Through the day&quot;. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
+          listed under &quot;Through the day&quot;. TRADE SETUPS - ideas only, nothing is placed: floor bounce (the nearest support,
+          stop under it), ceiling rejection (the nearest resistance, stop over it), squeeze / liquidation continuation (the retest
+          of a zone price broke through and holds beyond), the open-rule trend day (dips toward the open) and a failed squeeze /
+          breakdown (back inside within 15 minutes - the breakout traders trapped); targets = the next zones the other way, R:R =
+          the first target against the stop; READY = price at the trigger now, WATCH = wait for it; one against the day&apos;s
+          read is flagged for a smaller size. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
         </Text>
       </FoldText>
     </Space>
