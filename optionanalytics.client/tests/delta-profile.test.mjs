@@ -276,3 +276,20 @@ test('option OI net (CE − PE) profile: by spot row, negative = puts written = 
   // A cut part way = the profile of the minutes up to it.
   assert.equal(optionOiNetProfileOf(flow, [oiMinutes.slice(0, 1)]).rows.find((r) => r.price === 100).delta, -30)
 })
+
+test('CDV and OBV profiles: OBV signs a strike\'s volume by its close\'s direction from its own previous bar; the CDV column is the delta profile', async () => {
+  const { optionDeltaMinutes, optionDeltaProfileOf } = await import('../src/deltaProfile.js')
+  const T = Date.UTC(2026, 9, 5, 3, 45)
+  const bar = (i, price, volume) => ({ time: T + i * 60_000, strike: 25000, price, open: price, high: price + 1, low: price - 1, volume })
+  const spot = [0, 1, 2].map((i) => ({ time: T + i * 60_000, open: 25000, high: 25002, low: 24998, close: 25000 }))
+  // The call's close rises (minute 1), then falls (minute 2): OBV +v1 then -v2; the first bar has no previous close.
+  const ce = [bar(0, 100, 10), bar(1, 105, 20), bar(2, 102, 30)]
+  const minutes = optionDeltaMinutes(ce, [], spot)
+  const obv = optionDeltaProfileOf([minutes], { rowSize: 5, side: 'ce', metric: 'obv' })
+  const w = minutes[0].ceVol / 10                                   // the strike's delta weight (all minutes share spot)
+  assert.ok(Math.abs(obv.totals.ce - w * (20 - 30)) < 1e-6, `${obv.totals.ce}`)
+  const cdv = optionDeltaProfileOf([minutes], { rowSize: 5, side: 'ce', metric: 'cdv' })
+  const plain = optionDeltaProfileOf([minutes], { rowSize: 5, side: 'ce' })
+  assert.deepEqual(cdv.rows, plain.rows)                              // the default metric is the delta profile as before
+  assert.equal(obv.metric, 'obv')
+})

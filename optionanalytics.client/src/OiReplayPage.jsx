@@ -41,7 +41,7 @@ import { ProfileAlertsBar, useProfileAlerts } from './ProfileAlerts.jsx'
 import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
-import { FuturesDeltaProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
+import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
@@ -753,6 +753,7 @@ const SECTION_OPTIONS = [
   { value: 'dex', label: 'Dealer hedging (DEX)' },
   { value: 'futures', label: 'Futures' },
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
+  { value: 'optionCdvObvProfile', label: 'Option CDV / OBV profile (on spot)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -794,7 +795,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -7548,6 +7549,18 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
               <LiveSection version={sectionVersion}>
                 <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Option delta profile on spot (CE / PE flow by spot price){isLive ? ' · live' : ''}</Space>}>
                   <OptionDeltaProfileCard
+                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
+                    underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`${underlying}-${result.date}`} isLive={isLive}
+                  />
+                </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+            {visibleSections.includes('optionCdvObvProfile') && (
+              <DashboardCard key="optionCdvObvProfile" {...dash('optionCdvObvProfile')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Option CDV / OBV profile on spot (CE / PE flow by spot price){isLive ? ' · live' : ''}</Space>}>
+                  <OptionCdvObvProfileCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
                     underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`${underlying}-${result.date}`} isLive={isLive}
                   />

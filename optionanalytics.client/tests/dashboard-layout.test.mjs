@@ -280,28 +280,29 @@ test('the charts are the main part: taller than they ask, up to a share of the w
 })
 
 test('cards added since a "Sections shown" was saved come in ONCE - by the version that brought them, a card hidden since stays hidden', () => {
-  assert.equal(SECTIONS_VERSION, '7')
+  assert.equal(SECTIONS_VERSION, '8')
   assert.equal(Math.max(...SECTION_ADDITIONS.map((a) => a.version)), Number(SECTIONS_VERSION))
   // Saved at version 3 (the OI totals already split out): the two delta profiles, after the option flow and the futures,
   // and the GEX levels on spot (version 5) right after the GEX card.
-  assert.deepEqual(withAddedSections(['dayOi', 'optionFlow', 'gex', 'futures'], '3'), ['dayOi', 'optionFlow', 'optionDeltaProfile', 'gex', 'gexSpot', 'dex', 'futures', 'futuresDeltaProfile'])
+  assert.deepEqual(withAddedSections(['dayOi', 'optionFlow', 'gex', 'futures'], '3'), ['dayOi', 'optionFlow', 'optionDeltaProfile', 'optionCdvObvProfile', 'gex', 'gexSpot', 'dex', 'futures', 'futuresDeltaProfile'])
   // Those cards not shown: a NEW card at the end all the same; the totals (split out of the heatmap) only with it.
-  assert.deepEqual(withAddedSections(['dayOi'], '3'), ['dayOi', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot', 'dex'])
+  assert.deepEqual(withAddedSections(['dayOi'], '3'), ['dayOi', 'optionDeltaProfile', 'optionCdvObvProfile', 'futuresDeltaProfile', 'gexSpot', 'dex'])
   // Saved at 3 with the totals hidden since: they are not brought back.
-  assert.deepEqual(withAddedSections(['oiHeatmap', 'futures'], '3'), ['oiHeatmap', 'futures', 'futuresDeltaProfile', 'optionDeltaProfile', 'gexSpot', 'dex'])
+  assert.deepEqual(withAddedSections(['oiHeatmap', 'futures'], '3'), ['oiHeatmap', 'futures', 'futuresDeltaProfile', 'optionDeltaProfile', 'optionCdvObvProfile', 'gexSpot', 'dex'])
   // Saved before any version: the totals too (where the heatmap is), as the split always did.
-  assert.deepEqual(withAddedSections(['oiHeatmap'], null), ['oiHeatmap', 'oiTotals', 'optionDeltaProfile', 'futuresDeltaProfile', 'gexSpot', 'dex'])
+  assert.deepEqual(withAddedSections(['oiHeatmap'], null), ['oiHeatmap', 'oiTotals', 'optionDeltaProfile', 'optionCdvObvProfile', 'futuresDeltaProfile', 'gexSpot', 'dex'])
   // Saved at 4 (the delta profiles already offered, one hidden since): only the GEX levels on spot come in.
-  assert.deepEqual(withAddedSections(['gex', 'futures'], '4'), ['gex', 'gexSpot', 'dex', 'futures'])
+  assert.deepEqual(withAddedSections(['gex', 'futures'], '4'), ['gex', 'gexSpot', 'dex', 'futures', 'optionCdvObvProfile'])
   // At the current version nothing changes; a card already there is not doubled; nothing saved stays nothing.
   // Saved at 5: dealer hedging (version 7) at the end without the GEX levels on spot.
-  assert.deepEqual(withAddedSections(['straddle', 'gex'], '5'), ['straddle', 'gex', 'dex'])
-  assert.deepEqual(withAddedSections(['gex'], '5'), ['gex', 'dex'])
-  assert.deepEqual(withAddedSections(['gex'], '6'), ['gex', 'dex'])
+  assert.deepEqual(withAddedSections(['straddle', 'gex'], '5'), ['straddle', 'gex', 'dex', 'optionCdvObvProfile'])
+  assert.deepEqual(withAddedSections(['gex'], '5'), ['gex', 'dex', 'optionCdvObvProfile'])
+  assert.deepEqual(withAddedSections(['gex'], '6'), ['gex', 'dex', 'optionCdvObvProfile'])
   // Saved at 6: dealer hedging (version 7) right after the GEX levels on spot.
-  assert.deepEqual(withAddedSections(['gexSpot', 'ladder'], '6'), ['gexSpot', 'dex', 'ladder'])
-  assert.deepEqual(withAddedSections(['gex'], '7'), ['gex'])
-  assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'dex', 'optionDeltaProfile'])
+  assert.deepEqual(withAddedSections(['gexSpot', 'ladder'], '6'), ['gexSpot', 'dex', 'ladder', 'optionCdvObvProfile'])
+  assert.deepEqual(withAddedSections(['gex'], '7'), ['gex', 'optionCdvObvProfile'])
+  assert.deepEqual(withAddedSections(['gex'], '8'), ['gex'])
+  assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'dex', 'optionDeltaProfile', 'optionCdvObvProfile'])
   assert.equal(withAddedSections(null, '3'), null)
 })
 
