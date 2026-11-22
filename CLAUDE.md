@@ -721,7 +721,17 @@ All must pass before committing.
   (`profileLevels(rows, used, rowSize, price)` - each profile's strongest bullish / bearish cluster from its own `parts` via
   `deltaZones`, its busiest row and its role against price now - `zoneKind`), the previous day(s) and the current day, "not
   present - left out" for a profile not read. The CDV's own levels = `cdvLevels` (held equal in the test). `openingRead` /
-  `dayRead` / `positionProfile` return the composite's `rows`. The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
+  `dayRead` / `positionProfile` return the composite's `rows`. THE FIRST VERSION, TO COMPARE (asked for - "just to see this
+  version as well give a checkbox, and you suggest what is better"; the "Zones" switch in the card's top row, `optionanalytics.
+  oiReplay.trapZonesMode` - 'composite' "Combined (recommended)", the default, or 'union' "Each profile (first version)",
+  `ZONE_MODES`): `unionZones` - each profile's own clusters from its own `parts` (kept at >= SIGNIFICANT of its largest,
+  PER_SIDE a side), same-side clusters that overlap or touch joined (score = their strengths added, `against` empty) - nothing
+  cancels, so a bullish and a bearish zone can sit on the same prices, and joining touching clusters makes wide bands (why the
+  composite replaced it); `mode` goes through `positionProfile` / `openingRead` / `dayRead` / `dayTimeline`, so the bias, the
+  best zone, the setups, the chart and the ladder all read the mode picked; in 'union' the ladder SPLITS each lane - bullish
+  zones left, bearish right (`ZoneLadder`'s `split`) - so the overlapping zones do not cover each other. A line under the
+  switch says what each does. The recommendation given: Combined for trading (zones that never contradict, tight, a best zone
+  that means something), the strips / Levels by profile for each profile on its own, "Each profile" to inspect a clash. The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
   support and resistance of the previous day from the start and the current developing"; `cdvLevels`): the net CE − PE flow
   (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
   its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed
