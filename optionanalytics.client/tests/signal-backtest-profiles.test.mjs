@@ -120,3 +120,29 @@ test('the OI (CE − PE) profile minute by minute = oiProfileOf of the minutes u
   assert.deepEqual(mirrorLines([cleanLine({ id: 'oipFloor', value: 'above' })]).map((l) => [l.id, l.value]), [['oipCeiling', 'below']])
   assert.equal(deltaDaysNeeded(rule([{ id: 'oipFloor', value: 'above', param3: 2, param4: 1 }])), 2)  // the days before come with odmPast
 })
+
+test('the CDV profile: Net / CE / PE sides minute by minute = the card profile of that side; the mirror swaps CE <-> PE', () => {
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  const sideTest = (id, value, i, side) => { const o = option(id, value); return cond(id).test(d, i, value, 5, o.param.default, side, 1, 0) }
+  for (const [code, side] of [[0, 'net'], [1, 'ce'], [2, 'pe']]) {
+    const read = optionDeltaSteps([], d.odm, { rowSize: 5, side })
+    for (let i = 30; i < d.n; i += 40) {
+      const profile = optionDeltaProfileOf([d.odm.filter((m) => m.t <= d.t[i])], { rowSize: 5, side })
+      const at = optionDeltaAt(read, d.t[i])
+      assert.deepEqual(at.levels, deltaProfileLevels(profile), `${side} candle ${i}`)
+      assert.ok(Math.abs(at.delta - profile.delta) < 1e-6)
+      assert.equal(sideTest('cdpDelta', 'netPositive', i, code), profile.delta > 0 && profile.delta >= (option('cdpDelta', 'netPositive').param.default / 100) * profile.volume, `${side} ${i} ${profile.delta} ${profile.volume} ${at.delta} ${at.volume}`)
+      const lv = deltaProfileLevels(profile)?.buy
+      assert.equal(sideTest('cdpBuy', 'above', i, code), Number.isFinite(lv) && d.spot.c[i] > lv, `${side} ${i} ${lv} ${d.spot.c[i]}`)
+    }
+  }
+  // Net is the option delta profile's own net (the CDV); CE / PE are that side alone.
+  const i = 150
+  assert.equal(sideTest('cdpDelta', 'netPositive', i, 0), holds(d, 'odpDelta', 'netPositive', i))
+  const m = (l) => mirrorLines([cleanLine(l)]).map((x) => [x.id, x.value, x.param2])
+  assert.deepEqual(m({ id: 'cdpBuy', value: 'above', param2: 0 }), [['cdpSell', 'below', 0]])
+  assert.deepEqual(m({ id: 'cdpBuy', value: 'above', param2: 1 }), [['cdpBuy', 'below', 2]])
+  assert.deepEqual(m({ id: 'cdpDelta', value: 'buying', param2: 1 }), [['cdpDelta', 'buying', 2]])
+  assert.deepEqual(m({ id: 'obpDelta', value: 'netPositive', param2: 2 }), [['obpDelta', 'netPositive', 1]])
+  assert.equal(cleanLine({ id: 'cdpDelta', value: 'buying' }).param2, 0)
+})

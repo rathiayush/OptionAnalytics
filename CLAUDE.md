@@ -1113,7 +1113,10 @@ All must pass before committing.
   (`OBV_CONDITIONS`) - the OBV column of OI Replay's CDV / OBV profile card read the same way (`deltaAtCandle(..., 'obv')`,
   `optionDeltaSteps`'s `metric`): price vs its most bought / most sold OBV row (`obpBuy` / `obpSell`, each the other's mirror) and
   `obpDelta` (spot in a row of net OBV buying / selling, the profile's net positive / negative), the same Profile of / Days and
-  sessions before (`odmPast` - their minutes carry `ceObv` / `peObv`); its volume levels are the delta profile's. Group
+  sessions before (`odmPast` - their minutes carry `ceObv` / `peObv`); its volume levels are the delta profile's. Group `CdvProfile` (`CDV_CONDITIONS`, asked for - "you have not added cdv profile") - the CDV column of
+  the same card, its own group: `cdpBuy` / `cdpSell` / `cdpDelta`. Both groups take a SIDE (`param2`, `PROFILE_SIDE` - Net (CE − PE), the default, CE or
+  PE alone - `optionDeltaSteps`' `side`; a `param2` with `choices` is a dropdown on the page); the mirror (`sided`): Net flips the reading, CE / PE swap
+  the side on the same row (a level read the other way, the flow at the price kept). Group
   `FuturesProfile` (`FUT_PROFILE_CONDITIONS`) - OI Replay's futures delta profile card: the near futures' footprint by price in
   `PROFILE_ROWS` (`futuresDeltaSteps` = `futuresDeltaProfileOf` of the bars up to each minute, held equal in the test), its POC /
   VAH / VAL / HVN / LVN / most bought / most sold rows (`fdp...`, `levelCondition`'s `barsOf`) and `fdpDelta`, READ AGAINST THE

@@ -985,7 +985,7 @@ function cumCondition(line, group, meaning) {
 // profile is spot's). `level(d, k, p3, p4)` - the level at candle k (one that moves - the option delta profile's of the
 // day so far - is read at each candle); `more` - numbers every option takes besides its own (passed on as p3 / p4).
 function levelCondition({ id, group, name, short, level, more = {}, barsOf = null }) {
-  const at = (d, k, p3, p4) => { const x = k >= 0 ? level(d, k, p3, p4) : null; return Number.isFinite(x) ? x : null }
+  const at = (d, k, p3, p4, p2) => { const x = k >= 0 ? level(d, k, p3, p4, p2) : null; return Number.isFinite(x) ? x : null }
   return {
     id, group, name,
     options: [
@@ -996,7 +996,7 @@ function levelCondition({ id, group, name, short, level, more = {}, barsOf = nul
       opt('near', 'Near it', 'near', { ...NEAR(0.05), ...more }),
     ],
     test: (d, i, v, w, p, p2, p3, p4) => {
-      const L = (dd, k) => at(dd, k, p3, p4)
+      const L = (dd, k) => at(dd, k, p3, p4, p2)
       // The price the level is read against: spot's candles, or the condition's own (the futures profile - the futures').
       const bars = barsOf ? barsOf(d) : d.spot
       if (!bars) return false
@@ -1022,7 +1022,7 @@ function levelCondition({ id, group, name, short, level, more = {}, barsOf = nul
         default: return false
       }
     },
-    show: (d, i, l) => `${short} ${fmtP(at(d, i, l?.param3, l?.param4))}`,
+    show: (d, i, l) => `${short} ${fmtP(at(d, i, l?.param3, l?.param4, l?.param2))}`,
   }
 }
 
@@ -1050,22 +1050,22 @@ export const deltaPastOfLine = (l) => (GROUP_OF_DELTA.has(l?.id) ? pastSessionsN
 const DELTA_READS = new WeakMap()     // a day's `odm` -> Map(profile choice -> optionDeltaSteps), worked out once
 /** The option delta profile a line reads, minute by minute (`optionDeltaSteps`) - null when it needs sessions before the
  *  day that were not loaded. A view (`timeframeView`) shares its day's. */
-function deltaRead(d, p3, p4, metric = 'cdv') {
+function deltaRead(d, p3, p4, metric = 'cdv', side = 'net') {
   if (!Array.isArray(d?.odm)) return null
   const days = deltaDaysOf(p3), of = deltaOfOf(p4)
   const need = pastSessionsNeeded(days, of)
   if (need > 0 && !Array.isArray(d.odmPast)) return null
   let kept = DELTA_READS.get(d.odm)
   if (!kept) DELTA_READS.set(d.odm, kept = new Map())
-  const key = `${metric}|${of}|${days}`
+  const key = `${metric}|${side}|${of}|${days}`
   if (!kept.has(key)) {
     const past = need > 0 ? d.odmPast.slice(-need) : []
-    kept.set(key, optionDeltaSteps(past, of === 'previous' ? [] : d.odm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5, metric }))
+    kept.set(key, optionDeltaSteps(past, of === 'previous' ? [] : d.odm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5, metric, side }))
   }
   return kept.get(key)
 }
 /** The profile at candle k - from the minutes up to its close (`d.t[k]`, its last minute). `metric` 'obv' = the OBV profile. */
-export const deltaAtCandle = (d, k, p3, p4, metric = 'cdv') => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4, metric), d.t[k]) : null)
+export const deltaAtCandle = (d, k, p3, p4, metric = 'cdv', side = 'net') => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4, metric, side), d.t[k]) : null)
 const deltaLevel = (key, name, short, mirror = null) => ({
   ...levelCondition({ id: `odp${key[0].toUpperCase()}${key.slice(1)}`, group: 'DeltaProfile', name, short: `option Δ ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
   ...(mirror ? { mirror } : {}),
@@ -1109,6 +1109,30 @@ const DELTA_CONDITIONS = [
   },
 ]
 
+// THE SIDE a CDV / OBV profile line reads (`param2`, OI Replay's CDV / OBV card's side picker): Net (CE − PE, + = bullish
+// - the default, so a line without it reads as before), CE alone or PE alone (that side's own buying + / selling −). The
+// mirror (`sided` - `mirrorLine`): Net flips the reading (most bought <-> most sold, buying <-> selling); CE / PE swap the
+// side on the same row (CE bought - bullish - <-> PE bought - bearish), a level read the other way.
+const SIDES = ['net', 'ce', 'pe']
+const sideOf = (v) => SIDES[Math.round(Number(v))] ?? 'net'
+const PROFILE_SIDE = {
+  param2: {
+    label: 'Side', unit: '', default: 0, min: 0, max: 2, step: 1, wide: true,
+    choices: [{ value: 0, label: 'Net (CE − PE)' }, { value: 1, label: 'CE' }, { value: 2, label: 'PE' }],
+    text: (v) => ['Net (CE − PE)', 'CE', 'PE'][Math.round(Number(v))] ?? 'Net (CE − PE)',
+  },
+}
+const SIDED = { ...PROFILE_SIDE, ...DELTA_PROFILE_OF }
+
+// THE OPTION CDV PROFILE (asked for - "you have not added cdv profile"; the CDV column of OI Replay's CDV / OBV profile card):
+// the option delta profile's rows - its delta IS the CDV (each strike's bar-proxy delta x its delta weight) - read for a
+// SIDE: Net (CE − PE), CE or PE alone. The rows of the most CDV buying / selling, the CDV at the price and the profile's
+// net; its volume levels (POC / VAH / VAL / HVN / LVN) are the delta profile's. Same "Profile of" / Days and sessions before.
+const cdvLevel = (key, name, short, mirror) => ({
+  sided: 'level',
+  ...levelCondition({ id: `cdp${key[0].toUpperCase()}${key.slice(1)}`, group: 'CdvProfile', name, short: `option CDV ${short}`, level: (d, k, p3, p4, p2) => deltaAtCandle(d, k, p3, p4, 'cdv', sideOf(p2))?.levels?.[key], more: SIDED }),
+  mirror,
+})
 // THE OPTION OBV PROFILE (asked for - "this option delta profile and cdv and obv profile ... add it into our backtest signals";
 // OI Replay's "Option CDV / OBV profile" card): the same rows as the option delta profile - whose delta IS the CDV - with
 // the OBV's net (each strike's volume x delta weight signed by whether its close rose or fell from its previous bar's close,
@@ -1116,7 +1140,8 @@ const DELTA_CONDITIONS = [
 // own reads are the rows of the most OBV buying / selling and the OBV at the price / the profile's net. Same "Profile of" /
 // Days, the same sessions before (`odmPast`).
 const obvLevel = (key, name, short, mirror) => ({
-  ...levelCondition({ id: `obp${key[0].toUpperCase()}${key.slice(1)}`, group: 'ObvProfile', name, short: `option OBV ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4, 'obv')?.levels?.[key], more: DELTA_PROFILE_OF }),
+  sided: 'level',
+  ...levelCondition({ id: `obp${key[0].toUpperCase()}${key.slice(1)}`, group: 'ObvProfile', name, short: `option OBV ${short}`, level: (d, k, p3, p4, p2) => deltaAtCandle(d, k, p3, p4, 'obv', sideOf(p2))?.levels?.[key], more: SIDED }),
   mirror,
 })
 // The flow AT the price and the profile's net - one test for the option profiles (CDV / OBV) and the futures'.
@@ -1140,15 +1165,28 @@ const flowOptions = (buyText, sellText, more) => [
   opt('netPositive', "The profile's net positive (bullish)", 'netNegative', { param: pctParam('by ≥', 0, 100, 0.5), ...more }),
   opt('netNegative', "The profile's net negative (bearish)", 'netPositive', { param: pctParam('by ≥', 0, 100, 0.5), ...more }),
 ]
+const CDV_CONDITIONS = [
+  cdvLevel('buy', 'Option CDV profile: most bought row (bullish CDV)', 'most bought', 'cdpSell'),
+  cdvLevel('sell', 'Option CDV profile: most sold row (bearish CDV)', 'most sold', 'cdpBuy'),
+  {
+    id: 'cdpDelta', group: 'CdvProfile', sided: 'flow', name: 'Option CDV profile: buying / selling at the price',
+    options: flowOptions('Spot in a row of net CDV BUYING (green - Net: calls bought / puts sold; CE / PE: that side bought)', 'Spot in a row of net CDV SELLING (red)', SIDED),
+    test: (d, i, v, w, p, p2, p3, p4) => profileFlowTest((dd, k, q3, q4) => deltaAtCandle(dd, k, q3, q4, 'cdv', sideOf(p2)), (dd) => dd.spot)(d, i, v, w, p, p2, p3, p4),
+    show: (d, i, l) => {
+      const x = deltaAtCandle(d, i, l?.param3, l?.param4, 'cdv', sideOf(l?.param2))
+      return x ? `option CDV (${sideOf(l?.param2).toUpperCase()}) at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option CDV profile —'
+    },
+  },
+]
 const OBV_CONDITIONS = [
   obvLevel('buy', 'Option OBV profile: most bought row (bullish OBV)', 'most bought', 'obpSell'),
   obvLevel('sell', 'Option OBV profile: most sold row (bearish OBV)', 'most sold', 'obpBuy'),
   {
-    id: 'obpDelta', group: 'ObvProfile', name: 'Option OBV profile: buying / selling at the price',
-    options: flowOptions('Spot in a row of net OBV BUYING (option prices rising on volume - bullish)', 'Spot in a row of net OBV SELLING (bearish)', DELTA_PROFILE_OF),
-    test: profileFlowTest((d, i, p3, p4) => deltaAtCandle(d, i, p3, p4, 'obv'), (d) => d.spot),
+    id: 'obpDelta', group: 'ObvProfile', sided: 'flow', name: 'Option OBV profile: buying / selling at the price',
+    options: flowOptions('Spot in a row of net OBV BUYING (option prices rising on volume - bullish)', 'Spot in a row of net OBV SELLING (bearish)', SIDED),
+    test: (d, i, v, w, p, p2, p3, p4) => profileFlowTest((dd, k, q3, q4) => deltaAtCandle(dd, k, q3, q4, 'obv', sideOf(p2)), (dd) => dd.spot)(d, i, v, w, p, p2, p3, p4),
     show: (d, i, l) => {
-      const x = deltaAtCandle(d, i, l?.param3, l?.param4, 'obv')
+      const x = deltaAtCandle(d, i, l?.param3, l?.param4, 'obv', sideOf(l?.param2))
       return x ? `option OBV at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option OBV profile —'
     },
   },
@@ -1257,7 +1295,7 @@ const OI_PROFILE_CONDITIONS = [
 ]
 /** How many sessions BEFORE the day a line of the futures delta profile reads (0 = the day alone). */
 export const futuresPastOfLine = (l) => (GROUP_OF_FUT_PROFILE.has(l?.id) ? pastSessionsNeeded(deltaDaysOf(l.param3), deltaOfOf(l.param4)) : 0)
-const GROUP_OF_DELTA = new Set([...DELTA_CONDITIONS, ...OBV_CONDITIONS, ...OI_PROFILE_CONDITIONS].map((c) => c.id))
+const GROUP_OF_DELTA = new Set([...DELTA_CONDITIONS, ...CDV_CONDITIONS, ...OBV_CONDITIONS, ...OI_PROFILE_CONDITIONS].map((c) => c.id))
 
 // THE FUTURES ORDER FLOW (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal
 // backtest as well"): the Order Flow page's day of the near futures, put on the day by the loader when the rule reads it
@@ -2091,6 +2129,7 @@ export const RULE_CONDITIONS = [
     show: (d) => (d.pivots ? `CPR ${fmtP(d.pivots.bc)} - ${fmtP(d.pivots.tc)} (${d.pivots.widthPct.toFixed(2)}%)` : 'CPR —'),
   },
   ...DELTA_CONDITIONS,
+  ...CDV_CONDITIONS,
   ...OBV_CONDITIONS,
   ...OI_PROFILE_CONDITIONS,
   ...FUT_PROFILE_CONDITIONS,
@@ -2533,6 +2572,10 @@ export function ruleLogic(rule) {
  *  option mirrors it (RSI above 60 <-> below 40), else kept, as are its window and join. */
 function mirrorLine(l) {
   const o = optionOf(l.id, l.value)
+  // A CE / PE side of the CDV / OBV profile: the same row of the other side - a level read the other way (above the CE's
+  // most bought <-> below the PE's most bought), the flow at the price kept (CE buying <-> PE buying).
+  const sided = CONDITION[l.id]?.sided
+  if (sided && (l.param2 === 1 || l.param2 === 2)) return { ...l, value: sided === 'level' ? (o?.opposite ?? l.value) : l.value, param2: 3 - l.param2 }
   const out = { ...l, id: CONDITION[l.id]?.mirror ?? l.id, value: o?.opposite ?? l.value }
   for (const key of ['param', 'param2', 'param3', 'param4']) if (o?.[key]?.mirror && Number.isFinite(l[key])) out[key] = o[key].mirror(l[key])
   return out

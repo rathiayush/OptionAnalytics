@@ -166,13 +166,15 @@ export function optionDeltaProfileOf(sessions, { rowSize = 5, side = 'net', metr
  * profile with every minute up to t, nothing after it; `history` - each row's delta as it changed ([t, delta] pairs, by
  * row price). `optionDeltaAt` reads them at a clock.
  */
-export function optionDeltaSteps(past, minutes, { rowSize = 5, metric = 'cdv' } = {}) {
+export function optionDeltaSteps(past, minutes, { rowSize = 5, metric = 'cdv', side = 'net' } = {}) {
   const acc = optionDeltaAccumulator(rowSize)
   for (const s of past ?? []) for (const m of s ?? []) acc.add(m)
-  // `metric` 'obv': the OBV profile's net (each strike's volume signed by its close's direction) - else the CDV's.
-  const net = metric === 'obv' ? (r) => r.ceObv - r.peObv : (r) => r.ce - r.pe
+  // `metric` 'obv': the OBV profile's (each strike's volume signed by its close's direction) - else the CDV's. `side`
+  // 'net' (CE − PE, the default), 'ce' or 'pe' - that side's own buying (+) / selling (−), as the cards' side picker.
+  const c = metric === 'obv' ? 'ceObv' : 'ce', q = metric === 'obv' ? 'peObv' : 'pe'
+  const net = side === 'ce' ? (r) => r[c] : side === 'pe' ? (r) => r[q] : (r) => r[c] - r[q]
   const summary = (t) => {
-    const p = acc.profile('net', metric)
+    const p = acc.profile(side, metric)
     return { t, levels: deltaProfileLevels(p), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
   }
   const history = new Map()

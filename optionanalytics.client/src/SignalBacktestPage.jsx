@@ -73,7 +73,8 @@ const GROUP_TITLE = {
   OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Options: "Option premium - the ATM strike's own chart (VWAP, EMA, RSI)", Straddle: 'ATM straddle', Profile: "Today's market profile",
   PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
   DeltaProfile: "Option delta profile on spot = the CDV profile (OI Replay's card - its levels, the flow at the price)",
-  ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column)",
+  CdvProfile: "Option CDV profile on spot (OI Replay's CDV / OBV profile card - the CDV column; Side: Net / CE / PE)",
+  ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column; Side: Net / CE / PE)",
   OiProfile: "OI (CE − PE) profile on spot (the option writer's view - puts written = floor / bullish)",
   FuturesProfile: "Futures delta profile (OI Replay's card - the footprint by price, read on the futures' price)",
   OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
@@ -136,7 +137,14 @@ function ConditionRow({ line, no, onChange, onRemove }) {
           onChange={(v) => onChange(editLine(line, { param: v ?? o.param.default }))} addonBefore={o.param.label} addonAfter={o.param.unit}
         />
       )}
-      {o.param2 && (
+      {o.param2?.choices && (
+        // A pick from a list (the CDV / OBV profile's Side: Net / CE / PE).
+        <Select
+          size="small" className={`oa-rule-strike${o.param2.wide ? ' oa-rule-strike--wide' : ''}`} prefix={o.param2.label} value={line.param2 ?? o.param2.default}
+          onChange={(v) => onChange(editLine(line, { param2: v }))} options={o.param2.choices} popupMatchSelectWidth={false} classNames={POPUP}
+        />
+      )}
+      {o.param2 && !o.param2.choices && (
         <InputNumber
           size="small" className="oa-rule-num oa-rule-num--wide" min={o.param2.min} max={o.param2.max} step={o.param2.step} value={line.param2}
           onChange={(v) => onChange(editLine(line, { param2: v ?? o.param2.default }))} addonBefore={o.param2.label} addonAfter={o.param2.after ? o.param2.after(line.param2) : o.param2.unit}
