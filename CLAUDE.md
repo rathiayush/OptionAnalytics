@@ -1131,7 +1131,9 @@ All must pass before committing.
   `oimPast`, put on by `attachDeltaPast` with `odmPast` from each day's record's `oi` - `rememberDay` keeps it, the live scan
   too), NEGATIVE = puts written = BULLISH: price vs the row with the most puts written (`oipFloor`) / calls written
   (`oipCeiling`, each the other's mirror), `oipDelta` (spot in a row of puts / calls written, the net CE − PE negative /
-  positive by ≥ % of all the OI added); the same Profile of / Days. THE FUTURES ORDER FLOW
+  positive by ≥ % of all the OI added); the same Profile of / Days. Its SIDE (`param2`, asked for - "add net ce-pe of oi as well" - `OI_SIDE`):
+  OI Net (CE − PE), the default, CE OI alone or PE OI alone - `oiNetSteps`' `side`, read so NEGATIVE is always BULLISH (CE: calls unwound; PE: MINUS the put
+  OI, puts written); the mirror (`sided` 'oi') is the usual one on the other side (floor <-> ceiling and CE <-> PE). THE FUTURES ORDER FLOW
   (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal backtest as well"; group
   `OrderFlow`, `FLOW_CONDITIONS`; the data `orderFlowFeatures.js`): the Order Flow page's own day of the near futures
   (`/api/order-flow/{u}/day/{date}`, `orderFlowUrl` - no prints; the Δ alone in one row a bar, with the heatmap in the Order

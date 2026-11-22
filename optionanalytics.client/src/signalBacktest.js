@@ -1248,36 +1248,44 @@ const GROUP_OF_FUT_PROFILE = new Set(FUT_PROFILE_CONDITIONS.map((c) => c.id))
 // most puts written (floor) / calls written (ceiling - each the other's mirror), spot in a row of puts / calls written, the
 // profile's net bullish / bearish.
 const OI_READS = new WeakMap()
-function oiRead(d, p3, p4) {
+function oiRead(d, p3, p4, side = 'net') {
   if (!Array.isArray(d?.oim)) return null
   const days = deltaDaysOf(p3), of = deltaOfOf(p4)
   const need = pastSessionsNeeded(days, of)
   if (need > 0 && !Array.isArray(d.oimPast)) return null
   let kept = OI_READS.get(d.oim)
   if (!kept) OI_READS.set(d.oim, kept = new Map())
-  const key = `${of}|${days}`
-  if (!kept.has(key)) kept.set(key, oiNetSteps(need > 0 ? d.oimPast.slice(-need) : [], of === 'previous' ? [] : d.oim, { rowSize: PROFILE_ROWS[d.underlying] ?? 5 }))
+  const key = `${side}|${of}|${days}`
+  if (!kept.has(key)) kept.set(key, oiNetSteps(need > 0 ? d.oimPast.slice(-need) : [], of === 'previous' ? [] : d.oim, { rowSize: PROFILE_ROWS[d.underlying] ?? 5, side }))
   return kept.get(key)
 }
-export const oiNetAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(oiRead(d, p3, p4), d.t[k]) : null)
+export const oiNetAtCandle = (d, k, p3, p4, side = 'net') => (k >= 0 ? optionDeltaAt(oiRead(d, p3, p4, side), d.t[k]) : null)
+// The SIDE (`param2`, as the CDV / OBV profiles'): Net (CE − PE, the default - a line saved before reads as it did), the CE
+// OI alone or the PE OI alone - each read so NEGATIVE = BULLISH (CE: calls unwound; PE: puts written - `oiNetSteps`). The
+// mirror (`sided` 'oi') is the usual one (floor <-> ceiling, puts <-> calls, bullish <-> bearish) on the OTHER side.
+const OI_SIDE = {
+  param2: { ...PROFILE_SIDE.param2, text: (v) => ['OI Net (CE − PE)', 'CE OI', 'PE OI'][Math.round(Number(v))] ?? 'OI Net (CE − PE)' },
+}
+const OI_SIDED = { ...OI_SIDE, ...DELTA_PROFILE_OF }
 const oiLevel = (key, name, short, mirror) => ({
-  ...levelCondition({ id: `oip${key[0].toUpperCase()}${key.slice(1)}`, group: 'OiProfile', name, short: `OI CE−PE ${short}`, level: (d, k, p3, p4) => oiNetAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
+  sided: 'oi',
+  ...levelCondition({ id: `oip${key[0].toUpperCase()}${key.slice(1)}`, group: 'OiProfile', name, short: `OI ${short}`, level: (d, k, p3, p4, p2) => oiNetAtCandle(d, k, p3, p4, sideOf(p2))?.levels?.[key], more: OI_SIDED }),
   mirror,
 })
 const OI_PROFILE_CONDITIONS = [
-  oiLevel('floor', 'OI (CE − PE) profile: most PUTS written row (floor - bullish)', 'floor', 'oipCeiling'),
-  oiLevel('ceiling', 'OI (CE − PE) profile: most CALLS written row (ceiling - bearish)', 'ceiling', 'oipFloor'),
+  oiLevel('floor', 'OI profile: the most BULLISH row - floor (Net: puts written; CE: calls unwound; PE: puts written)', 'floor', 'oipCeiling'),
+  oiLevel('ceiling', 'OI profile: the most BEARISH row - ceiling (Net: calls written; CE: calls written; PE: puts unwound)', 'ceiling', 'oipFloor'),
   {
-    id: 'oipDelta', group: 'OiProfile', name: 'OI (CE − PE) profile: writing at the price / net',
+    id: 'oipDelta', group: 'OiProfile', sided: 'oi', name: 'OI profile: writing at the price / net (Net CE − PE, CE or PE OI)',
     options: [
-      opt('putsAt', 'Spot in a row where PUTS were written more (CE − PE < 0 - bullish)', 'callsAt', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
-      opt('callsAt', 'Spot in a row where CALLS were written more (CE − PE > 0 - bearish)', 'putsAt', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
-      opt('netBullish', "The profile's net CE − PE negative (puts written ahead - bullish)", 'netBearish', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
-      opt('netBearish', "The profile's net CE − PE positive (calls written ahead - bearish)", 'netBullish', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
+      opt('putsAt', 'Spot in a BULLISH row (Net: CE − PE < 0, puts written more; CE: calls unwound; PE: puts written)', 'callsAt', { param: pctParam('by ≥', 0, 100, 1), ...OI_SIDED }),
+      opt('callsAt', 'Spot in a BEARISH row (Net: CE − PE > 0, calls written more; CE: calls written; PE: puts unwound)', 'putsAt', { param: pctParam('by ≥', 0, 100, 1), ...OI_SIDED }),
+      opt('netBullish', "The profile's net BULLISH (Net: CE − PE negative; CE: calls unwound; PE: puts written)", 'netBearish', { param: pctParam('by ≥', 0, 100, 0.5), ...OI_SIDED }),
+      opt('netBearish', "The profile's net BEARISH (Net: CE − PE positive; CE: calls written; PE: puts unwound)", 'netBullish', { param: pctParam('by ≥', 0, 100, 0.5), ...OI_SIDED }),
     ],
-    // "by ≥ %": a row's CE − PE of the largest row's; the net of all the OI added (|CE| + |PE|).
+    // "by ≥ %": a row's reading of the largest row's; the net of all the OI added on that side (Net: |CE| + |PE|).
     test: (d, i, v, w, p, p2, p3, p4) => {
-      const x = oiNetAtCandle(d, i, p3, p4)
+      const x = oiNetAtCandle(d, i, p3, p4, sideOf(p2))
       if (!x) return false
       switch (v) {
         case 'putsAt': { const r = x.rowDelta(d.spot.c[i]); return r < 0 && -r >= frac(p) * x.maxAbsDelta }
@@ -1288,8 +1296,8 @@ const OI_PROFILE_CONDITIONS = [
       }
     },
     show: (d, i, l) => {
-      const x = oiNetAtCandle(d, i, l?.param3, l?.param4)
-      return x ? `OI CE−PE at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'OI (CE − PE) profile —'
+      const x = oiNetAtCandle(d, i, l?.param3, l?.param4, sideOf(l?.param2))
+      return x ? `OI ${['CE−PE', 'CE', '−PE'][SIDES.indexOf(sideOf(l?.param2))]} at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'OI (CE − PE) profile —'
     },
   },
 ]
@@ -2575,6 +2583,11 @@ function mirrorLine(l) {
   // A CE / PE side of the CDV / OBV profile: the same row of the other side - a level read the other way (above the CE's
   // most bought <-> below the PE's most bought), the flow at the price kept (CE buying <-> PE buying).
   const sided = CONDITION[l.id]?.sided
+  if (sided === 'oi') {
+    const out = { ...l, id: CONDITION[l.id]?.mirror ?? l.id, value: o?.opposite ?? l.value }
+    if (l.param2 === 1 || l.param2 === 2) out.param2 = 3 - l.param2
+    return out
+  }
   if (sided && (l.param2 === 1 || l.param2 === 2)) return { ...l, value: sided === 'level' ? (o?.opposite ?? l.value) : l.value, param2: 3 - l.param2 }
   const out = { ...l, id: CONDITION[l.id]?.mirror ?? l.id, value: o?.opposite ?? l.value }
   for (const key of ['param', 'param2', 'param3', 'param4']) if (o?.[key]?.mirror && Number.isFinite(l[key])) out[key] = o[key].mirror(l[key])
