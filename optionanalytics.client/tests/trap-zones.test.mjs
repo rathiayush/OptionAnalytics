@@ -324,3 +324,32 @@ test('the ladder\'s profile strips: every profile\'s own part a row, in its lane
   assert.ok(L.strips[0].height > 0)
   assert.deepEqual(ladderLayout({ zones: [], price: 25010 }).strips, [])
 })
+
+test('the first version, to compare: each profile\'s own clusters joined where they overlap - nothing cancels', async () => {
+  const { unionZones } = await import('../src/trapZones.js')
+  // CDV buying 100 - 110 and OBV selling there, equal (the combined zones cancel); OI puts written 105 - 115 (bullish).
+  const p = compositeProfile([
+    { id: 'cdv', rows: [{ price: 100, delta: 40 }, { price: 105, delta: 40 }, { price: 150, delta: -20 }] },
+    { id: 'obv', rows: [{ price: 100, delta: -40 }, { price: 105, delta: -40 }] },
+    { id: 'oi', rows: [{ price: 105, delta: -300 }, { price: 110, delta: -300 }], bullishNegative: true },
+  ], 5)
+  const u = unionZones(p, 5)
+  // A bullish zone 100 - 115 (CDV's 100 - 110 joined with OI's 105 - 115) AND a bearish one on the same prices (OBV's).
+  const bull = u.find((z) => z.bullish && z.low === 100), bear = u.find((z) => !z.bullish && z.low === 100)
+  assert.deepEqual([bull.high, bull.sources, bull.score], [115, ['oi', 'cdv'], 2])
+  assert.deepEqual([bear.high, bear.sources, bear.score], [110, ['obv'], 1])
+  assert.deepEqual(bull.against, [])
+  assert.ok(u.some((z) => !z.bullish && z.low === 150))   // CDV's own selling at 150, a quarter of its largest cluster (0.5 of 2) - kept
+  // The combined zones on the same rows: the CDV / OBV clash is gone, only the OI's floor is left there.
+  const c = compositeZones(p, 5)
+  assert.ok(!c.some((z) => !z.bullish && z.low <= 105 && z.high >= 105))
+  // The mode goes through every read.
+  const items = [{ t: 0, low: 100, high: 100, ce: 50, pe: 0, ceObv: 0, peObv: 50, ceVol: 1, peVol: 1 }]
+  const asUnion = positionProfile({ options: [{ items, oi: [] }], rowSize: 5, mode: 'union' })
+  assert.deepEqual(asUnion.zones.map((z) => [z.bullish, z.low]).sort(), [[false, 100], [true, 100]])
+  assert.deepEqual(positionProfile({ options: [{ items, oi: [] }], rowSize: 5 }).zones, [])   // combined: they cancel
+  const spot = spotDay(10, (k) => 120 + k)
+  const prev = { date: 'x', items, oi: [], candles: spot }
+  assert.equal(openingRead({ prevOptions: [prev], rowSize: 5, mode: 'union' }).zones.length, 2)
+  assert.equal(dayRead({ opening: { zones: [] }, options: items.map((m) => ({ ...m, t: T0 })), spot, rowSize: 5, mode: 'union' }).zones.filter((z) => z.from === 'today').length, 2)
+})

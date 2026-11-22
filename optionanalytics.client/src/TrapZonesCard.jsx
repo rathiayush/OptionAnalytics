@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -205,7 +205,7 @@ const STRIP_FULL = { oi: 'OI CE − PE (OI delta)', cdv: 'Net CE − PE (= optio
  * empty dashed column. Drawn at the box's MEASURED width (an SVG scaled by a viewBox shrank its text on a phone), text widths
  * measured, labels spaced so none touches another - one with no room is left off, the band stays (hover it).
  */
-export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 'Previous day', spanPct = 1, onSpan, showStrips = true, onStrips, rowSize = 5 }) {
+export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 'Previous day', spanPct = 1, onSpan, showStrips = true, onStrips, rowSize = 5, split = false }) {
   const boxRef = useRef(null)
   const [width, setWidth] = useState(0)
   useEffect(() => {
@@ -227,8 +227,11 @@ export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 
   const lanesEnd = laneX.today + laneW
   const stripW = showStrips ? (narrow ? 7 : 20) : 0
   const stripsW = showStrips ? TRAP_SOURCES.length * (stripW + 1) + 3 : 0
-  const bandX = (lane) => laneX[lane] + stripsW
-  const bandW = Math.max(20, laneW - stripsW)
+  // "Each profile" (the first version) lets a bullish and a bearish zone sit on the same prices: each lane is then split,
+  // bullish zones in its left half and bearish in its right, so neither covers the other.
+  const areaW = Math.max(20, laneW - stripsW)
+  const bandW = split ? Math.max(10, areaW / 2 - 1) : areaW
+  const bandX = (lane, bullish = true) => laneX[lane] + stripsW + (split && !bullish ? areaW / 2 + 1 : 0)
   const starred = (z) => sameZone(best?.support?.zone, z) || sameZone(best?.resistance?.zone, z)
   const bandViews = (layout?.bands ?? []).map((b) => {
     const z = b.zone
@@ -238,12 +241,13 @@ export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 
     const name = `${star ? '★ ' : ''}${kind}`
     const range = `${px(z.low)}–${px(z.high)}`
     // On a phone the label takes the lane's whole width (over the strips, on its dark backing) - beside them it had ~45 px.
-    const labelX = narrow ? laneX[b.lane] + 1 : bandX(b.lane)
-    const room = (narrow ? laneW - 2 : bandW) - 12
+    const labelX = narrow ? laneX[b.lane] + 1 : split ? laneX[b.lane] + stripsW : bandX(b.lane)
+    const labelW = narrow ? laneW - 2 : split ? areaW : bandW
+    const room = labelW - 12
     // As much as fits: the kind, its range and its profiles; the kind and its range; the kind alone.
     const label = width > 0 ? ([`${name} ${range} · ${shortOf(z.sources)}`, `${name} ${range}`].find((t) => textWidth(t, fontPx, 600) <= room) ?? fitText(name, room, fontPx, 600)) : null
     return {
-      b, z, star, x: bandX(b.lane), labelX, labelW: narrow ? laneW - 2 : bandW, color: k?.color ?? '#8c8c8c', label,
+      b, z, star, x: bandX(b.lane, z.bullish), labelX, labelW, color: k?.color ?? '#8c8c8c', label,
       title: `${k?.label ?? ''} ${range} (${z.from === 'today' ? 'current day' : 'previous'}) · ${shortOf(z.sources)}${z.against?.length ? ` · ${shortOf(z.against)} against` : ''} · strength ${z.score} · ${z.distance === 0 ? 'at price' : pct(z.distance)}`,
     }
   })
@@ -473,6 +477,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
   const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
+  const [modeSaved, setMode] = usePersistedState('optionanalytics.oiReplay.trapZonesMode', 'composite')
+  const mode = ZONE_MODES.includes(modeSaved) ? modeSaved : 'composite'
   const rowSize = PROFILE_ROWS[underlying] ?? 5
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
   const pastOpt = usePastDeltaSessions('options', underlying, date, dayCount, flag)
@@ -484,8 +490,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const todayOptions = useMemo(() => optionDeltaMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
   const todayOi = useMemo(() => optionOiMinutes(cePoints, pePoints, spotMs, { asOfMs }), [cePoints, pePoints, spotMs, asOfMs])
   const todayFut = useMemo(() => barsUpTo(futDay.bars ?? NONE, asOfMs), [futDay.bars, asOfMs])
-  const opening = useMemo(() => openingRead({ prevOptions: pastOpt.sessions, prevFutures: pastFut.sessions, rowSize }), [pastOpt.sessions, pastFut.sessions, rowSize])
-  const day = useMemo(() => dayRead({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize }), [opening, todayOptions, todayOi, todayFut, spotMs, rowSize])
+  const opening = useMemo(() => openingRead({ prevOptions: pastOpt.sessions, prevFutures: pastFut.sessions, rowSize, mode }), [pastOpt.sessions, pastFut.sessions, rowSize, mode])
+  const day = useMemo(() => dayRead({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize, mode }), [opening, todayOptions, todayOi, todayFut, spotMs, rowSize, mode])
   // The day bias from the open - fixed once the first minute is in (before it: the pre-open read).
   const dayOpen = spotMs.length ? (spotMs[0].open > 0 ? spotMs[0].open : spotMs[0].close) : null
   const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
@@ -519,9 +525,9 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
-  const timelineKey = `${underlying}|${date}|${lastStep}|${opening.zones?.length}|${opening.close}|${futDay.bars?.length ? 1 : 0}`
+  const timelineKey = `${underlying}|${date}|${lastStep}|${opening.zones?.length}|${opening.close}|${futDay.bars?.length ? 1 : 0}|${mode}`
   const zoneEvents = useMemo(
-    () => dayTimeline({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize, stepMin: STEP_MIN }),
+    () => dayTimeline({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize, stepMin: STEP_MIN, mode }),
     [timelineKey], // eslint-disable-line react-hooks/exhaustive-deps
   )
 
@@ -544,11 +550,22 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       <Space wrap size={[8, 6]} align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>Positions from</Text>
         <Segmented size="small" value={dayCount} onChange={setDays} options={DAY_CHOICES} />
+        <Text type="secondary" style={{ fontSize: 12 }}>Zones</Text>
+        <Segmented
+          size="small" value={mode} onChange={setMode}
+          options={[{ value: 'composite', label: 'Combined (recommended)' }, { value: 'union', label: 'Each profile (first version)' }]}
+        />
         {loadingPast && <Tag color="processing" style={{ margin: 0 }}>loading the sessions before…</Tag>}
         {pastOpt.error && <Tag color="warning" style={{ margin: 0 }}>{pastOpt.error.date}: {pastOpt.error.message}</Tag>}
         {futDay.error && <Tooltip title={futDay.error}><Tag style={{ margin: 0 }}>no futures footprint today</Tag></Tooltip>}
         {isLive && <Tag color="green" style={{ margin: 0 }}>live</Tag>}
       </Space>
+
+      <Text type="secondary" style={{ fontSize: 11 }}>
+        {mode === 'union'
+          ? 'Each profile (first version): every profile\'s own clusters, joined where they overlap - nothing cancels, so a bullish and a bearish zone can sit on the same prices (the ladder splits each column: bullish left, bearish right). The bias, best zone and setups below read these zones.'
+          : 'Combined: the profiles added into one - where they agree a zone is strong, where they disagree they cancel; tight zones that never overlap. Each profile on its own: the strips in the ladder and "Levels by profile".'}
+      </Text>
 
       <div style={{ border: `1px solid ${biasColor(bias.score)}`, borderRadius: 6, padding: '6px 10px' }}>
         <Text style={{ fontSize: 13 }}>
@@ -615,7 +632,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       {showLadder && (
         <ZoneLadder
           zones={tableZones} price={day?.price ?? opening.close} marks={ladderMarks} best={best}
-          rows={ladderRows} used={ladderUsed} rowSize={rowSize} showStrips={showStrips} onStrips={setShowStrips}
+          rows={ladderRows} used={ladderUsed} rowSize={rowSize} showStrips={showStrips} onStrips={setShowStrips} split={mode === 'union'}
           prevLabel={prevLabel} spanPct={LADDER_SPANS.includes(ladderSpan) ? ladderSpan : 1} onSpan={setLadderSpan}
         />
       )}
