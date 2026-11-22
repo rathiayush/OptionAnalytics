@@ -709,7 +709,19 @@ All must pass before committing.
   text widths MEASURED on a canvas (`textWidth` / `fitText`); one read's zones never overlap, so neither do a lane's bands, and
   the labels are spaced by `ladderLayout` - a lane's from the top down at their band's middle, pushed down when they would
   touch, DROPPED when pushed off their band (the band stays); the lines' labels pushed apart, none dropped; the zones' labels
-  drawn LAST, over the lines. Checked at 375 px and 900 px in a browser. The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
+  drawn LAST, over the lines. Checked at 375 px and 900 px in a browser. Each band's label carries its RANGE ("Trapped shorts
+  24,900–24,920 · OI" - as much as fits: kind + range + profiles, kind + range, the kind; on a phone the kind's `tiny` name and
+  the label over the lane's full width), as do the chart's boxes (`zoneBoxes`). LEVELS BY PROFILE (asked for - "is anything
+  missing ... levels of OI net CE − PE, OBV, CDV, OI delta, net CE − PE, futures delta": the composite CANCELS where profiles
+  disagree, so neither one's level showed - the first version gave each profile's own clusters): the ladder's PROFILE STRIPS
+  (`ladderLayout`'s `rows` -> `strips`, the "Profile strips" tick `optionanalytics.oiReplay.trapZonesStrips`, on) - in each lane
+  one thin column a profile, O / OI = OI CE − PE (the OI delta), N / Net = net CE − PE (= the option CDV), B / OBV, F / Fut =
+  futures delta - every row's own part (the composite's `parts`, scaled by that profile's largest row, bullish +) green /
+  red, deeper the stronger (>= 5% shown), a profile not read an empty dashed column; and the "Levels by profile" block
+  (`profileLevels(rows, used, rowSize, price)` - each profile's strongest bullish / bearish cluster from its own `parts` via
+  `deltaZones`, its busiest row and its role against price now - `zoneKind`), the previous day(s) and the current day, "not
+  present - left out" for a profile not read. The CDV's own levels = `cdvLevels` (held equal in the test). `openingRead` /
+  `dayRead` / `positionProfile` return the composite's `rows`. The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
   support and resistance of the previous day from the start and the current developing"; `cdvLevels`): the net CE − PE flow
   (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
   its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed

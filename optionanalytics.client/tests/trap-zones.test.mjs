@@ -148,8 +148,8 @@ test('zones drawn on spot: a box each in its role\'s colour, before dashed / tod
   ]
   const boxes = zoneBoxes(zones)
   assert.deepEqual(boxes.map((b) => [b.low, b.high, b.dashed]), [[100, 110, true], [120, 125, false]])
-  assert.match(boxes[0].label, /^Floor \(before\) · OI\+Net\/CDV$/)
-  assert.match(boxes[1].label, /^Ceiling \(today\) · Fut$/)
+  assert.match(boxes[0].label, /^Floor 100–110 \(before\) · OI\+Net\/CDV$/)
+  assert.match(boxes[1].label, /^Ceiling 120–125 \(today\) · Fut$/)
   assert.equal(boxes[0].labelColor, ZONE_KINDS.support.color)
   assert.deepEqual(zoneBoxes(zones, { showPrev: false }).map((b) => b.low), [120])
   assert.deepEqual(zoneBoxes(zones, { showToday: false }).map((b) => b.low), [100])
@@ -282,4 +282,45 @@ test('the ladder to scale: previous / current day lanes, bands at their prices, 
   // Nice ticks across the scale.
   assert.ok(L.ticks.length >= 4 && L.ticks.every((t) => t.price % 50 === 0 || t.price % 100 === 0))
   assert.equal(ladderLayout({ zones, price: null }), null)
+})
+
+test('levels by profile: each profile on its own - its strongest bullish / bearish cluster even where the others cancel it', async () => {
+  const { profileLevels, cdvLevels } = await import('../src/trapZones.js')
+  // CDV buying 100 - 110 and OBV selling at the very same rows (equal - the composite cancels there), OI puts written at 130.
+  const p = compositeProfile([
+    { id: 'cdv', rows: [{ price: 100, delta: 40 }, { price: 105, delta: 40 }, { price: 150, delta: -20 }] },
+    { id: 'obv', rows: [{ price: 100, delta: -40 }, { price: 105, delta: -40 }] },
+    { id: 'oi', rows: [{ price: 130, delta: -300 }], bullishNegative: true },
+  ], 5)
+  assert.deepEqual(compositeZones(p, 5).filter((z) => z.low < 110).map((z) => z.low), [])   // cancelled in the zones...
+  const lv = profileLevels(p.rows, p.used, 5, 120)
+  assert.deepEqual(lv.map((x) => x.id), ['oi', 'cdv', 'obv'])
+  const of = (id) => lv.find((x) => x.id === id)
+  // ...but each profile still shows its own: CDV's buyers 100 - 110 a floor under 120, OBV's sellers there trapped shorts.
+  assert.deepEqual([of('cdv').bull.low, of('cdv').bull.high, of('cdv').bull.kind], [100, 110, 'support'])
+  assert.deepEqual([of('obv').bear.low, of('obv').bear.high, of('obv').bear.kind], [100, 110, 'trappedShorts'])
+  assert.deepEqual([of('cdv').bear.low, of('cdv').bear.kind], [150, 'resistance'])
+  assert.deepEqual([of('oi').bull.low, of('oi').bull.level, of('oi').bull.kind], [130, 132.5, 'trappedLongs'])   // puts written above price
+  assert.equal(of('oi').bear, null)
+  // The CDV's own levels = the biggest CDV support / resistance worked out from the flow itself.
+  const m = (low, ce, pe) => ({ t: 0, low, high: low, ce, pe, ceVol: 1, peVol: 1 })
+  const items = [m(100, 60, 0), m(105, 20, 0), m(150, 0, 15), m(155, 0, 40)]
+  const pp = positionProfile({ options: [{ items, oi: [] }], rowSize: 5 })
+  const own = profileLevels(pp.rows, pp.used, 5, 120).find((x) => x.id === 'cdv')
+  const direct = cdvLevels([items], 5)
+  assert.deepEqual([own.bull.low, own.bull.high, own.bull.level], [direct.support.low, direct.support.high, direct.support.level])
+  assert.deepEqual([own.bear.low, own.bear.high, own.bear.level], [direct.resistance.low, direct.resistance.high, direct.resistance.level])
+})
+
+test('the ladder\'s profile strips: every profile\'s own part a row, in its lane, on the scale', async () => {
+  const { ladderLayout } = await import('../src/trapZones.js')
+  const p = compositeProfile([
+    { id: 'cdv', rows: [{ price: 25000, delta: 10 }, { price: 25005, delta: 0.2 }, { price: 27000, delta: 5 }] },
+    { id: 'oi', rows: [{ price: 25000, delta: 100 }], bullishNegative: true },
+  ], 5)
+  const L = ladderLayout({ zones: [], price: 25010, rows: { prev: p.rows, today: [] }, rowSize: 5 })
+  // CDV +1 and OI −1 at 25000; CDV's 2% row left out (under 5%); 27000 off the scale.
+  assert.deepEqual(L.strips.map((x) => [x.lane, x.id, x.price, x.value]), [['prev', 'cdv', 25000, 1], ['prev', 'oi', 25000, -1]])
+  assert.ok(L.strips[0].height > 0)
+  assert.deepEqual(ladderLayout({ zones: [], price: 25010 }).strips, [])
 })
