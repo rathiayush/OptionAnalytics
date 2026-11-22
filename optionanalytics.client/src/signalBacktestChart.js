@@ -29,9 +29,9 @@ export function ruleIndicators(rule) {
   for (const l of r.lines) {
     if (/Prem/.test(l.id)) premium = true
     if (l.id === 'emaCross' || /PremEmaCross$/.test(l.id)) { ema.add(l.param2); ema.add(l.param3) } else if (l.id === 'emaPrice' || /PremEma$/.test(l.id)) ema.add(l.param2)
-    else if (l.id === 'rsi' || /PremRsi$/.test(l.id)) {
+    else if (l.id === 'rsi' || l.id === 'rsiDiv' || /PremRsi$/.test(l.id)) {
       rsi ??= l.param2
-      rsiLevels.add(l.param)
+      if (l.id !== 'rsiDiv') rsiLevels.add(l.param)
       // Spot's RSI mirrors its level (above 60 <-> below 40); a premium's mirror is the other side's at the same level.
       if (r.mirror && l.id === 'rsi') rsiLevels.add(100 - l.param)
     } else if (l.id === 'cpr' || l.id.startsWith('pivot')) pivots = true

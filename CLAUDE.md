@@ -1069,7 +1069,7 @@ All must pass before committing.
   the higher one TC: above / inside / below, crossed through TC / BC, narrow / wide by its width in % of P). The previous
   session is the previous-day profile response's own `bars` (`previousDayBars` - its session minutes, of its own day, before
   the day run) - a day whose previous session had no index volume has no profile, so no pivots (the report lists those days,
-  `noPivots`, when the rule reads them) and its RSI / EMAs start at 09:15. OPTION PREMIUM TA (asked for - "TA indicators on
+  `noPivots`, when the rule reads them) and its RSI / EMAs start at 09:15. RSI DIVERGENCE (asked for - "add check for rsi bullish divergence, bearish divergence ... and a condition where I should not have it"; `rsiDiv`, `rsiDivergenceEvents`): on the spot candles of the timeframe, a swing low is a candle under the `pivot` (1 - 10, default 3) candles each side - known that many candles LATER, never before; BULLISH = a lower swing low in price (within 60 candles of the one before) with the RSI at it higher by `RSI gap ≥` points (default 1), BEARISH the mirror on swing highs; an EVENT at the candle that confirms the newer swing, holding for the look-back; "no divergence" = the condition in a NOT group (`tests/signal-backtest-indicators.test.mjs`). OPTION PREMIUM TA (asked for - "TA indicators on
   ... option prices, like ema crossover or above vwap"): the ATM CE / PE premium on its OWN chart (`premiumConditions` -
   `cePremVwap` / `cePremEma` / `cePremEmaCross` / `cePremRsi` and the PE's): vs its own VWAP (typical price x the strike's
   traded volume from 09:15 - `ceVol` / `peVol`, kept by `prepareDay`; a minute the server carried over a gap has 0 volume; no

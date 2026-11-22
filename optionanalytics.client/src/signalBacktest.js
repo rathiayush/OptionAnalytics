@@ -514,6 +514,44 @@ export function rsiSeries(d, p = 14) {
   return indicatorCache(d, `rsi${n}`, () => { const { warm, closes } = indicatorCloses(d); return rsiOver(closes, n).subarray(warm) })
 }
 
+// ---- RSI DIVERGENCE on the spot candles (asked for - "add check for rsi bullish divergence, bearish divergence, and a
+// condition where I should not have it": NOT on its group does that) ------------------------------------------------
+// A swing LOW is a candle whose low is under the `len` candles each side (strictly under those before it); it is known
+// `len` candles later, never before. BULLISH = price makes a LOWER swing low than the one before it (at most
+// `RSI_DIV_MAX_GAP` candles back) while the RSI at it is HIGHER by at least `gap` points; BEARISH the mirror on swing
+// highs (a higher high, a lower RSI). The divergence is an EVENT at the candle that confirms the newer swing - nothing
+// after it is read - and the condition holds for the look-back after it.
+const RSI_DIV_MAX_GAP = 60
+/** 1 at each candle that confirms a divergence (`bullish` - on lows - or bearish - on highs). */
+export function rsiDivergenceEvents(d, bullish, len = 3, period = 14, gap = 1) {
+  const L = Math.min(10, Math.max(1, Math.round(Number(len)) || 3))
+  const G = Number(gap) > 0 ? Number(gap) : 0
+  const n = fitPeriod(period, 14)
+  return indicatorCache(d, `rsiDiv|${bullish ? 'b' : 'r'}|${L}|${n}|${G}`, () => {
+    const r = rsiSeries(d, n)
+    const x = bullish ? d.spot.l : d.spot.h
+    const count = x.length
+    const out = new Uint8Array(count)
+    let last = -1
+    for (let c = 2 * L; c < count; c++) {
+      const p = c - L
+      let ok = finite(x[p]) && finite(r[p])
+      for (let k = p - L; ok && k <= p + L; k++) {
+        if (k === p) continue
+        if (!finite(x[k])) { ok = false; break }
+        const left = k < p
+        if (bullish ? (left ? x[k] <= x[p] : x[k] < x[p]) : (left ? x[k] >= x[p] : x[k] > x[p])) ok = false
+      }
+      if (!ok) continue
+      if (last >= 0 && p - last <= RSI_DIV_MAX_GAP && finite(r[last])) {
+        if (bullish ? x[p] < x[last] && r[p] > r[last] + G : x[p] > x[last] && r[p] < r[last] - G) out[c] = 1
+      }
+      last = p
+    }
+    return out
+  })
+}
+
 // ---- An option's premium on its own chart (the ATM strike's CE / PE): its candles, VWAP, EMAs and RSI ----------------
 // The strike's own 1-minute bars in candles of the timeframe read: a candle's OHLC from its minutes (a minute with no bar
 // adds nothing; a candle with none carries the last close), its volume their sum, its VWAP the premium's own from the
@@ -831,6 +869,12 @@ const fmtLakh = (v) => `${(v / 1e5).toFixed(1)}L`
 // below 40, `mirror`) and its period; an EMA's period(s) - the crossover's fast and slow.
 const RSI_LEVEL = (def) => ({ param: { label: 'level', unit: '', default: def, min: 1, max: 99, step: 1, mirror: (v) => 100 - v } })
 const RSI_PERIOD = { param2: { label: 'period', unit: '', default: 14, min: 2, max: 50, step: 1 } }
+const RSI_DIV = {
+  ...W,
+  param: { label: 'pivot', unit: ' candles', default: 3, min: 1, max: 10, step: 1 },
+  param2: { label: 'RSI period', unit: '', default: 14, min: 2, max: 50, step: 1 },
+  param3: { label: 'RSI gap ≥', unit: ' pts', default: 1, min: 0, max: 30, step: 1 },
+}
 const EMA_PERIOD = { param2: { label: 'EMA', unit: '', default: 20, min: 2, max: 200, step: 1 } }
 const EMA_FAST_SLOW = { param2: { label: 'fast', unit: '', default: 9, min: 2, max: 200, step: 1 }, param3: { label: 'slow', unit: '', default: 21, min: 2, max: 200, step: 1 } }
 
@@ -1772,6 +1816,20 @@ export const RULE_CONDITIONS = [
         case 'crossedBelow': return crossed(past, i, w, false)
         default: return false
       }
+    },
+    show: (d, i, l) => { const n = fitPeriod(l?.param2, 14); return `RSI(${n}) ${fmtP(rsiSeries(d, n)[i])}` },
+  },
+  {
+    // RSI divergence on the spot candles (`rsiDivergenceEvents`): confirmed in the look-back. Wrap it in a NOT group for
+    // "no divergence".
+    id: 'rsiDiv', group: 'Indicators', name: 'RSI divergence (spot candles)',
+    options: [
+      opt('bullish', 'Bullish divergence: price lower low, RSI higher low', 'bearish', RSI_DIV),
+      opt('bearish', 'Bearish divergence: price higher high, RSI lower high', 'bullish', RSI_DIV),
+    ],
+    test: (d, i, v, w, p, p2, p3) => {
+      const ev = rsiDivergenceEvents(d, v === 'bullish', p, p2, p3)
+      return inWindow(i, w, (k) => ev[k] === 1) >= 0
     },
     show: (d, i, l) => { const n = fitPeriod(l?.param2, 14); return `RSI(${n}) ${fmtP(rsiSeries(d, n)[i])}` },
   },
