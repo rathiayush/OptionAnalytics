@@ -257,11 +257,12 @@ const RELAY_TAG = {
 // The global Sync switch plus who this page is synced with - the other page and the other tabs of this one (OI Replay's
 // screens). `mismatch`: a short note when the other page is on a different day/underlying (shown instead of the peer list).
 // `extra`: anything to show beside the switch (OI Replay's "New screen").
+const WRAP_TAG = { margin: 0, whiteSpace: 'normal', height: 'auto', maxWidth: '100%', lineHeight: 1.4, paddingBlock: 2 }  // antd tags never wrap - a long one made the page wider than a phone
 export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = null, extra = null }) {
   const other = kind === 'oi' ? 'Order Flow' : 'OI Replay'
   const sameToo = kind === 'oi' ? ' and every other OI Replay tab / window (its screens)' : ''
   return (
-    <Space size={6} wrap align="center">
+    <Space size={6} wrap align="center" style={{ maxWidth: '100%' }}>
       <Tooltip title={`Play, pause, seek, speed and the day move together with the ${other} page${sameToo}: picking a date, Load day or Go Live here loads the same there.${kind === 'oi' ? ' Between OI Replay tabs the index, Weekly / Monthly, the live expiry and Σ 3 expiries follow too - each tab keeps its own cards.' : ''} One switch for every page.`}>
         <Space size={4}>
           <Switch size="small" checked={enabled} onChange={onChange} aria-label="Replay sync" />
@@ -276,12 +277,12 @@ export function ReplaySyncControl({ enabled, onChange, sync, kind, mismatch = nu
           </Space>
         </Tooltip>
       )}
-      {enabled && sync.devices && RELAY_TAG[sync.relayStatus] && <Tag color={RELAY_TAG[sync.relayStatus].color} style={{ margin: 0 }}>{RELAY_TAG[sync.relayStatus].text}</Tag>}
+      {enabled && sync.devices && RELAY_TAG[sync.relayStatus] && <Tag color={RELAY_TAG[sync.relayStatus].color} style={WRAP_TAG}>{RELAY_TAG[sync.relayStatus].text}</Tag>}
       {extra}
-      {enabled && mismatch && <Tag color="warning" style={{ margin: 0 }}>{mismatch}</Tag>}
+      {enabled && mismatch && <Tag color="warning" style={WRAP_TAG}>{mismatch}</Tag>}
       {enabled && !mismatch && (sync.peers.length
-        ? <Tag color="cyan" style={{ margin: 0 }}>⇄ {sync.peers.map((p) => `${peerName(p, thisDevice().id)}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
-        : <Tag style={{ margin: 0 }}>Open the {other} page{kind === 'oi' ? ' or another OI Replay screen' : ''} in another tab{sync.devices ? ' or on another device' : ''}</Tag>)}
+        ? <Tag color="cyan" style={WRAP_TAG}>⇄ {sync.peers.map((p) => `${peerName(p, thisDevice().id)}${p.live ? ' live' : p.date ? ` ${p.date}` : ''}`).join(', ')}{sync.leading ? ' · leading' : ''}</Tag>
+        : <Tag style={WRAP_TAG}>Open the {other} page{kind === 'oi' ? ' or another OI Replay screen' : ''} in another tab{sync.devices ? ' or on another device' : ''}</Tag>)}
     </Space>
   )
 }
