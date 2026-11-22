@@ -509,25 +509,60 @@ export function dayTimeline({ opening, options = [], oi = [], futures = [], spot
   return events
 }
 
+/** A "nice" axis step - 1, 2, 2.5 or 5 x a power of ten - giving about `count` ticks over `range`. */
+function niceStep(range, count) {
+  const raw = range / Math.max(1, count)
+  const pow = 10 ** Math.floor(Math.log10(raw))
+  return [1, 2, 2.5, 5, 10].map((m) => m * pow).find((x) => x >= raw) ?? 10 * pow
+}
+
 /**
- * THE LADDER (asked for back - "continue to show the ladder as well"): the zones within `span` of `price` (the nearest
- * `max`) and the price lines (`marks` [{ price, label, color }] - open, previous close, the CDV levels; the price itself
- * always) as ONE list from the highest price down - a zone by its middle - so each takes a row of its own and nothing can be
- * drawn over anything else (the SVG ladder scaled its text with the screen and overlapped on a phone). [{ type: 'zone',
- * zone, at } | { type: 'mark', price, label, color, at }].
+ * THE LADDER, drawn to scale (asked for - "previous day, current day like the older way, so I know what is happening"): a
+ * price scale of `price` ± `span` and two lanes - the PREVIOUS day(s)' zones ('prev') and the CURRENT day's ('today') -
+ * each zone a band at its real price (clipped to the scale, at least 3 px tall), the price lines (`marks` [{ price, label,
+ * color, dashed }] - open, previous close, the CDV levels; the price itself always) across both. One read's zones never
+ * overlap (compositeZones), so neither do a lane's bands; the LABELS are what could: a lane's labels are placed from the
+ * top down at their band's middle, pushed down by `labelPx` when they would touch the one above, and a label pushed off its
+ * band (more than half a label past it) is DROPPED - the band stays; the lines' labels sit in a gutter, pushed apart the
+ * same way (none dropped - a line's label may sit off its line, joined to it by a leader). `height` px, `pad` above and
+ * below. { lo, hi, ticks: [{ price, y }], bands: [{ zone, lane, top, height, mid, labelY | null }], lines: [{ price,
+ * label, color, dashed, now, y, labelY }] } or null without a price.
  */
-export function ladderItems({ zones = [], price, marks = [], span = 0.02, max = 12 } = {}) {
-  if (!(price > 0)) return []
+export function ladderLayout({ zones = [], price, marks = [], span = 0.01, height = 340, pad = 14, labelPx = 14 } = {}) {
+  if (!(price > 0)) return null
   const lo = price * (1 - span), hi = price * (1 + span)
-  const near = zones.filter((z) => z.high >= lo && z.low <= hi)
-    .sort((a, b) => Math.abs(a.distance ?? 0) - Math.abs(b.distance ?? 0)).slice(0, max)
-  const items = [
-    ...near.map((zone) => ({ type: 'zone', zone, at: (zone.low + zone.high) / 2 })),
-    { type: 'mark', price, label: 'Price', color: '#1677ff', at: price, now: true },
-    ...marks.filter((m) => Number.isFinite(m.price) && m.price >= lo && m.price <= hi).map((m) => ({ type: 'mark', ...m, at: m.price })),
-  ]
-  // Highest first; at the same price the price line before the others, a line before a zone.
-  return items.sort((a, b) => b.at - a.at || (b.now ? 1 : 0) - (a.now ? 1 : 0) || (a.type === 'mark' ? -1 : 1) - (b.type === 'mark' ? -1 : 1))
+  const y = (v) => pad + ((hi - v) / (hi - lo)) * (height - 2 * pad)
+  const step = niceStep(hi - lo, 6)
+  const ticks = []
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) ticks.push({ price: round2(v), y: y(v) })
+  const bands = []
+  for (const lane of ['prev', 'today']) {
+    const list = zones.filter((z) => (z.from === 'today' ? 'today' : 'prev') === lane && z.high > lo && z.low < hi)
+      .map((zone) => {
+        const top = y(Math.min(zone.high, hi)), bottom = y(Math.max(zone.low, lo))
+        const h = Math.max(3, bottom - top)
+        return { zone, lane, top: bottom - top < 3 ? (top + bottom) / 2 - 1.5 : top, height: h, mid: (top + bottom) / 2 }
+      })
+      .sort((p, q) => p.mid - q.mid)
+    let last = -Infinity
+    for (const b of list) {
+      const want = Math.max(b.mid, last + labelPx)
+      const fits = want <= b.top + b.height + labelPx / 2 && want <= height - pad / 2
+      b.labelY = fits ? want : null
+      if (fits) last = want
+      bands.push(b)
+    }
+  }
+  const lines = [{ price, label: 'Price', color: '#1677ff', now: true }, ...marks]
+    .filter((m) => Number.isFinite(m.price) && m.price >= lo && m.price <= hi)
+    .map((m) => ({ dashed: false, now: false, ...m, y: y(m.price) }))
+    .sort((p, q) => p.y - q.y)
+  let prev = -Infinity
+  for (const l of lines) { l.labelY = Math.max(l.y, prev + labelPx); prev = l.labelY }
+  // Pushed past the bottom: move the stack up as one, keeping the spacing.
+  const over = lines.length ? lines[lines.length - 1].labelY - (height - pad / 2) : 0
+  if (over > 0) for (let i = lines.length - 1, floor = height - pad / 2; i >= 0; i--) { lines[i].labelY = Math.min(lines[i].labelY, floor); floor = lines[i].labelY - labelPx }
+  return { lo, hi, ticks, bands, lines }
 }
 
 const hexA = (hex, a) => {
