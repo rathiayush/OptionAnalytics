@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -193,13 +193,19 @@ function fitText(text, room, fontPx, weight) {
   return null
 }
 
+const STRIP_NAMES = { oi: ['O', 'OI'], cdv: ['N', 'Net'], obv: ['B', 'OBV'], fut: ['F', 'Fut'] }
+const STRIP_FULL = { oi: 'OI CE − PE (OI delta)', cdv: 'Net CE − PE (= option CDV)', obv: 'Option OBV', fut: 'Futures delta' }
+
 /**
  * THE LADDER TO SCALE (ladderLayout): the previous day(s) in one lane, the current day in the other, each zone a band at
- * its real price, the price / open / previous close / CDV lines across both with their labels in the right gutter. Drawn
- * at the box's MEASURED width (an SVG scaled by a viewBox shrank its text on a phone), labels at a fixed size, spaced so
- * none touches another - a label with no room is left off, the band stays (hover it for its details).
+ * its real price with its range, the price / open / previous close / CDV lines across both with their labels in the right
+ * gutter, and (asked for - "is anything missing ... OI net CE − PE, OBV, CDV, net CE − PE, futures delta") each lane's
+ * PROFILE STRIPS - one thin column a profile (OI, Net / CDV, OBV, Futures) at the lane's left, green where that profile is
+ * bullish at a price, red where bearish, stronger the deeper the colour; a profile not read (futures not present) is an
+ * empty dashed column. Drawn at the box's MEASURED width (an SVG scaled by a viewBox shrank its text on a phone), text widths
+ * measured, labels spaced so none touches another - one with no room is left off, the band stays (hover it).
  */
-export function ZoneLadder({ zones, price, marks, best, prevLabel = 'Previous day', spanPct = 1, onSpan }) {
+export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 'Previous day', spanPct = 1, onSpan, showStrips = true, onStrips, rowSize = 5 }) {
   const boxRef = useRef(null)
   const [width, setWidth] = useState(0)
   useEffect(() => {
@@ -212,39 +218,56 @@ export function ZoneLadder({ zones, price, marks, best, prevLabel = 'Previous da
   }, [])
   const narrow = width > 0 && width < 480
   const height = narrow ? 320 : 360
-  const layout = useMemo(() => ladderLayout({ zones, price, marks, span: spanPct / 100, height }), [zones, price, marks, spanPct, height])
+  const layout = useMemo(() => ladderLayout({ zones, price, marks, span: spanPct / 100, height, rows: showStrips ? rows : null, rowSize }), [zones, price, marks, spanPct, height, rows, showStrips, rowSize])
   const fontPx = narrow ? 10 : 11
+  const headerPx = showStrips ? 30 : HEADER_PX
   const axisW = 46, gutterW = narrow ? 82 : 136, gap = 4
   const laneW = Math.max(40, (width - axisW - gutterW - gap * 3) / 2)
   const laneX = { prev: axisW + gap, today: axisW + gap * 2 + laneW }
   const lanesEnd = laneX.today + laneW
+  const stripW = showStrips ? (narrow ? 7 : 20) : 0
+  const stripsW = showStrips ? TRAP_SOURCES.length * (stripW + 1) + 3 : 0
+  const bandX = (lane) => laneX[lane] + stripsW
+  const bandW = Math.max(20, laneW - stripsW)
   const starred = (z) => sameZone(best?.support?.zone, z) || sameZone(best?.resistance?.zone, z)
   const bandViews = (layout?.bands ?? []).map((b) => {
     const z = b.zone
     const k = ZONE_KINDS[z.kind]
     const star = starred(z)
-    const name = `${star ? '★ ' : ''}${k?.short ?? k?.label ?? ''}`
-    const full = `${name} · ${shortOf(z.sources)}`
-    const room = laneW - 12
+    const kind = (narrow ? k?.tiny : k?.short) ?? k?.label ?? ''
+    const name = `${star ? '★ ' : ''}${kind}`
+    const range = `${px(z.low)}–${px(z.high)}`
+    // On a phone the label takes the lane's whole width (over the strips, on its dark backing) - beside them it had ~45 px.
+    const labelX = narrow ? laneX[b.lane] + 1 : bandX(b.lane)
+    const room = (narrow ? laneW - 2 : bandW) - 12
+    // As much as fits: the kind, its range and its profiles; the kind and its range; the kind alone.
+    const label = width > 0 ? ([`${name} ${range} · ${shortOf(z.sources)}`, `${name} ${range}`].find((t) => textWidth(t, fontPx, 600) <= room) ?? fitText(name, room, fontPx, 600)) : null
     return {
-      b, z, star, x: laneX[b.lane], color: k?.color ?? '#8c8c8c',
-      label: width > 0 ? (textWidth(full, fontPx, 600) <= room ? full : fitText(name, room, fontPx, 600)) : null,
-      title: `${k?.label ?? ''} ${px(z.low)}–${px(z.high)} (${z.from === 'today' ? 'current day' : 'previous'}) · ${shortOf(z.sources)}${z.against?.length ? ` · ${shortOf(z.against)} against` : ''} · strength ${z.score} · ${z.distance === 0 ? 'at price' : pct(z.distance)}`,
+      b, z, star, x: bandX(b.lane), labelX, labelW: narrow ? laneW - 2 : bandW, color: k?.color ?? '#8c8c8c', label,
+      title: `${k?.label ?? ''} ${range} (${z.from === 'today' ? 'current day' : 'previous'}) · ${shortOf(z.sources)}${z.against?.length ? ` · ${shortOf(z.against)} against` : ''} · strength ${z.score} · ${z.distance === 0 ? 'at price' : pct(z.distance)}`,
     }
   })
+  const stripX = (lane, i) => laneX[lane] + i * (stripW + 1)
   return (
     <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 8px' }}>
       <Space wrap size={[8, 4]} align="center" style={{ marginBottom: 4 }}>
         <Text strong style={{ fontSize: 12 }}>Ladder</Text>
         <Segmented size="small" value={spanPct} onChange={onSpan} options={LADDER_SPANS.map((v) => ({ value: v, label: `±${v}%` }))} />
+        <Checkbox checked={showStrips} onChange={(e) => onStrips?.(e.target.checked)}>Profile strips</Checkbox>
         <Text type="secondary" style={{ fontSize: 11 }}>dashed = previous, solid = current day, ★ best</Text>
       </Space>
       <div ref={boxRef} style={{ width: '100%' }}>
         {width > 0 && layout && (
-          <svg width={width} height={height + HEADER_PX} style={{ display: 'block', fontVariantNumeric: 'tabular-nums' }}>
+          <svg width={width} height={height + headerPx} style={{ display: 'block', fontVariantNumeric: 'tabular-nums' }}>
             <text x={laneX.prev + 2} y={12} fontSize={11} fill="#8c8c8c">{fitText(prevLabel, laneW - 4, 11, 400) ?? ''}</text>
             <text x={laneX.today + 2} y={12} fontSize={11} fill="#8c8c8c">Current day</text>
-            <g transform={`translate(0, ${HEADER_PX})`}>
+            {showStrips && ['prev', 'today'].map((lane) => TRAP_SOURCES.map((src, i) => (
+              <text key={`h-${lane}-${src.id}`} x={stripX(lane, i) + stripW / 2} y={26} fontSize={narrow ? 8 : 9} fill="#8c8c8c" textAnchor="middle">
+                <title>{STRIP_FULL[src.id]}</title>
+                {STRIP_NAMES[src.id][narrow ? 0 : 1]}
+              </text>
+            )))}
+            <g transform={`translate(0, ${headerPx})`}>
               {['prev', 'today'].map((lane) => <rect key={lane} x={laneX[lane]} y={0} width={laneW} height={height} fill="rgba(255,255,255,0.025)" rx={3} />)}
               {layout.ticks.map((t) => (
                 <g key={t.price}>
@@ -252,10 +275,25 @@ export function ZoneLadder({ zones, price, marks, best, prevLabel = 'Previous da
                   <text x={axisW - 4} y={t.y + 3.5} fontSize={10} fill="#8c8c8c" textAnchor="end">{Math.round(t.price).toLocaleString('en-IN')}</text>
                 </g>
               ))}
+              {showStrips && ['prev', 'today'].map((lane) => TRAP_SOURCES.map((src, i) => {
+                const read = used?.[lane]?.includes(src.id)
+                return (
+                  <rect key={`s-${lane}-${src.id}`} x={stripX(lane, i)} y={0} width={stripW} height={height} rx={1}
+                    fill={read ? 'rgba(255,255,255,0.03)' : 'none'} stroke={read ? 'none' : 'rgba(255,255,255,0.18)'} strokeDasharray={read ? undefined : '2 3'}>
+                    <title>{`${STRIP_FULL[src.id]}: ${read ? 'green = bullish, red = bearish at that price' : 'not present - left out'}`}</title>
+                  </rect>
+                )
+              }))}
+              {showStrips && layout.strips.map((st) => {
+                const i = TRAP_SOURCES.findIndex((src) => src.id === st.id)
+                if (i < 0) return null
+                return <rect key={`r-${st.lane}-${st.id}-${st.price}`} x={stripX(st.lane, i)} y={st.top} width={stripW} height={st.height}
+                  fill={st.value > 0 ? `rgba(82,196,26,${0.15 + 0.75 * Math.min(1, st.value)})` : `rgba(255,77,79,${0.15 + 0.75 * Math.min(1, -st.value)})`} />
+              })}
               {bandViews.map((v) => (
                 <g key={`${v.b.lane}-${v.z.low}-${v.z.high}`}>
                   <title>{v.title}</title>
-                  <rect x={v.x} y={v.b.top} width={laneW} height={v.b.height} fill={ladderTint(v.color, v.star ? 0.38 : Math.min(0.3, 0.1 + v.z.score * 0.07))}
+                  <rect x={v.x} y={v.b.top} width={bandW} height={v.b.height} fill={ladderTint(v.color, v.star ? 0.38 : Math.min(0.3, 0.1 + v.z.score * 0.07))}
                     stroke={v.color} strokeWidth={v.star ? 2 : 1} strokeDasharray={v.z.from === 'today' ? undefined : '4 3'} rx={2} />
                 </g>
               ))}
@@ -273,14 +311,61 @@ export function ZoneLadder({ zones, price, marks, best, prevLabel = 'Previous da
               {bandViews.filter((v) => v.b.labelY != null && v.label).map((v) => (
                 <g key={`label-${v.b.lane}-${v.z.low}-${v.z.high}`}>
                   <title>{v.title}</title>
-                  <rect x={v.x + 2} y={v.b.labelY - fontPx * 0.68} width={Math.min(laneW - 4, textWidth(v.label, fontPx, 600) + 6)} height={fontPx * 1.36} fill="rgba(13,17,26,0.78)" rx={2} />
-                  <text x={v.x + 5} y={v.b.labelY + fontPx * 0.36} fontSize={fontPx} fontWeight={600} fill={v.color}>{v.label}</text>
+                  <rect x={v.labelX + 2} y={v.b.labelY - fontPx * 0.68} width={Math.min(v.labelW - 4, textWidth(v.label, fontPx, 600) + 6)} height={fontPx * 1.36} fill="rgba(13,17,26,0.82)" rx={2} />
+                  <text x={v.labelX + 5} y={v.b.labelY + fontPx * 0.36} fontSize={fontPx} fontWeight={600} fill={v.color}>{v.label}</text>
                 </g>
               ))}
             </g>
           </svg>
         )}
       </div>
+      {showStrips && (
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          Strips: {TRAP_SOURCES.map((src) => `${STRIP_NAMES[src.id][narrow ? 0 : 1]} = ${STRIP_FULL[src.id]}`).join(' · ')} - green bullish, red bearish at that price; a dashed empty strip = not present.
+        </Text>
+      )}
+    </div>
+  )
+}
+
+/** LEVELS BY PROFILE (profileLevels): each profile's own strongest bullish / bearish cluster, the previous day(s) and the
+ *  current day, with its range, its busiest row and what it is against price now. */
+export function ProfileLevels({ prev, today, prevLabel }) {
+  const ids = TRAP_SOURCES.map((x) => x.id).filter((id) => prev?.some((p) => p.id === id) || today?.some((p) => p.id === id))
+  if (!ids.length) return null
+  const cell = (lv, bullish) => {
+    if (!lv) return <Text type="secondary" style={{ fontSize: 12 }}>{bullish ? '▲' : '▼'} none</Text>
+    const k = ZONE_KINDS[lv.kind]
+    return (
+      <span style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+        <Text style={{ fontSize: 12, color: bullish ? '#52c41a' : '#ff4d4f' }}>{bullish ? '▲' : '▼'} {px(lv.low)}–{px(lv.high)}</Text>
+        <Text type="secondary" style={{ fontSize: 11 }}> ({px(lv.level)})</Text>{' '}
+        {k && <Tooltip title={k.text}><Tag color={k.color} style={{ margin: 0, color: '#000', fontSize: 11, lineHeight: '16px', padding: '0 4px' }}>{k.short}</Tag></Tooltip>}
+      </span>
+    )
+  }
+  const side = (list, id, label) => {
+    const p = list?.find((x) => x.id === id)
+    return (
+      <div>
+        <Space wrap size={[8, 2]} align="center">
+          <Text type="secondary" style={{ fontSize: 11, minWidth: 80, display: 'inline-block' }}>{label}</Text>
+          {p ? <>{cell(p.bull, true)}{cell(p.bear, false)}</> : <Text type="secondary" style={{ fontSize: 12 }}>not present - left out</Text>}
+        </Space>
+      </div>
+    )
+  }
+  return (
+    <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 10px' }}>
+      <Text strong style={{ fontSize: 12 }}>Levels by profile</Text>
+      <Text type="secondary" style={{ fontSize: 11 }}> - each profile on its own: its strongest bullish (▲) and bearish (▼) cluster, (its busiest row), what it is against price now</Text>
+      {ids.map((id) => (
+        <div key={id} style={{ borderTop: `1px solid ${BORDER_COLOR}`, marginTop: 4, paddingTop: 4 }}>
+          <div><Text strong style={{ fontSize: 12 }}>{STRIP_FULL[id]}</Text></div>
+          {side(prev, id, prevLabel)}
+          {side(today, id, 'Current day')}
+        </div>
+      ))}
     </div>
   )
 }
@@ -387,6 +472,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showCdv, setShowCdv] = usePersistedState('optionanalytics.oiReplay.trapZonesCdv', true)
   const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
+  const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
   const rowSize = PROFILE_ROWS[underlying] ?? 5
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
   const pastOpt = usePastDeltaSessions('options', underlying, date, dayCount, flag)
@@ -423,6 +509,12 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
     ] : []),
   ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday])
   const setups = useMemo(() => tradeSetups({ day, bias, rowSize, best }), [day, bias, rowSize, best])
+  const prevLabel = dayCount === 1 ? 'Previous day' : `Previous ${dayCount} days`
+  const ladderRows = useMemo(() => ({ prev: opening.rows ?? [], today: day?.rows ?? [] }), [opening.rows, day?.rows])
+  const ladderUsed = useMemo(() => ({ prev: opening.used ?? [], today: day?.used ?? [] }), [opening.used, day?.used])
+  const nowPrice = day?.price ?? opening.close
+  const levelsPrev = useMemo(() => profileLevels(opening.rows, opening.used, rowSize, nowPrice), [opening.rows, opening.used, rowSize, nowPrice])
+  const levelsToday = useMemo(() => (day ? profileLevels(day.rows, day.used, rowSize, nowPrice) : null), [day, rowSize, nowPrice])
   const ladderMarks = useMemo(() => chartLines.filter((l) => l.title).map((l) => ({ price: l.price, label: l.title, color: l.color, dashed: l.style === 2 })), [chartLines])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
@@ -523,10 +615,11 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       {showLadder && (
         <ZoneLadder
           zones={tableZones} price={day?.price ?? opening.close} marks={ladderMarks} best={best}
-          prevLabel={dayCount === 1 ? 'Previous day' : `Previous ${dayCount} days`}
-          spanPct={LADDER_SPANS.includes(ladderSpan) ? ladderSpan : 1} onSpan={setLadderSpan}
+          rows={ladderRows} used={ladderUsed} rowSize={rowSize} showStrips={showStrips} onStrips={setShowStrips}
+          prevLabel={prevLabel} spanPct={LADDER_SPANS.includes(ladderSpan) ? ladderSpan : 1} onSpan={setLadderSpan}
         />
       )}
+      <ProfileLevels prev={levelsPrev} today={levelsToday} prevLabel={prevLabel} />
 
       <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
         <ZoneTable zones={tableZones} />
@@ -577,7 +670,11 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           resistance are starred - the bounce / rejection setups trade those. BIGGEST CDV SUPPORT / RESISTANCE: the net CE − PE
           flow&apos;s strongest buying cluster (support) and selling cluster (resistance) - of the sessions before, fixed from the
           start of the day (dashed &quot;Prev CDV S / R&quot; lines at each cluster&apos;s busiest row), and of the day so far,
-          developing (solid &quot;CDV S / R&quot;). THE LADDER (under the chart), to scale: the previous day(s) in the left lane and
+          developing (solid &quot;CDV S / R&quot;). LEVELS BY PROFILE: the zones add the profiles together, so where two disagree they cancel - the
+          profile strips in the ladder (O / OI = OI CE − PE, the OI delta; N / Net = net CE − PE, which IS the option CDV; B /
+          OBV; F / Fut = futures delta) and the &quot;Levels by profile&quot; list show each one ON ITS OWN: green where it is
+          bullish at a price, red where bearish; its strongest bullish / bearish cluster with its range, busiest row and role
+          against price now. THE LADDER (under the chart), to scale: the previous day(s) in the left lane and
           the current day in the right, each zone a band at its real price (dashed previous, solid current), the price, the open,
           the previous close and the CDV lines across both, ±0.5 / 1 / 2% of price; ★ = the best zone of its side; hover a band
           for its details. Only the minutes up to the clock count. A read - it feeds no strategy or alert.

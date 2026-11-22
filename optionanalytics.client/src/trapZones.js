@@ -30,6 +30,7 @@ const MIN = 60_000
 const minuteOf = (ms) => Math.floor(ms / MIN) * MIN
 const msOf = (t) => (typeof t === 'number' ? t : new Date(t).getTime())
 const round2 = (x) => Math.round(x * 100) / 100
+const fmtPrice = (v) => (Math.round(v * 10) / 10).toLocaleString('en-IN')
 
 export const TRAP_SOURCES = [
   { id: 'oi', name: 'OI (CE − PE)', short: 'OI' },
@@ -40,12 +41,12 @@ export const TRAP_SOURCES = [
 
 /** What each kind of zone means, its lean (+1 helps a rise, −1 a fall) and its colour. */
 export const ZONE_KINDS = {
-  support: { label: 'Floor', short: 'Floor', lean: 1, color: '#52c41a', text: 'buyers / put writers in profit below - they defend it' },
-  trappedShorts: { label: 'Trapped shorts - squeeze fuel', short: 'Trapped shorts', lean: 1, color: '#13c2c2', text: 'sellers / call writers under water below - their covering pushes price up; a pullback into it is where they get out flat' },
-  resistance: { label: 'Ceiling', short: 'Ceiling', lean: -1, color: '#ff4d4f', text: 'sellers / call writers in profit above - they defend it' },
-  trappedLongs: { label: 'Trapped longs - liquidation fuel', short: 'Trapped longs', lean: -1, color: '#fa8c16', text: 'buyers / put writers under water above - their exits are supply on any rally into it, and add to a fall' },
-  insideBull: { label: 'Price inside a bullish cluster', short: 'Bull zone at price', lean: 0, color: '#95de64', text: 'the buyers\' own zone - holding it keeps them in control' },
-  insideBear: { label: 'Price inside a bearish cluster', short: 'Bear zone at price', lean: 0, color: '#ff7875', text: 'the sellers\' own zone - holding under it keeps them in control' },
+  support: { label: 'Floor', short: 'Floor', tiny: 'Floor', lean: 1, color: '#52c41a', text: 'buyers / put writers in profit below - they defend it' },
+  trappedShorts: { label: 'Trapped shorts - squeeze fuel', short: 'Trapped shorts', tiny: 'Tr. shorts', lean: 1, color: '#13c2c2', text: 'sellers / call writers under water below - their covering pushes price up; a pullback into it is where they get out flat' },
+  resistance: { label: 'Ceiling', short: 'Ceiling', tiny: 'Ceiling', lean: -1, color: '#ff4d4f', text: 'sellers / call writers in profit above - they defend it' },
+  trappedLongs: { label: 'Trapped longs - liquidation fuel', short: 'Trapped longs', tiny: 'Tr. longs', lean: -1, color: '#fa8c16', text: 'buyers / put writers under water above - their exits are supply on any rally into it, and add to a fall' },
+  insideBull: { label: 'Price inside a bullish cluster', short: 'Bull zone at price', tiny: 'Bull @ price', lean: 0, color: '#95de64', text: 'the buyers\' own zone - holding it keeps them in control' },
+  insideBear: { label: 'Price inside a bearish cluster', short: 'Bear zone at price', tiny: 'Bear @ price', lean: 0, color: '#ff7875', text: 'the sellers\' own zone - holding under it keeps them in control' },
 }
 
 /** A cluster is kept when its size is at least this share of its profile's largest cluster; at most PER_SIDE a side. */
@@ -173,6 +174,29 @@ export function zoneKind(z, price) {
 const distancePct = (z, price) => (price >= z.low && price <= z.high ? 0 : (price > z.high ? z.high - price : z.low - price) / price * 100)
 
 /**
+ * LEVELS BY PROFILE (asked for - "is anything missing ... levels of OI net CE − PE, OBV, CDV, OI delta, net CE − PE, futures
+ * delta"): the composite adds the profiles, so where two disagree they cancel and neither's level shows - here each profile
+ * is read ON ITS OWN from the composite's rows (`parts` - scaled by its own largest row, bullish positive: OI CE − PE negated,
+ * the futures already on spot): its strongest BULLISH cluster (adjacent rows of one sign, the largest added up - deltaZones'
+ * green) and BEARISH one, each { low, high, level (the middle of its busiest row), kind (zoneKind against `price`) } or null.
+ * One entry a profile READ (`used`), in TRAP_SOURCES' order: [{ id, bull, bear }]. The net CE − PE flow is the CDV ('cdv').
+ */
+export function profileLevels(rows = [], used = [], rowSize = 5, price = null) {
+  return TRAP_SOURCES.filter((src) => used.includes(src.id)).map(({ id }) => {
+    const own = rows.map((r) => ({ price: r.price, delta: r.parts?.[id] ?? 0 }))
+    const { green, red } = deltaZones(own, rowSize)
+    const of = (z, bullish) => {
+      if (!z) return null
+      let peak = null
+      for (const r of own) if (r.price >= z.low - 1e-6 && r.price < z.high - 1e-6 && (bullish ? r.delta > 0 : r.delta < 0) && (!peak || Math.abs(r.delta) > Math.abs(peak.delta))) peak = r
+      const zone = { bullish, low: z.low, high: z.high }
+      return { low: z.low, high: z.high, level: round2((peak?.price ?? z.low) + rowSize / 2), kind: zoneKind(zone, price) }
+    }
+    return { id, bull: of(green, true), bear: of(red, false) }
+  })
+}
+
+/**
  * The profiles of some sessions as ONE composite (compositeProfile) and its zones, in spot terms. `options` [{ items, oi }]
  * (optionDeltaMinutes / optionOiMinutes of each session), `futures` [[footprint bars]], `basis` = futures − spot. The
  * futures are LEFT OUT when they are not there (no bars - `futures: 'none'`) or cannot be put on spot (no basis -
@@ -190,7 +214,7 @@ export function positionProfile({ options = [], futures = [], basis = null, rowS
   const futStatus = !hasFutures ? 'none' : Number.isFinite(basis) ? 'used' : 'noBasis'
   if (futStatus === 'used') sources.push({ id: 'fut', rows: futuresDeltaProfileOf(futures, { rowSize }).rows, shift: basis })
   const profile = compositeProfile(sources, rowSize)
-  return { zones: compositeZones(profile, rowSize), used: profile.used, futures: futStatus === 'used' && !profile.used.includes('fut') ? 'none' : futStatus }
+  return { zones: compositeZones(profile, rowSize), rows: profile.rows, used: profile.used, futures: futStatus === 'used' && !profile.used.includes('fut') ? 'none' : futStatus }
 }
 
 /** The zones only (positionProfile). */
@@ -263,8 +287,8 @@ export function openingRead({ prevOptions = [], prevFutures = [], rowSize = 5 })
   // The basis from the same session's two closes only - another day's futures would put their zones off by its own basis.
   const sameDay = lastFut && (!last?.date || !lastFut.date || lastFut.date === last.date)
   const basis = sameDay && close > 0 ? basisOf(lastFut.items ?? [], last?.candles ?? []) : null
-  const { zones, used, futures } = positionProfile({ options: prevOptions, futures: prevFutures.map((f) => f.items ?? []), basis, rowSize })
-  return { close, basis, used, futures, ...readZones(zones, close) }
+  const { zones, rows, used, futures } = positionProfile({ options: prevOptions, futures: prevFutures.map((f) => f.items ?? []), basis, rowSize })
+  return { close, basis, used, futures, rows, ...readZones(zones, close) }
 }
 
 /**
@@ -382,7 +406,7 @@ export function dayRead({ opening, options = [], oi = [], futures = [], spot = [
   }
   if (Math.abs(lean) >= 0.3) reasons.push(`Zones near price lean ${lean > 0 ? 'up (floors / trapped shorts closer)' : 'down (ceilings / trapped longs closer)'}`)
   const verdict = score >= 4 ? 'Strong bullish' : score >= 2 ? 'Bullish' : score <= -4 ? 'Strong bearish' : score <= -2 ? 'Bearish' : 'Mixed'
-  return { open, price, basis, used: own.used, futures: own.futures, zones, lean, openRule, crossings, flows, score, verdict, reasons, liveSqueeze: live ?? null }
+  return { open, price, basis, used: own.used, futures: own.futures, rows: own.rows, zones, lean, openRule, crossings, flows, score, verdict, reasons, liveSqueeze: live ?? null }
 }
 
 /**
@@ -525,10 +549,12 @@ function niceStep(range, count) {
  * top down at their band's middle, pushed down by `labelPx` when they would touch the one above, and a label pushed off its
  * band (more than half a label past it) is DROPPED - the band stays; the lines' labels sit in a gutter, pushed apart the
  * same way (none dropped - a line's label may sit off its line, joined to it by a leader). `height` px, `pad` above and
- * below. { lo, hi, ticks: [{ price, y }], bands: [{ zone, lane, top, height, mid, labelY | null }], lines: [{ price,
- * label, color, dashed, now, y, labelY }] } or null without a price.
+ * below. `rows` { prev, today } (the composite rows of each read) also give each lane's PROFILE STRIPS - every profile's own
+ * part at each row (`rowSize` points). { lo, hi, ticks: [{ price, y }], bands: [{ zone, lane, top, height, mid, labelY |
+ * null }], lines: [{ price, label, color, dashed, now, y, labelY }], strips: [{ lane, id, price, top, height, value }] } or
+ * null without a price.
  */
-export function ladderLayout({ zones = [], price, marks = [], span = 0.01, height = 340, pad = 14, labelPx = 14 } = {}) {
+export function ladderLayout({ zones = [], price, marks = [], span = 0.01, height = 340, pad = 14, labelPx = 14, rows = null, rowSize = 5 } = {}) {
   if (!(price > 0)) return null
   const lo = price * (1 - span), hi = price * (1 + span)
   const y = (v) => pad + ((hi - v) / (hi - lo)) * (height - 2 * pad)
@@ -562,7 +588,17 @@ export function ladderLayout({ zones = [], price, marks = [], span = 0.01, heigh
   // Pushed past the bottom: move the stack up as one, keeping the spacing.
   const over = lines.length ? lines[lines.length - 1].labelY - (height - pad / 2) : 0
   if (over > 0) for (let i = lines.length - 1, floor = height - pad / 2; i >= 0; i--) { lines[i].labelY = Math.min(lines[i].labelY, floor); floor = lines[i].labelY - labelPx }
-  return { lo, hi, ticks, bands, lines }
+  // THE PROFILE STRIPS: each lane's composite rows (`rows` { prev, today }) cut into one strip a profile - every row's own
+  // part (bullish +) where it is at least 5% of that profile's largest, clipped to the scale.
+  const strips = []
+  for (const lane of ['prev', 'today']) {
+    for (const r of rows?.[lane] ?? []) {
+      if (!(r.price + rowSize > lo && r.price < hi)) continue
+      const top = y(Math.min(r.price + rowSize, hi)), bottom = y(Math.max(r.price, lo))
+      for (const [id, value] of Object.entries(r.parts ?? {})) if (Math.abs(value) >= 0.05) strips.push({ lane, id, price: r.price, top, height: Math.max(1, bottom - top), value })
+    }
+  }
+  return { lo, hi, ticks, bands, lines, strips }
 }
 
 const hexA = (hex, a) => {
@@ -578,7 +614,7 @@ export function zoneBoxes(zones, { showPrev = true, showToday = true, best = nul
     const k = ZONE_KINDS[z.kind]
     const color = k?.color ?? '#8c8c8c'
     const star = starred.get(zoneKey(z))
-    const name = `${k?.label.split(' - ')[0] ?? ''} ${z.from === 'today' ? '(today)' : '(before)'} · ${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}`
+    const name = `${k?.label.split(' - ')[0] ?? ''} ${fmtPrice(z.low)}–${fmtPrice(z.high)} ${z.from === 'today' ? '(today)' : '(before)'} · ${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}`
     return {
       low: z.low, high: z.high,
       fill: hexA(color, star ? 0.4 : Math.min(0.32, 0.1 + z.score * 0.06)), stroke: hexA(color, star ? 1 : 0.85), dashed: !star && z.from !== 'today',
