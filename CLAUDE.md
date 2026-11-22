@@ -698,8 +698,14 @@ All must pass before committing.
   side; each zone's `score` = its peak row (1 = one profile at its largest), `sources` = the profiles behind it (>= 15% of it) and
   `against` = those pushing the other way. The FUTURES ARE LEFT OUT when there are none or no same-day close to put them on spot
   (`positionProfile`'s `futures`: 'used' / 'none' / 'noBasis'; the verdict's flows count them only when present) - the card's
-  "Profiles read" tags show each read's profiles, a struck-through tag with why. The old ladder (an SVG beside the table - it
-  overlapped on a phone) is gone - the zones are on the spot chart; the zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
+  "Profiles read" tags show each read's profiles, a struck-through tag with why. THE LADDER (asked for back - "continue to show the ladder
+  as well"; `ladderItems` + `ZoneLadder`, under the chart, the "Ladder" tick `optionanalytics.oiReplay.trapZonesLadder`, on): the
+  zones within 2% of price (the nearest 12) and the price, open, previous close and CDV lines as ONE list from the highest
+  price down (a zone by its middle), a ROW EACH - a CSS grid of Price / Sessions before / Today so far / From price, each
+  zone a box in its column (dashed before, solid today, its kind's short name, its profiles, those against and its
+  strength; ★ the best of its side) and each line a rule across both columns - so nothing is ever drawn over anything else
+  (the SVG ladder it replaced scaled its text with the screen and overlapped on a phone; checked at 375 px and 900 px in a
+  browser). The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
   support and resistance of the previous day from the start and the current developing"; `cdvLevels`): the net CE − PE flow
   (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
   its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed
@@ -720,8 +726,7 @@ All must pass before committing.
   OI added at rows below / above the day's open: puts written below it by >= 15% of all the OI added with price above it = trend-day
   up, the mirror down, a state counting once it holds 3 minutes; its changes listed), the previous zones' CROSSINGS (`zoneCrossings`
   - a ceiling closed above = short squeeze, a floor closed below = long liquidation, back inside = stalled) and a VERDICT (open rule
-  ±2, the day's four flows ±1 each, a squeeze still standing ±1). A ladder (zones near price, before / today columns, price / open /
-  previous close lines), a table and the day's events. DAY BIAS FROM THE OPEN (asked for - "from day starting, day bias ... trap zones,
+  ±2, the day's four flows ±1 each, a squeeze still standing ±1). The ladder (above), a folded table and the day's events. DAY BIAS FROM THE OPEN (asked for - "from day starting, day bias ... trap zones,
   support zones ... continuously analyse these profiles and update zones"; `openingBias`): fixed once the day's first minute is in ("pre-open"
   before it) - the previous zones' lean at the close and at the open (±1 each), a gap THROUGH a zone (its side trapped from the open, ±1),
   the last session's OI net and CDV net (±1 each); SUPPORT below / RESISTANCE above (`supportResistance` - floors + trapped shorts /

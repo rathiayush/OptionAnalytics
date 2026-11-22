@@ -40,12 +40,12 @@ export const TRAP_SOURCES = [
 
 /** What each kind of zone means, its lean (+1 helps a rise, −1 a fall) and its colour. */
 export const ZONE_KINDS = {
-  support: { label: 'Floor', lean: 1, color: '#52c41a', text: 'buyers / put writers in profit below - they defend it' },
-  trappedShorts: { label: 'Trapped shorts - squeeze fuel', lean: 1, color: '#13c2c2', text: 'sellers / call writers under water below - their covering pushes price up; a pullback into it is where they get out flat' },
-  resistance: { label: 'Ceiling', lean: -1, color: '#ff4d4f', text: 'sellers / call writers in profit above - they defend it' },
-  trappedLongs: { label: 'Trapped longs - liquidation fuel', lean: -1, color: '#fa8c16', text: 'buyers / put writers under water above - their exits are supply on any rally into it, and add to a fall' },
-  insideBull: { label: 'Price inside a bullish cluster', lean: 0, color: '#95de64', text: 'the buyers\' own zone - holding it keeps them in control' },
-  insideBear: { label: 'Price inside a bearish cluster', lean: 0, color: '#ff7875', text: 'the sellers\' own zone - holding under it keeps them in control' },
+  support: { label: 'Floor', short: 'Floor', lean: 1, color: '#52c41a', text: 'buyers / put writers in profit below - they defend it' },
+  trappedShorts: { label: 'Trapped shorts - squeeze fuel', short: 'Trapped shorts', lean: 1, color: '#13c2c2', text: 'sellers / call writers under water below - their covering pushes price up; a pullback into it is where they get out flat' },
+  resistance: { label: 'Ceiling', short: 'Ceiling', lean: -1, color: '#ff4d4f', text: 'sellers / call writers in profit above - they defend it' },
+  trappedLongs: { label: 'Trapped longs - liquidation fuel', short: 'Trapped longs', lean: -1, color: '#fa8c16', text: 'buyers / put writers under water above - their exits are supply on any rally into it, and add to a fall' },
+  insideBull: { label: 'Price inside a bullish cluster', short: 'Bull zone at price', lean: 0, color: '#95de64', text: 'the buyers\' own zone - holding it keeps them in control' },
+  insideBear: { label: 'Price inside a bearish cluster', short: 'Bear zone at price', lean: 0, color: '#ff7875', text: 'the sellers\' own zone - holding under it keeps them in control' },
 }
 
 /** A cluster is kept when its size is at least this share of its profile's largest cluster; at most PER_SIDE a side. */
@@ -507,6 +507,27 @@ export function dayTimeline({ opening, options = [], oi = [], futures = [], spot
     before = read
   }
   return events
+}
+
+/**
+ * THE LADDER (asked for back - "continue to show the ladder as well"): the zones within `span` of `price` (the nearest
+ * `max`) and the price lines (`marks` [{ price, label, color }] - open, previous close, the CDV levels; the price itself
+ * always) as ONE list from the highest price down - a zone by its middle - so each takes a row of its own and nothing can be
+ * drawn over anything else (the SVG ladder scaled its text with the screen and overlapped on a phone). [{ type: 'zone',
+ * zone, at } | { type: 'mark', price, label, color, at }].
+ */
+export function ladderItems({ zones = [], price, marks = [], span = 0.02, max = 12 } = {}) {
+  if (!(price > 0)) return []
+  const lo = price * (1 - span), hi = price * (1 + span)
+  const near = zones.filter((z) => z.high >= lo && z.low <= hi)
+    .sort((a, b) => Math.abs(a.distance ?? 0) - Math.abs(b.distance ?? 0)).slice(0, max)
+  const items = [
+    ...near.map((zone) => ({ type: 'zone', zone, at: (zone.low + zone.high) / 2 })),
+    { type: 'mark', price, label: 'Price', color: '#1677ff', at: price, now: true },
+    ...marks.filter((m) => Number.isFinite(m.price) && m.price >= lo && m.price <= hi).map((m) => ({ type: 'mark', ...m, at: m.price })),
+  ]
+  // Highest first; at the same price the price line before the others, a line before a zone.
+  return items.sort((a, b) => b.at - a.at || (b.now ? 1 : 0) - (a.now ? 1 : 0) || (a.type === 'mark' ? -1 : 1) - (b.type === 'mark' ? -1 : 1))
 }
 
 const hexA = (hex, a) => {

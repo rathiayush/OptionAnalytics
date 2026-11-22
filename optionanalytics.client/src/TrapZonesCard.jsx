@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, bestZones, cdvLevels, dayRead, dayTimeline, ladderItems, openingBias, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -172,6 +172,64 @@ const STEP_MIN = 5
 
 const biasColor = (score) => (score >= 1 ? '#52c41a' : score <= -1 ? '#ff4d4f' : '#d9d9d9')
 
+const ladderTint = (hex, a) => { const n = parseInt(hex.slice(1), 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})` }
+const LADDER_COLS = '98px minmax(0, 1fr) minmax(0, 1fr) 54px'
+const sameZone = (a, b) => !!a && !!b && a.from === b.from && a.bullish === b.bullish && a.low === b.low && a.high === b.high
+
+/** THE LADDER (ladderItems): the zones near price from the highest down, each in its column - the sessions before (dashed)
+ *  or today (solid) - and the price, open, previous close and CDV lines between them, a row each, so nothing overlaps. */
+export function ZoneLadder({ items, best }) {
+  if (!items.length) return null
+  const starred = (z) => sameZone(best?.support?.zone, z) || sameZone(best?.resistance?.zone, z)
+  const row = { display: 'grid', gridTemplateColumns: LADDER_COLS, columnGap: 6, alignItems: 'center' }
+  return (
+    <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 8px', fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
+      <div style={{ ...row, color: '#8c8c8c', fontSize: 11, marginBottom: 2 }}>
+        <span>Price</span><span>Sessions before</span><span>Today so far</span><span style={{ textAlign: 'right' }}>From price</span>
+      </div>
+      {items.map((it, i) => {
+        if (it.type === 'mark') {
+          const line = `${it.now ? 2 : 1}px ${it.dashed ? 'dashed' : 'solid'} ${it.color}`
+          return (
+            <div key={`m-${it.label}-${i}`} style={{ ...row, margin: it.now ? '4px 0' : '2px 0' }}>
+              <span style={{ color: it.color, fontWeight: it.now ? 700 : 500 }}>{px(it.price)}</span>
+              <div style={{ gridColumn: '2 / 4', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <div style={{ flex: 1, borderTop: line }} />
+                <span style={{ color: it.color, fontWeight: it.now ? 700 : 500, whiteSpace: 'nowrap', fontSize: it.now ? 12 : 11 }}>{it.label}</span>
+                <div style={{ flex: 1, borderTop: line }} />
+              </div>
+              <span />
+            </div>
+          )
+        }
+        const z = it.zone
+        const k = ZONE_KINDS[z.kind]
+        const color = k?.color ?? '#8c8c8c'
+        const star = starred(z)
+        const bar = (
+          <Tooltip title={`${k?.label ?? ''}: ${k?.text ?? ''}`}>
+            <div style={{
+              background: ladderTint(color, star ? 0.32 : Math.min(0.28, 0.08 + z.score * 0.06)),
+              border: `${star ? 2 : 1}px ${z.from === 'today' ? 'solid' : 'dashed'} ${color}`,
+              borderRadius: 4, padding: '2px 6px', minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.3,
+            }}>
+              <div style={{ color, fontWeight: 600 }}>{star ? '★ ' : ''}{k?.short ?? k?.label}</div>
+              <div style={{ color: '#bfbfbf', fontSize: 11 }}>{shortOf(z.sources)}{z.against?.length ? ` (${shortOf(z.against)} against)` : ''} · {z.score}</div>
+            </div>
+          </Tooltip>
+        )
+        return (
+          <div key={`z-${z.from}-${z.low}-${z.high}-${i}`} style={{ ...row, margin: '2px 0' }}>
+            <span style={{ color: '#d9d9d9' }}>{px(z.low)}–{px(z.high)}</span>
+            {z.from === 'today' ? <><span />{bar}</> : <>{bar}<span /></>}
+            <span style={{ textAlign: 'right', color: '#8c8c8c', fontSize: 11 }}>{z.distance === 0 ? 'at price' : pct(z.distance)}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 /** One side's zones (support / resistance), nearest first. */
 function SideList({ title, zones, color }) {
   return (
@@ -272,6 +330,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showPrev, setShowPrev] = usePersistedState('optionanalytics.oiReplay.trapZonesPrev', true)
   const [showToday, setShowToday] = usePersistedState('optionanalytics.oiReplay.trapZonesToday', true)
   const [showCdv, setShowCdv] = usePersistedState('optionanalytics.oiReplay.trapZonesCdv', true)
+  const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const rowSize = PROFILE_ROWS[underlying] ?? 5
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
   const pastOpt = usePastDeltaSessions('options', underlying, date, dayCount, flag)
@@ -308,6 +367,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
     ] : []),
   ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday])
   const setups = useMemo(() => tradeSetups({ day, bias, rowSize, best }), [day, bias, rowSize, best])
+  const ladder = useMemo(() => ladderItems({
+    zones: tableZones, price: day?.price ?? opening.close,
+    marks: chartLines.filter((l) => l.title).map((l) => ({ price: l.price, label: l.title, color: l.color, dashed: l.style === 2 })),
+  }), [tableZones, day?.price, opening.close, chartLines])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
@@ -398,10 +461,13 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showPrev} onChange={(e) => setShowPrev(e.target.checked)}>Zones from before (dashed)</Checkbox>
         <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
         <Checkbox checked={showCdv} onChange={(e) => setShowCdv(e.target.checked)}>CDV S / R lines</Checkbox>
+        <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
       </Space>
       {chartCandles.length ? (
         <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={chartLines} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
+
+      {showLadder && <ZoneLadder items={ladder} best={best} />}
 
       <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
         <ZoneTable zones={tableZones} />
@@ -452,7 +518,9 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           resistance are starred - the bounce / rejection setups trade those. BIGGEST CDV SUPPORT / RESISTANCE: the net CE − PE
           flow&apos;s strongest buying cluster (support) and selling cluster (resistance) - of the sessions before, fixed from the
           start of the day (dashed &quot;Prev CDV S / R&quot; lines at each cluster&apos;s busiest row), and of the day so far,
-          developing (solid &quot;CDV S / R&quot;). Only the minutes up to the clock count. A read - it feeds no strategy or alert.
+          developing (solid &quot;CDV S / R&quot;). THE LADDER (under the chart): the zones within 2% of price from the highest
+          down, each in its column - the sessions before (dashed) or today (solid) - with the price, the open, the previous
+          close and the CDV lines between them, a row each; ★ = the best zone of its side, the number = its strength. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
         </Text>
       </FoldText>
     </Space>
