@@ -510,7 +510,7 @@ export function OptionCdvObvProfileCard({ cePoints, pePoints, spotBars, asOfMs, 
 
 // The futures' Order Flow day with its footprint (buy / sell at each price, in lots), the minutes it did not record filled
 // from its estimate - loaded once, live again every minute (a page timer - POLL_HEADERS). `date` null = not wanted.
-function useFuturesFootprintDay(underlying, date, isLive, rowSize) {
+export function useFuturesFootprintDay(underlying, date, isLive, rowSize) {
   const [state, setState] = useState({ key: null, bars: NONE, error: null })
   const key = `${underlying}|${date}|${rowSize}`
   useEffect(() => {
