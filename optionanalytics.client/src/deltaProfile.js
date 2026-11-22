@@ -319,7 +319,11 @@ export function futuresDeltaSteps(past, bars, { rowSize = 5 } = {}) {
  * written) }, delta (the net CE − PE - NEGATIVE = bullish), volume (|CE| + |PE| added), maxAbsDelta }. `optionDeltaAt` reads
  * it at a clock (its `rowDelta(price)` = that row's CE − PE).
  */
-export function oiNetSteps(past, minutes, { rowSize = 5 } = {}) {
+export function oiNetSteps(past, minutes, { rowSize = 5, side = 'net' } = {}) {
+  // `side`: 'net' = CE − PE (the default), 'ce' = the call OI alone, 'pe' = MINUS the put OI - so for every side NEGATIVE is
+  // BULLISH (puts written / calls unwound) and positive bearish, and the floor / ceiling keep their meaning.
+  const net = side === 'ce' ? (c) => c : side === 'pe' ? (c, q) => -q : (c, q) => c - q
+  const size = side === 'ce' ? (c) => Math.abs(c) : side === 'pe' ? (c, q) => Math.abs(q) : (c, q) => Math.abs(c) + Math.abs(q)
   const rows = new Map()
   let ce = 0, pe = 0, gross = 0
   const add = (m) => {
@@ -335,28 +339,28 @@ export function oiNetSteps(past, minutes, { rowSize = 5 } = {}) {
       r.pe += (m.pe ?? 0) / n
       touched.push(r)
     }
-    ce += m.ce ?? 0; pe += m.pe ?? 0; gross += Math.abs(m.ce ?? 0) + Math.abs(m.pe ?? 0)
+    ce += m.ce ?? 0; pe += m.pe ?? 0; gross += size(m.ce ?? 0, m.pe ?? 0)
     return touched
   }
   const summary = (t) => {
     let floor = null, ceiling = null, maxAbsDelta = 0
     for (const r of rows.values()) {
-      const d = r.ce - r.pe
+      const d = net(r.ce, r.pe)
       maxAbsDelta = Math.max(maxAbsDelta, Math.abs(d))
-      if (d < 0 && (!floor || d < floor.ce - floor.pe)) floor = r
-      if (d > 0 && (!ceiling || d > ceiling.ce - ceiling.pe)) ceiling = r
+      if (d < 0 && (!floor || d < net(floor.ce, floor.pe))) floor = r
+      if (d > 0 && (!ceiling || d > net(ceiling.ce, ceiling.pe))) ceiling = r
     }
     const mid = (r) => (r ? Math.round((r.price + rowSize / 2) * 100) / 100 : null)
-    return { t, levels: { floor: mid(floor), ceiling: mid(ceiling) }, delta: ce - pe, volume: gross, maxAbsDelta }
+    return { t, levels: { floor: mid(floor), ceiling: mid(ceiling) }, delta: net(ce, pe), volume: gross, maxAbsDelta }
   }
   for (const s of past ?? []) for (const m of s ?? []) add(m)
   const history = new Map()
-  for (const [price, r] of rows) history.set(price, [[-Infinity, r.ce - r.pe]])
+  for (const [price, r] of rows) history.set(price, [[-Infinity, net(r.ce, r.pe)]])
   const steps = [summary(-Infinity)]
   for (const m of [...(minutes ?? [])].sort((a, b) => a.t - b.t)) {
     for (const r of add(m)) {
       const h = history.get(r.price)
-      if (h) h.push([m.t, r.ce - r.pe]); else history.set(r.price, [[m.t, r.ce - r.pe]])
+      if (h) h.push([m.t, net(r.ce, r.pe)]); else history.set(r.price, [[m.t, net(r.ce, r.pe)]])
     }
     steps.push(summary(m.t))
   }

@@ -146,3 +146,36 @@ test('the CDV profile: Net / CE / PE sides minute by minute = the card profile o
   assert.deepEqual(m({ id: 'obpDelta', value: 'netPositive', param2: 2 }), [['obpDelta', 'netPositive', 1]])
   assert.equal(cleanLine({ id: 'cdpDelta', value: 'buying' }).param2, 0)
 })
+
+test('the OI profile side: Net (CE − PE) / CE OI / PE OI - negative always bullish; the mirror swaps the side too', async () => {
+  const { oiNetSteps } = await import('../src/deltaProfile.js')
+  const minutes = [
+    { t: 1, low: 100, high: 104, ce: 50, pe: 200 },   // puts written more - bullish row on Net and PE
+    { t: 2, low: 110, high: 114, ce: -80, pe: 10 },   // calls unwound - bullish on CE
+  ]
+  const at = (side) => optionDeltaAt(oiNetSteps([], minutes, { rowSize: 5, side }), 2)
+  assert.equal(at('net').delta, (50 - 80) - (200 + 10))
+  assert.equal(at('ce').delta, -30)
+  assert.equal(at('pe').delta, -210)
+  assert.equal(at('net').volume, 250 + 90)
+  assert.equal(at('ce').volume, 130)
+  assert.equal(at('pe').volume, 210)
+  assert.equal(at('ce').levels.floor, 112.5)          // the calls-unwound row
+  assert.equal(at('ce').levels.ceiling, 102.5)        // calls written
+  assert.equal(at('pe').levels.floor, 102.5)          // the most puts written
+  assert.equal(at('pe').rowDelta(111), -10)
+  assert.ok(at('net').rowDelta(101) < 0)
+  // On a prepared day: each side's net read by the condition, and Net unchanged with no side.
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  const i = 200
+  for (const [code, side] of [[0, 'net'], [1, 'ce'], [2, 'pe']]) {
+    const net = optionDeltaAt(oiNetSteps([], d.oim.filter((m) => m.t <= d.t[i]), { rowSize: 5, side }), d.t[i])?.delta ?? 0
+    assert.equal(cond('oipDelta').test(d, i, 'netBullish', 5, 0, code, 1, 0), net < 0, side)
+    assert.equal(cond('oipDelta').test(d, i, 'netBearish', 5, 0, code, 1, 0), net > 0, side)
+  }
+  assert.equal(cond('oipDelta').test(d, i, 'netBullish', 5, 0, undefined, 1, 0), cond('oipDelta').test(d, i, 'netBullish', 5, 0, 0, 1, 0))
+  const m = (l) => mirrorLines([cleanLine(l)]).map((x) => [x.id, x.value, x.param2])
+  assert.deepEqual(m({ id: 'oipFloor', value: 'above', param2: 0 }), [['oipCeiling', 'below', 0]])
+  assert.deepEqual(m({ id: 'oipFloor', value: 'above', param2: 1 }), [['oipCeiling', 'below', 2]])
+  assert.deepEqual(m({ id: 'oipDelta', value: 'putsAt', param2: 2 }), [['oipDelta', 'callsAt', 1]])
+})

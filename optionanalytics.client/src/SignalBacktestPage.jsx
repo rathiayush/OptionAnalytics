@@ -75,7 +75,7 @@ const GROUP_TITLE = {
   DeltaProfile: "Option delta profile on spot = the CDV profile (OI Replay's card - its levels, the flow at the price)",
   CdvProfile: "Option CDV profile on spot (OI Replay's CDV / OBV profile card - the CDV column; Side: Net / CE / PE)",
   ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column; Side: Net / CE / PE)",
-  OiProfile: "OI (CE − PE) profile on spot (the option writer's view - puts written = floor / bullish)",
+  OiProfile: "OI profile on spot - Side: OI Net (CE − PE) / CE OI / PE OI (the option writer's view - negative = bullish)",
   FuturesProfile: "Futures delta profile (OI Replay's card - the footprint by price, read on the futures' price)",
   OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
 }
