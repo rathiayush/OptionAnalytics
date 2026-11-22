@@ -699,7 +699,21 @@ All must pass before committing.
   `against` = those pushing the other way. The FUTURES ARE LEFT OUT when there are none or no same-day close to put them on spot
   (`positionProfile`'s `futures`: 'used' / 'none' / 'noBasis'; the verdict's flows count them only when present) - the card's
   "Profiles read" tags show each read's profiles, a struck-through tag with why. The old ladder (an SVG beside the table - it
-  overlapped on a phone) is gone - the zones are on the spot chart; the zone table is folded ("All zones"). Each zone read against a price (`zoneKind`): bullish below = FLOOR, bullish above = TRAPPED LONGS (long
+  overlapped on a phone) is gone - the zones are on the spot chart; the zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
+  support and resistance of the previous day from the start and the current developing"; `cdvLevels`): the net CE − PE flow
+  (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
+  its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed
+  all day: dashed "Prev CDV S / R" price lines) and of the day up to the clock (developing: solid "CDV S / R"); a line names
+  both, the "CDV S / R lines" tick (`optionanalytics.oiReplay.trapZonesCdv`, on). THE BEST ZONE (asked for - "identify the best
+  zone and show it on the chart"; `bestZones`): every zone rated - score x (1 + 0.5 a profile agreeing beyond one) x (1 − 0.25
+  a profile against, >= 0.4) x 1.5 when the sessions before AND today built a zone of the same side there x 1.3 for each
+  biggest CDV level of its side in it / (1 + distance / 0.5%) - the best support and best resistance STARRED on the chart (★
+  BEST SUPPORT / RESISTANCE, brighter, a 2 px outline - `lineWidth` on `ZoneBoxesPrimitive` - drawn first so their labels
+  win, shown even with their layer unticked) and named over it with why; the floor bounce / ceiling rejection setups trade
+  those, not merely the nearest zone (`tradeSetups`' `best`). The FUTURES BASIS is read AT THE SAME MINUTE (`basisOf` - the
+  last futures close against the spot close of that minute, within 5 min; the two last closes could be minutes apart). The
+  DAY'S OWN zones count in full from its 30th minute (`DAY_MATURE_MIN`), in proportion before - each profile is scaled by its
+  own largest row, so a 3-minute profile gave zones as strong as a whole session's. Each zone read against a price (`zoneKind`): bullish below = FLOOR, bullish above = TRAPPED LONGS (long
   liquidation fuel), bearish above = CEILING, bearish below = TRAPPED SHORTS (short squeeze fuel), inside. BEFORE THE OPEN
   (`openingRead`) the previous 1 - 3 sessions' (`optionanalytics.oiReplay.trapZonesDays`, `usePastDeltaSessions`) against their
   close; THROUGH THE DAY (`dayRead`) those zones and the day's own against the price at the clock, the OPEN RULE (`openRuleDay` - the
