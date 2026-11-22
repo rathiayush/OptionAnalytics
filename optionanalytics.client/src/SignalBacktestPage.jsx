@@ -626,6 +626,20 @@ export default function SignalBacktestPage() {
       }
       setCompare((c) => ({ ...c, loadingPast: false, pastMissing }))
     }
+    // A template reading the futures order flow (the futures delta profile) needs the day's footprint: put on the days the
+    // same way, stopped at the first that fails.
+    const flowNeed = Math.max(0, ...RULE_TEMPLATES.map((t) => orderFlowNeeded(t.rule)))
+    const futNeed = Math.max(0, ...RULE_TEMPLATES.map((t) => futuresDaysNeeded(t.rule)))
+    let flowMissing = null
+    if (flowNeed > 0) {
+      setCompare((c) => ({ ...c, loadingPast: true }))
+      for (let k = 0; k < results.length; k++) {
+        const flow = await attachOrderFlow(results[k].day, settings.underlying, flowNeed, { futuresPast: futNeed }).catch((err) => ({ ok: false, reason: String(err?.message ?? err) }))
+        if (compareToken.current !== token) return
+        if (!flow.ok) { flowMissing = { days: results.length - k, reason: flow.reason }; break }
+      }
+      setCompare((c) => ({ ...c, loadingPast: false, flowMissing }))
+    }
     const rows = []
     for (const t of RULE_TEMPLATES) {
       // One template at a time, the page drawn between them.
@@ -1100,6 +1114,11 @@ export default function SignalBacktestPage() {
                     {compare.pastMissing && (
                       <Text type="warning" style={{ fontSize: 12 }}>
                         The session before could not be loaded for {compare.pastMissing.days} day{compare.pastMissing.days === 1 ? '' : 's'} ({compare.pastMissing.reason}) - the delta profile templates took no trades there. Compare again to retry.
+                      </Text>
+                    )}
+                    {compare.flowMissing && (
+                      <Text type="warning" style={{ fontSize: 12 }}>
+                        The futures order flow could not be loaded for {compare.flowMissing.days} day{compare.flowMissing.days === 1 ? '' : 's'} ({compare.flowMissing.reason}) - the futures template took no trades there. Compare again to retry.
                       </Text>
                     )}
                     <Text type="secondary" style={{ fontSize: 12 }}>

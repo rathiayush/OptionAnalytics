@@ -1279,8 +1279,10 @@ All must pass before committing.
   run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
   loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
   `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
-  add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 24 rules from the page's own conditions in
-  seven families (`TEMPLATE_FAMILIES` - delta profile, in order (THEN), trend, reversal, breakout, options & volatility,
+  add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 29 rules from the page's own conditions in
+  eight families (`TEMPLATE_FAMILIES` - profile clusters (asked for - "add top 5 strategy on this page now": `cluBuyersHold`, `cluRedBrokenFutures`,
+  `cluThreeFlows`, `cluFailedBreak`, `cluOiFloorSellPut` - the CDV / OBV / OI clusters with a second flow; Compare all also puts the futures footprint on
+  the days for the futures one - `attachOrderFlow`, stopped at the first failure, said under the table), delta profile, in order (THEN), trend, reversal, breakout, options & volatility,
   premium selling), each read through a different lens (positioning, flow, dealer gamma, volatility, auction structure,
   momentum, the premiums' own tape, the option delta profile), written for the bullish side with the Mirror on, with its
   `idea` (why) and its own `settings` (timeframe, SL / target, trail / time stop - what it does not name is OFF). The DELTA PROFILE four (asked for - "add strategy for delta profile ... previous day's highest buy and
