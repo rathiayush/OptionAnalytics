@@ -1,21 +1,56 @@
 // Trapped / squeeze zones (trapZones.js): clusters, their role against price, the open rule, the crossings, no look-ahead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { dayRead, mergeZones, openRuleDay, openingRead, profileRuns, readZones, sourceZones, zoneCrossings, zoneKind } from '../src/trapZones.js'
+import { compositeProfile, compositeZones, dayRead, openRuleDay, openingRead, positionProfile, readZones, zoneCrossings, zoneKind } from '../src/trapZones.js'
 
 const T0 = Date.UTC(2026, 10, 16, 3, 45)  // 09:15 IST
 const MIN = 60_000
 
-test('runs of adjacent same-sign rows, the significant ones kept, merged across profiles', () => {
-  const rows = [{ price: 100, delta: 5 }, { price: 105, delta: 7 }, { price: 110, delta: -2 }, { price: 120, delta: -9 }, { price: 125, delta: -1 }]
-  const runs = profileRuns(rows, 5)
-  assert.deepEqual(runs.map((r) => [r.low, r.high, r.sum, r.bullish]), [[100, 110, 12, true], [110, 115, -2, false], [120, 130, -10, false]])
-  const oi = profileRuns(rows, 5, { bullishNegative: true })
-  assert.deepEqual(oi.map((r) => r.bullish), [false, true, true])
-  const z = sourceZones('cdv', rows, 5)
-  assert.deepEqual(z.map((x) => [x.low, x.high, x.bullish, Math.round(x.strength * 100)]), [[100, 110, true, 100], [120, 130, false, 83]])   // -2 under 20% of 12: dropped
-  const merged = mergeZones([...z, { source: 'oi', bullish: true, low: 105, high: 115, strength: 0.5 }])
-  assert.deepEqual(merged.map((m) => [m.low, m.high, m.sources, m.score]), [[100, 115, ['oi', 'cdv'], 1.5], [120, 130, ['cdv'], 0.83]])
+test('the composite profile: each profile scaled to its own largest row, bullish positive (OI negated), added row by row', () => {
+  const p = compositeProfile([
+    { id: 'cdv', rows: [{ price: 100, delta: 50 }, { price: 105, delta: 100 }, { price: 120, delta: -25 }] },
+    { id: 'oi', rows: [{ price: 105, delta: -2000 }, { price: 120, delta: 1000 }], bullishNegative: true },
+    { id: 'obv', rows: [{ price: 100, delta: 0 }] },   // no non-zero row: not used
+  ], 5)
+  assert.deepEqual(p.used, ['oi', 'cdv'])
+  assert.deepEqual(p.rows.map((r) => [r.price, r.total]), [[100, 0.5], [105, 2], [120, -0.75]])
+  assert.deepEqual(p.rows[1].parts, { cdv: 1, oi: 1 })
+  // The futures moved to spot by the basis, onto the nearest row.
+  const f = compositeProfile([{ id: 'fut', rows: [{ price: 25090, delta: 10 }], shift: 87.4 }], 5)
+  assert.deepEqual(f.rows.map((r) => r.price), [25005])
+})
+
+test('composite zones: agreeing profiles add, disagreeing cancel, a zone is its core, its profiles named', () => {
+  // CDV bullish 100 - 115, OI puts written 105 - 110 (bullish); OBV bearish over the same rows, weaker.
+  const p = compositeProfile([
+    { id: 'cdv', rows: [{ price: 100, delta: 10 }, { price: 105, delta: 40 }, { price: 110, delta: 40 }, { price: 115, delta: 10 }, { price: 140, delta: -30 }] },
+    { id: 'oi', rows: [{ price: 105, delta: -500 }, { price: 110, delta: -400 }] , bullishNegative: true },
+    { id: 'obv', rows: [{ price: 105, delta: -5 }, { price: 110, delta: -5 }, { price: 140, delta: -20 }] },
+  ], 5)
+  const z = compositeZones(p, 5)
+  assert.deepEqual(z.map((x) => [x.low, x.high, x.bullish]), [[105, 115, true], [140, 145, false]])
+  assert.deepEqual(z[0].sources, ['oi', 'cdv'])   // OBV pushes the other way there
+  assert.deepEqual(z[0].against, ['obv'])
+  assert.equal(z[0].score, 1.75)                  // the peak row: CDV 1 + OI 1 − OBV 0.25
+  assert.deepEqual(z[1].sources, ['cdv', 'obv'])
+  // Two equal profiles opposite each other leave nothing.
+  const flat = compositeProfile([{ id: 'cdv', rows: [{ price: 100, delta: 5 }] }, { id: 'obv', rows: [{ price: 100, delta: -5 }] }], 5)
+  assert.deepEqual(compositeZones(flat, 5), [])
+  // A neutral row (under 10% of the largest) ends a zone; a small run under 20% of the largest zone is dropped.
+  const split = compositeProfile([{ id: 'cdv', rows: [{ price: 100, delta: 100 }, { price: 105, delta: 5 }, { price: 110, delta: 60 }, { price: 200, delta: 10 }] }], 5)
+  assert.deepEqual(compositeZones(split, 5).map((x) => [x.low, x.high]), [[100, 105], [110, 115]])
+})
+
+test('the futures are left out when they are not there or cannot be put on spot', () => {
+  const items = [{ t: T0, low: 24990, high: 25000, ce: 10, pe: 2, ceObv: 10, peObv: 2 }]
+  const none = positionProfile({ options: [{ items, oi: [] }], futures: [], basis: null, rowSize: 5 })
+  assert.equal(none.futures, 'none')
+  assert.ok(!none.used.includes('fut'))
+  const bars = [{ time: T0, levels: [{ price: 25080, buy: 50, sell: 10 }], close: 25082 }]
+  assert.equal(positionProfile({ options: [{ items, oi: [] }], futures: [bars], basis: null, rowSize: 5 }).futures, 'noBasis')
+  const used = positionProfile({ options: [{ items, oi: [] }], futures: [bars], basis: 80, rowSize: 5 })
+  assert.equal(used.futures, 'used')
+  assert.ok(used.used.includes('fut'))
 })
 
 test('a zone\'s role against price: floor, trapped longs, ceiling, trapped shorts, inside', () => {
@@ -78,11 +113,13 @@ test('opening read from the session before and the day read up to the clock (no 
 
 test('day bias from the open, support / resistance split, the day re-read every 5 minutes with no look-ahead', async () => {
   const { openingBias, supportResistance, dayTimeline } = await import('../src/trapZones.js')
-  const prevSpot = spotDay(30, (k) => 24900 + k * 5)
-  const prevOi = prevSpot.map((b, k) => ({ t: b.time, low: b.low, high: b.high, ce: k > 20 ? 300 : 5, pe: k < 8 ? 300 : 5 }))
+  // Puts written early, calls written at the top, then the close falls back under the calls.
+  const prevSpot = spotDay(30, (k) => (k < 25 ? 24900 + k * 5 : 25020 - (k - 24) * 10))
+  const prevOi = prevSpot.map((b, k) => ({ t: b.time, low: b.low, high: b.high, ce: k > 20 && k < 25 ? 300 : 5, pe: k < 8 ? 300 : 5 }))
   const prev = { date: '2026-11-13', items: [], oi: prevOi, candles: prevSpot }
   const opening = openingRead({ prevOptions: [prev], prevFutures: [], rowSize: 5 })
   const sellers = opening.zones.find((z) => !z.bullish)
+  assert.equal(sellers.kind, 'resistance')
   // Opened above the sellers' zone the close was inside / under: they are trapped from the open (+1).
   const gapUp = openingBias({ opening, prevOptions: [prev], open: sellers.high + 30 })
   assert.ok(gapUp.reasons.some((r) => /trapped from the open/.test(r)))
@@ -111,7 +148,7 @@ test('zones drawn on spot: a box each in its role\'s colour, before dashed / tod
   ]
   const boxes = zoneBoxes(zones)
   assert.deepEqual(boxes.map((b) => [b.low, b.high, b.dashed]), [[100, 110, true], [120, 125, false]])
-  assert.match(boxes[0].label, /^Floor \(before\) · OI\+CDV$/)
+  assert.match(boxes[0].label, /^Floor \(before\) · OI\+Net\/CDV$/)
   assert.match(boxes[1].label, /^Ceiling \(today\) · Fut$/)
   assert.equal(boxes[0].labelColor, ZONE_KINDS.support.color)
   assert.deepEqual(zoneBoxes(zones, { showPrev: false }).map((b) => b.low), [120])

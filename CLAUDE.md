@@ -686,11 +686,20 @@ All must pass before committing.
 - OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... the previous session's idea ... identify trapped
   zones, short squeeze zones ... keep updating as it goes ... a separate component", and the user's own rule: "OI CE − PE negative
   below the day's open and price moved up - it runs through the day; vice versa"; `trapZones` - `TrapZonesCard.jsx`, the maths
-  `trapZones.js`, section version 9 / `SECTIONS_VERSION` '9', added once right after the option CDV / OBV profile): the four position
-  profiles - OI (CE − PE), option CDV, option OBV, futures delta (moved to spot by the basis: futures close − spot close, the same
-  session's) - give their significant CLUSTERS (`profileRuns` / `sourceZones`: runs of adjacent same-sign rows, kept at >= 20% of the
-  largest, 4 a side; OI bullish = negative), overlapping same-side clusters of different profiles merged into one zone scored by
-  how many agree (`mergeZones`), each read against a price (`zoneKind`): bullish below = FLOOR, bullish above = TRAPPED LONGS (long
+  `trapZones.js`, section version 9 / `SECTIONS_VERSION` '9', added once right after the option CDV / OBV profile): the position
+  profiles - OI (CE − PE), NET CE − PE (which IS the option CDV here - the option delta profile's Net side and the CDV / OBV card's
+  CDV column are the same numbers - so it is counted once, "Net/CDV"), option OBV, and the futures delta (moved to spot by the
+  basis: futures close − spot close, the same session's) - are added into ONE COMPOSITE profile (asked for - "use net CE − PE, OI
+  CE − PE, option CDV and OBV and the futures delta profile; if futures data is not present do not consider it"; `compositeProfile`:
+  each scaled by its own largest row, signed bullish positive - the OI negated - added row by row, so agreeing profiles add and
+  disagreeing ones CANCEL: no bullish and bearish zone on the same prices), its ZONES (`compositeZones`) the runs of adjacent rows
+  of one sign (a row under `NEUTRAL` 10% of the largest ends one), each cut to its CORE (the rows around its peak holding `CORE` 70%
+  of it - the union of four profiles' runs made bands so wide price sat "inside" most of them), kept at >= 20% of the largest, 4 a
+  side; each zone's `score` = its peak row (1 = one profile at its largest), `sources` = the profiles behind it (>= 15% of it) and
+  `against` = those pushing the other way. The FUTURES ARE LEFT OUT when there are none or no same-day close to put them on spot
+  (`positionProfile`'s `futures`: 'used' / 'none' / 'noBasis'; the verdict's flows count them only when present) - the card's
+  "Profiles read" tags show each read's profiles, a struck-through tag with why. The old ladder (an SVG beside the table - it
+  overlapped on a phone) is gone - the zones are on the spot chart; the zone table is folded ("All zones"). Each zone read against a price (`zoneKind`): bullish below = FLOOR, bullish above = TRAPPED LONGS (long
   liquidation fuel), bearish above = CEILING, bearish below = TRAPPED SHORTS (short squeeze fuel), inside. BEFORE THE OPEN
   (`openingRead`) the previous 1 - 3 sessions' (`optionanalytics.oiReplay.trapZonesDays`, `usePastDeltaSessions`) against their
   close; THROUGH THE DAY (`dayRead`) those zones and the day's own against the price at the clock, the OPEN RULE (`openRuleDay` - the
