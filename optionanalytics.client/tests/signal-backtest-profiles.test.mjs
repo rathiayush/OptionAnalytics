@@ -1,0 +1,95 @@
+// The option OBV profile and the futures delta profile as Signal backtest conditions (OI Replay's CDV / OBV profile and
+// futures delta profile cards): minute by minute = the profile built from the minutes up to the clock, read on the right
+// price, loaded with the order flow.
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import { day as syntheticDay } from './synthetic-day.mjs'
+import { deltaProfileLevels, futuresDeltaProfileOf, futuresDeltaSteps, optionDeltaAt, optionDeltaProfileOf, optionDeltaSteps } from '../src/deltaProfile.js'
+import { RULE_CONDITIONS, cleanLine, futuresDaysNeeded, mirrorLines, orderFlowNeeded, prepareDay } from '../src/signalBacktest.js'
+import { FLOW_DELTA, FLOW_PROFILE, orderFlowUrl } from '../src/orderFlowFeatures.js'
+import { attachOrderFlow } from '../src/signalBacktestJob.js'
+
+const MIN = 60_000
+const cond = (id) => RULE_CONDITIONS.find((c) => c.id === id)
+const option = (id, value) => cond(id).options.find((o) => o.value === value)
+const holds = (d, id, value, i, { w = 5, p } = {}) => {
+  const o = option(id, value)
+  return cond(id).test(d, i, value, w, p ?? o.param?.default ?? 0, undefined, o.param3?.default, o.param4?.default)
+}
+let seed = 11
+const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 }
+const { run: base } = syntheticDay()
+const withBars = (list) => list.map((p) => ({ ...p, open: p.price * (1 + (rnd() - 0.5) * 0.02), high: p.price * (1 + 0.005 + rnd() * 0.03), low: p.price * (1 - 0.005 - rnd() * 0.03), volume: Math.round(200 + rnd() * 3000) }))
+const RUN = { ...base, cePoints: withBars(base.cePoints), pePoints: withBars(base.pePoints) }
+const rule = (lines) => ({ tree: { op: 'and', items: lines.map((line) => ({ line })) }, action: 'buyCE', mirror: true })
+
+test('the OBV profile minute by minute = the OBV profile of the minutes up to the clock; its conditions read it', () => {
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  assert.ok(d.ok && d.odm.some((m) => m.ceObv !== 0))
+  const read = optionDeltaSteps([], d.odm, { rowSize: 5, metric: 'obv' })
+  for (const k of [10, 120, d.odm.length - 1]) {
+    const t = d.odm[k].t
+    const profile = optionDeltaProfileOf([d.odm.filter((m) => m.t <= t)], { rowSize: 5, metric: 'obv' })
+    const at = optionDeltaAt(read, t)
+    assert.deepEqual(at.levels, deltaProfileLevels(profile))
+    assert.ok(Math.abs(at.delta - profile.delta) < 1e-6)
+  }
+  // netPositive / netNegative follow the OBV net at the candle - one of the two at each candle with a net.
+  let pos = 0, neg = 0
+  for (let i = 30; i < d.n; i += 25) {
+    const net = optionDeltaProfileOf([d.odm.filter((m) => m.t <= d.t[i])], { rowSize: 5, metric: 'obv' }).delta
+    assert.equal(holds(d, 'obpDelta', 'netPositive', i), net > 0, `candle ${i}`)
+    assert.equal(holds(d, 'obpDelta', 'netNegative', i), net < 0, `candle ${i}`)
+    if (net > 0) pos++; else if (net < 0) neg++
+  }
+  assert.ok(pos + neg > 0)
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'obpBuy', value: 'above' })]).map((l) => [l.id, l.value]), [['obpSell', 'below']])
+})
+
+// Footprint bars on the futures: each minute's buy / sell at a few prices around its close.
+function footprint(d) {
+  return d.t.map((t, i) => {
+    const c = d.price.c[i]
+    const levels = [-2, -1, 0, 1, 2].map((k) => ({ price: Math.round(c) + k, buy: 10 + ((i * 7 + k * 3) % 13), sell: 10 + ((i * 5 - k * 2 + 26) % 11) }))
+    return { time: t, open: d.price.o[i], high: d.price.h[i], low: d.price.l[i], close: c, volume: levels.reduce((s, l) => s + l.buy + l.sell, 0), levels }
+  })
+}
+
+test('the futures delta profile minute by minute = futuresDeltaProfileOf of the bars up to the clock; read on the futures price', () => {
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  const bars = footprint(d)
+  const past = [bars.map((b) => ({ ...b, time: b.time - 86_400_000, levels: b.levels.map((l) => ({ ...l, price: l.price - 40 })), close: b.close - 40, open: b.open - 40, high: b.high - 40, low: b.low - 40 }))]
+  const read = futuresDeltaSteps(past, bars, { rowSize: 5 })
+  for (const k of [0, 50, bars.length - 1]) {
+    const profile = futuresDeltaProfileOf([...past, bars.slice(0, k + 1)], { rowSize: 5 })
+    const at = optionDeltaAt(read, bars[k].time)
+    assert.deepEqual(at.levels, deltaProfileLevels(profile), `minute ${k}`)
+    assert.ok(Math.abs(at.delta - profile.delta) < 1e-6 && Math.abs(at.volume - profile.volume) < 1e-6)
+    for (const r of profile.rows.slice(0, 6)) assert.ok(Math.abs(at.rowDelta(r.price + 1) - r.delta) < 1e-6)
+  }
+  // The conditions: only with the futures' bars on the day, and read against the futures' price.
+  const i = 200
+  assert.equal(holds(d, 'fdpDelta', 'netPositive', i), false)                                  // no fdm: never
+  const withFut = Object.assign(Object.create(Object.getPrototypeOf(d)), d, { fdm: bars })
+  const net = futuresDeltaProfileOf([bars.slice(0, i + 1)], { rowSize: 5 }).delta
+  assert.equal(holds(withFut, 'fdpDelta', 'netPositive', i), withFut.priceSource === 'futures' && net > 0)
+  const poc = deltaProfileLevels(futuresDeltaProfileOf([bars.slice(0, i + 1)], { rowSize: 5 })).poc
+  if (withFut.priceSource === 'futures') assert.equal(holds(withFut, 'fdpPoc', 'above', i), withFut.price.c[i] > poc)
+  const spotOnly = { ...withFut, priceSource: 'spot' }
+  assert.equal(holds(spotOnly, 'fdpPoc', 'above', i) || holds(spotOnly, 'fdpPoc', 'below', i), false)  // no futures price: never
+})
+
+test('a rule with the futures delta profile asks the order flow by price and the days before; the loader puts the bars on the day', async () => {
+  assert.equal(orderFlowNeeded(rule([{ id: 'fdpPoc', value: 'above' }])), FLOW_PROFILE)
+  assert.equal(orderFlowNeeded(rule([{ id: 'futDelta', value: 'buyers' }])), FLOW_DELTA)
+  assert.equal(futuresDaysNeeded(rule([{ id: 'fdpPoc', value: 'above' }])), 0)
+  assert.equal(futuresDaysNeeded(rule([{ id: 'fdpPoc', value: 'above', param3: 3, param4: 1 }])), 3)
+  assert.match(orderFlowUrl('NIFTY', '2026-10-05', FLOW_PROFILE), /rowSize=1&minTradeLots=100000&heatmapColumns=50&backfillBars=true$/)
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  const t0 = d.t[0]
+  const body = { source: 'live', meta: { lotSize: 75 }, rowSize: 1, bars: [0, 1, 2].map((k) => ({ time: new Date(t0 + k * MIN).toISOString(), open: 1, high: 2, low: 1, close: 2, buy: 75, sell: 0, levels: [{ price: 25000, buy: 75, sell: 0 }] })) }
+  const fake = async () => ({ ok: true, status: 200, json: async () => body })
+  assert.deepEqual(await attachOrderFlow(d, 'NIFTY', FLOW_PROFILE, { fetch: fake, asOfMs: t0 + 2 * MIN }), { ok: true })
+  assert.equal(d.fdm.length, 2)                                                                 // the minute at the clock not completed
+  assert.equal(d.fdm[0].levels[0].buy, 1)                                                        // in lots
+})

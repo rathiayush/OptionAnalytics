@@ -29,13 +29,16 @@ export const FLOW_HEATMAP_COLUMNS = 750
 /** What a rule needs of the order flow: nothing, the delta (every day has it - estimated where not recorded), or the book too. */
 export const FLOW_NONE = 0
 export const FLOW_DELTA = 1
-export const FLOW_BOOK = 2
+/** The footprint by price too (the futures delta profile): the bars in the footprint's rows, the estimated minutes' too. */
+export const FLOW_PROFILE = 2
+export const FLOW_BOOK = 3
 
 /** The Order Flow day asked for the backtest: no prints; with the book, the footprint and heatmap in the Order Flow page's
  *  default rows (NIFTY 1, BANKNIFTY / SENSEX 5 points - the liquidity map's rows), else one row a bar (the delta only). */
 export function orderFlowUrl(u, date, need = FLOW_DELTA) {
   const book = need >= FLOW_BOOK
-  return `/api/order-flow/${u}/day/${date}?rowSize=${book ? FETCH_ROWS[u] ?? 1 : 1000}&minTradeLots=100000&heatmapColumns=${book ? FLOW_HEATMAP_COLUMNS : 50}`
+  const rows = need >= FLOW_PROFILE
+  return `/api/order-flow/${u}/day/${date}?rowSize=${rows ? FETCH_ROWS[u] ?? 1 : 1000}&minTradeLots=100000&heatmapColumns=${book ? FLOW_HEATMAP_COLUMNS : 50}${rows ? '&backfillBars=true' : ''}`
 }
 
 // The liquidity map's read now, as a code the conditions name (the side it is bullish / bearish for in its name).
