@@ -2,9 +2,12 @@
 // short squeeze zones ... keep updating as it goes ... a separate component"; and the trader's own rule: "when OI CE − PE is
 // negative below the day's open - a bullish bunch of positions - and price moved up, it runs through the day; vice versa").
 //
-// The four position profiles OI Replay already draws - OI (CE − PE), the option CDV, the option OBV and the futures delta -
-// each give CLUSTERS: runs of adjacent price rows where one side stacked up (`profileRuns`). A cluster is a group of
-// positions opened at those prices, so where price is now against it says who is in profit and who is TRAPPED:
+// The position profiles OI Replay already draws - OI (CE − PE), the net CE − PE flow (= the option CDV), the option OBV
+// and the futures delta (left out when there is none) - are added into ONE composite profile (`compositeProfile` - each
+// scaled by its own largest row, bullish positive), whose CLUSTERS - runs of adjacent rows of one sign, cut to their core
+// (`compositeZones`) - are where the positions stacked up: profiles that agree make a zone strong, profiles that disagree
+// cancel (no bullish and bearish zone on the same prices). A cluster is a group of positions opened at those prices, so
+// where price is now against it says who is in profit and who is TRAPPED:
 //   bullish cluster BELOW price  -> FLOOR: buyers / put writers in profit, they defend it (support);
 //   bullish cluster ABOVE price  -> TRAPPED LONGS: buyers / put writers under water - their exits (selling futures, buying
 //                                   back puts) are supply on the way down: a LONG LIQUIDATION zone;
@@ -30,7 +33,7 @@ const round2 = (x) => Math.round(x * 100) / 100
 
 export const TRAP_SOURCES = [
   { id: 'oi', name: 'OI (CE − PE)', short: 'OI' },
-  { id: 'cdv', name: 'Option CDV', short: 'CDV' },
+  { id: 'cdv', name: 'Net CE − PE (option CDV)', short: 'Net/CDV' },
   { id: 'obv', name: 'Option OBV', short: 'OBV' },
   { id: 'fut', name: 'Futures Δ', short: 'Fut' },
 ]
@@ -73,59 +76,87 @@ export function oiRowsOf(sessions, rowSize) {
   return [...rows.values()].map((r) => ({ price: r.price, delta: r.ce - r.pe }))
 }
 
-/** Every run of ADJACENT rows (each one row size above the last) of one sign: [{ low, high, sum, rows, bullish }]. Bullish =
- *  positive delta, or negative when `bullishNegative` (OI: puts written / calls unwound). */
-export function profileRuns(rows, rowSize, { bullishNegative = false } = {}) {
-  const list = (rows ?? []).filter((r) => Number.isFinite(r.price) && Number.isFinite(r.delta)).sort((a, b) => a.price - b.price)
-  const out = []
-  let run = null
-  const close = () => {
-    if (run) out.push({ low: run.low, high: round2(run.top + rowSize), sum: run.sum, rows: run.rows, bullish: bullishNegative ? run.sum < 0 : run.sum > 0 })
-    run = null
-  }
-  for (const r of list) {
-    const sign = Math.sign(r.delta)
-    if (!sign) { close(); continue }
-    if (run && sign === run.sign && Math.abs(r.price - run.top - rowSize) < 1e-6) { run.top = r.price; run.sum += r.delta; run.rows++; continue }
-    close()
-    run = { sign, low: r.price, top: r.price, sum: r.delta, rows: 1 }
-  }
-  close()
-  return out
-}
+/** A composite row under this share of its largest row is NEUTRAL - it ends a zone. */
+export const NEUTRAL = 0.1
+/** A zone is cut to the rows around its peak that hold this share of its run's total (its CORE - a tight band). */
+export const CORE = 0.7
+/** A profile is named on a zone when its own part over the zone's rows is at least this share of the zone's total. */
+export const SOURCE_SHARE = 0.15
 
-/** One profile's significant clusters: `source`, each { source, bullish, low, high, strength (0 - 1 of its largest) },
- *  `shift` subtracted from the prices (the futures' basis, so they read in spot terms). */
-export function sourceZones(source, rows, rowSize, { bullishNegative = false, shift = 0 } = {}) {
-  const runs = profileRuns(rows, rowSize, { bullishNegative })
-  const max = Math.max(0, ...runs.map((r) => Math.abs(r.sum)))
-  if (!(max > 0)) return []
-  const keep = (bullish) => runs.filter((r) => r.bullish === bullish && Math.abs(r.sum) >= SIGNIFICANT * max)
-    .sort((a, b) => Math.abs(b.sum) - Math.abs(a.sum)).slice(0, PER_SIDE)
-  return [...keep(true), ...keep(false)].map((r) => ({
-    source, bullish: r.bullish, low: round2(r.low - shift), high: round2(r.high - shift), strength: Math.abs(r.sum) / max,
-  }))
-}
-
-/** Clusters of the same side that overlap (or touch) joined into one zone: { bullish, low, high, sources, score }. */
-export function mergeZones(zones) {
-  const out = []
-  for (const bullish of [true, false]) {
-    const list = zones.filter((z) => z.bullish === bullish).sort((a, b) => a.low - b.low)
-    let cur = null
-    for (const z of list) {
-      if (cur && z.low <= cur.high + 1e-6) {
-        cur.high = Math.max(cur.high, z.high)
-        cur.score += z.strength
-        if (!cur.sources.includes(z.source)) cur.sources.push(z.source)
-        continue
-      }
-      if (cur) out.push(cur)
-      cur = { bullish, low: z.low, high: z.high, sources: [z.source], score: z.strength }
+/**
+ * THE COMPOSITE POSITIONING PROFILE (asked for - "use net CE − PE, OI CE − PE, option CDV and OBV and the futures delta
+ * profile; if futures data is not present do not consider it"): every profile's rows put on ONE grid of spot rows, each
+ * scaled by its own largest row (so no profile outweighs another by its units - OI in contracts, the flows in lots) and
+ * signed BULLISH POSITIVE (the OI's CE − PE negated: puts written / calls unwound = bullish), then added row by row - where
+ * the profiles agree the row is large, where they disagree they cancel. `sources` [{ id, rows: [{ price, delta }],
+ * bullishNegative, shift }] - `shift` subtracted from a profile's prices (the futures' basis, so they read in spot terms;
+ * rounded to the nearest row). A profile with no non-zero row is not used. { rows: [{ price, total, parts: { id: n } }]
+ * (by price), used: [ids] }.
+ */
+export function compositeProfile(sources, rowSize) {
+  const grid = new Map()
+  const used = new Set()
+  for (const s of sources ?? []) {
+    const rows = (s.rows ?? []).filter((r) => Number.isFinite(r.price) && Number.isFinite(r.delta) && r.delta)
+    const max = Math.max(0, ...rows.map((r) => Math.abs(r.delta)))
+    if (!(max > 0)) continue
+    used.add(s.id)
+    for (const r of rows) {
+      const price = rowOf(r.price - (s.shift ?? 0) + rowSize / 2, rowSize)
+      const n = (s.bullishNegative ? -r.delta : r.delta) / max
+      const g = grid.get(price) ?? { price, total: 0, parts: {} }
+      g.total += n
+      g.parts[s.id] = (g.parts[s.id] ?? 0) + n
+      grid.set(price, g)
     }
-    if (cur) out.push(cur)
   }
-  return out.map((z) => ({ ...z, score: round2(z.score), sources: TRAP_SOURCES.map((s) => s.id).filter((id) => z.sources.includes(id)) }))
+  return { rows: [...grid.values()].sort((a, b) => a.price - b.price), used: TRAP_SOURCES.map((x) => x.id).filter((id) => used.has(id)) }
+}
+
+/** The run's CORE: from its peak row out to the larger neighbour each step until CORE of the run's total is held. */
+function coreOf(rows) {
+  const abs = rows.map((r) => Math.abs(r.total))
+  const total = abs.reduce((a, b) => a + b, 0)
+  let i = abs.indexOf(Math.max(...abs)), j = i, held = abs[i]
+  while (held < CORE * total - 1e-9) {
+    const left = i > 0 ? abs[i - 1] : -1, right = j < rows.length - 1 ? abs[j + 1] : -1
+    if (left < 0 && right < 0) break
+    if (right > left) held += abs[++j]; else held += abs[--i]
+  }
+  return rows.slice(i, j + 1)
+}
+
+/**
+ * The composite's ZONES: runs of adjacent rows of one sign (a neutral row - under NEUTRAL of the largest - or a gap ends
+ * one), each cut to its CORE; kept at >= SIGNIFICANT of the largest zone's total, at most PER_SIDE a side. Each { bullish,
+ * low, high, score (the peak row: 1 = one profile at its largest, up to the number of profiles agreeing there), sources
+ * (the profiles behind it), against (profiles pushing the other way there) }, by price.
+ */
+export function compositeZones({ rows = [], used = [] } = {}, rowSize = 5) {
+  const maxAbs = Math.max(0, ...rows.map((r) => Math.abs(r.total)))
+  if (!(maxAbs > 0)) return []
+  const runs = []
+  let run = null
+  for (const r of rows) {
+    const sgn = Math.abs(r.total) >= NEUTRAL * maxAbs ? Math.sign(r.total) : 0
+    if (sgn && run && run.sign === sgn && Math.abs(r.price - run.rows[run.rows.length - 1].price - rowSize) < 1e-6) { run.rows.push(r); continue }
+    if (run) runs.push(run)
+    run = sgn ? { sign: sgn, rows: [r] } : null
+  }
+  if (run) runs.push(run)
+  const zones = runs.map((x) => {
+    const core = coreOf(x.rows)
+    const sum = core.reduce((a, r) => a + r.total, 0)
+    const part = (id) => core.reduce((a, r) => a + (r.parts[id] ?? 0), 0)
+    const named = (same) => used.filter((id) => { const p = part(id); return (same ? p * sum > 0 : p * sum < 0) && Math.abs(p) >= SOURCE_SHARE * Math.abs(sum) })
+    return {
+      bullish: x.sign > 0, low: core[0].price, high: round2(core[core.length - 1].price + rowSize), size: Math.abs(sum),
+      score: round2(Math.max(...core.map((r) => Math.abs(r.total)))), sources: named(true), against: named(false),
+    }
+  })
+  const max = Math.max(0, ...zones.map((z) => z.size))
+  const keep = (bullish) => zones.filter((z) => z.bullish === bullish && z.size >= SIGNIFICANT * max).sort((a, b) => b.size - a.size).slice(0, PER_SIDE)
+  return [...keep(true), ...keep(false)].sort((a, b) => a.low - b.low).map(({ size, ...z }) => z) // eslint-disable-line no-unused-vars
 }
 
 /** The zone's role against `price` (ZONE_KINDS). */
@@ -138,19 +169,29 @@ export function zoneKind(z, price) {
 
 const distancePct = (z, price) => (price >= z.low && price <= z.high ? 0 : (price > z.high ? z.high - price : z.low - price) / price * 100)
 
-/** The four profiles' zones of some sessions, merged, in spot terms. `options` [{ items, oi }] (optionDeltaMinutes /
- *  optionOiMinutes of each session), `futures` [[footprint bars]], `basis` = futures − spot (null: futures left out). */
-export function positionZones({ options = [], futures = [], basis = null, rowSize = 5 }) {
+/**
+ * The profiles of some sessions as ONE composite (compositeProfile) and its zones, in spot terms. `options` [{ items, oi }]
+ * (optionDeltaMinutes / optionOiMinutes of each session), `futures` [[footprint bars]], `basis` = futures − spot. The
+ * futures are LEFT OUT when they are not there (no bars - `futures: 'none'`) or cannot be put on spot (no basis -
+ * 'noBasis'). The NET CE − PE flow IS the option CDV here (the option delta profile's Net side, the CDV / OBV profile's CDV
+ * column - the same numbers), so it is counted once, as "Net / CDV". { zones, used, futures: 'used' | 'none' | 'noBasis' }.
+ */
+export function positionProfile({ options = [], futures = [], basis = null, rowSize = 5 }) {
   const items = options.map((s) => s.items ?? [])
-  const zones = []
-  zones.push(...sourceZones('oi', oiRowsOf(options.map((s) => s.oi ?? []), rowSize), rowSize, { bullishNegative: true }))
-  zones.push(...sourceZones('cdv', optionDeltaProfileOf(items, { rowSize, metric: 'cdv' }).rows, rowSize))
-  zones.push(...sourceZones('obv', optionDeltaProfileOf(items, { rowSize, metric: 'obv' }).rows, rowSize))
-  if (Number.isFinite(basis) && futures.some((f) => f?.length)) {
-    zones.push(...sourceZones('fut', futuresDeltaProfileOf(futures, { rowSize }).rows, rowSize, { shift: basis }))
-  }
-  return mergeZones(zones)
+  const sources = [
+    { id: 'oi', rows: oiRowsOf(options.map((s) => s.oi ?? []), rowSize), bullishNegative: true },
+    { id: 'cdv', rows: optionDeltaProfileOf(items, { rowSize, metric: 'cdv' }).rows },
+    { id: 'obv', rows: optionDeltaProfileOf(items, { rowSize, metric: 'obv' }).rows },
+  ]
+  const hasFutures = (futures ?? []).some((f) => f?.length)
+  const futStatus = !hasFutures ? 'none' : Number.isFinite(basis) ? 'used' : 'noBasis'
+  if (futStatus === 'used') sources.push({ id: 'fut', rows: futuresDeltaProfileOf(futures, { rowSize }).rows, shift: basis })
+  const profile = compositeProfile(sources, rowSize)
+  return { zones: compositeZones(profile, rowSize), used: profile.used, futures: futStatus === 'used' && !profile.used.includes('fut') ? 'none' : futStatus }
 }
+
+/** The zones only (positionProfile). */
+export function positionZones(args) { return positionProfile(args).zones }
 
 /** The zones read against `price`: each with its kind and distance (% of price, + above), nearest first; and the LEAN -
  *  (helping a rise − helping a fall) / both, each zone's score weighted by nearness (1 / (1 + distance / 0.3%)). */
@@ -170,7 +211,7 @@ const lastClose = (bars) => { for (let i = (bars?.length ?? 0) - 1; i >= 0; i--)
 
 /**
  * BEFORE THE OPEN: the previous session(s) - `prevOptions` [{ date, items, oi, candles }] and `prevFutures` [{ items }] -
- * read against the last session's close. { close, zones, lean, basis }.
+ * read against the last session's close. { close, zones, lean, basis, used (the profiles read), futures (positionProfile) }.
  */
 export function openingRead({ prevOptions = [], prevFutures = [], rowSize = 5 }) {
   const last = prevOptions[prevOptions.length - 1]
@@ -179,8 +220,8 @@ export function openingRead({ prevOptions = [], prevFutures = [], rowSize = 5 })
   // The basis from the same session's two closes only - another day's futures would put their zones off by its own basis.
   const futClose = lastFut && (!last?.date || !lastFut.date || lastFut.date === last.date) ? lastClose(lastFut.items) : null
   const basis = close > 0 && futClose > 0 ? futClose - close : null
-  const zones = positionZones({ options: prevOptions, futures: prevFutures.map((f) => f.items ?? []), basis, rowSize })
-  return { close, basis, ...readZones(zones, close) }
+  const { zones, used, futures } = positionProfile({ options: prevOptions, futures: prevFutures.map((f) => f.items ?? []), basis, rowSize })
+  return { close, basis, used, futures, ...readZones(zones, close) }
 }
 
 /**
@@ -266,7 +307,8 @@ export function dayRead({ opening, options = [], oi = [], futures = [], spot = [
   const price = bars[bars.length - 1].close
   const futClose = lastClose(futures)
   const basis = futClose > 0 ? futClose - price : null
-  const today = positionZones({ options: [{ items: options, oi }], futures: [futures], basis, rowSize }).map((z) => ({ ...z, from: 'today' }))
+  const own = positionProfile({ options: [{ items: options, oi }], futures: [futures], basis, rowSize })
+  const today = own.zones.map((z) => ({ ...z, from: 'today' }))
   const prev = (opening?.zones ?? []).map(({ kind, distance, ...z }) => ({ ...z, from: 'prev' })) // eslint-disable-line no-unused-vars
   const { zones, lean } = readZones([...prev, ...today], price)
   const openRule = openRuleDay({ oi, spot: bars, open, rowSize })
@@ -295,7 +337,7 @@ export function dayRead({ opening, options = [], oi = [], futures = [], spot = [
   }
   if (Math.abs(lean) >= 0.3) reasons.push(`Zones near price lean ${lean > 0 ? 'up (floors / trapped shorts closer)' : 'down (ceilings / trapped longs closer)'}`)
   const verdict = score >= 4 ? 'Strong bullish' : score >= 2 ? 'Bullish' : score <= -4 ? 'Strong bearish' : score <= -2 ? 'Bearish' : 'Mixed'
-  return { open, price, basis, zones, lean, openRule, crossings, flows, score, verdict, reasons, liveSqueeze: live ?? null }
+  return { open, price, basis, used: own.used, futures: own.futures, zones, lean, openRule, crossings, flows, score, verdict, reasons, liveSqueeze: live ?? null }
 }
 
 /**

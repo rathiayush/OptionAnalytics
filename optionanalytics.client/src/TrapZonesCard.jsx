@@ -16,8 +16,8 @@ import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRea
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
-// session(s)' OI (CE − PE), option CDV / OBV and futures delta clusters read against their close before the open, and
-// against the price at the clock through the day with the day's own clusters, the open rule and the squeezes (trapZones.js).
+// session(s)' OI (CE − PE), net CE − PE (= option CDV), OBV and futures delta added into one profile, its clusters read
+// against their close before the open, and against the price at the clock through the day with the day's own clusters, the open rule and the squeezes (trapZones.js).
 
 const { Text } = Typography
 const MIN = 60_000
@@ -34,6 +34,27 @@ function KindTag({ kind }) {
 }
 
 const sourceTags = (sources) => sources.map((s) => <Tag key={s} style={{ margin: 0, marginRight: 2 }}>{TRAP_SOURCES.find((x) => x.id === s)?.short ?? s}</Tag>)
+const shortOf = (ids) => (ids ?? []).map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short ?? x).join('+')
+const FUTURES_OUT = { none: 'not present - left out', noBasis: 'no same-day close to put them on spot - left out' }
+
+/** Which profiles a read is built from: each one read green, not read grey; the futures say why they were left out. */
+function ProfilesRead({ label, read }) {
+  if (!read) return null
+  return (
+    <Space wrap size={[4, 2]} align="center">
+      <Text type="secondary" style={{ fontSize: 11 }}>{label}</Text>
+      {TRAP_SOURCES.map((s) => {
+        const on = read.used?.includes(s.id)
+        const why = on ? 'read' : s.id === 'fut' ? FUTURES_OUT[read.futures] ?? 'no data - left out' : 'no data - left out'
+        return (
+          <Tooltip key={s.id} title={`${s.name}: ${why}`}>
+            <Tag color={on ? 'green' : undefined} style={{ margin: 0, opacity: on ? 1 : 0.55, textDecoration: on ? undefined : 'line-through' }}>{s.short}</Tag>
+          </Tooltip>
+        )
+      })}
+    </Space>
+  )
+}
 
 // THE ZONES ON SPOT (asked for - "these levels, can we not draw them on spot as well - so easy to identify"): the spot
 // candles of the card's own timeframe with every zone a band across the plot in its role's colour (floor green, trapped
@@ -120,50 +141,16 @@ function ZonesSpotChart({ candles, boxes, open, prevClose, dayKey, height: given
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
-/** The zones near price as a vertical ladder: each zone a band in its kind's colour, price / open / previous close lines. */
-function ZoneLadder({ zones, price, open, prevClose, height = 280 }) {
-  if (!Number.isFinite(price) || !zones.length) return null
-  const span = price * 0.02
-  const near = zones.filter((z) => z.high >= price - span && z.low <= price + span)
-  const lo = Math.min(price - span * 0.5, ...near.map((z) => z.low)), hi = Math.max(price + span * 0.5, ...near.map((z) => z.high))
-  const y = (v) => ((hi - v) / (hi - lo)) * (height - 20) + 10
-  const width = 360
-  const line = (v, color, label, dash) => (Number.isFinite(v) && v >= lo && v <= hi ? (
-    <g key={label}>
-      <line x1={0} x2={width - 70} y1={y(v)} y2={y(v)} stroke={color} strokeWidth={label === 'Price' ? 2 : 1} strokeDasharray={dash} />
-      <text x={width - 66} y={y(v) + 4} fill={color} fontSize={11}>{label} {px(v)}</text>
-    </g>
-  ) : null)
-  return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', maxWidth: 520, height, display: 'block' }}>
-      {near.map((z, i) => {
-        const k = ZONE_KINDS[z.kind]
-        const top = y(z.high), h = Math.max(3, y(z.low) - y(z.high))
-        return (
-          <g key={`${z.low}-${z.high}-${i}`}>
-            <rect x={z.from === 'today' ? 150 : 0} y={top} width={140} height={h} fill={k?.color ?? '#888'} opacity={0.25 + Math.min(0.55, z.score / 4)} stroke={k?.color} />
-            {h >= 12 && <text x={(z.from === 'today' ? 150 : 0) + 4} y={top + 11} fontSize={10} fill="#fff">{k?.label?.split(' - ')[0]} · {z.sources.map((s) => TRAP_SOURCES.find((x) => x.id === s)?.short).join('+')}</text>}
-          </g>
-        )
-      })}
-      <text x={2} y={9} fontSize={9} fill="#888">Previous session(s)</text>
-      <text x={152} y={9} fontSize={9} fill="#888">Today so far</text>
-      {line(prevClose, '#8c8c8c', 'Prev close', '2 3')}
-      {line(open, '#d9d9d9', 'Open', '5 4')}
-      {line(price, '#1677ff', 'Price')}
-    </svg>
-  )
-}
-
 function ZoneTable({ zones }) {
   return (
     <Table
-      size="small" pagination={false} rowKey={(z, i) => `${z.from}-${z.low}-${z.high}-${i}`} dataSource={zones.slice(0, 12)} scroll={{ x: 560 }}
+      size="small" pagination={false} rowKey={(z, i) => `${z.from}-${z.low}-${z.high}-${i}`} dataSource={zones.slice(0, 12)} scroll={{ x: 640 }}
       columns={[
         { title: 'Zone', key: 'z', width: 130, render: (_, z) => `${px(z.low)} – ${px(z.high)}` },
         { title: 'What it is now', key: 'k', render: (_, z) => <KindTag kind={z.kind} /> },
         { title: 'From', key: 'f', width: 80, render: (_, z) => (z.from === 'today' ? 'today' : 'before') },
-        { title: 'Profiles', key: 's', render: (_, z) => sourceTags(z.sources) },
+        { title: 'Profiles behind it', key: 's', render: (_, z) => sourceTags(z.sources) },
+        { title: 'Against', key: 'a', render: (_, z) => (z.against?.length ? sourceTags(z.against) : '—') },
         { title: 'Strength', dataIndex: 'score', key: 'sc', width: 80, align: 'right' },
         { title: 'From price', key: 'd', width: 90, align: 'right', render: (_, z) => (z.distance === 0 ? 'at price' : pct(z.distance)) },
       ]}
@@ -196,7 +183,7 @@ function SideList({ title, zones, color }) {
         <Space key={`${z.from}-${z.low}-${z.high}-${i}`} size={4} wrap>
           <Text style={{ fontSize: 12, minWidth: 110, display: 'inline-block' }}>{px(z.low)} – {px(z.high)}</Text>
           <KindTag kind={z.kind} />
-          <Text type="secondary" style={{ fontSize: 11 }}>{z.distance === 0 ? 'at price' : pct(z.distance)} · {z.from === 'today' ? 'today' : 'before'} · {z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>{z.distance === 0 ? 'at price' : pct(z.distance)} · {z.from === 'today' ? 'today' : 'before'} · {shortOf(z.sources)}{z.against?.length ? ` (${shortOf(z.against)} against)` : ''}</Text>
         </Space>
       )) : <Text type="secondary" style={{ fontSize: 12 }}>none near</Text>}
     </Space>
@@ -234,7 +221,7 @@ function SetupList({ setups }) {
 
 const eventText = (e) => {
   if (e.type === 'verdict') return `Bias now ${e.to} (was ${e.from})`
-  if (e.type === 'newZone') return `New ${ZONE_KINDS[e.zone.kind]?.label.split(' - ')[0].toLowerCase() ?? 'zone'} of the day ${px(e.zone.low)}–${px(e.zone.high)} (${e.zone.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')})`
+  if (e.type === 'newZone') return `New ${ZONE_KINDS[e.zone.kind]?.label.split(' - ')[0].toLowerCase() ?? 'zone'} of the day ${px(e.zone.low)}–${px(e.zone.high)} (${shortOf(e.zone.sources)})`
   if (e.type === 'roleChange') return `${px(e.zone.low)}–${px(e.zone.high)}: ${ZONE_KINDS[e.fromKind]?.label.split(' - ')[0]} → ${ZONE_KINDS[e.zone.kind]?.label}`
   return `${EVENT_TEXT[e.type]}${e.zone ? ` ${px(e.zone.low)}–${px(e.zone.high)}` : ''}`
 }
@@ -269,6 +256,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const chartBoxes = useMemo(() => zoneBoxes(day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' })), { showPrev, showToday }), [day, opening.zones, showPrev, showToday])
   const setups = useMemo(() => tradeSetups({ day, bias, rowSize }), [day, bias, rowSize])
   const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
+  const tableZones = useMemo(() => (day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))), [day, opening.zones])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
@@ -330,8 +318,11 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       <Text style={{ fontSize: 12 }}>
         <b>Before the open</b> ({pastOpt.sessions.map((s) => s.date).join(', ') || 'no session loaded'}): close {px(opening.close)} - positioning {openingLean}
         {opening.zones?.length ? ` · nearest: ${opening.zones.slice(0, 2).map((z) => `${ZONE_KINDS[z.kind]?.label.split(' - ')[0]} ${px(z.low)}–${px(z.high)}`).join(', ')}` : ''}
-        {opening.basis == null && pastFut.sessions.length ? ' · futures left out (no same-day close for the basis)' : ''}
       </Text>
+      <Space wrap size={[12, 2]}>
+        <ProfilesRead label="Profiles read - before:" read={opening} />
+        {day && <ProfilesRead label="today:" read={day} />}
+      </Space>
 
       {day && day.openRule.gross > 0 && (
         <Text style={{ fontSize: 12 }}>
@@ -357,8 +348,9 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} open={day?.open} prevClose={opening.close} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
 
-      <ZoneLadder zones={day ? day.zones : (opening.zones ?? [])} price={day?.price ?? opening.close} open={day?.open} prevClose={opening.close} />
-      <ZoneTable zones={day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))} />
+      <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
+        <ZoneTable zones={tableZones} />
+      </FoldText>
 
       {events.length > 0 && (
         <Space direction="vertical" size={2}>
@@ -373,18 +365,24 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
 
       <FoldText id="oiReplay.trapZones" label="how to read this" className="oa-note">
         <Text type="secondary" style={{ fontSize: 12 }}>
-          Four position profiles - OI (CE − PE), option CDV, option OBV and the futures delta - each show CLUSTERS: price bands
-          where one side stacked up. Those positions were opened at those prices, so where price is now says who is in profit
+          The position profiles - OI (CE − PE), the net CE − PE flow (which IS the option CDV: the option delta profile&apos;s Net
+          side and the CDV / OBV profile&apos;s CDV column are the same numbers, so it is counted once, &quot;Net/CDV&quot;), the option
+          OBV and the futures delta (left out when there is no futures data, or no same-day close to move it onto spot) - are
+          added into ONE profile, each scaled by its own largest row and read bullish-positive (OI negated: puts written =
+          bullish). Where they agree a row is strong, where they disagree they cancel, so a bullish and a bearish zone never sit
+          on the same prices; each zone is the tight core of a run of one sign (the rows around its peak holding 70% of it),
+          named with the profiles behind it and any pushing against it; strength 1 = one profile at its largest, up to the
+          number agreeing. The tags under &quot;Before the open&quot; show which profiles each read used. Those positions were
+          opened at those prices, so where price is now says who is in profit
           and who is trapped. A bullish cluster below price is a FLOOR (buyers / put writers defend it); above price those
           buyers are TRAPPED - their exits are supply (long liquidation). A bearish cluster above price is a CEILING; below price
-          its sellers / call writers are TRAPPED - their covering is fuel (SHORT SQUEEZE). Clusters of different profiles that
-          overlap are one zone, stronger the more profiles agree. BEFORE THE OPEN the previous session(s)&apos; zones are read
+          its sellers / call writers are TRAPPED - their covering is fuel (SHORT SQUEEZE). BEFORE THE OPEN the previous session(s)&apos; zones are read
           against their close; THROUGH THE DAY against the price at the replay clock, with the day&apos;s own clusters (today&apos;s
           column). A previous ceiling closed above = its sellers trapped = squeeze; a previous floor closed below = long
           liquidation. THE OPEN RULE (yours): the OI added below the day&apos;s open net CE − PE negative (puts written under the
           open) with price above the open = the writers defend a floor under a rising market - a trend-day-up setup; calls
           written above the open with price below it = trend-day-down; it counts once it holds 3 minutes. The verdict adds the
-          open rule (±2), today&apos;s four flows (±1 each) and a squeeze still standing (±1). Futures zones are moved to spot by
+          open rule (±2), today&apos;s flows (±1 each - the futures only when present) and a squeeze still standing (±1). Futures zones are moved to spot by
           the basis. DAY BIAS: fixed once the day's first minute is in, from what was known then - the previous zones' lean at the close
           and at the open, a gap through a zone (its side trapped from the open), the last session's OI and CDV. Through the day
           the profiles are re-read every 5 minutes: a new zone of the day, a previous zone changing role and the bias changing are
