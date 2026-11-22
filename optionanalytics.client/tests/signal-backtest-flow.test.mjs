@@ -186,7 +186,7 @@ test('what a rule reads: nothing, the Δ, or the book too; the lines in words an
   assert.equal(orderFlowNeeded(rule([{ id: 'vwap', value: 'above' }, { id: 'futCvd', value: 'positive' }])), FLOW_DELTA)
   assert.equal(orderFlowNeeded(rule([{ id: 'futDelta', value: 'buyers' }, { id: 'liqWalls', value: 'nearBid' }])), FLOW_BOOK)
   assert.match(orderFlowUrl('NIFTY', '2026-10-05', FLOW_DELTA), /day\/2026-10-05\?rowSize=1000&minTradeLots=100000&heatmapColumns=50$/)
-  assert.match(orderFlowUrl('BANKNIFTY', '2026-10-05', FLOW_BOOK), /rowSize=5&minTradeLots=100000&heatmapColumns=750$/)
+  assert.match(orderFlowUrl('BANKNIFTY', '2026-10-05', FLOW_BOOK), /rowSize=5&minTradeLots=100000&heatmapColumns=750&backfillBars=true$/)
   const line = cleanLine({ id: 'futDelta', value: 'bigBuy', param: 3, windowMin: 10 })
   assert.match(lineText(line), /^Futures Δ \(the candle's buy − sell\): Big buying: .* ≥ 3× the average \(last 10 min\)$/)
   assert.deepEqual(mirrorLines([line]).map((l) => [l.id, l.value, l.param]), [['futDelta', 'bigSell', 3]])

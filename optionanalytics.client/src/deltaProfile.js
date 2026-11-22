@@ -166,20 +166,22 @@ export function optionDeltaProfileOf(sessions, { rowSize = 5, side = 'net', metr
  * profile with every minute up to t, nothing after it; `history` - each row's delta as it changed ([t, delta] pairs, by
  * row price). `optionDeltaAt` reads them at a clock.
  */
-export function optionDeltaSteps(past, minutes, { rowSize = 5 } = {}) {
+export function optionDeltaSteps(past, minutes, { rowSize = 5, metric = 'cdv' } = {}) {
   const acc = optionDeltaAccumulator(rowSize)
   for (const s of past ?? []) for (const m of s ?? []) acc.add(m)
+  // `metric` 'obv': the OBV profile's net (each strike's volume signed by its close's direction) - else the CDV's.
+  const net = metric === 'obv' ? (r) => r.ceObv - r.peObv : (r) => r.ce - r.pe
   const summary = (t) => {
-    const p = acc.profile('net')
+    const p = acc.profile('net', metric)
     return { t, levels: deltaProfileLevels(p), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
   }
   const history = new Map()
-  for (const [price, r] of acc.rows) history.set(price, [[-Infinity, r.ce - r.pe]])
+  for (const [price, r] of acc.rows) history.set(price, [[-Infinity, net(r)]])
   const steps = [summary(-Infinity)]
   for (const m of minutes ?? []) {
     for (const r of acc.add(m)) {
       const h = history.get(r.price)
-      if (h) h.push([m.t, r.ce - r.pe]); else history.set(r.price, [[m.t, r.ce - r.pe]])
+      if (h) h.push([m.t, net(r)]); else history.set(r.price, [[m.t, net(r)]])
     }
     steps.push(summary(m.t))
   }
@@ -266,6 +268,45 @@ export function futuresDeltaProfileOf(sessions, { rowSize = 5 } = {}) {
   const vp = dayVolumeProfile(all, rowSize)
   const list = (vp.rows ?? []).map((r) => ({ price: r.price, buy: r.buy, sell: r.sell, volume: r.buy + r.sell, delta: r.buy - r.sell }))
   return { ...finishDeltaProfile(list, rowSize), minutes: all.length, estimatedMinutes: all.filter((b) => b.estimated).length }
+}
+
+/**
+ * The FUTURES delta profile MINUTE BY MINUTE - what the Signal backtest reads, as `optionDeltaSteps` does for the options:
+ * `past` (whole sessions before the day - each its footprint bars, known before it opens) and then the day's `bars` (the
+ * footprint's 1-minute bars, `footprintBars`) one at a time; each step the profile with every bar up to its minute, as
+ * `futuresDeltaProfileOf` builds it (each bar's rows added - a bar with no footprint rows spread over its range).
+ * `optionDeltaAt` reads it at a clock.
+ */
+export function futuresDeltaSteps(past, bars, { rowSize = 5 } = {}) {
+  const rows = new Map()
+  const add = (b) => {
+    const touched = []
+    for (const r of dayVolumeProfile([b], rowSize).rows ?? []) {
+      let row = rows.get(r.price)
+      if (!row) rows.set(r.price, row = { price: r.price, buy: 0, sell: 0 })
+      row.buy += r.buy
+      row.sell += r.sell
+      touched.push(row)
+    }
+    return touched
+  }
+  const summary = (t) => {
+    const p = finishDeltaProfile([...rows.values()].map((r) => ({ price: r.price, buy: r.buy, sell: r.sell, volume: r.buy + r.sell, delta: r.buy - r.sell })), rowSize)
+    return { t, levels: deltaProfileLevels(p), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
+  }
+  for (const s of past ?? []) for (const b of s ?? []) add(b)
+  const history = new Map()
+  for (const [price, r] of rows) history.set(price, [[-Infinity, r.buy - r.sell]])
+  const steps = [summary(-Infinity)]
+  const day = (bars ?? []).map((b) => ({ b, t: minuteOf(msOf(b.time)) })).filter((x) => Number.isFinite(x.t)).sort((a, b) => a.t - b.t)
+  for (const { b, t } of day) {
+    for (const r of add(b)) {
+      const h = history.get(r.price)
+      if (h) h.push([t, r.buy - r.sell]); else history.set(r.price, [[t, r.buy - r.sell]])
+    }
+    steps.push(summary(t))
+  }
+  return { steps, history, rowSize }
 }
 
 /**

@@ -1107,7 +1107,21 @@ All must pass before committing.
   again" when the rule now reads more than the run loaded, the report lists days with fewer (`noDeltaPast`). The background
   run and the day chart load them too; the LIVE SCAN walks them once an index a day (backed off on a failure - a strategy
   reading them waits, the others go on). `tests/signal-backtest-delta.test.mjs` (a clock = the minutes up to it, the levels,
-  the days before, the mirror, a live cut = the whole day's, the loader), `signal-live.test.mjs`. THE FUTURES ORDER FLOW
+  the days before, the mirror, a live cut = the whole day's, the loader), `signal-live.test.mjs`. THE OPTION OBV PROFILE and THE FUTURES
+  DELTA PROFILE (asked for - "this option delta profile and cdv and obv profile ... add it into our backtest signals ... future
+  delta profile as well"; the option delta profile IS the CDV profile, so its conditions above are the CDV's): group `ObvProfile`
+  (`OBV_CONDITIONS`) - the OBV column of OI Replay's CDV / OBV profile card read the same way (`deltaAtCandle(..., 'obv')`,
+  `optionDeltaSteps`'s `metric`): price vs its most bought / most sold OBV row (`obpBuy` / `obpSell`, each the other's mirror) and
+  `obpDelta` (spot in a row of net OBV buying / selling, the profile's net positive / negative), the same Profile of / Days and
+  sessions before (`odmPast` - their minutes carry `ceObv` / `peObv`); its volume levels are the delta profile's. Group
+  `FuturesProfile` (`FUT_PROFILE_CONDITIONS`) - OI Replay's futures delta profile card: the near futures' footprint by price in
+  `PROFILE_ROWS` (`futuresDeltaSteps` = `futuresDeltaProfileOf` of the bars up to each minute, held equal in the test), its POC /
+  VAH / VAL / HVN / LVN / most bought / most sold rows (`fdp...`, `levelCondition`'s `barsOf`) and `fdpDelta`, READ AGAINST THE
+  FUTURES' PRICE (`d.price` when `priceSource` is 'futures' - none without it); the day's bars come with the order flow
+  (`FLOW_PROFILE` - `orderFlowNeeded`: NONE 0 / DELTA 1 / PROFILE 2 / BOOK 3; `orderFlowUrl` then asks the footprint's rows and
+  `backfillBars=true`; `attachOrderFlow` keeps `fdm` = `footprintBars`, live only the completed minutes), the sessions before as
+  the card walks them (`attachFuturesPast` - `fdmPast`, `futuresDaysNeeded`, threaded through the page, the day chart, the
+  background run and the live scan as `futuresPast`); without them those lines never hold. `tests/signal-backtest-profiles.test.mjs`. THE FUTURES ORDER FLOW
   (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal backtest as well"; group
   `OrderFlow`, `FLOW_CONDITIONS`; the data `orderFlowFeatures.js`): the Order Flow page's own day of the near futures
   (`/api/order-flow/{u}/day/{date}`, `orderFlowUrl` - no prints; the Δ alone in one row a bar, with the heatmap in the Order

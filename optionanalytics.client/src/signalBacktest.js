@@ -32,9 +32,9 @@ import { sumExpiryOi } from './expirySum.js'
 import { straddleRead } from './straddle.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
-import { optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
+import { futuresDeltaSteps, optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
 import { PROFILE_ROWS, pastSessionsNeeded } from './profileZones.js'
-import { FLOW_BOOK, FLOW_DELTA, FLOW_NONE, flowView } from './orderFlowFeatures.js'
+import { FLOW_BOOK, FLOW_DELTA, FLOW_NONE, FLOW_PROFILE, flowView } from './orderFlowFeatures.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -981,7 +981,7 @@ function cumCondition(line, group, meaning) {
 // A level of the PREVIOUS day's volume profile - fixed all day, known before the session opens, read on spot (that
 // profile is spot's). `level(d, k, p3, p4)` - the level at candle k (one that moves - the option delta profile's of the
 // day so far - is read at each candle); `more` - numbers every option takes besides its own (passed on as p3 / p4).
-function levelCondition({ id, group, name, short, level, more = {} }) {
+function levelCondition({ id, group, name, short, level, more = {}, barsOf = null }) {
   const at = (d, k, p3, p4) => { const x = k >= 0 ? level(d, k, p3, p4) : null; return Number.isFinite(x) ? x : null }
   return {
     id, group, name,
@@ -994,7 +994,9 @@ function levelCondition({ id, group, name, short, level, more = {} }) {
     ],
     test: (d, i, v, w, p, p2, p3, p4) => {
       const L = (dd, k) => at(dd, k, p3, p4)
-      const bars = d.spot
+      // The price the level is read against: spot's candles, or the condition's own (the futures profile - the futures').
+      const bars = barsOf ? barsOf(d) : d.spot
+      if (!bars) return false
       const c = bars.c
       const x = L(d, i)
       const by = frac(p) * (x ?? 0)
@@ -1045,22 +1047,22 @@ export const deltaPastOfLine = (l) => (GROUP_OF_DELTA.has(l?.id) ? pastSessionsN
 const DELTA_READS = new WeakMap()     // a day's `odm` -> Map(profile choice -> optionDeltaSteps), worked out once
 /** The option delta profile a line reads, minute by minute (`optionDeltaSteps`) - null when it needs sessions before the
  *  day that were not loaded. A view (`timeframeView`) shares its day's. */
-function deltaRead(d, p3, p4) {
+function deltaRead(d, p3, p4, metric = 'cdv') {
   if (!Array.isArray(d?.odm)) return null
   const days = deltaDaysOf(p3), of = deltaOfOf(p4)
   const need = pastSessionsNeeded(days, of)
   if (need > 0 && !Array.isArray(d.odmPast)) return null
   let kept = DELTA_READS.get(d.odm)
   if (!kept) DELTA_READS.set(d.odm, kept = new Map())
-  const key = `${of}|${days}`
+  const key = `${metric}|${of}|${days}`
   if (!kept.has(key)) {
     const past = need > 0 ? d.odmPast.slice(-need) : []
-    kept.set(key, optionDeltaSteps(past, of === 'previous' ? [] : d.odm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5 }))
+    kept.set(key, optionDeltaSteps(past, of === 'previous' ? [] : d.odm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5, metric }))
   }
   return kept.get(key)
 }
-/** The profile at candle k - from the minutes up to its close (`d.t[k]`, its last minute). */
-export const deltaAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4), d.t[k]) : null)
+/** The profile at candle k - from the minutes up to its close (`d.t[k]`, its last minute). `metric` 'obv' = the OBV profile. */
+export const deltaAtCandle = (d, k, p3, p4, metric = 'cdv') => (k >= 0 ? optionDeltaAt(deltaRead(d, p3, p4, metric), d.t[k]) : null)
 const deltaLevel = (key, name, short, mirror = null) => ({
   ...levelCondition({ id: `odp${key[0].toUpperCase()}${key.slice(1)}`, group: 'DeltaProfile', name, short: `option Δ ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
   ...(mirror ? { mirror } : {}),
@@ -1103,7 +1105,103 @@ const DELTA_CONDITIONS = [
     },
   },
 ]
-const GROUP_OF_DELTA = new Set(DELTA_CONDITIONS.map((c) => c.id))
+
+// THE OPTION OBV PROFILE (asked for - "this option delta profile and cdv and obv profile ... add it into our backtest signals";
+// OI Replay's "Option CDV / OBV profile" card): the same rows as the option delta profile - whose delta IS the CDV - with
+// the OBV's net (each strike's volume x delta weight signed by whether its close rose or fell from its previous bar's close,
+// CE − PE: + = bullish). Its volume - and so its POC / VAH / VAL / HVN / LVN - is the delta profile's (read those there); its
+// own reads are the rows of the most OBV buying / selling and the OBV at the price / the profile's net. Same "Profile of" /
+// Days, the same sessions before (`odmPast`).
+const obvLevel = (key, name, short, mirror) => ({
+  ...levelCondition({ id: `obp${key[0].toUpperCase()}${key.slice(1)}`, group: 'ObvProfile', name, short: `option OBV ${short}`, level: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4, 'obv')?.levels?.[key], more: DELTA_PROFILE_OF }),
+  mirror,
+})
+// The flow AT the price and the profile's net - one test for the option profiles (CDV / OBV) and the futures'.
+function profileFlowTest(read, priceOf) {
+  return (d, i, v, w, p, p2, p3, p4) => {
+    const x = read(d, i, p3, p4)
+    const price = priceOf(d)?.c?.[i]
+    if (!x) return false
+    switch (v) {
+      case 'buying': { if (!(price > 0)) return false; const r = x.rowDelta(price); return r > 0 && r >= frac(p) * x.maxAbsDelta }
+      case 'selling': { if (!(price > 0)) return false; const r = x.rowDelta(price); return r < 0 && -r >= frac(p) * x.maxAbsDelta }
+      case 'netPositive': return x.delta > 0 && x.delta >= frac(p) * x.volume
+      case 'netNegative': return x.delta < 0 && -x.delta >= frac(p) * x.volume
+      default: return false
+    }
+  }
+}
+const flowOptions = (buyText, sellText, more) => [
+  opt('buying', buyText, 'selling', { param: pctParam('by ≥', 0, 100, 1), ...more }),
+  opt('selling', sellText, 'buying', { param: pctParam('by ≥', 0, 100, 1), ...more }),
+  opt('netPositive', "The profile's net positive (bullish)", 'netNegative', { param: pctParam('by ≥', 0, 100, 0.5), ...more }),
+  opt('netNegative', "The profile's net negative (bearish)", 'netPositive', { param: pctParam('by ≥', 0, 100, 0.5), ...more }),
+]
+const OBV_CONDITIONS = [
+  obvLevel('buy', 'Option OBV profile: most bought row (bullish OBV)', 'most bought', 'obpSell'),
+  obvLevel('sell', 'Option OBV profile: most sold row (bearish OBV)', 'most sold', 'obpBuy'),
+  {
+    id: 'obpDelta', group: 'ObvProfile', name: 'Option OBV profile: buying / selling at the price',
+    options: flowOptions('Spot in a row of net OBV BUYING (option prices rising on volume - bullish)', 'Spot in a row of net OBV SELLING (bearish)', DELTA_PROFILE_OF),
+    test: profileFlowTest((d, i, p3, p4) => deltaAtCandle(d, i, p3, p4, 'obv'), (d) => d.spot),
+    show: (d, i, l) => {
+      const x = deltaAtCandle(d, i, l?.param3, l?.param4, 'obv')
+      return x ? `option OBV at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option OBV profile —'
+    },
+  },
+]
+
+// THE FUTURES DELTA PROFILE (asked for - "future delta profile as well"; OI Replay's "Futures delta profile" card): the near
+// futures' footprint by price - buy − sell at each row (the Order Flow server's recorded day, the minutes it did not record
+// estimated from 1-minute candles), in the footprint's rows (FETCH_ROWS) - read against the FUTURES' price (`d.price` when
+// it is the futures': a day without the futures' candles has none). Its POC / VAH / VAL / HVN / LVN, the most bought / sold
+// rows, the delta at the price and the net; "Profile of" / Days as the card's. The day's bars come with the order flow
+// (`attachOrderFlow` - FLOW_PROFILE, `fdm`), the sessions before (`fdmPast`) walked back as the card walks
+// (`futuresDaysNeeded`); without them the lines never hold.
+const futuresBarsOf = (d) => (d?.priceSource === 'futures' ? d.price : null)
+const FUT_READS = new WeakMap()
+function futuresRead(d, p3, p4) {
+  if (!Array.isArray(d?.fdm)) return null
+  const days = deltaDaysOf(p3), of = deltaOfOf(p4)
+  const need = pastSessionsNeeded(days, of)
+  if (need > 0 && !Array.isArray(d.fdmPast)) return null
+  let kept = FUT_READS.get(d.fdm)
+  if (!kept) FUT_READS.set(d.fdm, kept = new Map())
+  const key = `${of}|${days}`
+  if (!kept.has(key)) {
+    const past = need > 0 ? d.fdmPast.slice(-need) : []
+    kept.set(key, futuresDeltaSteps(past, of === 'previous' ? [] : d.fdm, { rowSize: PROFILE_ROWS[d.underlying] ?? 5 }))
+  }
+  return kept.get(key)
+}
+export const futuresAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(futuresRead(d, p3, p4), d.t[k]) : null)
+const futLevel = (key, name, short, mirror = null) => ({
+  ...levelCondition({ id: `fdp${key[0].toUpperCase()}${key.slice(1)}`, group: 'FuturesProfile', name, short: `futures Δ ${short}`, level: (d, k, p3, p4) => futuresAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF, barsOf: futuresBarsOf }),
+  ...(mirror ? { mirror } : {}),
+})
+const FUT_PROFILE_CONDITIONS = [
+  futLevel('poc', 'Futures Δ profile: POC', 'POC'),
+  futLevel('vah', 'Futures Δ profile: VAH', 'VAH'),
+  futLevel('val', 'Futures Δ profile: VAL', 'VAL'),
+  futLevel('hvn', 'Futures Δ profile: HVN', 'HVN'),
+  futLevel('lvn', 'Futures Δ profile: LVN', 'LVN'),
+  futLevel('buy', 'Futures Δ profile: most bought row (aggressive buyers)', 'most bought', 'fdpSell'),
+  futLevel('sell', 'Futures Δ profile: most sold row (aggressive sellers)', 'most sold', 'fdpBuy'),
+  {
+    id: 'fdpDelta', group: 'FuturesProfile', name: 'Futures Δ profile: buying / selling at the price',
+    options: flowOptions('Futures in a row of net BUYING (buy − sell > 0 there)', 'Futures in a row of net SELLING', DELTA_PROFILE_OF),
+    test: profileFlowTest(futuresAtCandle, futuresBarsOf),
+    show: (d, i, l) => {
+      const x = futuresAtCandle(d, i, l?.param3, l?.param4)
+      const c = futuresBarsOf(d)?.c?.[i]
+      return x && c > 0 ? `futures Δ at price ${fmtL(x.rowDelta(c))} · net ${fmtL(x.delta)}` : 'futures Δ profile —'
+    },
+  },
+]
+const GROUP_OF_FUT_PROFILE = new Set(FUT_PROFILE_CONDITIONS.map((c) => c.id))
+/** How many sessions BEFORE the day a line of the futures delta profile reads (0 = the day alone). */
+export const futuresPastOfLine = (l) => (GROUP_OF_FUT_PROFILE.has(l?.id) ? pastSessionsNeeded(deltaDaysOf(l.param3), deltaOfOf(l.param4)) : 0)
+const GROUP_OF_DELTA = new Set([...DELTA_CONDITIONS, ...OBV_CONDITIONS].map((c) => c.id))
 
 // THE FUTURES ORDER FLOW (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal
 // backtest as well"): the Order Flow page's day of the near futures, put on the day by the loader when the rule reads it
@@ -1937,6 +2035,8 @@ export const RULE_CONDITIONS = [
     show: (d) => (d.pivots ? `CPR ${fmtP(d.pivots.bc)} - ${fmtP(d.pivots.tc)} (${d.pivots.widthPct.toFixed(2)}%)` : 'CPR —'),
   },
   ...DELTA_CONDITIONS,
+  ...OBV_CONDITIONS,
+  ...FUT_PROFILE_CONDITIONS,
   ...FLOW_CONDITIONS,
 ]
 // Lines saved while the volume profile levels were today's developing ones (POC / HVN / LVN): read as the previous
@@ -2871,10 +2971,17 @@ export function deltaDaysNeeded(rule) {
   return lines.reduce((most, l) => Math.max(most, deltaPastOfLine(l)), 0)
 }
 
+/** How many sessions BEFORE each day a rule's futures delta profile lines read (the most of them; 0 = none) - the loader
+ *  puts them on the day (`fdmPast` - attachOrderFlow's `futuresPast`). */
+export function futuresDaysNeeded(rule) {
+  const lines = normalizeRule(rule).lines
+  return lines.reduce((most, l) => Math.max(most, futuresPastOfLine(l)), 0)
+}
+
 /** What a rule reads of the futures order flow (the loader puts it on each day - `attachOrderFlow`): FLOW_NONE, FLOW_DELTA
  *  (the futures Δ / cumulative Δ) or FLOW_BOOK (the liquidity heatmap too - the footprint and book in the Order Flow
  *  page's rows). The mirror's lines read the same. */
 export function orderFlowNeeded(rule) {
   const lines = normalizeRule(rule).lines
-  return lines.reduce((most, l) => Math.max(most, BOOK_IDS.has(l.id) ? FLOW_BOOK : FLOW_IDS.has(l.id) ? FLOW_DELTA : FLOW_NONE), FLOW_NONE)
+  return lines.reduce((most, l) => Math.max(most, BOOK_IDS.has(l.id) ? FLOW_BOOK : GROUP_OF_FUT_PROFILE.has(l.id) ? FLOW_PROFILE : FLOW_IDS.has(l.id) ? FLOW_DELTA : FLOW_NONE), FLOW_NONE)
 }

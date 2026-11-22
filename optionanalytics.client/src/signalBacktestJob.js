@@ -9,10 +9,10 @@ import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
   orderFlowNeeded, prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
-import { FLOW_BOOK, FLOW_NONE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
+import { FLOW_BOOK, FLOW_NONE, FLOW_PROFILE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
 import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import { summedExpiries } from './expirySum.js'
-import { cachedDay, loadOptionDay, optionDayKey, rememberDay, walkPastSessions } from './deltaProfileDays.js'
+import { cachedDay, footprintBars, loadFuturesDay, loadOptionDay, optionDayKey, rememberDay, walkPastSessions } from './deltaProfileDays.js'
 
 export const BACKTEST_UNDERLYINGS = ['NIFTY', 'BANKNIFTY', 'SENSEX']
 export const SIDE_NAMES = { rule: 'Rule', mirror: 'Mirror', all: 'Both' }
@@ -75,7 +75,7 @@ export async function loadExpiryChains(getJson, u, date, { live = false } = {}) 
  * says which (`sumExpiries` - the dates). A day whose other expiries cannot be loaded does not run (it would be another
  * strategy's numbers).
  */
-export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false, deltaDays = 0, orderFlow = FLOW_NONE } = {}) {
+export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 240_000, fetch: fetchImpl, sumExpiries = false, deltaDays = 0, orderFlow = FLOW_NONE, futuresPast = 0 } = {}) {
   const get = fetchImpl ?? globalThis.fetch
   const timeout = new AbortController()
   const timer = setTimeout(() => timeout.abort('timeout'), timeoutMs)
@@ -110,7 +110,7 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     rememberDay(optionDayKey(underlying, seriesFlag(underlying), date), { date, items: day.odm, candles: dayCandles(day) })
     const past = await attachDeltaPast(day, underlying, deltaDays, { fetch: get })
     if (!past.ok) return { ok: false, date, reason: past.reason, retry: true, dhanCalls }
-    const flow = await attachOrderFlow(day, underlying, orderFlow, { fetch: get, signal: timeout.signal })
+    const flow = await attachOrderFlow(day, underlying, orderFlow, { fetch: get, signal: timeout.signal, futuresPast })
     return flow.ok ? day : { ok: false, date, reason: flow.reason, retry: true, dhanCalls }
   } catch (err) {
     if (signal?.aborted) throw err
@@ -150,8 +150,9 @@ export async function attachDeltaPast(day, underlying, count, { fetch: fetchImpl
  * no order flow for the day (a 404: the day keeps `flow.missing` - its order flow lines never hold, the report lists it) -
  * or { ok: false, reason, retry } when it failed on the way (a server error, the network: the day is not run this time).
  */
-export async function attachOrderFlow(day, underlying, need, { fetch: fetchImpl, signal, asOfMs = null, date = null } = {}) {
-  if (!day?.ok || !(need > FLOW_NONE) || (day.flow && (day.flowWanted ?? 0) >= need)) return { ok: true }
+export async function attachOrderFlow(day, underlying, need, { fetch: fetchImpl, signal, asOfMs = null, date = null, futuresPast = 0 } = {}) {
+  if (!day?.ok || !(need > FLOW_NONE)) return { ok: true }
+  if (day.flow && (day.flowWanted ?? 0) >= need) return attachFuturesPast(day, underlying, futuresPast, { fetch: fetchImpl })
   const get = fetchImpl ?? globalThis.fetch
   try {
     const r = await get(orderFlowUrl(underlying, date ?? day.date, need), signal ? { signal } : undefined)
@@ -162,15 +163,37 @@ export async function attachOrderFlow(day, underlying, need, { fetch: fetchImpl,
       return { ok: false, reason: `futures order flow: ${body?.error ?? `HTTP ${r.status}`}`, retry: true }
     } else {
       day.flow = orderFlowMinutes(body, day.t, { asOfMs, book: need >= FLOW_BOOK })
+      // The futures delta profile's bars - the footprint by price, in lots, the estimated minutes' too (the card's own),
+      // only the minutes completed at the clock (the live scan's).
+      if (need >= FLOW_PROFILE) {
+        const lastMs = asOfMs == null ? Infinity : asOfMs - 60_000
+        day.fdm = footprintBars(body).filter((b) => { const ms = typeof b.time === 'number' ? b.time : Date.parse(b.time); return Number.isFinite(ms) && ms <= lastMs })
+      }
     }
     day.flowWanted = need
     // A timeframe's candles were cut from the day before its order flow was on it: cut again.
     day.views?.clear?.()
-    return { ok: true }
+    return attachFuturesPast(day, underlying, futuresPast, { fetch: fetchImpl })
   } catch (err) {
     if (signal?.aborted) throw err
     return { ok: false, reason: `futures order flow: ${String(err?.message ?? err)}`, retry: true }
   }
+}
+
+/**
+ * The FUTURES DELTA PROFILE'S DAYS BEFORE (`futuresDaysNeeded`): the `count` sessions before the day put on it as `fdmPast`
+ * (oldest first, each its footprint bars in lots), walked back as OI Replay's futures card walks (deltaProfileDays.js - the
+ * Order Flow day of each, a holiday stepped over, kept for the tab / process). { ok } - or { ok: false, reason, retry } when
+ * a day before could not be loaded (the day is not run - its numbers would be another profile's).
+ */
+export async function attachFuturesPast(day, underlying, count, { fetch: fetchImpl } = {}) {
+  if (!day?.ok || !(count > 0) || (Array.isArray(day.fdmPast) && (day.fdmPastWanted ?? 0) >= count)) return { ok: true }
+  const found = await walkPastSessions(day.date, count, (date) => cachedDay(`futures|${underlying}|${date}`, () => loadFuturesDay(underlying, date, fetchImpl)))
+  if (found.error) return { ok: false, reason: `futures Δ profile of the days before - ${found.error.date}: ${found.error.message}`, retry: true }
+  day.fdmPast = found.sessions.map((x) => x.items)
+  day.fdmPastWanted = count
+  day.views?.clear?.()
+  return { ok: true }
 }
 
 const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && Number.isFinite(Date.parse(`${v}T00:00:00Z`))

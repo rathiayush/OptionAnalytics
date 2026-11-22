@@ -8,8 +8,9 @@ import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import {
   BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
-  deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
+  deltaDaysNeeded, futuresDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
+import { FLOW_BOOK, FLOW_PROFILE } from './orderFlowFeatures.js'
 import { attachDeltaPast, attachOrderFlow, backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { downloadFeaturesCsv, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
@@ -71,7 +72,9 @@ const GROUPS = [...new Set(RULE_CONDITIONS.map((c) => c.group))]
 const GROUP_TITLE = {
   OI: 'OI (OI Replay)', GEX: 'GEX', Price: 'Price', Indicators: 'Indicators (spot candles - RSI, EMA)', Options: "Option premium - the ATM strike's own chart (VWAP, EMA, RSI)", Straddle: 'ATM straddle', Profile: "Today's market profile",
   PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
-  DeltaProfile: "Option delta profile on spot (OI Replay's card - its levels, the flow at the price)",
+  DeltaProfile: "Option delta profile on spot = the CDV profile (OI Replay's card - its levels, the flow at the price)",
+  ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column)",
+  FuturesProfile: "Futures delta profile (OI Replay's card - the footprint by price, read on the futures' price)",
   OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
 }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
@@ -328,7 +331,7 @@ function remember(key, day) {
 // days of this run already loaded are not asked again); a day before that could not be loaded = the day not run this time.
 // `orderFlow` - what the rule reads of the futures order flow (`orderFlowNeeded`), put on the day kept once
 // (`attachOrderFlow`); failing on the way = the day not run this time.
-async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDays = 0, orderFlow = 0 } = {}) {
+async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDays = 0, orderFlow = 0, futuresPast = 0 } = {}) {
   const key = `${underlying}|${date}${sumExpiries ? '|Σ3' : ''}`
   const cached = PREPARED.has(key)
   const day = cached ? PREPARED.get(key) : await loadBacktestDay(underlying, date, { signal, timeoutMs: LOAD_TIMEOUT_MS, sumExpiries })
@@ -336,7 +339,7 @@ async function loadDay(underlying, date, signal, { sumExpiries = false, deltaDay
   if (!cached && (day.ok || day.final)) remember(key, day.ok ? day : { ok: false, date, reason: day.reason })
   const past = await attachDeltaPast(day, underlying, deltaDays)
   if (!past.ok) return { day: { ok: false, date, reason: past.reason, retry: true }, cached }
-  const flow = await attachOrderFlow(day, underlying, orderFlow, { signal })
+  const flow = await attachOrderFlow(day, underlying, orderFlow, { signal, futuresPast })
   if (!flow.ok) return { day: { ok: false, date, reason: flow.reason, retry: true }, cached }
   return { day, cached }
 }
@@ -478,19 +481,20 @@ export default function SignalBacktestPage() {
     const sum = sumExpiries
     const deltaDays = deltaDaysNeeded(rule)
     const orderFlow = orderFlowNeeded(rule)
+    const futuresPast = futuresDaysNeeded(rule)
     const list = dates
     setViewing(null)
     // Where the days came from (asked about - "all the data is cached, why is it taking time?"): already prepared in this
     // tab, from the server's disk, or asked of Dhan - a day nothing has loaded before (the first time only).
     const startedMs = Date.now()
-    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, deltaDays, orderFlow, dates: list, done: 0, current: list[0] ?? null, results: [], sources: { disk: 0, dhan: 0, tab: 0 } })
+    setRun({ status: 'running', underlying: u, tradeIn: ti, sumExpiries: sum, deltaDays, orderFlow, futuresPast, dates: list, done: 0, current: list[0] ?? null, results: [], sources: { disk: 0, dhan: 0, tab: 0 } })
     const results = []
     for (let k = 0; k < list.length; k++) {
       setRun((r) => ({ ...r, current: list[k], done: k }))
       let source = null
       try {
         // The signal index's day - and, trading in another, that index's day of the same date (where the trades are taken).
-        const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum, deltaDays, orderFlow })
+        const { day, cached } = await loadDay(u, list[k], controller.signal, { sumExpiries: sum, deltaDays, orderFlow, futuresPast })
         const trade = ti && day?.ok ? await loadDay(ti, list[k], controller.signal) : null
         results.push({ date: list[k], day, tradeDay: trade?.day ?? null, cached: Boolean(cached) })
         source = cached ? 'tab' : daySource(day)
@@ -803,7 +807,7 @@ export default function SignalBacktestPage() {
             )}
             {run.underlying && !viewing && orderFlowNeeded(rule) > (run.orderFlow ?? 0) && (
               <Text type="warning" style={{ fontSize: 12 }}>
-                The rule reads the futures order flow{orderFlowNeeded(rule) > 1 ? ' and its liquidity heatmap' : ''} - the last run did not load {orderFlowNeeded(rule) > 1 && (run.orderFlow ?? 0) > 0 ? 'the heatmap' : 'it'}, so those lines do not hold below. Run again (the days already loaded are not asked again).
+                The rule reads the futures order flow{orderFlowNeeded(rule) >= FLOW_BOOK ? ' and its liquidity heatmap' : orderFlowNeeded(rule) >= FLOW_PROFILE ? ' by price (the futures delta profile)' : ''} - the last run did not load {(run.orderFlow ?? 0) > 0 ? 'all of it' : 'it'}, so those lines do not hold below. Run again (the days already loaded are not asked again).
               </Text>
             )}
             {run.underlying && !viewing && (run.underlying !== index || (run.tradeIn ?? '') !== tradeIn || Boolean(run.sumExpiries) !== sumExpiries) && (

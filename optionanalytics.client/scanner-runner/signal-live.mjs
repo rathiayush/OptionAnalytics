@@ -12,7 +12,7 @@
 //   LIVE_NOW, LIVE_ONCE           (tests only) a fixed clock (ISO) and one round, then exit
 
 import { attachDeltaPast, attachOrderFlow, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
-import { deltaDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
+import { deltaDaysNeeded, futuresDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
 import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
@@ -105,6 +105,9 @@ async function round(nowMs) {
   // What an index's strategies read of its futures order flow (Δ / cumulative Δ, the liquidity heatmap too).
   const flowNeed = new Map()
   for (const s of list) flowNeed.set(s.clean.underlying, Math.max(flowNeed.get(s.clean.underlying) ?? 0, orderFlowNeeded(s.clean.rule)))
+  // The most sessions before today an index's strategies read on the futures delta profile (walked once a process - cached).
+  const futNeed = new Map()
+  for (const s of list) futNeed.set(s.clean.underlying, Math.max(futNeed.get(s.clean.underlying) ?? 0, futuresDaysNeeded(s.clean.rule)))
   const days = new Map()
   const summedDays = new Map()
   for (const u of wanted) {
@@ -133,7 +136,7 @@ async function round(nowMs) {
       let flow = null
       if ((flowNeed.get(u) ?? 0) > 0 && day.ok && (backoff.get(flowKey)?.until ?? 0) <= nowMs) {
         try {
-          const r = await attachOrderFlow(day, u, flowNeed.get(u), { fetch: withKey, asOfMs: nowMs })
+          const r = await attachOrderFlow(day, u, flowNeed.get(u), { fetch: withKey, asOfMs: nowMs, futuresPast: futNeed.get(u) ?? 0 })
           if (!r.ok) throw new Error(r.reason)
           backoff.delete(flowKey)
           flow = day.flow
@@ -150,7 +153,7 @@ async function round(nowMs) {
           if (!summed.ok) throw new Error(summed.reason)
           const sumDay = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs, expiryChains: summed.chains })
           backoff.delete(sumKey)
-          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}, flow ? { flow, flowWanted: day.flowWanted } : {}))
+          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}, flow ? { flow, flowWanted: day.flowWanted, fdm: day.fdm, fdmPast: day.fdmPast } : {}))
         } catch (err) {
           failed(sumKey, err.message)
         }
@@ -166,6 +169,7 @@ async function round(nowMs) {
       if (!day) continue
       if (deltaDaysNeeded(s.clean.rule) > 0 && !Array.isArray(day.odmPast)) continue
       if (orderFlowNeeded(s.clean.rule) > 0 && !day.flow) continue
+      if (futuresDaysNeeded(s.clean.rule) > 0 && !Array.isArray(day.fdmPast)) continue
       // Trading in another index: its day too - not read this round, the strategy waits for the next.
       const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
       if (s.clean.tradeIn && !tradeDay) continue
