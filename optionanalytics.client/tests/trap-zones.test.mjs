@@ -253,19 +253,33 @@ test('the day\'s own zones count in full from its 30th minute, in proportion bef
   assert.equal(late[0].score, full[0].score)
 })
 
-test('the ladder: the zones near price and the price lines in one list, highest first, a row each', async () => {
-  const { ladderItems } = await import('../src/trapZones.js')
+test('the ladder to scale: previous / current day lanes, bands at their prices, labels never touching', async () => {
+  const { ladderLayout } = await import('../src/trapZones.js')
   const z = (o) => ({ from: 'today', score: 1, sources: ['oi'], against: [], ...o })
   const zones = [
-    z({ bullish: true, low: 24950, high: 24970, kind: 'support', distance: -0.16 }),
-    z({ bullish: false, low: 25060, high: 25080, kind: 'resistance', distance: 0.24, from: 'prev' }),
-    z({ bullish: false, low: 26000, high: 26020, kind: 'resistance', distance: 3.96 }),      // over 2% away: left out
+    z({ bullish: false, low: 25060, high: 25080, kind: 'resistance', from: 'prev' }),
+    z({ bullish: true, low: 24950, high: 24970, kind: 'support' }),
+    z({ bullish: false, low: 26000, high: 26020, kind: 'resistance' }),                    // off the scale: left out
+    z({ bullish: false, low: 25150, high: 25155, kind: 'resistance', from: 'prev' }),      // two thin bands side by side:
+    z({ bullish: false, low: 25145, high: 25150, kind: 'resistance', from: 'prev' }),      // the lower one's label has no room
   ]
-  const marks = [{ price: 24990, label: 'Open', color: '#d9d9d9' }, { price: 25075, label: 'CDV R', color: '#ff4d4f' }, { price: NaN, label: 'x' }]
-  const items = ladderItems({ zones, price: 25010, marks })
-  assert.deepEqual(items.map((i) => (i.type === 'zone' ? `${i.zone.low}` : i.label)), ['CDV R', '25060', 'Price', 'Open', '24950'])
-  assert.equal(items.find((i) => i.label === 'Price').now, true)
-  // At most `max` zones, the nearest; no price = nothing.
-  assert.deepEqual(ladderItems({ zones, price: 25010, max: 1 }).filter((i) => i.type === 'zone').map((i) => i.zone.low), [24950])
-  assert.deepEqual(ladderItems({ zones, price: null }), [])
+  const marks = [{ price: 25008, label: 'Open', color: '#d9d9d9', dashed: true }, { price: 30000, label: 'far' }]
+  const L = ladderLayout({ zones, price: 25010, marks, span: 0.01, height: 340, pad: 14, labelPx: 14 })
+  assert.ok(Math.abs(L.lo - 24759.9) < 1e-6 && Math.abs(L.hi - 25260.1) < 1e-6)
+  assert.deepEqual(L.bands.map((b) => [b.lane, b.zone.low]), [['prev', 25150], ['prev', 25145], ['prev', 25060], ['today', 24950]])
+  const y = (v) => 14 + (L.hi - v) / (L.hi - L.lo) * (340 - 28)
+  const r = L.bands.find((b) => b.zone.low === 25060)
+  assert.ok(Math.abs(r.top - y(25080)) < 1e-9 && Math.abs(r.height - (y(25060) - y(25080))) < 1e-9)
+  // Labels in a lane at least a label apart; the squeezed one is dropped, its band kept.
+  const prevLabels = L.bands.filter((b) => b.lane === 'prev' && b.labelY != null).map((b) => b.labelY)
+  for (let i = 1; i < prevLabels.length; i++) assert.ok(prevLabels[i] - prevLabels[i - 1] >= 14)
+  assert.equal(L.bands.find((b) => b.zone.low === 25145).labelY, null)
+  assert.ok(L.bands.find((b) => b.zone.low === 25060).labelY != null)
+  // The price line always, the open beside it with its label pushed clear, the far mark left out.
+  assert.deepEqual(L.lines.map((l) => l.label), ['Price', 'Open'])
+  assert.ok(L.lines[1].labelY - L.lines[0].labelY >= 14)
+  assert.ok(Math.abs(L.lines[0].y - y(25010)) < 1e-9)
+  // Nice ticks across the scale.
+  assert.ok(L.ticks.length >= 4 && L.ticks.every((t) => t.price % 50 === 0 || t.price % 100 === 0))
+  assert.equal(ladderLayout({ zones, price: null }), null)
 })

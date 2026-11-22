@@ -698,14 +698,18 @@ All must pass before committing.
   side; each zone's `score` = its peak row (1 = one profile at its largest), `sources` = the profiles behind it (>= 15% of it) and
   `against` = those pushing the other way. The FUTURES ARE LEFT OUT when there are none or no same-day close to put them on spot
   (`positionProfile`'s `futures`: 'used' / 'none' / 'noBasis'; the verdict's flows count them only when present) - the card's
-  "Profiles read" tags show each read's profiles, a struck-through tag with why. THE LADDER (asked for back - "continue to show the ladder
-  as well"; `ladderItems` + `ZoneLadder`, under the chart, the "Ladder" tick `optionanalytics.oiReplay.trapZonesLadder`, on): the
-  zones within 2% of price (the nearest 12) and the price, open, previous close and CDV lines as ONE list from the highest
-  price down (a zone by its middle), a ROW EACH - a CSS grid of Price / Sessions before / Today so far / From price, each
-  zone a box in its column (dashed before, solid today, its kind's short name, its profiles, those against and its
-  strength; ★ the best of its side) and each line a rule across both columns - so nothing is ever drawn over anything else
-  (the SVG ladder it replaced scaled its text with the screen and overlapped on a phone; checked at 375 px and 900 px in a
-  browser). The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
+  "Profiles read" tags show each read's profiles, a struck-through tag with why. THE LADDER, TO SCALE (asked for back - "continue to show the ladder as well", then "previous day, current day like the
+  older way so I know what is happening"; `ladderLayout` + `ZoneLadder`, under the chart, the "Ladder" tick
+  `optionanalytics.oiReplay.trapZonesLadder`, on, and its scale ±0.5 / 1 / 2% of price - `...trapZonesLadderSpan`, 1): a
+  price axis and TWO LANES - "Previous day" ("Previous N days") and "Current day" - each zone a band at its REAL price
+  (clipped to the scale, >= 3 px; dashed previous / solid current, ★ the best of its side, hover = its details), the price /
+  open / previous close / CDV lines across both lanes with their labels in a right gutter (a leader to the line when pushed;
+  on a phone the name alone, the price's own line keeps its price). Drawn at the box's MEASURED width with fixed-size text (the
+  first SVG ladder was scaled by a viewBox, its text shrank and overlapped on a phone - it was replaced by a list for a while);
+  text widths MEASURED on a canvas (`textWidth` / `fitText`); one read's zones never overlap, so neither do a lane's bands, and
+  the labels are spaced by `ladderLayout` - a lane's from the top down at their band's middle, pushed down when they would
+  touch, DROPPED when pushed off their band (the band stays); the lines' labels pushed apart, none dropped; the zones' labels
+  drawn LAST, over the lines. Checked at 375 px and 900 px in a browser. The zone table is folded ("All zones"). THE BIGGEST CDV SUPPORT / RESISTANCE (asked for - "the biggest CDV
   support and resistance of the previous day from the start and the current developing"; `cdvLevels`): the net CE − PE flow
   (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
   its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed
