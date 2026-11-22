@@ -117,3 +117,43 @@ test('zones drawn on spot: a box each in its role\'s colour, before dashed / tod
   assert.deepEqual(zoneBoxes(zones, { showPrev: false }).map((b) => b.low), [120])
   assert.deepEqual(zoneBoxes(zones, { showToday: false }).map((b) => b.low), [100])
 })
+
+test('trade setups: floor bounce / ceiling rejection from the nearest zones, squeeze, open rule, failed squeeze', async () => {
+  const { tradeSetups } = await import('../src/trapZones.js')
+  const z = (o) => ({ from: 'prev', score: 1, sources: ['oi'], ...o })
+  const day = {
+    price: 25010, open: 24990, score: 2, openRule: { state: 'bull' }, crossings: [], liveSqueeze: null,
+    zones: [
+      z({ bullish: true, low: 24990, high: 25005, kind: 'support', distance: -0.02 }),
+      z({ bullish: false, low: 25060, high: 25080, kind: 'resistance', distance: 0.2 }),
+      z({ bullish: false, low: 25120, high: 25140, kind: 'resistance', distance: 0.44 }),
+      z({ bullish: true, low: 24900, high: 24920, kind: 'support', distance: -0.36 }),
+    ],
+  }
+  const s = tradeSetups({ day, rowSize: 5 })
+  const floor = s.find((x) => x.id === 'floorBounce')
+  assert.equal(floor.side, 'long')
+  assert.equal(floor.status, 'ready')                // price just over the floor's top
+  assert.equal(floor.entry, 25005)
+  assert.equal(floor.stop, 24977.5)                   // under the zone by max(row, 0.05% of price) = 12.505
+  assert.deepEqual(floor.targets, [25060, 25120])
+  assert.equal(floor.rr, 2)                           // 55 to the first target / 27.5 risk
+  assert.equal(floor.aligned, true)
+  const ceil = s.find((x) => x.id === 'ceilingReject')
+  assert.equal(ceil.side, 'short')
+  assert.equal(ceil.status, 'watch')
+  assert.deepEqual(ceil.targets, [25005, 24920])
+  assert.equal(ceil.aligned, false)
+  assert.ok(s.find((x) => x.id === 'openTrendLong'))
+  // Ready and with the read come first.
+  assert.equal(s[0].status, 'ready')
+  // A squeeze still standing / a failed squeeze.
+  const zone = { bullish: false, low: 25000, high: 25020 }
+  const sq = tradeSetups({ day: { ...day, openRule: {}, price: 25030, liveSqueeze: { type: 'shortSqueeze', zone } }, rowSize: 5 })
+  assert.equal(sq.find((x) => x.id === 'squeezeLong').entry, 25020)
+  const failed = tradeSetups({ day: { ...day, openRule: {}, price: 25010, crossings: [{ t: 0, type: 'shortSqueeze', zone }, { t: 5 * 60_000, type: 'failedUp', zone }] }, rowSize: 5 })
+  const f = failed.find((x) => x.id === 'failedSqueeze')
+  assert.equal(f.side, 'short')
+  assert.ok(f.stop > zone.high)
+  assert.deepEqual(tradeSetups({ day: null }), [])
+})

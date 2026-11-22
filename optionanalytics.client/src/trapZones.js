@@ -405,3 +405,131 @@ export function zoneBoxes(zones, { showPrev = true, showToday = true } = {}) {
   })
 }
 
+
+/**
+ * TRADE SETUPS (asked for - "in this component only, suggest trade setups"): ideas from the read at the clock - never an
+ * order. Each { id, name, side 'long' | 'short', option ('Buy CE' / 'Buy PE'), status 'ready' (price is at the trigger now)
+ * or 'watch' (wait for it), entry, stop, targets [t1, t2?], rr (t1's reward / risk), entryText, why, aligned (with the day's
+ * read - the verdict's score, else the bias from the open; null = no lean) }:
+ *   FLOOR BOUNCE - the nearest support below (floor / trapped shorts): a dip into it that closes back above; stop under it.
+ *   CEILING REJECTION - the nearest resistance above (ceiling / trapped longs): a rally into it that closes back below.
+ *   SQUEEZE CONTINUATION - a short squeeze still standing: buy the retest of the broken sellers' zone (now support); the
+ *     long liquidation the mirror.
+ *   OPEN-RULE TREND - the open rule on: buy dips toward the open (the writers' floor), the mirror under the open.
+ *   FAILED SQUEEZE - back inside a sellers' zone within 15 min of breaking above it: the breakout trapped its buyers - short,
+ *     stop over the zone; the failed liquidation the mirror.
+ * Targets are the next zones the other way (their near edge); none = no target given. Ready first, then those with the read,
+ * then the better reward / risk; at most 4.
+ */
+export function tradeSetups({ day, bias = null, rowSize = 5 }) {
+  if (!day || !(day.price > 0)) return []
+  const price = day.price
+  const buf = Math.max(rowSize, price * 0.0005)
+  const lean = Math.sign(day.score || 0) || Math.sign(bias?.score || 0)
+  const { support, resistance } = supportResistance(day.zones)
+  const above = (x) => resistance.filter((z) => z.low > x).sort((a, b) => a.low - b.low).map((z) => z.low)
+  const below = (x) => support.filter((z) => z.high < x).sort((a, b) => b.high - a.high).map((z) => z.high)
+  const make = (o) => {
+    const risk = Math.abs(o.entry - o.stop)
+    const t1 = o.targets[0]
+    const rr = Number.isFinite(t1) && risk > 0 ? round2(Math.abs(t1 - o.entry) / risk) : null
+    const sideSign = o.side === 'long' ? 1 : -1
+    return {
+      ...o, entry: round2(o.entry), stop: round2(o.stop), targets: o.targets.slice(0, 2).map(round2), rr,
+      option: o.side === 'long' ? 'Buy CE (or sell PE)' : 'Buy PE (or sell CE)',
+      aligned: lean ? lean === sideSign : null,
+    }
+  }
+  const out = []
+  const zoneName = (z) => `${ZONE_KINDS[z.kind]?.label.split(' - ')[0]} ${z.low}–${z.high} (${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')})`
+  const s = support[0]
+  if (s) {
+    const entry = Math.min(price, s.high)
+    out.push(make({
+      id: 'floorBounce', name: 'Floor bounce', side: 'long',
+      status: price >= s.low - buf && price <= s.high * 1.0015 ? 'ready' : 'watch',
+      entry, stop: s.low - buf, targets: above(entry),
+      entryText: `On a dip into ${s.low}–${s.high} that closes back above ${s.high}`,
+      why: `Nearest support: ${zoneName(s)} - its side defends it.`,
+    }))
+  }
+  const r = resistance[0]
+  if (r) {
+    const entry = Math.max(price, r.low)
+    out.push(make({
+      id: 'ceilingReject', name: 'Ceiling rejection', side: 'short',
+      status: price <= r.high + buf && price >= r.low * 0.9985 ? 'ready' : 'watch',
+      entry, stop: r.high + buf, targets: below(entry),
+      entryText: `On a rally into ${r.low}–${r.high} that closes back below ${r.low}`,
+      why: `Nearest resistance: ${zoneName(r)} - its side defends it.`,
+    }))
+  }
+  const live = day.liveSqueeze
+  if (live) {
+    const z = live.zone
+    if (live.type === 'shortSqueeze') {
+      out.push(make({
+        id: 'squeezeLong', name: 'Short squeeze continuation', side: 'long',
+        status: price <= z.high * 1.002 ? 'ready' : 'watch',
+        entry: z.high, stop: z.low - buf, targets: above(Math.max(price, z.high)),
+        entryText: `Buy the retest of ${z.high} (the broken sellers' zone, now support)`,
+        why: `Price broke above the previous sellers' zone ${z.low}–${z.high} and holds - they are trapped and cover on the way up.`,
+      }))
+    } else {
+      out.push(make({
+        id: 'liquidationShort', name: 'Long liquidation continuation', side: 'short',
+        status: price >= z.low * 0.998 ? 'ready' : 'watch',
+        entry: z.low, stop: z.high + buf, targets: below(Math.min(price, z.low)),
+        entryText: `Sell the retest of ${z.low} (the broken buyers' zone, now resistance)`,
+        why: `Price broke below the previous buyers' zone ${z.low}–${z.high} and holds - they are trapped and sell on the way down.`,
+      }))
+    }
+  }
+  const rule = day.openRule?.state
+  if (rule && day.open > 0) {
+    const o = day.open
+    if (rule === 'bull') {
+      const floor = below(o)[0]
+      out.push(make({
+        id: 'openTrendLong', name: 'Open-rule trend day (up)', side: 'long',
+        status: price <= o * 1.0025 ? 'ready' : 'watch',
+        entry: Math.max(o, Math.min(price, o * 1.0025)), stop: Math.min(o - buf * 2, floor != null ? floor - buf : Infinity), targets: above(price),
+        entryText: `Buy dips toward the open ${round2(o)} - trend days rarely give it back; trail the rest`,
+        why: 'Puts written below the open with price above it: the writers defend the floor (your open rule).',
+      }))
+    } else {
+      const ceil = above(o)[0]
+      out.push(make({
+        id: 'openTrendShort', name: 'Open-rule trend day (down)', side: 'short',
+        status: price >= o * 0.9975 ? 'ready' : 'watch',
+        entry: Math.min(o, Math.max(price, o * 0.9975)), stop: Math.max(o + buf * 2, ceil != null ? ceil + buf : -Infinity), targets: below(price),
+        entryText: `Sell rallies toward the open ${round2(o)}; trail the rest`,
+        why: 'Calls written above the open with price below it: the writers defend the ceiling (your open rule).',
+      }))
+    }
+  }
+  const lastT = day.crossings?.length ? Math.max(...day.crossings.map((e) => e.t)) : null
+  const fresh = (day.crossings ?? []).filter((e) => lastT != null && lastT - e.t <= 15 * MIN)
+  const failUp = [...fresh].reverse().find((e) => e.type === 'failedUp' && price >= e.zone.low && price <= e.zone.high)
+  if (failUp) {
+    const z = failUp.zone
+    out.push(make({
+      id: 'failedSqueeze', name: 'Failed squeeze - short the trap', side: 'short', status: 'ready',
+      entry: price, stop: z.high + buf, targets: below(price),
+      entryText: `Short while back inside ${z.low}–${z.high}; out on a close above ${z.high}`,
+      why: 'Price broke above the sellers\' zone and fell back inside within 15 min - the breakout buyers are trapped.',
+    }))
+  }
+  const failDown = [...fresh].reverse().find((e) => e.type === 'failedDown' && price >= e.zone.low && price <= e.zone.high)
+  if (failDown) {
+    const z = failDown.zone
+    out.push(make({
+      id: 'failedLiquidation', name: 'Failed breakdown - buy the trap', side: 'long', status: 'ready',
+      entry: price, stop: z.low - buf, targets: above(price),
+      entryText: `Buy while back inside ${z.low}–${z.high}; out on a close below ${z.low}`,
+      why: 'Price broke below the buyers\' zone and came back inside within 15 min - the breakdown sellers are trapped.',
+    }))
+  }
+  const rank = (x) => (x.status === 'ready' ? 0 : 2) + (x.aligned === false ? 1 : 0)
+  return out.sort((a, b) => rank(a) - rank(b) || (b.rr ?? -1) - (a.rr ?? -1)).slice(0, 4)
+}

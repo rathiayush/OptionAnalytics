@@ -707,7 +707,13 @@ All must pass before committing.
   for - "these levels, can we not draw them on spot as well"; `ZonesSpotChart` in the card, `zoneBoxes`): the spot candles of the card's own timeframe
   (1 / 3 / 5 / 15, `optionanalytics.oiReplay.trapZonesTf`) with every zone a band across the plot in its role's colour (`ZoneBoxesPrimitive`, the
   Profiles page's), labelled with its role and profiles, the previous sessions' DASHED and the day's SOLID (each layer ticked - `...trapZonesPrev` /
-  `...trapZonesToday`), the open / previous close as price lines; the price scale also holds the zones within ~1% of price. Only the minutes up
+  `...trapZonesToday`), the open / previous close as price lines; the price scale also holds the zones within ~1% of price. TRADE SETUPS (asked for - "in this component only,
+  suggest trade setups"; `tradeSetups`, the card's `SetupList` under the verdict) - IDEAS, nothing is placed, no strategy / alert fed: FLOOR BOUNCE (the
+  nearest support, a dip that closes back above it, stop under it by max(row, 0.05% of price)), CEILING REJECTION (the mirror at the nearest resistance),
+  SQUEEZE / LIQUIDATION CONTINUATION (the retest of a zone price broke through and holds beyond), OPEN-RULE TREND DAY (dips toward the open, stop under
+  the open / the floor below it) and FAILED SQUEEZE / BREAKDOWN (back inside within 15 min of the break - the breakout traders trapped); targets = the next
+  zones the other way (near edges), R:R = the first target against the stop; READY = price at the trigger now, WATCH = wait; flagged with / against the
+  day's read (the verdict's score, else the bias from the open); ready and with the read first, at most 4; levels are spot. Only the minutes up
   to the clock count (`tests/trap-zones.test.mjs`). A read -
   it feeds no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
