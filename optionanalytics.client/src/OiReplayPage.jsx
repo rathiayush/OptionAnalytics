@@ -42,6 +42,7 @@ import { tpoRowFor, histogramNodes, binsProfile } from './profiles.js'
 import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
+import { TrapZonesCard } from './TrapZonesCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
@@ -754,6 +755,7 @@ const SECTION_OPTIONS = [
   { value: 'futures', label: 'Futures' },
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
   { value: 'optionCdvObvProfile', label: 'Option CDV / OBV profile (on spot)' },
+  { value: 'trapZones', label: 'Trapped / squeeze zones' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -795,7 +797,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -7563,6 +7565,20 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   <OptionCdvObvProfileCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
                     underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} dayKey={`${underlying}-${result.date}`} isLive={isLive}
+                  />
+                </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+            {/* TRAPPED / SQUEEZE ZONES (TrapZonesCard.jsx, trapZones.js): the position profiles' clusters - previous sessions
+                before the open, the day's as it goes - read as floors, ceilings and trapped sides, with the open rule. */}
+            {visibleSections.includes('trapZones') && (
+              <DashboardCard key="trapZones" {...dash('trapZones')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Trapped / squeeze zones (OI, CDV, OBV, futures positions){isLive ? ' · live' : ''}</Space>}>
+                  <TrapZonesCard
+                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
+                    underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} isLive={isLive}
                   />
                 </Card>
               </LiveSection>
