@@ -5,21 +5,26 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
-import { RULE_ACTIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, normalizeRule, prepareDay, ruleLogic, ruleSignals, ruleText } from '../src/signalBacktest.js'
+import { RULE_ACTIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, normalizeRule, orderFlowNeeded, prepareDay, ruleLogic, ruleSignals, ruleText } from '../src/signalBacktest.js'
 import { backtestReport, cleanBacktestSettings, dayOutcome, engineSettings } from '../src/signalBacktestJob.js'
 import { RULE_TEMPLATES, TEMPLATE_FAMILIES, compareTemplates, templateById, templateRow, withTemplate } from '../src/signalTemplates.js'
 
 const countLines = (g) => g.items.reduce((n, it) => n + (it.line ? 1 : countLines(it.group)), 0)
 
-test('24 templates, each a whole rule: every condition kept, its logic read, a side for the mirror, its levels in range', () => {
-  assert.equal(RULE_TEMPLATES.length, 24)
-  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.id)).size, 24)
-  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.name)).size, 24)
+test('29 templates, each a whole rule: every condition kept, its logic read, a side for the mirror, its levels in range', () => {
+  assert.equal(RULE_TEMPLATES.length, 29)
+  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.id)).size, 29)
+  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.name)).size, 29)
   // The delta profile family: 4, each reading yesterday's profile (the session before each day is loaded for it).
   const delta = RULE_TEMPLATES.filter((t) => t.family === 'delta')
   assert.deepEqual(delta.map((t) => t.id), ['dpBuyersDefend', 'dpSellersBroken', 'dpFailedBreak', 'dpSellPut'])
   for (const t of delta) assert.equal(deltaDaysNeeded(t.rule), 1, t.id)
-  assert.ok(RULE_TEMPLATES.filter((t) => t.family !== 'delta').every((t) => deltaDaysNeeded(t.rule) === 0))
+  // The profile clusters family: 5 - those reading yesterday's clusters load the session before, the futures one its footprint.
+  const clusters = RULE_TEMPLATES.filter((t) => t.family === 'clusters')
+  assert.deepEqual(clusters.map((t) => t.id), ['cluBuyersHold', 'cluRedBrokenFutures', 'cluThreeFlows', 'cluFailedBreak', 'cluOiFloorSellPut'])
+  assert.deepEqual(clusters.map((t) => deltaDaysNeeded(t.rule)), [1, 1, 0, 1, 1])
+  assert.ok(orderFlowNeeded(templateById('cluRedBrokenFutures').rule) > 0)
+  assert.ok(RULE_TEMPLATES.filter((t) => t.family !== 'delta' && t.family !== 'clusters').every((t) => deltaDaysNeeded(t.rule) === 0))
   const families = new Set(TEMPLATE_FAMILIES.map((f) => f.id))
   for (const t of RULE_TEMPLATES) {
     assert.ok(families.has(t.family), `${t.id} family`)
@@ -53,13 +58,13 @@ test('a template on the page keeps the page\'s own index, lots, charges and limi
   assert.equal(s.rule.action, 'buyCE')
 })
 
-test('compare all 24 over the days loaded: each one\'s own report through the page\'s engine, best net first', () => {
+test('compare all 29 over the days loaded: each one\'s own report through the page\'s engine, best net first', () => {
   const { run } = syntheticDay()
   const day = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
   const results = [{ date: day.date, day }]
   const page = cleanBacktestSettings({ underlying: 'NIFTY' })
   const rows = compareTemplates(results, page)
-  assert.equal(rows.length, 24)
+  assert.equal(rows.length, 29)
   for (let k = 1; k < rows.length; k++) assert.ok(rows[k - 1].net >= rows[k].net)
   for (const r of rows) assert.ok(Number.isFinite(r.net) && Number.isInteger(r.trades) && r.days === 1, r.id)
   // A row is that template's own report: the same numbers as running it on the page.

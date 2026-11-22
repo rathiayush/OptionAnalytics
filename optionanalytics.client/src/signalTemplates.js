@@ -17,6 +17,7 @@ const THEN = (within, ...items) => group('then', items, { within })
 const nest = (g) => ({ group: g })
 
 export const TEMPLATE_FAMILIES = [
+  { id: 'clusters', name: 'Profile clusters (CDV / OBV / OI / futures)' },
   { id: 'delta', name: 'Delta profile (yesterday\'s buy / sell rows)' },
   { id: 'sequence', name: 'In order (THEN)' },
   { id: 'trend', name: 'Trend' },
@@ -41,6 +42,39 @@ export const RULE_TEMPLATES = [
   // MOST SOLD row, where the bearish flow did - resistance. Read four ways: the level holds, it breaks, a break of it fails,
   // a quiet market sits on it. They read the session before each day: the page's run, Compare all, a background run and the
   // live scan load it for them.
+  // THE PROFILE CLUSTERS (asked for - "add top 5 strategy on this page now", after the profile groups and their green / red
+  // clusters were added): each reads where option buyers / sellers / writers STACKED up - the CDV, OBV and OI profiles' green
+  // (bullish) and red (bearish) clusters - and confirms with a second, different flow. Net (CE − PE) side throughout.
+  {
+    id: 'cluBuyersHold', family: 'clusters', name: 'Yesterday\'s buying cluster holds',
+    idea: 'Yesterday\'s option buyers stacked up in one band of prices (the CDV profile\'s green cluster) - a zone they will defend. Price dips into it and closes back above, while today\'s option flow at the price is buying too: support defended. Quick, with a time stop. Mirror: rejected at yesterday\'s selling (red) cluster with selling at the price.',
+    rule: { tree: ALL(L('cdpZone', 'heldAboveGreen', { param: 0.05, windowMin: 10, ...PREV_DAY }), L('cdpDelta', 'buying', TODAY)), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 40, timeStopMin: 45 },
+  },
+  {
+    id: 'cluRedBrokenFutures', family: 'clusters', name: 'Through yesterday\'s selling cluster, futures buyers confirm',
+    idea: 'Yesterday\'s option sellers stacked up in a red cluster - the ceiling. A cross above it with today\'s FUTURES delta profile net buying (aggressive buyers in the futures, a different market) and price over VWAP says the ceiling was absorbed: the breakout, trailed. Mirror: a break below yesterday\'s buying cluster with futures sellers in charge, under VWAP.',
+    rule: { tree: ALL(L('cdpZone', 'crossedAboveRed', { windowMin: 10, ...PREV_DAY }), L('fdpDelta', 'netPositive', { param: 2, ...TODAY }), L('vwap', 'above')), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 25, targetPct: 60, trailGap: 20, trailStart: 30 },
+  },
+  {
+    id: 'cluThreeFlows', family: 'clusters', name: 'CDV, OBV and OI agree over today\'s buying cluster',
+    idea: 'Three reads of the options, one answer: price holds a dip into today\'s CDV buying cluster, sits above today\'s OBV buying cluster (premiums rising on volume) and the OI profile is net bullish (puts written ahead of calls). Buyers, momentum and writers all on one side. Mirror: all three bearish under the selling clusters.',
+    rule: { tree: ALL(L('cdpZone', 'heldAboveGreen', { param: 0.05, windowMin: 15, ...TODAY }), L('obpZone', 'aboveGreen', TODAY), L('oipDelta', 'netBullish', { param: 2, ...TODAY })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 5, slPct: 25, targetPct: 50 },
+  },
+  {
+    id: 'cluFailedBreak', family: 'clusters', name: 'Failed break of yesterday\'s buying cluster',
+    idea: 'Price breaks below yesterday\'s CDV buying cluster, then crosses back above it within 30 minutes - the breakdown failed and the sellers who chased it are trapped under the buyers\' zone. Mirror: a failed break above yesterday\'s selling cluster.',
+    rule: { tree: THEN(30, L('cdpZone', 'crossedBelowGreen', { windowMin: 10, ...PREV_DAY }), L('cdpZone', 'crossedAboveGreen', { windowMin: 5, ...PREV_DAY })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 45 },
+  },
+  {
+    id: 'cluOiFloorSellPut', family: 'clusters', name: 'Over yesterday\'s put-writing cluster, quiet: sell the put',
+    idea: 'Yesterday\'s put writers stacked up in one band (the OI profile\'s bullish cluster) - a floor they are paid to defend. Price holding above it, sideways for 30 minutes, the straddle under its decay-only line (IV being sold): sell the ATM put, the time stop caps the stay. Mirror: under yesterday\'s call-writing cluster, sell the call.',
+    rule: { tree: ALL(L('oipZone', 'aboveGreen', { param: 0.05, ...PREV_DAY }), L('spotMove', 'sideways', { param: 0.15, windowMin: 30 }), L('straddle', 'belowDecay')), action: 'sellPE', mirror: true },
+    settings: { timeframe: 5, slPct: 40, targetPct: 60, timeStopMin: 90 },
+  },
   {
     id: 'dpBuyersDefend', family: 'delta', name: 'Yesterday\'s most-bought row holds',
     idea: 'Yesterday\'s bullish option flow piled up at one price row - its buyers have a position to defend there. Price dips into that row and closes back above it while today\'s option flow at the price is buying too: support defended, taken quickly with a time stop. Mirror: rejected at yesterday\'s most-sold row with selling at the price.',
