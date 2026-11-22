@@ -1133,7 +1133,12 @@ All must pass before committing.
   (`oipCeiling`, each the other's mirror), `oipDelta` (spot in a row of puts / calls written, the net CE − PE negative /
   positive by ≥ % of all the OI added); the same Profile of / Days. Its SIDE (`param2`, asked for - "add net ce-pe of oi as well" - `OI_SIDE`):
   OI Net (CE − PE), the default, CE OI alone or PE OI alone - `oiNetSteps`' `side`, read so NEGATIVE is always BULLISH (CE: calls unwound; PE: MINUS the put
-  OI, puts written); the mirror (`sided` 'oi') is the usual one on the other side (floor <-> ceiling and CE <-> PE). THE FUTURES ORDER FLOW
+  OI, puts written); the mirror (`sided` 'oi') is the usual one on the other side (floor <-> ceiling and CE <-> PE). CLUSTERS (asked for - "where bunch of bull cluster, bear clusters ... to all these signal indicators"): every
+  profile group has a cluster condition (`odpZone` / `cdpZone` / `obpZone` / `oipZone` / `fdpZone` - `zoneCondition`): the strongest GREEN (bullish) and
+  RED (bearish) run of ADJACENT rows of one sign in the profile's own data (`deltaZones` - each step's `zones`; a gap or a row of the other sign ends a
+  run, its strength its delta added up; the OI profile's bullish = negative), read as a band: price above / below it (by ≥ %), inside it, touched and
+  closed back above / below (within %), crossed above / below in the look-back; the mirror = the other colour the other way (a CDV / OBV CE / PE side:
+  the same colour the other way on the other side - `sided` 'zone'). Each candle's clusters from the minutes up to its close. THE FUTURES ORDER FLOW
   (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal backtest as well"; group
   `OrderFlow`, `FLOW_CONDITIONS`; the data `orderFlowFeatures.js`): the Order Flow page's own day of the near futures
   (`/api/order-flow/{u}/day/{date}`, `orderFlowUrl` - no prints; the Δ alone in one row a bar, with the heatmap in the Order

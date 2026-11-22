@@ -1026,6 +1026,65 @@ function levelCondition({ id, group, name, short, level, more = {}, barsOf = nul
   }
 }
 
+// A PROFILE'S CLUSTERS (asked for - "where bunch of bull cluster, bear clusters ... to all these signal indicators"): the
+// strongest GREEN (bullish) and RED (bearish) run of adjacent rows of one sign in the profile's own data (`deltaZones` - each
+// step's `zones`), read against the price like a level band: above / below it (by ≥ % of its edge), inside it, touched and
+// closed back above / below it (within %), crossed above / below it in the look-back. `read(d, k, p3, p4, p2)` - the step at
+// candle k (its `zones`). The mirror (Net / no side): the other colour the other way (above green <-> below red); a CE / PE
+// side keeps the colour, reads the other way and swaps the side (`sided` 'zone' - `mirrorLine`).
+const ZONE_DIRS = ['above', 'below', 'in', 'heldAbove', 'heldBelow', 'crossedAbove', 'crossedBelow']
+const ZONE_DIR_SWAP = { above: 'below', below: 'above', in: 'in', heldAbove: 'heldBelow', heldBelow: 'heldAbove', crossedAbove: 'crossedBelow', crossedBelow: 'crossedAbove' }
+const zoneParts = (v) => { const m = /^(.*)(Green|Red)$/.exec(v ?? ''); return m ? { dir: m[1], colour: m[2] } : null }
+const zoneDirSwap = (v) => { const z = zoneParts(v); return z ? `${ZONE_DIR_SWAP[z.dir] ?? z.dir}${z.colour}` : v }
+function zoneCondition({ id, group, name, short, read, more = {}, barsOf = null, sided = null, green = 'GREEN cluster (bullish)', red = 'RED cluster (bearish)' }) {
+  const words = { above: 'Price above the', below: 'Price below the', in: 'Price inside the', heldAbove: 'Touched the {z}, closed back above (support held)', heldBelow: 'Touched the {z}, closed back below (resistance held)', crossedAbove: 'Crossed above the', crossedBelow: 'Crossed below the' }
+  const extra = { above: OVER, below: OVER, in: {}, heldAbove: NEAR(0.05), heldBelow: NEAR(0.05), crossedAbove: { ...W, ...OVER }, crossedBelow: { ...W, ...OVER } }
+  const label = (dir, z) => (words[dir].includes('{z}') ? words[dir].replace('{z}', z) : `${words[dir]} ${z}`)
+  const options = []
+  for (const colour of ['Green', 'Red']) {
+    for (const dir of ZONE_DIRS) {
+      const other = colour === 'Green' ? 'Red' : 'Green'
+      options.push(opt(`${dir}${colour}`, label(dir, colour === 'Green' ? green : red), `${ZONE_DIR_SWAP[dir]}${other}`, { ...extra[dir], ...more }))
+    }
+  }
+  return {
+    id, group, name, ...(sided ? { sided } : {}),
+    options,
+    test: (d, i, v, w, p, p2, p3, p4) => {
+      const zp = zoneParts(v)
+      if (!zp) return false
+      const key = zp.colour === 'Green' ? 'green' : 'red'
+      const Z = (k) => (k >= 0 ? read(d, k, p3, p4, p2)?.zones?.[key] ?? null : null)
+      const bars = barsOf ? barsOf(d) : d.spot
+      if (!bars) return false
+      const c = bars.c
+      const z = Z(i)
+      switch (zp.dir) {
+        case 'above': return !!z && c[i] > z.high && c[i] - z.high >= frac(p) * z.high
+        case 'below': return !!z && c[i] < z.low && z.low - c[i] >= frac(p) * z.low
+        case 'in': return !!z && c[i] >= z.low && c[i] <= z.high
+        case 'crossedAbove': return brokeLevel(c, (k) => Z(k)?.high, i, w, true, p)
+        case 'crossedBelow': return brokeLevel(c, (k) => Z(k)?.low, i, w, false, p)
+        case 'heldAbove': case 'heldBelow': {
+          const up = zp.dir === 'heldAbove'
+          const k = inWindow(i, w, (k) => {
+            const zk = Z(k - 1)
+            return !!zk && (up ? bars.l[k] <= zk.high * (1 + p / 100) && c[k] > zk.high : bars.h[k] >= zk.low * (1 - p / 100) && c[k] < zk.low)
+          })
+          if (k < 0 || !z) return false
+          return up ? c[i] > z.high : c[i] < z.low
+        }
+        default: return false
+      }
+    },
+    show: (d, i, l) => {
+      const x = read(d, i, l?.param3, l?.param4, l?.param2)?.zones
+      const f = (z) => (z ? `${fmtP(z.low)}–${fmtP(z.high)}` : '—')
+      return `${short}: green ${f(x?.green)} · red ${f(x?.red)}`
+    },
+  }
+}
+
 // OI REPLAY'S OPTION DELTA PROFILE ON SPOT (asked for - "add this in our indicator as well", the delta profile cards): the
 // options' flow laid on the spot rows they traded at (deltaProfile.js - each strike's bar-proxy delta x its delta weight,
 // CE − PE: + = calls bought / puts sold), NET, in rows of the index's default size (PROFILE_ROWS - NIFTY 5, BANKNIFTY /
@@ -1107,6 +1166,7 @@ const DELTA_CONDITIONS = [
       return x ? `option Δ at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option Δ profile —'
     },
   },
+  zoneCondition({ id: 'odpZone', group: 'DeltaProfile', name: 'Option Δ profile: buying / selling CLUSTERS (rows stacked green / red)', short: 'option Δ clusters', read: (d, k, p3, p4) => deltaAtCandle(d, k, p3, p4), more: DELTA_PROFILE_OF, green: 'GREEN cluster (net option buying - bullish)', red: 'RED cluster (net option selling - bearish)' }),
 ]
 
 // THE SIDE a CDV / OBV profile line reads (`param2`, OI Replay's CDV / OBV card's side picker): Net (CE − PE, + = bullish
@@ -1177,6 +1237,7 @@ const CDV_CONDITIONS = [
       return x ? `option CDV (${sideOf(l?.param2).toUpperCase()}) at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option CDV profile —'
     },
   },
+  zoneCondition({ id: 'cdpZone', group: 'CdvProfile', name: 'Option CDV profile: buying / selling CLUSTERS', short: 'option CDV clusters', read: (d, k, p3, p4, p2) => deltaAtCandle(d, k, p3, p4, 'cdv', sideOf(p2)), more: SIDED, sided: 'zone', green: 'GREEN cluster (CDV buying)', red: 'RED cluster (CDV selling)' }),
 ]
 const OBV_CONDITIONS = [
   obvLevel('buy', 'Option OBV profile: most bought row (bullish OBV)', 'most bought', 'obpSell'),
@@ -1190,6 +1251,7 @@ const OBV_CONDITIONS = [
       return x ? `option OBV at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'option OBV profile —'
     },
   },
+  zoneCondition({ id: 'obpZone', group: 'ObvProfile', name: 'Option OBV profile: buying / selling CLUSTERS', short: 'option OBV clusters', read: (d, k, p3, p4, p2) => deltaAtCandle(d, k, p3, p4, 'obv', sideOf(p2)), more: SIDED, sided: 'zone', green: 'GREEN cluster (OBV buying)', red: 'RED cluster (OBV selling)' }),
 ]
 
 // THE FUTURES DELTA PROFILE (asked for - "future delta profile as well"; OI Replay's "Futures delta profile" card): the near
@@ -1238,6 +1300,7 @@ const FUT_PROFILE_CONDITIONS = [
       return x && c > 0 ? `futures Δ at price ${fmtL(x.rowDelta(c))} · net ${fmtL(x.delta)}` : 'futures Δ profile —'
     },
   },
+  zoneCondition({ id: 'fdpZone', group: 'FuturesProfile', name: 'Futures Δ profile: buying / selling CLUSTERS (read on the futures price)', short: 'futures Δ clusters', read: (d, k, p3, p4) => futuresAtCandle(d, k, p3, p4), more: DELTA_PROFILE_OF, barsOf: futuresBarsOf, green: 'GREEN cluster (aggressive buyers)', red: 'RED cluster (aggressive sellers)' }),
 ]
 const GROUP_OF_FUT_PROFILE = new Set(FUT_PROFILE_CONDITIONS.map((c) => c.id))
 
@@ -1300,6 +1363,7 @@ const OI_PROFILE_CONDITIONS = [
       return x ? `OI ${['CE−PE', 'CE', '−PE'][SIDES.indexOf(sideOf(l?.param2))]} at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'OI (CE − PE) profile —'
     },
   },
+  zoneCondition({ id: 'oipZone', group: 'OiProfile', name: 'OI profile: writing CLUSTERS (rows stacked bullish / bearish)', short: 'OI clusters', read: (d, k, p3, p4, p2) => oiNetAtCandle(d, k, p3, p4, sideOf(p2)), more: OI_SIDED, sided: 'oi', green: 'BULLISH cluster (puts written / calls unwound)', red: 'BEARISH cluster (calls written / puts unwound)' }),
 ]
 /** How many sessions BEFORE the day a line of the futures delta profile reads (0 = the day alone). */
 export const futuresPastOfLine = (l) => (GROUP_OF_FUT_PROFILE.has(l?.id) ? pastSessionsNeeded(deltaDaysOf(l.param3), deltaOfOf(l.param4)) : 0)
@@ -2583,6 +2647,7 @@ function mirrorLine(l) {
   // A CE / PE side of the CDV / OBV profile: the same row of the other side - a level read the other way (above the CE's
   // most bought <-> below the PE's most bought), the flow at the price kept (CE buying <-> PE buying).
   const sided = CONDITION[l.id]?.sided
+  if (sided === 'zone' && (l.param2 === 1 || l.param2 === 2)) return { ...l, value: zoneDirSwap(l.value), param2: 3 - l.param2 }
   if (sided === 'oi') {
     const out = { ...l, id: CONDITION[l.id]?.mirror ?? l.id, value: o?.opposite ?? l.value }
     if (l.param2 === 1 || l.param2 === 2) out.param2 = 3 - l.param2

@@ -175,7 +175,7 @@ export function optionDeltaSteps(past, minutes, { rowSize = 5, metric = 'cdv', s
   const net = side === 'ce' ? (r) => r[c] : side === 'pe' ? (r) => r[q] : (r) => r[c] - r[q]
   const summary = (t) => {
     const p = acc.profile(side, metric)
-    return { t, levels: deltaProfileLevels(p), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
+    return { t, levels: deltaProfileLevels(p), zones: deltaZones(p.rows, rowSize), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
   }
   const history = new Map()
   for (const [price, r] of acc.rows) history.set(price, [[-Infinity, net(r)]])
@@ -294,7 +294,7 @@ export function futuresDeltaSteps(past, bars, { rowSize = 5 } = {}) {
   }
   const summary = (t) => {
     const p = finishDeltaProfile([...rows.values()].map((r) => ({ price: r.price, buy: r.buy, sell: r.sell, volume: r.buy + r.sell, delta: r.buy - r.sell })), rowSize)
-    return { t, levels: deltaProfileLevels(p), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
+    return { t, levels: deltaProfileLevels(p), zones: deltaZones(p.rows, rowSize), delta: p.delta, volume: p.volume, maxAbsDelta: p.maxAbsDelta }
   }
   for (const s of past ?? []) for (const b of s ?? []) add(b)
   const history = new Map()
@@ -351,7 +351,8 @@ export function oiNetSteps(past, minutes, { rowSize = 5, side = 'net' } = {}) {
       if (d > 0 && (!ceiling || d > net(ceiling.ce, ceiling.pe))) ceiling = r
     }
     const mid = (r) => (r ? Math.round((r.price + rowSize / 2) * 100) / 100 : null)
-    return { t, levels: { floor: mid(floor), ceiling: mid(ceiling) }, delta: net(ce, pe), volume: gross, maxAbsDelta }
+    const zones = deltaZones([...rows.values()].map((r) => ({ price: r.price, delta: net(r.ce, r.pe) })), rowSize, { bullishNegative: true })
+    return { t, levels: { floor: mid(floor), ceiling: mid(ceiling) }, zones, delta: net(ce, pe), volume: gross, maxAbsDelta }
   }
   for (const s of past ?? []) for (const m of s ?? []) add(m)
   const history = new Map()
@@ -389,6 +390,35 @@ export function deltaProfileLevels(profile) {
     poc: mid(profile.poc), vah: Math.round((profile.vah + row) * 100) / 100, val: profile.val,
     hvn: vz.topHvn ?? null, lvn: vz.thinLvn ?? null, buy: buy ? mid(buy.price) : null, sell: sell ? mid(sell.price) : null,
   }
+}
+
+/**
+ * The CLUSTERS of a delta profile (asked for - "where bunch of bull cluster, bear clusters"): runs of ADJACENT rows (each one
+ * row size above the last) whose delta has the same sign, each run's strength its delta added up. `green` = the strongest
+ * bullish run, `red` = the strongest bearish one - bullish being POSITIVE delta (buying), or NEGATIVE when `bullishNegative`
+ * (the OI profile: puts written / calls unwound). Each { low (the bottom row's price), high (the top row's top), sum, rows }
+ * or null. `rows` - [{ price, delta }] in any order.
+ */
+export function deltaZones(rows, rowSize, { bullishNegative = false } = {}) {
+  const list = (rows ?? []).filter((r) => Number.isFinite(r.price) && Number.isFinite(r.delta)).sort((a, b) => a.price - b.price)
+  let green = null, red = null, run = null
+  const close = () => {
+    if (!run) return
+    const bullish = bullishNegative ? run.sum < 0 : run.sum > 0
+    const z = { low: run.low, high: Math.round((run.top + rowSize) * 100) / 100, sum: run.sum, rows: run.rows }
+    if (bullish) { if (!green || Math.abs(z.sum) > Math.abs(green.sum)) green = z }
+    else if (!red || Math.abs(z.sum) > Math.abs(red.sum)) red = z
+    run = null
+  }
+  for (const r of list) {
+    const sign = Math.sign(r.delta)
+    if (!sign) { close(); continue }
+    if (run && sign === run.sign && Math.abs(r.price - run.top - rowSize) < 1e-6) { run.top = r.price; run.sum += r.delta; run.rows++; continue }
+    close()
+    run = { sign, low: r.price, top: r.price, sum: r.delta, rows: 1 }
+  }
+  close()
+  return { green, red }
 }
 
 /** The row holding `price` in a profile (its rows' bottoms, `rowSize` apart), or null - what the crosshair reads. */

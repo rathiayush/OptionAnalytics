@@ -111,9 +111,9 @@ test('the days before: fixed all day; with none loaded those lines never hold; t
 })
 
 test('the lines: numbers held to their range, the mirror, the words, the days a rule needs', () => {
-  assert.deepEqual(RULE_CONDITIONS.filter((c) => c.group === 'DeltaProfile').map((c) => c.id), ['odpPoc', 'odpVah', 'odpVal', 'odpHvn', 'odpLvn', 'odpBuy', 'odpSell', 'odpDelta'])
+  assert.deepEqual(RULE_CONDITIONS.filter((c) => c.group === 'DeltaProfile').map((c) => c.id), ['odpPoc', 'odpVah', 'odpVal', 'odpHvn', 'odpLvn', 'odpBuy', 'odpSell', 'odpDelta', 'odpZone'])
   for (const c of RULE_CONDITIONS.filter((x) => x.group === 'DeltaProfile')) {
-    for (const o of c.options) assert.ok(o.param && o.param3 && o.param4?.choices, `${c.id}.${o.value}`)
+    for (const o of c.options) assert.ok((o.param || /^in(Green|Red)$/.test(o.value)) && o.param3 && o.param4?.choices, `${c.id}.${o.value}`)
   }
   const line = cleanLine({ id: 'odpVah', value: 'crossedAbove', param3: 9, param4: 7, windowMin: 15 })
   assert.deepEqual([line.param3, line.param4, line.windowMin], [DELTA_DAYS_MAX, 1, 15])

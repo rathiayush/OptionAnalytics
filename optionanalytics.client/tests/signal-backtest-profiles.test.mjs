@@ -179,3 +179,42 @@ test('the OI profile side: Net (CE − PE) / CE OI / PE OI - negative always bul
   assert.deepEqual(m({ id: 'oipFloor', value: 'above', param2: 1 }), [['oipCeiling', 'below', 2]])
   assert.deepEqual(m({ id: 'oipDelta', value: 'putsAt', param2: 2 }), [['oipDelta', 'callsAt', 1]])
 })
+
+test('profile clusters: the strongest green / red run of adjacent same-sign rows; the conditions read them; the mirror', async () => {
+  const { deltaZones } = await import('../src/deltaProfile.js')
+  const rows = [
+    { price: 100, delta: 5 }, { price: 105, delta: 7 }, { price: 110, delta: 4 },   // green 100 - 115, 16
+    { price: 115, delta: -2 },                                                        // red 115 - 120, -2
+    { price: 125, delta: 30 },                                                        // a gap before it: its own run - green 30
+    { price: 130, delta: -9 }, { price: 135, delta: -8 },                             // red 130 - 140, -17
+  ]
+  const z = deltaZones(rows, 5)
+  assert.deepEqual([z.green.low, z.green.high, z.green.sum, z.green.rows], [125, 130, 30, 1])
+  assert.deepEqual([z.red.low, z.red.high, z.red.sum, z.red.rows], [130, 140, -17, 2])
+  const oi = deltaZones(rows, 5, { bullishNegative: true })
+  assert.deepEqual([oi.green.low, oi.green.high], [130, 140])                       // OI: negative = bullish
+  assert.deepEqual([oi.red.low, oi.red.high], [125, 130])
+  assert.deepEqual(deltaZones([], 5), { green: null, red: null })
+
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  const read = optionDeltaSteps([], d.odm, { rowSize: 5 })
+  let checked = 0
+  for (let i = 30; i < d.n; i += 20) {
+    const zones = optionDeltaAt(read, d.t[i])?.zones
+    const g = zones?.green, c = d.spot.c[i]
+    const t = (v) => cond('odpZone').test(d, i, v, 5, 0, undefined, 1, 0)
+    assert.equal(t('aboveGreen'), !!g && c > g.high, `candle ${i}`)
+    assert.equal(t('belowGreen'), !!g && c < g.low)
+    assert.equal(t('inGreen'), !!g && c >= g.low && c <= g.high)
+    if (g) checked++
+  }
+  assert.ok(checked > 0)
+  // Every profile group has its clusters.
+  for (const id of ['odpZone', 'cdpZone', 'obpZone', 'oipZone', 'fdpZone']) assert.ok(cond(id), id)
+  assert.equal(cond('fdpZone').test(d, 200, 'aboveGreen', 5, 0, undefined, 1, 0), false)   // no futures footprint: never
+  const m = (l) => mirrorLines([cleanLine(l)]).map((x) => [x.id, x.value, x.param2])
+  assert.deepEqual(m({ id: 'odpZone', value: 'aboveGreen' }), [['odpZone', 'belowRed', undefined]])
+  assert.deepEqual(m({ id: 'cdpZone', value: 'heldAboveGreen', param2: 0 }), [['cdpZone', 'heldBelowRed', 0]])
+  assert.deepEqual(m({ id: 'cdpZone', value: 'heldAboveGreen', param2: 1 }), [['cdpZone', 'heldBelowGreen', 2]])
+  assert.deepEqual(m({ id: 'oipZone', value: 'crossedAboveRed', param2: 2 }), [['oipZone', 'crossedBelowGreen', 1]])
+})
