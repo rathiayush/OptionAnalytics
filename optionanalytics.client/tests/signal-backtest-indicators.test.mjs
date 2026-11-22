@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import {
   RULE_CONDITIONS, cleanLine, emaCrossHolds, emaOver, emaPriceHolds, emaSeries, lineText, mirrorIsSame, mirrorLines, pivotLevels, premiumCandles, premiumEma, premiumRsi, prepareDay, previousDayBars,
-  ruleSignals, rsiOver, rsiSeries, simulateDay, timeframeView,
+  ruleSignals, rsiOver, rsiSeries, rsiDivergenceEvents, simulateDay, timeframeView,
 } from '../src/signalBacktest.js'
 import { backtestReport, dayOutcome, engineSettings } from '../src/signalBacktestJob.js'
 
@@ -422,4 +422,17 @@ test('EMA slope - a flat EMA (a choppy market) skipped: the EMA moved ≥ the % 
   assert.ok(holds(d, 'emaPrice', 'crossedAbove', up))
   const rise = ((ema[up] - ema[up - 5]) / ema[up - 5]) * 100
   assert.ok(!holds(d, 'emaPrice', 'crossedAbove', up, { p4: Math.max(0.01, rise + 0.01) }))
+})
+
+test('RSI divergence: bullish = a lower low in price with a higher low in RSI, known only once confirmed - bearish the mirror', () => {
+  // Down, a first low, a bounce, then a slower fall to a LOWER low (price) with a weaker push (RSI higher), then up.
+  const path = (i) => (i < 20 ? 25400 - i * 10 : i < 28 ? 25200 + (i - 20) * 12 : i < 50 ? 25296 - (i - 28) * 5 : 25186 + (i - 50) * 6)
+  const d = fakeDay({ n: 120, spot: (i) => { const c = path(i); return { o: c, h: c + 2, l: c - 2, c } } })
+  const bull = rsiDivergenceEvents(d, true, 3, 14, 1)
+  const at = bull.findIndex((v) => v === 1)
+  assert.ok(at > 50, `confirmed at ${at}`)                                  // only after the second low and its 3 candles
+  assert.ok(holds(d, 'rsiDiv', 'bullish', at, { w: 1 }) && !holds(d, 'rsiDiv', 'bullish', at - 1, { w: 1 }))
+  assert.ok(holds(d, 'rsiDiv', 'bullish', at + 4, { w: 5 }) && !holds(d, 'rsiDiv', 'bullish', at + 6, { w: 5 }))
+  assert.ok(!holds(d, 'rsiDiv', 'bearish', at, { w: 120 }))
+  assert.equal(option('rsiDiv', 'bullish').opposite, 'bearish')
 })
