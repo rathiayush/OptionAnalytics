@@ -297,3 +297,92 @@ export function dayRead({ opening, options = [], oi = [], futures = [], spot = [
   const verdict = score >= 4 ? 'Strong bullish' : score >= 2 ? 'Bullish' : score <= -4 ? 'Strong bearish' : score <= -2 ? 'Bearish' : 'Mixed'
   return { open, price, basis, zones, lean, openRule, crossings, flows, score, verdict, reasons, liveSqueeze: live ?? null }
 }
+
+/**
+ * THE DAY BIAS FROM THE OPEN (asked for - "from day starting, day bias"): fixed for the day once its first minute is in,
+ * from what was known then - the previous session(s)' zones (`opening`), their last session's own flows and the open:
+ *   the zones' lean at the previous close (floors / trapped shorts nearer = up), ±1;
+ *   the zones re-read at the OPEN price (a gap can put price through a zone), ±1;
+ *   a gap THROUGH a zone: opened above a ceiling the close was under (its sellers trapped at the open) +1, below a floor
+ *   the close was over (its buyers trapped) −1;
+ *   the last session's OI (puts written ahead = +1, calls = −1) and CDV (net buying +1 / selling −1).
+ * `open` null = before the open: the same read without the open's parts ("pre-open"). { bias, score, reasons, open }.
+ */
+export function openingBias({ opening, prevOptions = [], open = null, rowSize = 5 }) {
+  const reasons = []
+  let score = 0
+  const close = opening?.close
+  const zones = opening?.zones ?? []
+  if (Math.abs(opening?.lean ?? 0) >= 0.25) {
+    score += opening.lean > 0 ? 1 : -1
+    reasons.push(opening.lean > 0 ? 'At the previous close floors / trapped shorts were nearer than ceilings' : 'At the previous close ceilings / trapped longs were nearer than floors')
+  }
+  if (open > 0 && close > 0) {
+    const atOpen = readZones(zones.map(({ kind, distance, ...z }) => z), open) // eslint-disable-line no-unused-vars
+    if (Math.abs(atOpen.lean) >= 0.25) {
+      score += atOpen.lean > 0 ? 1 : -1
+      reasons.push(`At the open (${Math.round(open)}) the zones around price lean ${atOpen.lean > 0 ? 'up' : 'down'}`)
+    }
+    const upThrough = zones.find((z) => !z.bullish && close <= z.high && open > z.high)
+    const downThrough = zones.find((z) => z.bullish && close >= z.low && open < z.low)
+    if (upThrough) { score += 1; reasons.push(`Opened above the sellers' zone ${upThrough.low}–${upThrough.high}: they are trapped from the open`) }
+    if (downThrough) { score -= 1; reasons.push(`Opened below the buyers' zone ${downThrough.low}–${downThrough.high}: they are trapped from the open`) }
+  }
+  const last = prevOptions[prevOptions.length - 1]
+  if (last) {
+    const oiNet = (last.oi ?? []).reduce((s, m) => s + (m.ce ?? 0) - (m.pe ?? 0), 0)
+    if (oiNet) { score += oiNet < 0 ? 1 : -1; reasons.push(oiNet < 0 ? 'Last session: puts written ahead of calls (writers bullish)' : 'Last session: calls written ahead of puts (writers bearish)') }
+    const cdv = optionDeltaProfileOf([last.items ?? []], { rowSize, metric: 'cdv' }).totals.net
+    if (cdv) { score += cdv > 0 ? 1 : -1; reasons.push(cdv > 0 ? 'Last session: option CDV net buying' : 'Last session: option CDV net selling') }
+  }
+  const bias = score >= 3 ? 'Strong bullish' : score >= 1 ? 'Bullish' : score <= -3 ? 'Strong bearish' : score <= -1 ? 'Bearish' : 'Neutral'
+  return { bias, score, reasons, open: open > 0 ? open : null }
+}
+
+/** The zones read against price split into SUPPORT below it (floors, trapped shorts) and RESISTANCE above it (ceilings,
+ *  trapped longs), nearest first; a zone price is inside goes to the side its own cluster defends. */
+export function supportResistance(zones) {
+  const support = [], resistance = []
+  for (const z of zones ?? []) {
+    if (z.kind === 'support' || z.kind === 'trappedShorts' || z.kind === 'insideBull') support.push(z)
+    else if (z.kind === 'resistance' || z.kind === 'trappedLongs' || z.kind === 'insideBear') resistance.push(z)
+  }
+  const near = (a, b) => Math.abs(a.distance) - Math.abs(b.distance)
+  return { support: support.sort(near), resistance: resistance.sort(near) }
+}
+
+/** The day re-read every `stepMin` minutes (asked for - "continuously analyse these profiles and update the zones"): at
+ *  each step only the minutes up to it, the changes from the step before - a NEW zone of the day's own (no same-side zone
+ *  of the step before overlapped it), a zone that CHANGED ROLE against price, the verdict CHANGING. [{ t, type, ... }],
+ *  oldest first. The steps end at the last completed step of the data given (nothing after it is read). */
+export function dayTimeline({ opening, options = [], oi = [], futures = [], spot = [], rowSize = 5, stepMin = 5 }) {
+  const bars = spot.filter((b) => b?.close > 0)
+  if (!bars.length) return []
+  const first = minuteOf(msOf(bars[0].time)), last = minuteOf(msOf(bars[bars.length - 1].time))
+  const events = []
+  let before = null
+  const keyOf = (z) => `${z.from}|${z.bullish}|${z.low}|${z.high}`
+  for (let t = first + (stepMin - 1) * MIN; t <= last; t += stepMin * MIN) {
+    const upTo = (x) => minuteOf(msOf(x)) <= t
+    const read = dayRead({
+      opening, rowSize,
+      options: options.filter((m) => m.t <= t), oi: oi.filter((m) => m.t <= t),
+      futures: futures.filter((b) => upTo(b.time)), spot: bars.filter((b) => upTo(b.time)),
+    })
+    if (!read) continue
+    if (before) {
+      if (read.verdict !== before.verdict) events.push({ t, type: 'verdict', from: before.verdict, to: read.verdict })
+      const oldToday = before.zones.filter((z) => z.from === 'today')
+      for (const z of read.zones.filter((x) => x.from === 'today' && x.score >= 0.8)) {
+        if (!oldToday.some((o) => o.bullish === z.bullish && o.low <= z.high && z.low <= o.high)) events.push({ t, type: 'newZone', zone: z })
+      }
+      const was = new Map(before.zones.filter((z) => z.from === 'prev').map((z) => [keyOf(z), z.kind]))
+      for (const z of read.zones.filter((x) => x.from === 'prev')) {
+        const k = was.get(keyOf(z))
+        if (k && k !== z.kind) events.push({ t, type: 'roleChange', zone: z, fromKind: k })
+      }
+    }
+    before = read
+  }
+  return events
+}

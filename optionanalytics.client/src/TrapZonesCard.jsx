@@ -7,7 +7,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, dayRead, openingRead } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -89,6 +89,35 @@ const EVENT_TEXT = {
   longLiquidation: 'LONG LIQUIDATION: closed below the previous buyers\' zone',
   failedUp: 'Back inside the sellers\' zone - the squeeze stalled',
   failedDown: 'Back inside the buyers\' zone - the liquidation stalled',
+  newZone: 'New zone of the day',
+  roleChange: 'Zone changed role',
+  verdict: 'Bias now',
+}
+const STEP_MIN = 5
+
+const biasColor = (score) => (score >= 1 ? '#52c41a' : score <= -1 ? '#ff4d4f' : '#d9d9d9')
+
+/** One side's zones (support / resistance), nearest first. */
+function SideList({ title, zones, color }) {
+  return (
+    <Space direction="vertical" size={2} style={{ minWidth: 240, flex: 1 }}>
+      <Text strong style={{ fontSize: 12, color }}>{title}</Text>
+      {zones.length ? zones.slice(0, 4).map((z, i) => (
+        <Space key={`${z.from}-${z.low}-${z.high}-${i}`} size={4} wrap>
+          <Text style={{ fontSize: 12, minWidth: 110, display: 'inline-block' }}>{px(z.low)} – {px(z.high)}</Text>
+          <KindTag kind={z.kind} />
+          <Text type="secondary" style={{ fontSize: 11 }}>{z.distance === 0 ? 'at price' : pct(z.distance)} · {z.from === 'today' ? 'today' : 'before'} · {z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}</Text>
+        </Space>
+      )) : <Text type="secondary" style={{ fontSize: 12 }}>none near</Text>}
+    </Space>
+  )
+}
+
+const eventText = (e) => {
+  if (e.type === 'verdict') return `Bias now ${e.to} (was ${e.from})`
+  if (e.type === 'newZone') return `New ${ZONE_KINDS[e.zone.kind]?.label.split(' - ')[0].toLowerCase() ?? 'zone'} of the day ${px(e.zone.low)}–${px(e.zone.high)} (${e.zone.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')})`
+  if (e.type === 'roleChange') return `${px(e.zone.low)}–${px(e.zone.high)}: ${ZONE_KINDS[e.fromKind]?.label.split(' - ')[0]} → ${ZONE_KINDS[e.zone.kind]?.label}`
+  return `${EVENT_TEXT[e.type]}${e.zone ? ` ${px(e.zone.low)}–${px(e.zone.high)}` : ''}`
 }
 
 /**
@@ -111,15 +140,28 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const todayFut = useMemo(() => barsUpTo(futDay.bars ?? NONE, asOfMs), [futDay.bars, asOfMs])
   const opening = useMemo(() => openingRead({ prevOptions: pastOpt.sessions, prevFutures: pastFut.sessions, rowSize }), [pastOpt.sessions, pastFut.sessions, rowSize])
   const day = useMemo(() => dayRead({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize }), [opening, todayOptions, todayOi, todayFut, spotMs, rowSize])
+  // The day bias from the open - fixed once the first minute is in (before it: the pre-open read).
+  const dayOpen = spotMs.length ? (spotMs[0].open > 0 ? spotMs[0].open : spotMs[0].close) : null
+  const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
+  const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
+  // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
+  // would otherwise redo it all), from the minutes up to each step.
+  const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
+  const timelineKey = `${underlying}|${date}|${lastStep}|${opening.zones?.length}|${opening.close}|${futDay.bars?.length ? 1 : 0}`
+  const zoneEvents = useMemo(
+    () => dayTimeline({ opening, options: todayOptions, oi: todayOi, futures: todayFut, spot: spotMs, rowSize, stepMin: STEP_MIN }),
+    [timelineKey], // eslint-disable-line react-hooks/exhaustive-deps
+  )
 
   const events = useMemo(() => {
     if (!day) return []
     const list = [
       ...day.openRule.events.map((e) => ({ t: e.t, type: e.state ?? 'off' })),
       ...day.crossings.map((e) => ({ t: e.t, type: e.type, zone: e.zone })),
+      ...zoneEvents,
     ]
-    return list.sort((a, b) => b.t - a.t).slice(0, 10)
-  }, [day])
+    return list.sort((a, b) => b.t - a.t).slice(0, 14)
+  }, [day, zoneEvents])
 
   const verdictType = !day ? 'info' : day.score >= 2 ? 'success' : day.score <= -2 ? 'error' : 'info'
   const loadingPast = pastOpt.loading || pastFut.loading
@@ -135,6 +177,15 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         {futDay.error && <Tooltip title={futDay.error}><Tag style={{ margin: 0 }}>no futures footprint today</Tag></Tooltip>}
         {isLive && <Tag color="green" style={{ margin: 0 }}>live</Tag>}
       </Space>
+
+      <div style={{ border: `1px solid ${biasColor(bias.score)}`, borderRadius: 6, padding: '6px 10px' }}>
+        <Text style={{ fontSize: 13 }}>
+          <b>Day bias {bias.open ? `from the open (${px(bias.open)})` : '(pre-open)'}:</b>{' '}
+          <Text strong style={{ fontSize: 13, color: biasColor(bias.score) }}>{bias.bias}</Text>
+          <Text type="secondary" style={{ fontSize: 11 }}> · score {bias.score > 0 ? '+' : ''}{bias.score} · fixed for the day</Text>
+        </Text>
+        {bias.reasons.length > 0 && <ul style={{ margin: '2px 0 0', paddingLeft: 18 }}>{bias.reasons.map((r) => <li key={r} style={{ fontSize: 12 }}>{r}</li>)}</ul>}
+      </div>
 
       {day ? (
         <Alert
@@ -161,6 +212,11 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         </Text>
       )}
 
+      <Space wrap align="start" size={[16, 8]} style={{ width: '100%' }}>
+        <SideList title="Support below (floors / trapped shorts)" zones={sides.support} color="#52c41a" />
+        <SideList title="Resistance above (ceilings / trapped longs)" zones={sides.resistance} color="#ff4d4f" />
+      </Space>
+
       <ZoneLadder zones={day ? day.zones : (opening.zones ?? [])} price={day?.price ?? opening.close} open={day?.open} prevClose={opening.close} />
       <ZoneTable zones={day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))} />
 
@@ -169,7 +225,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           <Text type="secondary" style={{ fontSize: 12 }}>Through the day (newest first)</Text>
           {events.map((e, i) => (
             <Text key={`${e.t}-${e.type}-${i}`} style={{ fontSize: 12 }}>
-              {hhmm(e.t)} · {EVENT_TEXT[e.type]}{e.zone ? ` ${px(e.zone.low)}–${px(e.zone.high)}` : ''}
+              {hhmm(e.t)} · {eventText(e)}
             </Text>
           ))}
         </Space>
@@ -189,7 +245,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           open) with price above the open = the writers defend a floor under a rising market - a trend-day-up setup; calls
           written above the open with price below it = trend-day-down; it counts once it holds 3 minutes. The verdict adds the
           open rule (±2), today&apos;s four flows (±1 each) and a squeeze still standing (±1). Futures zones are moved to spot by
-          the basis. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
+          the basis. DAY BIAS: fixed once the day's first minute is in, from what was known then - the previous zones' lean at the close
+          and at the open, a gap through a zone (its side trapped from the open), the last session's OI and CDV. Through the day
+          the profiles are re-read every 5 minutes: a new zone of the day, a previous zone changing role and the bias changing are
+          listed under &quot;Through the day&quot;. Only the minutes up to the clock count. A read - it feeds no strategy or alert.
         </Text>
       </FoldText>
     </Space>

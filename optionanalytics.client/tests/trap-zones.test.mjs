@@ -75,3 +75,30 @@ test('opening read from the session before and the day read up to the clock (no 
   assert.equal(cut.price, spot[20].close)
   assert.deepEqual(cut.crossings.filter((c) => c.t > spot[20].time), [])
 })
+
+test('day bias from the open, support / resistance split, the day re-read every 5 minutes with no look-ahead', async () => {
+  const { openingBias, supportResistance, dayTimeline } = await import('../src/trapZones.js')
+  const prevSpot = spotDay(30, (k) => 24900 + k * 5)
+  const prevOi = prevSpot.map((b, k) => ({ t: b.time, low: b.low, high: b.high, ce: k > 20 ? 300 : 5, pe: k < 8 ? 300 : 5 }))
+  const prev = { date: '2026-11-13', items: [], oi: prevOi, candles: prevSpot }
+  const opening = openingRead({ prevOptions: [prev], prevFutures: [], rowSize: 5 })
+  const sellers = opening.zones.find((z) => !z.bullish)
+  // Opened above the sellers' zone the close was inside / under: they are trapped from the open (+1).
+  const gapUp = openingBias({ opening, prevOptions: [prev], open: sellers.high + 30 })
+  assert.ok(gapUp.reasons.some((r) => /trapped from the open/.test(r)))
+  const pre = openingBias({ opening, prevOptions: [prev], open: null })
+  assert.equal(pre.open, null)
+  assert.ok(gapUp.score > pre.score)
+  const { support, resistance } = supportResistance(readZones(opening.zones, opening.close).zones)
+  assert.ok(support.every((z) => ['support', 'trappedShorts', 'insideBull'].includes(z.kind)))
+  assert.ok(resistance.every((z) => ['resistance', 'trappedLongs', 'insideBear'].includes(z.kind)))
+  // The day: puts written under the price early, then a rise through the sellers' zone.
+  const spot = spotDay(60, (k) => sellers.low - 20 + k * 2)
+  const oi = spot.map((b, k) => ({ t: b.time, low: b.low - 20, high: b.low - 10, ce: 5, pe: k < 30 ? 300 : 5 }))
+  const whole = dayTimeline({ opening, oi, spot, rowSize: 5 })
+  assert.ok(whole.length > 0)
+  assert.ok(whole.some((e) => e.type === 'newZone' || e.type === 'roleChange' || e.type === 'verdict'))
+  // A cut at minute 34 = the whole day's events up to its last full step, nothing later.
+  const cut = dayTimeline({ opening, oi: oi.filter((m) => m.t <= spot[34].time), spot: spot.slice(0, 35), rowSize: 5 })
+  assert.deepEqual(cut, whole.filter((e) => e.t <= spot[34].time))
+})
