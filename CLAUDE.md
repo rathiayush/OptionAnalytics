@@ -698,7 +698,13 @@ All must pass before committing.
   up, the mirror down, a state counting once it holds 3 minutes; its changes listed), the previous zones' CROSSINGS (`zoneCrossings`
   - a ceiling closed above = short squeeze, a floor closed below = long liquidation, back inside = stalled) and a VERDICT (open rule
   ±2, the day's four flows ±1 each, a squeeze still standing ±1). A ladder (zones near price, before / today columns, price / open /
-  previous close lines), a table and the day's events. Only the minutes up to the clock count (`tests/trap-zones.test.mjs`). A read -
+  previous close lines), a table and the day's events. DAY BIAS FROM THE OPEN (asked for - "from day starting, day bias ... trap zones,
+  support zones ... continuously analyse these profiles and update zones"; `openingBias`): fixed once the day's first minute is in ("pre-open"
+  before it) - the previous zones' lean at the close and at the open (±1 each), a gap THROUGH a zone (its side trapped from the open, ±1),
+  the last session's OI net and CDV net (±1 each); SUPPORT below / RESISTANCE above (`supportResistance` - floors + trapped shorts /
+  ceilings + trapped longs, nearest first); THE DAY RE-READ EVERY 5 MINUTES (`dayTimeline` - each step from the minutes up to it: a NEW
+  zone of the day, a previous zone CHANGING ROLE, the verdict CHANGING; worked out again only when a step completes). Only the minutes up
+  to the clock count (`tests/trap-zones.test.mjs`). A read -
   it feeds no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
