@@ -107,7 +107,7 @@ export async function loadBacktestDay(underlying, date, { signal, timeoutMs = 24
     if (day.ok) day.dhanCalls = dhanCalls
     if (!day.ok) return { ok: false, date, reason: day.reason, final: true, dhanCalls }
     // Its option flow kept for the next day's walk back (the option delta profile's days before) - asked of no one again.
-    rememberDay(optionDayKey(underlying, seriesFlag(underlying), date), { date, items: day.odm, candles: dayCandles(day) })
+    rememberDay(optionDayKey(underlying, seriesFlag(underlying), date), { date, items: day.odm, candles: dayCandles(day), oi: day.oim })
     const past = await attachDeltaPast(day, underlying, deltaDays, { fetch: get })
     if (!past.ok) return { ok: false, date, reason: past.reason, retry: true, dhanCalls }
     const flow = await attachOrderFlow(day, underlying, orderFlow, { fetch: get, signal: timeout.signal, futuresPast })
@@ -138,6 +138,7 @@ export async function attachDeltaPast(day, underlying, count, { fetch: fetchImpl
   const found = await walkPastSessions(day.date, count, (date) => cachedDay(optionDayKey(underlying, flag, date), () => loadOptionDay(underlying, date, flag, fetchImpl)))
   if (found.error) return { ok: false, reason: `option Δ profile of the days before - ${found.error.date}: ${found.error.message}` }
   day.odmPast = found.sessions.map((x) => x.items)
+  day.oimPast = found.sessions.map((x) => x.oi ?? [])
   day.odmPastWanted = count
   return { ok: true }
 }

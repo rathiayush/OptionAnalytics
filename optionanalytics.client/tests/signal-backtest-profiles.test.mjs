@@ -93,3 +93,30 @@ test('a rule with the futures delta profile asks the order flow by price and the
   assert.equal(d.fdm.length, 2)                                                                 // the minute at the clock not completed
   assert.equal(d.fdm[0].levels[0].buy, 1)                                                        // in lots
 })
+
+test('the OI (CE − PE) profile minute by minute = oiProfileOf of the minutes up to the clock; puts written = bullish', async () => {
+  const { oiNetSteps } = await import('../src/deltaProfile.js')
+  const { oiProfileOf } = await import('../src/oiProfile.js')
+  const { deltaDaysNeeded } = await import('../src/signalBacktest.js')
+  // Spot moving through a few rows; calls written up top, puts written low.
+  const T = Date.UTC(2026, 9, 5, 3, 45)
+  const minutes = Array.from({ length: 30 }, (_, k) => ({ t: T + k * MIN, low: 25000 + k * 2, high: 25003 + k * 2, ce: k > 20 ? 500 : 50, pe: k < 10 ? 800 : 40 }))
+  const read = oiNetSteps([], minutes, { rowSize: 5 })
+  for (const k of [5, 15, 29]) {
+    const at = optionDeltaAt(read, minutes[k].t)
+    const p = oiProfileOf([minutes.slice(0, k + 1)], { rowSize: 5 })
+    assert.ok(Math.abs(at.delta + p.delta) < 1e-6)                 // oiProfileOf's delta is PE − CE: the opposite sign
+    for (const r of p.rows.slice(0, 5)) assert.ok(Math.abs(at.rowDelta(r.price + 1) - (r.ce - r.pe)) < 1e-6)
+  }
+  const early = optionDeltaAt(read, minutes[9].t)
+  assert.ok(early.delta < 0 && early.levels.floor > 0 && early.levels.ceiling == null)   // puts written: a floor, bullish
+  // The conditions on a prepared day: never without the day's OI minutes; read once there.
+  const d = prepareDay(RUN, { underlying: 'NIFTY' })
+  assert.ok(Array.isArray(d.oim))
+  const i = 150
+  const net = optionDeltaAt(oiNetSteps([], d.oim.filter((m) => m.t <= d.t[i]), { rowSize: 5 }), d.t[i])?.delta ?? 0
+  assert.equal(holds(d, 'oipDelta', 'netBullish', i), net < 0)
+  assert.equal(holds(d, 'oipDelta', 'netBearish', i), net > 0)
+  assert.deepEqual(mirrorLines([cleanLine({ id: 'oipFloor', value: 'above' })]).map((l) => [l.id, l.value]), [['oipCeiling', 'below']])
+  assert.equal(deltaDaysNeeded(rule([{ id: 'oipFloor', value: 'above', param3: 2, param4: 1 }])), 2)  // the days before come with odmPast
+})

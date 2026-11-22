@@ -310,6 +310,58 @@ export function futuresDeltaSteps(past, bars, { rowSize = 5 } = {}) {
 }
 
 /**
+ * The OI (CE − PE) profile MINUTE BY MINUTE - the option writer's view the Signal backtest reads (OI Replay's "OI (CE − PE)"
+ * card side): `past` (sessions before the day, each `optionOiMinutes`) and the day's `minutes`; at each spot row the call OI
+ * added minus the put OI added (each minute's change spread over the rows spot covered - `oiProfileOf`'s rule). Each step:
+ * { t, levels: { floor (the row with the most PUTS written - the most negative, its middle), ceiling (the most CALLS
+ * written) }, delta (the net CE − PE - NEGATIVE = bullish), volume (|CE| + |PE| added), maxAbsDelta }. `optionDeltaAt` reads
+ * it at a clock (its `rowDelta(price)` = that row's CE − PE).
+ */
+export function oiNetSteps(past, minutes, { rowSize = 5 } = {}) {
+  const rows = new Map()
+  let ce = 0, pe = 0, gross = 0
+  const add = (m) => {
+    const touched = []
+    if (!(rowSize > 0) || !Number.isFinite(m.low) || !Number.isFinite(m.high)) return touched
+    const bottom = rowOf(m.low, rowSize), top = rowOf(m.high, rowSize)
+    const n = Math.max(1, Math.round((top - bottom) / rowSize) + 1)
+    for (let i = 0; i < n; i++) {
+      const price = Math.round((bottom + i * rowSize) * 100) / 100
+      let r = rows.get(price)
+      if (!r) rows.set(price, r = { price, ce: 0, pe: 0 })
+      r.ce += (m.ce ?? 0) / n
+      r.pe += (m.pe ?? 0) / n
+      touched.push(r)
+    }
+    ce += m.ce ?? 0; pe += m.pe ?? 0; gross += Math.abs(m.ce ?? 0) + Math.abs(m.pe ?? 0)
+    return touched
+  }
+  const summary = (t) => {
+    let floor = null, ceiling = null, maxAbsDelta = 0
+    for (const r of rows.values()) {
+      const d = r.ce - r.pe
+      maxAbsDelta = Math.max(maxAbsDelta, Math.abs(d))
+      if (d < 0 && (!floor || d < floor.ce - floor.pe)) floor = r
+      if (d > 0 && (!ceiling || d > ceiling.ce - ceiling.pe)) ceiling = r
+    }
+    const mid = (r) => (r ? Math.round((r.price + rowSize / 2) * 100) / 100 : null)
+    return { t, levels: { floor: mid(floor), ceiling: mid(ceiling) }, delta: ce - pe, volume: gross, maxAbsDelta }
+  }
+  for (const s of past ?? []) for (const m of s ?? []) add(m)
+  const history = new Map()
+  for (const [price, r] of rows) history.set(price, [[-Infinity, r.ce - r.pe]])
+  const steps = [summary(-Infinity)]
+  for (const m of [...(minutes ?? [])].sort((a, b) => a.t - b.t)) {
+    for (const r of add(m)) {
+      const h = history.get(r.price)
+      if (h) h.push([m.t, r.ce - r.pe]); else history.set(r.price, [[m.t, r.ce - r.pe]])
+    }
+    steps.push(summary(m.t))
+  }
+  return { steps, history, rowSize }
+}
+
+/**
  * A delta profile's LEVELS, as prices - what its cards draw and the Signal backtest reads: the volume profile's POC (the
  * middle of its row), VAH (the value area's top - the top of its top row), VAL (its bottom), ONE HVN and ONE LVN as the
  * Profiles page picks them (`volumeZones` on the profile's volume: the busiest row of the busy areas, the POC's aside -

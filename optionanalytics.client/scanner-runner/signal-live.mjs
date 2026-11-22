@@ -71,13 +71,14 @@ const withKey = (path, options = {}) => fetch(`${BASE}${path}`, { ...options, he
 async function deltaPast(u, date, count) {
   const key = `${u}|${date}`
   const kept = deltaPasts.get(key)
-  if (kept && kept.count >= count) return kept.sessions
+  if (kept && kept.count >= count) return kept
   const stand = { ok: true, date }
   const r = await attachDeltaPast(stand, u, count, { fetch: withKey })
   if (!r.ok) throw new Error(r.reason)
   for (const k of deltaPasts.keys()) if (!k.endsWith(`|${date}`)) deltaPasts.delete(k)
-  deltaPasts.set(key, { count, sessions: stand.odmPast })
-  return stand.odmPast
+  const found = { count, sessions: stand.odmPast, oi: stand.oimPast }
+  deltaPasts.set(key, found)
+  return found
 }
 
 async function round(nowMs) {
@@ -125,7 +126,7 @@ async function round(nowMs) {
         try {
           past = await deltaPast(u, date, deltaNeed.get(u))
           backoff.delete(deltaKey)
-          if (day.ok) day.odmPast = past
+          if (day.ok) { day.odmPast = past.sessions; day.oimPast = past.oi }
         } catch (err) {
           failed(deltaKey, err.message)
         }
@@ -153,7 +154,7 @@ async function round(nowMs) {
           if (!summed.ok) throw new Error(summed.reason)
           const sumDay = prepareLiveDay(run, { underlying: u, prevProfile: prev, nowMs, expiryChains: summed.chains })
           backoff.delete(sumKey)
-          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past } : {}, flow ? { flow, flowWanted: day.flowWanted, fdm: day.fdm, fdmPast: day.fdmPast } : {}))
+          if (sumDay.ok && sumDay.date === date) summedDays.set(u, Object.assign(sumDay, { sumExpiries: summed.expiries }, past ? { odmPast: past.sessions, oimPast: past.oi } : {}, flow ? { flow, flowWanted: day.flowWanted, fdm: day.fdm, fdmPast: day.fdmPast } : {}))
         } catch (err) {
           failed(sumKey, err.message)
         }
