@@ -703,7 +703,11 @@ All must pass before committing.
   before it) - the previous zones' lean at the close and at the open (±1 each), a gap THROUGH a zone (its side trapped from the open, ±1),
   the last session's OI net and CDV net (±1 each); SUPPORT below / RESISTANCE above (`supportResistance` - floors + trapped shorts /
   ceilings + trapped longs, nearest first); THE DAY RE-READ EVERY 5 MINUTES (`dayTimeline` - each step from the minutes up to it: a NEW
-  zone of the day, a previous zone CHANGING ROLE, the verdict CHANGING; worked out again only when a step completes). Only the minutes up
+  zone of the day, a previous zone CHANGING ROLE, the verdict CHANGING; worked out again only when a step completes). THE ZONES ON SPOT (asked
+  for - "these levels, can we not draw them on spot as well"; `ZonesSpotChart` in the card, `zoneBoxes`): the spot candles of the card's own timeframe
+  (1 / 3 / 5 / 15, `optionanalytics.oiReplay.trapZonesTf`) with every zone a band across the plot in its role's colour (`ZoneBoxesPrimitive`, the
+  Profiles page's), labelled with its role and profiles, the previous sessions' DASHED and the day's SOLID (each layer ticked - `...trapZonesPrev` /
+  `...trapZonesToday`), the open / previous close as price lines; the price scale also holds the zones within ~1% of price. Only the minutes up
   to the clock count (`tests/trap-zones.test.mjs`). A read -
   it feeds no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the

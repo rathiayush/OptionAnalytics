@@ -386,3 +386,22 @@ export function dayTimeline({ opening, options = [], oi = [], futures = [], spot
   }
   return events
 }
+
+const hexA = (hex, a) => {
+  const n = parseInt(hex.slice(1), 16)
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`
+}
+/** Zones (read against price) as the boxes the primitive draws. */
+export function zoneBoxes(zones, { showPrev = true, showToday = true } = {}) {
+  return (zones ?? []).filter((z) => (z.from === 'today' ? showToday : showPrev)).map((z) => {
+    const k = ZONE_KINDS[z.kind]
+    const color = k?.color ?? '#8c8c8c'
+    return {
+      low: z.low, high: z.high,
+      fill: hexA(color, Math.min(0.32, 0.1 + z.score * 0.06)), stroke: hexA(color, 0.85), dashed: z.from !== 'today',
+      label: `${k?.label.split(' - ')[0] ?? ''} ${z.from === 'today' ? '(today)' : '(before)'} · ${z.sources.map((x) => TRAP_SOURCES.find((y) => y.id === x)?.short).join('+')}`,
+      labelColor: color,
+    }
+  })
+}
+

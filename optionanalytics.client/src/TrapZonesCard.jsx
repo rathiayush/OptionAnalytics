@@ -1,13 +1,18 @@
-import { useMemo } from 'react'
-import { Alert, Segmented, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { fromChartTime, usePersistedState } from './shared.jsx'
+import { useEffect, useMemo, useRef } from 'react'
+import { Alert, Checkbox, Segmented, Space, Table, Tag, Tooltip, Typography } from 'antd'
+import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
+import { createZoomableChart } from './chartZoom.js'
+import { useChartUserControl } from './oiShared.jsx'
+import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
+import { ZoneBoxesPrimitive } from './profilePrimitives.js'
+import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, fromChartTime, istTickMarkFormatter, istTimeFormatter, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { barsUpTo, optionDeltaMinutes } from './deltaProfile.js'
 import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, dayRead, dayTimeline, openingBias, openingRead, supportResistance, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -29,6 +34,91 @@ function KindTag({ kind }) {
 }
 
 const sourceTags = (sources) => sources.map((s) => <Tag key={s} style={{ margin: 0, marginRight: 2 }}>{TRAP_SOURCES.find((x) => x.id === s)?.short ?? s}</Tag>)
+
+// THE ZONES ON SPOT (asked for - "these levels, can we not draw them on spot as well - so easy to identify"): the spot
+// candles of the card's own timeframe with every zone a band across the plot in its role's colour (floor green, trapped
+// shorts teal, ceiling red, trapped longs orange), labelled with its role and the profiles behind it - the previous
+// sessions' dashed, the day's own solid - and the open / previous close as price lines. Up to the clock only.
+const CHART_TF = [1, 3, 5, 15]
+function candlesOf(bars, minutes) {
+  if (!(minutes > 1)) return bars
+  const size = minutes * 60
+  const out = []
+  for (const b of bars) {
+    const t = Math.floor(b.time / size) * size
+    const last = out.at(-1)
+    if (last?.time === t) { last.high = Math.max(last.high, b.high); last.low = Math.min(last.low, b.low); last.close = b.close } else out.push({ time: t, open: b.open, high: b.high, low: b.low, close: b.close })
+  }
+  return out
+}
+function ZonesSpotChart({ candles, boxes, open, prevClose, dayKey, height: givenHeight = 380 }) {
+  const height = useFitHeight(givenHeight)
+  const heightRef = useRef(height)
+  const containerRef = useRef(null)
+  const chartRef = useRef(null)
+  const seriesRef = useRef(null)
+  const boxesRef = useRef(null)
+  const linesRef = useRef([])
+  const rangeRef = useRef(null)
+  useEffect(() => {
+    if (!containerRef.current) return undefined
+    const chart = createZoomableChart(containerRef.current, {
+      width: containerRef.current.clientWidth,
+      height: heightRef.current,
+      layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 12 },
+      grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+      rightPriceScale: { borderColor: BORDER_COLOR },
+      timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter, rightOffset: 4 },
+      crosshair: { mode: CrosshairMode.Normal },
+      localization: { timeFormatter: istTimeFormatter },
+    })
+    chartRef.current = chart
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+      // The scale also holds the zones nearest price (within ~1%) so a support / resistance just off the candles shows.
+      autoscaleInfoProvider: (original) => {
+        const base = original()
+        const r = rangeRef.current
+        if (!r || !base?.priceRange) return base
+        return { ...base, priceRange: { minValue: Math.min(base.priceRange.minValue, r.low), maxValue: Math.max(base.priceRange.maxValue, r.high) } }
+      },
+    })
+    seriesRef.current = series
+    const prim = new ZoneBoxesPrimitive()
+    boxesRef.current = prim
+    series.attachPrimitive(prim)
+    const resize = new ResizeObserver(() => { if (containerRef.current) chart.applyOptions({ width: containerRef.current.clientWidth }) })
+    resize.observe(containerRef.current)
+    return () => { resize.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = null; boxesRef.current = null; linesRef.current = [] }
+  }, [])
+  useChartHeight(chartRef, height)
+  const userControlRef = useChartUserControl(chartRef, dayKey)
+  useEffect(() => {
+    seriesRef.current?.setData(candles)
+    if (chartRef.current && candles.length && !userControlRef.current) chartRef.current.timeScale().fitContent()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [candles, dayKey])
+  useEffect(() => {
+    boxesRef.current?.setZones(boxes)
+    const last = candles.at(-1)?.close
+    if (Number.isFinite(last)) {
+      const near = boxes.filter((b) => Math.abs((b.low + b.high) / 2 - last) / last <= 0.01)
+      rangeRef.current = near.length ? { low: Math.min(...near.map((b) => b.low)), high: Math.max(...near.map((b) => b.high)) } : null
+    }
+    if (!userControlRef.current) chartRef.current?.priceScale('right').applyOptions({ autoScale: true })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [boxes, candles])
+  useEffect(() => {
+    const series = seriesRef.current
+    if (!series) return
+    for (const l of linesRef.current) series.removePriceLine(l)
+    linesRef.current = [
+      Number.isFinite(open) ? series.createPriceLine({ price: open, color: '#d9d9d9', title: 'Open', lineWidth: 1, lineStyle: 2, axisLabelVisible: true }) : null,
+      Number.isFinite(prevClose) ? series.createPriceLine({ price: prevClose, color: '#8c8c8c', title: 'Prev close', lineWidth: 1, lineStyle: 1, axisLabelVisible: true }) : null,
+    ].filter(Boolean)
+  }, [open, prevClose])
+  return <div ref={containerRef} style={{ width: '100%', height }} />
+}
 
 /** The zones near price as a vertical ladder: each zone a band in its kind's colour, price / open / previous close lines. */
 function ZoneLadder({ zones, price, open, prevClose, height = 280 }) {
@@ -127,6 +217,9 @@ const eventText = (e) => {
 export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying, date, expiryFlag, isLive = false }) {
   const [days, setDays] = usePersistedState('optionanalytics.oiReplay.trapZonesDays', 1)
   const dayCount = [1, 2, 3].includes(days) ? days : 1
+  const [chartTf, setChartTf] = usePersistedState('optionanalytics.oiReplay.trapZonesTf', 5)
+  const [showPrev, setShowPrev] = usePersistedState('optionanalytics.oiReplay.trapZonesPrev', true)
+  const [showToday, setShowToday] = usePersistedState('optionanalytics.oiReplay.trapZonesToday', true)
   const rowSize = PROFILE_ROWS[underlying] ?? 5
   const flag = expiryFlag || (underlying === 'BANKNIFTY' ? 'MONTH' : 'WEEK')
   const pastOpt = usePastDeltaSessions('options', underlying, date, dayCount, flag)
@@ -143,6 +236,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   // The day bias from the open - fixed once the first minute is in (before it: the pre-open read).
   const dayOpen = spotMs.length ? (spotMs[0].open > 0 ? spotMs[0].open : spotMs[0].close) : null
   const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
+  const chartCandles = useMemo(() => candlesOf((spotBars ?? []).filter((b) => clock == null || fromChartTime(b.time) * 1000 <= clock), CHART_TF.includes(chartTf) ? chartTf : 5), [spotBars, clock, chartTf])
+  const chartBoxes = useMemo(() => zoneBoxes(day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' })), { showPrev, showToday }), [day, opening.zones, showPrev, showToday])
   const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
@@ -216,6 +311,16 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <SideList title="Support below (floors / trapped shorts)" zones={sides.support} color="#52c41a" />
         <SideList title="Resistance above (ceilings / trapped longs)" zones={sides.resistance} color="#ff4d4f" />
       </Space>
+
+      <Space wrap size={[8, 4]} align="center">
+        <Text type="secondary" style={{ fontSize: 12 }}>On spot</Text>
+        <Segmented size="small" value={CHART_TF.includes(chartTf) ? chartTf : 5} onChange={setChartTf} options={CHART_TF.map((v) => ({ value: v, label: `${v}m` }))} />
+        <Checkbox checked={showPrev} onChange={(e) => setShowPrev(e.target.checked)}>Zones from before (dashed)</Checkbox>
+        <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
+      </Space>
+      {chartCandles.length ? (
+        <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} open={day?.open} prevClose={opening.close} dayKey={`${underlying}|${date}|${chartTf}`} />
+      ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
 
       <ZoneLadder zones={day ? day.zones : (opening.zones ?? [])} price={day?.price ?? opening.close} open={day?.open} prevClose={opening.close} />
       <ZoneTable zones={day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))} />

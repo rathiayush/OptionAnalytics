@@ -102,3 +102,18 @@ test('day bias from the open, support / resistance split, the day re-read every 
   const cut = dayTimeline({ opening, oi: oi.filter((m) => m.t <= spot[34].time), spot: spot.slice(0, 35), rowSize: 5 })
   assert.deepEqual(cut, whole.filter((e) => e.t <= spot[34].time))
 })
+
+test('zones drawn on spot: a box each in its role\'s colour, before dashed / today solid, each layer can be hidden', async () => {
+  const { zoneBoxes, ZONE_KINDS } = await import('../src/trapZones.js')
+  const zones = [
+    { from: 'prev', bullish: true, low: 100, high: 110, kind: 'support', score: 1.5, sources: ['oi', 'cdv'] },
+    { from: 'today', bullish: false, low: 120, high: 125, kind: 'resistance', score: 0.5, sources: ['fut'] },
+  ]
+  const boxes = zoneBoxes(zones)
+  assert.deepEqual(boxes.map((b) => [b.low, b.high, b.dashed]), [[100, 110, true], [120, 125, false]])
+  assert.match(boxes[0].label, /^Floor \(before\) · OI\+CDV$/)
+  assert.match(boxes[1].label, /^Ceiling \(today\) · Fut$/)
+  assert.equal(boxes[0].labelColor, ZONE_KINDS.support.color)
+  assert.deepEqual(zoneBoxes(zones, { showPrev: false }).map((b) => b.low), [120])
+  assert.deepEqual(zoneBoxes(zones, { showToday: false }).map((b) => b.low), [100])
+})
