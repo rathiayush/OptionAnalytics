@@ -32,7 +32,8 @@ import { sumExpiryOi } from './expirySum.js'
 import { straddleRead } from './straddle.js'
 import { chargeRates, tradeCharges } from './tradeCharges.js'
 import { optionTrailLevel, tighterStop } from './optionTrail.js'
-import { futuresDeltaSteps, optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
+import { futuresDeltaSteps, oiNetSteps, optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
+import { optionOiMinutes } from './oiProfile.js'
 import { PROFILE_ROWS, pastSessionsNeeded } from './profileZones.js'
 import { FLOW_BOOK, FLOW_DELTA, FLOW_NONE, FLOW_PROFILE, flowView } from './orderFlowFeatures.js'
 
@@ -335,6 +336,8 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t), ceVol: packVolumes(ceLegs, t), peVol: packVolumes(peLegs, t),
     expiry, isExpiry: expiry === date,
     odm: optionDeltaMinutes(run?.cePoints, run?.pePoints, spotBars.map((b) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }))),
+    // The options' OI change a minute on spot (the OI (CE − PE) profile's - oiProfile.js), the current expiry's as the card's.
+    oim: optionOiMinutes(run?.cePoints, run?.pePoints, spotBars.map((b) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }))),
     ...(chains.length ? { expiries: 1 + chains.length } : {}),
   }
 }
@@ -1199,9 +1202,62 @@ const FUT_PROFILE_CONDITIONS = [
   },
 ]
 const GROUP_OF_FUT_PROFILE = new Set(FUT_PROFILE_CONDITIONS.map((c) => c.id))
+
+// THE OI (CE − PE) PROFILE (asked for - "cdv obv profile, option delta profile, net ce − pe, oi ce − pe, future delta profile
+// - I need all"; OI Replay's option card's "OI (CE − PE)" side - the option writer's view): at each spot row the call OI added
+// minus the put OI added in the minutes spot spent there (`oiNetSteps` on the day's `oim` and the sessions before's `oimPast`
+// - put on with `odmPast`, the same Profile of / Days). NEGATIVE = puts written = a floor = BULLISH. Price vs the row with the
+// most puts written (floor) / calls written (ceiling - each the other's mirror), spot in a row of puts / calls written, the
+// profile's net bullish / bearish.
+const OI_READS = new WeakMap()
+function oiRead(d, p3, p4) {
+  if (!Array.isArray(d?.oim)) return null
+  const days = deltaDaysOf(p3), of = deltaOfOf(p4)
+  const need = pastSessionsNeeded(days, of)
+  if (need > 0 && !Array.isArray(d.oimPast)) return null
+  let kept = OI_READS.get(d.oim)
+  if (!kept) OI_READS.set(d.oim, kept = new Map())
+  const key = `${of}|${days}`
+  if (!kept.has(key)) kept.set(key, oiNetSteps(need > 0 ? d.oimPast.slice(-need) : [], of === 'previous' ? [] : d.oim, { rowSize: PROFILE_ROWS[d.underlying] ?? 5 }))
+  return kept.get(key)
+}
+export const oiNetAtCandle = (d, k, p3, p4) => (k >= 0 ? optionDeltaAt(oiRead(d, p3, p4), d.t[k]) : null)
+const oiLevel = (key, name, short, mirror) => ({
+  ...levelCondition({ id: `oip${key[0].toUpperCase()}${key.slice(1)}`, group: 'OiProfile', name, short: `OI CE−PE ${short}`, level: (d, k, p3, p4) => oiNetAtCandle(d, k, p3, p4)?.levels?.[key], more: DELTA_PROFILE_OF }),
+  mirror,
+})
+const OI_PROFILE_CONDITIONS = [
+  oiLevel('floor', 'OI (CE − PE) profile: most PUTS written row (floor - bullish)', 'floor', 'oipCeiling'),
+  oiLevel('ceiling', 'OI (CE − PE) profile: most CALLS written row (ceiling - bearish)', 'ceiling', 'oipFloor'),
+  {
+    id: 'oipDelta', group: 'OiProfile', name: 'OI (CE − PE) profile: writing at the price / net',
+    options: [
+      opt('putsAt', 'Spot in a row where PUTS were written more (CE − PE < 0 - bullish)', 'callsAt', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
+      opt('callsAt', 'Spot in a row where CALLS were written more (CE − PE > 0 - bearish)', 'putsAt', { param: pctParam('by ≥', 0, 100, 1), ...DELTA_PROFILE_OF }),
+      opt('netBullish', "The profile's net CE − PE negative (puts written ahead - bullish)", 'netBearish', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
+      opt('netBearish', "The profile's net CE − PE positive (calls written ahead - bearish)", 'netBullish', { param: pctParam('by ≥', 0, 100, 0.5), ...DELTA_PROFILE_OF }),
+    ],
+    // "by ≥ %": a row's CE − PE of the largest row's; the net of all the OI added (|CE| + |PE|).
+    test: (d, i, v, w, p, p2, p3, p4) => {
+      const x = oiNetAtCandle(d, i, p3, p4)
+      if (!x) return false
+      switch (v) {
+        case 'putsAt': { const r = x.rowDelta(d.spot.c[i]); return r < 0 && -r >= frac(p) * x.maxAbsDelta }
+        case 'callsAt': { const r = x.rowDelta(d.spot.c[i]); return r > 0 && r >= frac(p) * x.maxAbsDelta }
+        case 'netBullish': return x.delta < 0 && -x.delta >= frac(p) * x.volume
+        case 'netBearish': return x.delta > 0 && x.delta >= frac(p) * x.volume
+        default: return false
+      }
+    },
+    show: (d, i, l) => {
+      const x = oiNetAtCandle(d, i, l?.param3, l?.param4)
+      return x ? `OI CE−PE at spot ${fmtL(x.rowDelta(d.spot.c[i]))} · net ${fmtL(x.delta)}` : 'OI (CE − PE) profile —'
+    },
+  },
+]
 /** How many sessions BEFORE the day a line of the futures delta profile reads (0 = the day alone). */
 export const futuresPastOfLine = (l) => (GROUP_OF_FUT_PROFILE.has(l?.id) ? pastSessionsNeeded(deltaDaysOf(l.param3), deltaOfOf(l.param4)) : 0)
-const GROUP_OF_DELTA = new Set([...DELTA_CONDITIONS, ...OBV_CONDITIONS].map((c) => c.id))
+const GROUP_OF_DELTA = new Set([...DELTA_CONDITIONS, ...OBV_CONDITIONS, ...OI_PROFILE_CONDITIONS].map((c) => c.id))
 
 // THE FUTURES ORDER FLOW (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal
 // backtest as well"): the Order Flow page's day of the near futures, put on the day by the loader when the rule reads it
@@ -2036,6 +2092,7 @@ export const RULE_CONDITIONS = [
   },
   ...DELTA_CONDITIONS,
   ...OBV_CONDITIONS,
+  ...OI_PROFILE_CONDITIONS,
   ...FUT_PROFILE_CONDITIONS,
   ...FLOW_CONDITIONS,
 ]

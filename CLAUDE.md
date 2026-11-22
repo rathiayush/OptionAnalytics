@@ -1121,7 +1121,14 @@ All must pass before committing.
   (`FLOW_PROFILE` - `orderFlowNeeded`: NONE 0 / DELTA 1 / PROFILE 2 / BOOK 3; `orderFlowUrl` then asks the footprint's rows and
   `backfillBars=true`; `attachOrderFlow` keeps `fdm` = `footprintBars`, live only the completed minutes), the sessions before as
   the card walks them (`attachFuturesPast` - `fdmPast`, `futuresDaysNeeded`, threaded through the page, the day chart, the
-  background run and the live scan as `futuresPast`); without them those lines never hold. `tests/signal-backtest-profiles.test.mjs`. THE FUTURES ORDER FLOW
+  background run and the live scan as `futuresPast`); without them those lines never hold. `tests/signal-backtest-profiles.test.mjs`. THE OI (CE − PE) PROFILE (asked for - "cdv obv profile, option delta
+  profile, net ce − pe, oi ce − pe, future delta profile - I need all"; the option delta profile is the CDV and its Net CE − PE):
+  group `OiProfile` (`OI_PROFILE_CONDITIONS`) - OI Replay's option card's "OI (CE − PE)" side: at each spot row the call OI added
+  less the put OI added (`oiNetSteps` on `prepareDay`'s `oim` = `optionOiMinutes`, the current expiry's; the sessions before as
+  `oimPast`, put on by `attachDeltaPast` with `odmPast` from each day's record's `oi` - `rememberDay` keeps it, the live scan
+  too), NEGATIVE = puts written = BULLISH: price vs the row with the most puts written (`oipFloor`) / calls written
+  (`oipCeiling`, each the other's mirror), `oipDelta` (spot in a row of puts / calls written, the net CE − PE negative /
+  positive by ≥ % of all the OI added); the same Profile of / Days. THE FUTURES ORDER FLOW
   (asked for - "add futures delta and cumulative delta and liquidity heatmap indicator in signal backtest as well"; group
   `OrderFlow`, `FLOW_CONDITIONS`; the data `orderFlowFeatures.js`): the Order Flow page's own day of the near futures
   (`/api/order-flow/{u}/day/{date}`, `orderFlowUrl` - no prints; the Δ alone in one row a bar, with the heatmap in the Order

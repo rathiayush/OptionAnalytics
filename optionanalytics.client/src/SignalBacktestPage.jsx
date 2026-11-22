@@ -74,6 +74,7 @@ const GROUP_TITLE = {
   PrevProfile: "Previous day's volume profile (yesterday's levels)", Pivots: "Pivot points / CPR (the previous day's high, low, close)",
   DeltaProfile: "Option delta profile on spot = the CDV profile (OI Replay's card - its levels, the flow at the price)",
   ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column)",
+  OiProfile: "OI (CE − PE) profile on spot (the option writer's view - puts written = floor / bullish)",
   FuturesProfile: "Futures delta profile (OI Replay's card - the footprint by price, read on the futures' price)",
   OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
 }
