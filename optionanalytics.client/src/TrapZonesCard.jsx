@@ -525,6 +525,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
   const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
   const [showTotals, setShowTotals] = usePersistedState('optionanalytics.oiReplay.trapZonesTotals', true)
+  const [showOpenClose, setShowOpenClose] = usePersistedState('optionanalytics.oiReplay.trapZonesOpenClose', true)
   const [modeSaved, setMode] = usePersistedState('optionanalytics.oiReplay.trapZonesMode', 'composite')
   const mode = ZONE_MODES.includes(modeSaved) ? modeSaved : 'composite'
   const rowSize = PROFILE_ROWS[underlying] ?? 5
@@ -558,8 +559,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const best = useMemo(() => bestZones({ zones: tableZones, cdv: { prev: cdvPrev, today: cdvToday } }), [tableZones, cdvPrev, cdvToday])
   const chartBoxes = useMemo(() => zoneBoxes(tableZones, { showPrev, showToday, best }), [tableZones, showPrev, showToday, best])
   const chartLines = useMemo(() => [
-    { price: day?.open, color: '#d9d9d9', title: 'Open', style: 2 },
-    { price: opening.close, color: '#8c8c8c', title: 'Prev close', style: 1 },
+    ...(showOpenClose ? [
+      { price: day?.open, color: '#d9d9d9', title: 'Open', style: 2 },
+      { price: opening.close, color: '#8c8c8c', title: 'Prev close', style: 1 },
+    ] : []),
     ...(showCdv ? [
       { price: cdvPrev.support?.level, color: '#73d13d', title: 'Prev CDV S', style: 2, width: 2 },
       { price: cdvPrev.resistance?.level, color: '#ff7875', title: 'Prev CDV R', style: 2, width: 2 },
@@ -572,7 +575,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       { price: oiToday?.support?.level, color: '#40a9ff', title: 'OI S', width: 2 },
       { price: oiToday?.resistance?.level, color: '#fa8c16', title: 'OI R', width: 2 },
     ] : []),
-  ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday, showOi, oiPrev, oiToday])
+  ], [day?.open, opening.close, showOpenClose, showCdv, cdvPrev, cdvToday, showOi, oiPrev, oiToday])
   const setups = useMemo(() => tradeSetups({ day, bias, rowSize, best }), [day, bias, rowSize, best])
   const prevLabel = dayCount === 1 ? 'Previous day' : `Previous ${dayCount} days`
   const ladderRows = useMemo(() => ({ prev: opening.rows ?? [], today: day?.rows ?? [] }), [opening.rows, day?.rows])
@@ -691,8 +694,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       </Space>
 
       <BestZones best={best} />
-      <CdvLevelsLine prev={cdvPrev} today={cdvToday} />
-      <OiLevelsLine prev={oiPrev} today={oiToday} />
+      {showCdv && <CdvLevelsLine prev={cdvPrev} today={cdvToday} />}
+      {showOi && <OiLevelsLine prev={oiPrev} today={oiToday} />}
 
       <Space wrap size={[8, 4]} align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>On spot</Text>
@@ -701,6 +704,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
         <Checkbox checked={showCdv} onChange={(e) => setShowCdv(e.target.checked)}>CDV S / R lines</Checkbox>
         <Checkbox checked={showOi} onChange={(e) => setShowOi(e.target.checked)}>OI S / R lines</Checkbox>
+        <Checkbox checked={showOpenClose} onChange={(e) => setShowOpenClose(e.target.checked)}>Open / prev close</Checkbox>
         <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
         <Checkbox checked={showTotals} onChange={(e) => setShowTotals(e.target.checked)}>Total (OI − Net) outliers</Checkbox>
       </Space>
@@ -729,7 +733,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           prevLabel={prevLabel} spanPct={LADDER_SPANS.includes(ladderSpan) ? ladderSpan : 1} onSpan={setLadderSpan}
         />
       )}
-      <ProfileLevels prev={levelsPrev} today={levelsToday} prevLabel={prevLabel} totals={totalsRead} />
+      <ProfileLevels prev={levelsPrev} today={levelsToday} prevLabel={prevLabel} totals={showTotals ? totalsRead : null} />
 
       <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
         <ZoneTable zones={tableZones} />

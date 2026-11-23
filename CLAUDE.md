@@ -760,7 +760,10 @@ All must pass before committing.
   profile's own rows (`oiRowsOf` - call OI added less put OI added at each spot row): its strongest run of PUTS WRITTEN (negative -
   `deltaZones` with `bullishNegative`) = support, of CALLS WRITTEN = resistance, `level` the middle of the busiest row, `sum` the OI
   added - the sessions before (dashed "Prev OI S / R", light blue / light orange) and the day up to the clock (solid "OI S / R", blue /
-  orange), on the chart and the ladder; a line names both; the "OI S / R lines" tick (`optionanalytics.oiReplay.trapZonesOi`, on). THE BEST ZONE (asked for - "identify the best
+  orange), on the chart and the ladder; a line names both; the "OI S / R lines" tick (`optionanalytics.oiReplay.trapZonesOi`, on). EVERY LINE
+  IS SHOWN / HIDDEN BY A TICK (asked for - "show hide by checkbox as well"): the CDV / OI ticks hide their lines AND their text line,
+  "Total (OI − Net) outliers" its lines and its "Levels by profile" section, and "Open / prev close" (`...trapZonesOpenClose`, on) the
+  open and previous close lines - on the chart and the ladder alike (the ladder's marks are the chart's lines). THE BEST ZONE (asked for - "identify the best
   zone and show it on the chart"; `bestZones`): every zone rated - score x (1 + 0.5 a profile agreeing beyond one) x (1 − 0.25
   a profile against, >= 0.4) x 1.5 when the sessions before AND today built a zone of the same side there x 1.3 for each
   biggest CDV level of its side in it / (1 + distance / 0.5%) - the best support and best resistance STARRED on the chart (★
