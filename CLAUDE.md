@@ -755,7 +755,12 @@ All must pass before committing.
   (CDV) profile's strongest BUYING cluster (deltaZones' green - adjacent rows of net buying, the largest added up) = support,
   its strongest SELLING cluster = resistance, each with `level` = the middle of its busiest row - of the sessions before (fixed
   all day: dashed "Prev CDV S / R" price lines) and of the day up to the clock (developing: solid "CDV S / R"); a line names
-  both, the "CDV S / R lines" tick (`optionanalytics.oiReplay.trapZonesCdv`, on). THE BEST ZONE (asked for - "identify the best
+  both, the "CDV S / R lines" tick (`optionanalytics.oiReplay.trapZonesCdv`, on). THE BIGGEST OI (CE − PE) SUPPORT / RESISTANCE
+  (asked for - "you are plotting CDV R line, can you also plot OI delta profile S/R lines"; `oiLevels`): the same on the OI delta
+  profile's own rows (`oiRowsOf` - call OI added less put OI added at each spot row): its strongest run of PUTS WRITTEN (negative -
+  `deltaZones` with `bullishNegative`) = support, of CALLS WRITTEN = resistance, `level` the middle of the busiest row, `sum` the OI
+  added - the sessions before (dashed "Prev OI S / R", light blue / light orange) and the day up to the clock (solid "OI S / R", blue /
+  orange), on the chart and the ladder; a line names both; the "OI S / R lines" tick (`optionanalytics.oiReplay.trapZonesOi`, on). THE BEST ZONE (asked for - "identify the best
   zone and show it on the chart"; `bestZones`): every zone rated - score x (1 + 0.5 a profile agreeing beyond one) x (1 − 0.25
   a profile against, >= 0.4) x 1.5 when the sessions before AND today built a zone of the same side there x 1.3 for each
   biggest CDV level of its side in it / (1 + distance / 0.5%) - the best support and best resistance STARRED on the chart (★

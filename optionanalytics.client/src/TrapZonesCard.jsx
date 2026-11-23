@@ -13,7 +13,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, spotFeedRead, tradeSetups, zoneBoxes, zoneScaleRange } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, oiLevels, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, spotFeedRead, tradeSetups, zoneBoxes, zoneScaleRange } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -460,6 +460,19 @@ function CdvLevelsLine({ prev, today }) {
   )
 }
 
+const oiAmount = (v) => `${v > 0 ? '+' : ''}${Math.round(v).toLocaleString('en-IN')} OI`
+/** The biggest OI (CE − PE) support / resistance - the sessions before and the day so far (oiLevels): puts written = support,
+ *  calls written = resistance. */
+function OiLevelsLine({ prev, today }) {
+  const part = (lv, side) => (lv?.[side] ? `${side === 'support' ? 'S' : 'R'} ${px(lv[side].low)}–${px(lv[side].high)} (peak ${px(lv[side].level)}, ${oiAmount(lv[side].sum)})` : `${side === 'support' ? 'S' : 'R'} none`)
+  return (
+    <Text style={{ fontSize: 12 }}>
+      <b>Biggest OI (CE − PE) support / resistance</b> <Text type="secondary" style={{ fontSize: 11 }}>(puts written = support, calls written = resistance)</Text> - before (fixed from the start): {prev?.support || prev?.resistance ? `${part(prev, 'support')} · ${part(prev, 'resistance')}` : 'none loaded'}
+      {' '}| today, developing: {today ? `${part(today, 'support')} · ${part(today, 'resistance')}` : 'not yet'}
+    </Text>
+  )
+}
+
 /** The trade setups (tradeSetups) - ideas, each with its trigger, stop, targets and reward / risk. */
 function SetupList({ setups }) {
   if (!setups.length) return <Text type="secondary" style={{ fontSize: 12 }}>No setup near price yet.</Text>
@@ -507,6 +520,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showPrev, setShowPrev] = usePersistedState('optionanalytics.oiReplay.trapZonesPrev', true)
   const [showToday, setShowToday] = usePersistedState('optionanalytics.oiReplay.trapZonesToday', true)
   const [showCdv, setShowCdv] = usePersistedState('optionanalytics.oiReplay.trapZonesCdv', true)
+  const [showOi, setShowOi] = usePersistedState('optionanalytics.oiReplay.trapZonesOi', true)
   const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
   const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
@@ -538,6 +552,9 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   // (developing - the minutes up to the clock).
   const cdvPrev = useMemo(() => cdvLevels(pastOpt.sessions.map((x) => x.items ?? []), rowSize), [pastOpt.sessions, rowSize])
   const cdvToday = useMemo(() => (todayOptions.length ? cdvLevels([todayOptions], rowSize) : null), [todayOptions, rowSize])
+  // The biggest OI (CE − PE) support / resistance the same way: the sessions before (fixed) and the day so far (developing).
+  const oiPrev = useMemo(() => oiLevels(pastOpt.sessions.map((x) => x.oi ?? []), rowSize), [pastOpt.sessions, rowSize])
+  const oiToday = useMemo(() => (todayOi.length ? oiLevels([todayOi], rowSize) : null), [todayOi, rowSize])
   const best = useMemo(() => bestZones({ zones: tableZones, cdv: { prev: cdvPrev, today: cdvToday } }), [tableZones, cdvPrev, cdvToday])
   const chartBoxes = useMemo(() => zoneBoxes(tableZones, { showPrev, showToday, best }), [tableZones, showPrev, showToday, best])
   const chartLines = useMemo(() => [
@@ -549,7 +566,13 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
       { price: cdvToday?.support?.level, color: '#52c41a', title: 'CDV S', width: 2 },
       { price: cdvToday?.resistance?.level, color: '#ff4d4f', title: 'CDV R', width: 2 },
     ] : []),
-  ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday])
+    ...(showOi ? [
+      { price: oiPrev.support?.level, color: '#91d5ff', title: 'Prev OI S', style: 2, width: 2 },
+      { price: oiPrev.resistance?.level, color: '#ffc069', title: 'Prev OI R', style: 2, width: 2 },
+      { price: oiToday?.support?.level, color: '#40a9ff', title: 'OI S', width: 2 },
+      { price: oiToday?.resistance?.level, color: '#fa8c16', title: 'OI R', width: 2 },
+    ] : []),
+  ], [day?.open, opening.close, showCdv, cdvPrev, cdvToday, showOi, oiPrev, oiToday])
   const setups = useMemo(() => tradeSetups({ day, bias, rowSize, best }), [day, bias, rowSize, best])
   const prevLabel = dayCount === 1 ? 'Previous day' : `Previous ${dayCount} days`
   const ladderRows = useMemo(() => ({ prev: opening.rows ?? [], today: day?.rows ?? [] }), [opening.rows, day?.rows])
@@ -669,6 +692,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
 
       <BestZones best={best} />
       <CdvLevelsLine prev={cdvPrev} today={cdvToday} />
+      <OiLevelsLine prev={oiPrev} today={oiToday} />
 
       <Space wrap size={[8, 4]} align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>On spot</Text>
@@ -676,6 +700,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showPrev} onChange={(e) => setShowPrev(e.target.checked)}>Zones from before (dashed)</Checkbox>
         <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
         <Checkbox checked={showCdv} onChange={(e) => setShowCdv(e.target.checked)}>CDV S / R lines</Checkbox>
+        <Checkbox checked={showOi} onChange={(e) => setShowOi(e.target.checked)}>OI S / R lines</Checkbox>
         <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
         <Checkbox checked={showTotals} onChange={(e) => setShowTotals(e.target.checked)}>Total (OI − Net) outliers</Checkbox>
       </Space>
