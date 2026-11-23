@@ -13,7 +13,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, oiLevels, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, spotFeedRead, tradeSetups, zoneBoxes, zoneScaleRange } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderItems, ladderLayout, oiLevels, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, spotFeedRead, tradeSetups, zoneBoxes, zoneScaleRange } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -195,6 +195,62 @@ function fitText(text, room, fontPx, weight) {
 
 const STRIP_NAMES = { oi: ['O', 'OI'], cdv: ['N', 'Net'], obv: ['B', 'OBV'], fut: ['F', 'Fut'] }
 const STRIP_FULL = { oi: 'OI CE − PE (OI delta)', cdv: 'Net CE − PE (= option CDV)', obv: 'Option OBV', fut: 'Futures delta' }
+
+const LADDER_COLS = '98px minmax(0, 1fr) minmax(0, 1fr) 54px'
+
+/** THE LADDER AS A LIST (ladderItems - the first ladder, the default again: "older ladder was better"): the zones near price from the highest down, each in its column - the sessions before (dashed)
+ *  or today (solid) - and the price, open, previous close and CDV lines between them, a row each, so nothing overlaps. */
+export function ZoneList({ items, best, prevLabel = 'Previous day' }) {
+  if (!items.length) return null
+  const starred = (z) => sameZone(best?.support?.zone, z) || sameZone(best?.resistance?.zone, z)
+  const row = { display: 'grid', gridTemplateColumns: LADDER_COLS, columnGap: 6, alignItems: 'center' }
+  return (
+    <div style={{ border: `1px solid ${BORDER_COLOR}`, borderRadius: 6, padding: '6px 8px', fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
+      <div style={{ ...row, color: '#8c8c8c', fontSize: 11, marginBottom: 2 }}>
+        <span>Price</span><span>{prevLabel}</span><span>Current day</span><span style={{ textAlign: 'right' }}>From price</span>
+      </div>
+      {items.map((it, i) => {
+        if (it.type === 'mark') {
+          const line = `${it.now ? 2 : 1}px ${it.dashed ? 'dashed' : 'solid'} ${it.color}`
+          return (
+            <div key={`m-${it.label}-${i}`} style={{ ...row, margin: it.now ? '4px 0' : '2px 0' }}>
+              <span style={{ color: it.color, fontWeight: it.now ? 700 : 500 }}>{px(it.price)}</span>
+              <div style={{ gridColumn: '2 / 4', display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <div style={{ flex: 1, borderTop: line }} />
+                <span style={{ color: it.color, fontWeight: it.now ? 700 : 500, whiteSpace: 'nowrap', fontSize: it.now ? 12 : 11 }}>{it.label}</span>
+                <div style={{ flex: 1, borderTop: line }} />
+              </div>
+              <span />
+            </div>
+          )
+        }
+        const z = it.zone
+        const k = ZONE_KINDS[z.kind]
+        const color = k?.color ?? '#8c8c8c'
+        const star = starred(z)
+        const bar = (
+          <Tooltip title={`${k?.label ?? ''}: ${k?.text ?? ''}`}>
+            <div style={{
+              background: ladderTint(color, star ? 0.32 : Math.min(0.28, 0.08 + z.score * 0.06)),
+              border: `${star ? 2 : 1}px ${z.from === 'today' ? 'solid' : 'dashed'} ${color}`,
+              borderRadius: 4, padding: '2px 6px', minWidth: 0, overflowWrap: 'anywhere', lineHeight: 1.3,
+            }}>
+              <div style={{ color, fontWeight: 600 }}>{star ? '★ ' : ''}{k?.short ?? k?.label}</div>
+              <div style={{ color: '#bfbfbf', fontSize: 11 }}>{shortOf(z.sources)}{z.against?.length ? ` (${shortOf(z.against)} against)` : ''} · {z.score}</div>
+            </div>
+          </Tooltip>
+        )
+        return (
+          <div key={`z-${z.from}-${z.low}-${z.high}-${i}`} style={{ ...row, margin: '2px 0' }}>
+            <span style={{ color: '#d9d9d9' }}>{px(z.low)}–{px(z.high)}</span>
+            {z.from === 'today' ? <><span />{bar}</> : <>{bar}<span /></>}
+            <span style={{ textAlign: 'right', color: '#8c8c8c', fontSize: 11 }}>{z.distance === 0 ? 'at price' : pct(z.distance)}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 /**
  * THE LADDER TO SCALE (ladderLayout): the previous day(s) in one lane, the current day in the other, each zone a band at
@@ -524,6 +580,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
   const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
+  // The ladder's look: the LIST (the first one, a row per zone or line - the default) or TO SCALE (the lanes and strips).
+  const [ladderView, setLadderView] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderView', 'list')
   const [showTotals, setShowTotals] = usePersistedState('optionanalytics.oiReplay.trapZonesTotals', true)
   const [showOpenClose, setShowOpenClose] = usePersistedState('optionanalytics.oiReplay.trapZonesOpenClose', true)
   const [modeSaved, setMode] = usePersistedState('optionanalytics.oiReplay.trapZonesMode', 'composite')
@@ -601,6 +659,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
     return [...chartLines, ...out]
   }, [chartLines, showTotals, totalsRead])
   const ladderMarks = useMemo(() => allLines.filter((l) => l.title).map((l) => ({ price: l.price, label: l.title, color: l.color, dashed: l.style === 2 })), [allLines])
+  const ladderList = useMemo(() => ladderItems({ zones: tableZones, price: day?.price ?? opening.close, marks: ladderMarks }), [tableZones, day?.price, opening.close, ladderMarks])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
@@ -706,6 +765,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showOi} onChange={(e) => setShowOi(e.target.checked)}>OI S / R lines</Checkbox>
         <Checkbox checked={showOpenClose} onChange={(e) => setShowOpenClose(e.target.checked)}>Open / prev close</Checkbox>
         <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
+        {showLadder && (
+          <Segmented size="small" value={ladderView === 'scale' ? 'scale' : 'list'} onChange={setLadderView} aria-label="Ladder view"
+            options={[{ value: 'list', label: 'List' }, { value: 'scale', label: 'To scale' }]} />
+        )}
         <Checkbox checked={showTotals} onChange={(e) => setShowTotals(e.target.checked)}>Total (OI − Net) outliers</Checkbox>
       </Space>
       {spotRead && (
@@ -726,7 +789,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={allLines} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
 
-      {showLadder && (
+      {showLadder && ladderView !== 'scale' && <ZoneList items={ladderList} best={best} prevLabel={prevLabel} />}
+      {showLadder && ladderView === 'scale' && (
         <ZoneLadder
           zones={tableZones} price={day?.price ?? opening.close} marks={ladderMarks} best={best}
           rows={ladderRows} used={ladderUsed} rowSize={rowSize} showStrips={showStrips} onStrips={setShowStrips} split={mode === 'union'}

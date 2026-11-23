@@ -466,3 +466,19 @@ test('the biggest OI (CE − PE) support / resistance: the strongest run of puts
   const wide = oiLevels([[{ low: 100, high: 105, ce: 0, pe: 1000 }]], 5)
   assert.deepEqual([wide.support.low, wide.support.high, wide.support.sum], [100, 110, -1000])
 })
+test('the ladder: the zones near price and the price lines in one list, highest first, a row each', async () => {
+  const { ladderItems } = await import('../src/trapZones.js')
+  const z = (o) => ({ from: 'today', score: 1, sources: ['oi'], against: [], ...o })
+  const zones = [
+    z({ bullish: true, low: 24950, high: 24970, kind: 'support', distance: -0.16 }),
+    z({ bullish: false, low: 25060, high: 25080, kind: 'resistance', distance: 0.24, from: 'prev' }),
+    z({ bullish: false, low: 26000, high: 26020, kind: 'resistance', distance: 3.96 }),      // over 2% away: left out
+  ]
+  const marks = [{ price: 24990, label: 'Open', color: '#d9d9d9' }, { price: 25075, label: 'CDV R', color: '#ff4d4f' }, { price: NaN, label: 'x' }]
+  const items = ladderItems({ zones, price: 25010, marks })
+  assert.deepEqual(items.map((i) => (i.type === 'zone' ? `${i.zone.low}` : i.label)), ['CDV R', '25060', 'Price', 'Open', '24950'])
+  assert.equal(items.find((i) => i.label === 'Price').now, true)
+  // At most `max` zones, the nearest; no price = nothing.
+  assert.deepEqual(ladderItems({ zones, price: 25010, max: 1 }).filter((i) => i.type === 'zone').map((i) => i.zone.low), [24950])
+  assert.deepEqual(ladderItems({ zones, price: null }), [])
+})

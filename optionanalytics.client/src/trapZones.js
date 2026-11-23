@@ -922,3 +922,25 @@ export function tradeSetups({ day, bias = null, rowSize = 5, best = null }) {
   const rank = (x) => (x.status === 'ready' ? 0 : 2) + (x.aligned === false ? 1 : 0)
   return out.sort((a, b) => rank(a) - rank(b) || (b.rr ?? -1) - (a.rr ?? -1)).slice(0, 4)
 }
+
+
+/**
+ * THE LADDER AS A LIST (asked for back - "continue to show the ladder as well", and again - "older ladder was better"): the zones within `span` of `price` (the nearest
+ * `max`) and the price lines (`marks` [{ price, label, color }] - open, previous close, the CDV levels; the price itself
+ * always) as ONE list from the highest price down - a zone by its middle - so each takes a row of its own and nothing can be
+ * drawn over anything else (the SVG ladder scaled its text with the screen and overlapped on a phone). [{ type: 'zone',
+ * zone, at } | { type: 'mark', price, label, color, at }].
+ */
+export function ladderItems({ zones = [], price, marks = [], span = 0.02, max = 12 } = {}) {
+  if (!(price > 0)) return []
+  const lo = price * (1 - span), hi = price * (1 + span)
+  const near = zones.filter((z) => z.high >= lo && z.low <= hi)
+    .sort((a, b) => Math.abs(a.distance ?? 0) - Math.abs(b.distance ?? 0)).slice(0, max)
+  const items = [
+    ...near.map((zone) => ({ type: 'zone', zone, at: (zone.low + zone.high) / 2 })),
+    { type: 'mark', price, label: 'Price', color: '#1677ff', at: price, now: true },
+    ...marks.filter((m) => Number.isFinite(m.price) && m.price >= lo && m.price <= hi).map((m) => ({ type: 'mark', ...m, at: m.price })),
+  ]
+  // Highest first; at the same price the price line before the others, a line before a zone.
+  return items.sort((a, b) => b.at - a.at || (b.now ? 1 : 0) - (a.now ? 1 : 0) || (a.type === 'mark' ? -1 : 1) - (b.type === 'mark' ? -1 : 1))
+}
