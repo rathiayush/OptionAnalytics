@@ -377,6 +377,26 @@ export function cdvLevels(sessions, rowSize = 5) {
   return { support: of(green, 1), resistance: of(red, -1), net: p.totals?.net ?? 0 }
 }
 
+/**
+ * THE BIGGEST OI (CE − PE) SUPPORT AND RESISTANCE (asked for - "you are plotting CDV R line, can you also plot OI delta profile S/R
+ * lines"): the option writers' profile - at each spot row the call OI added less the put OI added (oiRowsOf, the OI delta
+ * profile's own rows) of `oiSessions` (optionOiMinutes each) - its strongest run of PUTS WRITTEN (negative rows - a floor, deltaZones'
+ * green with bullishNegative) = SUPPORT, its strongest run of CALLS WRITTEN (positive - a ceiling) = RESISTANCE. Each { low, high,
+ * level (the middle of the run's busiest row), sum (OI added - negative for the support) } or null; `net` = all the call OI less
+ * the put OI added. The sessions before: fixed from the start of the day; the day's own minutes up to the clock: developing.
+ */
+export function oiLevels(oiSessions, rowSize = 5) {
+  const rows = oiRowsOf(oiSessions, rowSize)
+  const { green, red } = deltaZones(rows, rowSize, { bullishNegative: true })
+  const of = (z, sgn) => {
+    if (!z) return null
+    let peak = null
+    for (const r of rows) if (r.price >= z.low - 1e-6 && r.price < z.high - 1e-6 && Math.sign(r.delta) === sgn && (!peak || Math.abs(r.delta) > Math.abs(peak.delta))) peak = r
+    return { low: z.low, high: z.high, level: round2((peak?.price ?? z.low) + rowSize / 2), sum: z.sum }
+  }
+  return { support: of(green, -1), resistance: of(red, 1), net: rows.reduce((t, r) => t + r.delta, 0) }
+}
+
 const lastClose = (bars) => { for (let i = (bars?.length ?? 0) - 1; i >= 0; i--) if (bars[i]?.close > 0) return bars[i].close; return null }
 
 /**

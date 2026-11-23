@@ -1,7 +1,7 @@
 // Trapped / squeeze zones (trapZones.js): clusters, their role against price, the open rule, the crossings, no look-ahead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { compositeProfile, compositeZones, dayRead, openRuleDay, openingRead, positionProfile, readZones, zoneCrossings, zoneKind, zoneScaleRange, ZONE_REACH_RANGE, spotFeedRead, SPOT_STALE_MS } from '../src/trapZones.js'
+import { compositeProfile, compositeZones, dayRead, openRuleDay, openingRead, positionProfile, readZones, zoneCrossings, zoneKind, zoneScaleRange, ZONE_REACH_RANGE, spotFeedRead, SPOT_STALE_MS, oiLevels, oiRowsOf } from '../src/trapZones.js'
 
 const T0 = Date.UTC(2026, 10, 16, 3, 45)  // 09:15 IST
 const MIN = 60_000
@@ -440,4 +440,29 @@ test('the spot readout: the last spot minute, and live inside the session a feed
   assert.equal(spotFeedRead([{ time: T0, close: 100 }, { time: T0 + MIN, close: 0 }], null).price, 100)
   assert.equal(spotFeedRead([], T0), null)
   assert.equal(spotFeedRead(undefined, T0), null)
+})
+
+test('the biggest OI (CE − PE) support / resistance: the strongest run of puts written = support, of calls written = resistance', () => {
+  // Spot rows of 5: puts written at 100 - 110 (a floor), calls written at 130 - 135 (a ceiling), a thin call row at 115.
+  const minutes = [
+    { low: 100, high: 100, ce: 0, pe: 4000 },
+    { low: 105, high: 105, ce: 500, pe: 9000 },   // the busiest put row
+    { low: 115, high: 115, ce: 300, pe: 0 },
+    { low: 130, high: 130, ce: 6000, pe: 0 },
+    { low: 135, high: 135, ce: 2000, pe: 500 },
+  ]
+  const lv = oiLevels([minutes], 5)
+  assert.deepEqual(lv.support, { low: 100, high: 110, level: 107.5, sum: -12500 })
+  assert.deepEqual(lv.resistance, { low: 130, high: 140, level: 132.5, sum: 7500 })
+  assert.equal(lv.net, 8800 - 13500)
+  // The same rows the composite's OI profile reads (oiRowsOf), so its levels and the zones agree.
+  assert.equal(oiRowsOf([minutes], 5).reduce((t, r) => t + r.delta, 0), lv.net)
+  // Several sessions add up; a session with only calls written has no support; none = none.
+  const two = oiLevels([minutes, [{ low: 130, high: 130, ce: 1000, pe: 0 }]], 5)
+  assert.equal(two.resistance.sum, 8500)
+  assert.equal(oiLevels([[{ low: 130, high: 130, ce: 1000, pe: 0 }]], 5).support, null)
+  assert.deepEqual(oiLevels([], 5), { support: null, resistance: null, net: 0 })
+  // A minute spanning two rows splits its OI between them (oiRowsOf), the run still one.
+  const wide = oiLevels([[{ low: 100, high: 105, ce: 0, pe: 1000 }]], 5)
+  assert.deepEqual([wide.support.low, wide.support.high, wide.support.sum], [100, 110, -1000])
 })
