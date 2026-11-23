@@ -14,7 +14,7 @@ import { useOnScreen, useViewport } from './useScreen.js'
 import { useLiveIndexFeed } from './useLiveIndexFeed.js'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { inMarketSession } from './marketSession.js'
-import { SESSION_MINUTES, addLiveMinute, candlesAtClock, foldMinutes, sessionStartOf, weekdaysBack } from './structureLive.js'
+import { SESSION_MINUTES, addLiveMinute, candlesAtClock, foldMinutes, followRange, sessionStartOf, weekdaysBack } from './structureLive.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
 import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, ltfLayers, lowerThan, structureShapes } from './structureShapes.js'
 
@@ -128,6 +128,7 @@ function StructureChart({ analysis, shapes, height }) {
   const seriesRef = useRef(null)
   const primitiveRef = useRef(null)
   const fittedRef = useRef(null)
+  const lenRef = useRef(0)
 
   useEffect(() => {
     const element = containerRef.current
@@ -151,19 +152,27 @@ function StructureChart({ analysis, shapes, height }) {
     primitiveRef.current = primitive
     const resize = new ResizeObserver(() => chart.applyOptions({ width: element.clientWidth }))
     resize.observe(element)
-    return () => { resize.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = null; primitiveRef.current = null; fittedRef.current = null }
+    return () => { resize.disconnect(); chart.remove(); chartRef.current = null; seriesRef.current = null; primitiveRef.current = null; fittedRef.current = null; lenRef.current = 0 }
   }, [height])
 
   useEffect(() => {
     const series = seriesRef.current
     if (!series) return
     const bars = analysis?.bars ?? []
+    const timeScale = chartRef.current?.timeScale()
+    const before = timeScale?.getVisibleLogicalRange() ?? null
+    const prevLen = lenRef.current
     series.setData(bars.map((b) => ({ time: toChartTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })))
-    // The newest ~160 candles on the first load of a series; a refresh keeps the viewer's view.
+    lenRef.current = bars.length
+    // The newest ~160 candles on the first load of a series; after that a viewer at the newest candle FOLLOWS the new ones
+    // (a replay's 15m chart adds 25 a day - they ran off the right edge), one who scrolled back keeps the view.
     const key = `${bars[0]?.time ?? ''}|${analysis?.options?.swingLen ?? ''}`
     if (bars.length && fittedRef.current !== key) {
       fittedRef.current = key
-      chartRef.current?.timeScale().setVisibleLogicalRange({ from: Math.max(-1, bars.length - 160), to: bars.length + 8 })
+      timeScale?.setVisibleLogicalRange({ from: Math.max(-1, bars.length - 160), to: bars.length + 8 })
+    } else {
+      const next = followRange(before, prevLen, bars.length)
+      if (next) timeScale?.setVisibleLogicalRange(next)
     }
   }, [analysis])
 
