@@ -1,4 +1,5 @@
 import { TPO_LETTERS } from './profiles.js'
+import { RANK_COLORS, deltaRanks, drawRankTag } from './deltaRanks.js'
 
 // Two drawings for the Profiles page's charts, each a lightweight-charts series primitive attached to the
 // candle series - so the chart redraws them itself on every scroll, zoom, price-scale drag and resize:
@@ -218,6 +219,8 @@ export class DeltaColumnPrimitive {
       ctx.fillStyle = DELTA_AXIS
       ctx.fillRect(mid, head, Math.max(1, Math.round(hpr)), H - head)
       if (!(p.maxAbsDelta > 0)) return
+      // The 1st / 2nd biggest buying and selling rows in their own colours with a B1 / B2 / S1 / S2 tag (deltaRanks.js).
+      const ranks = deltaRanks(p.rows)
       for (const row of p.rows) {
         if (!row.delta) continue
         const yTop = this._series.priceToCoordinate(row.price + p.rowSize)
@@ -233,8 +236,10 @@ export class DeltaColumnPrimitive {
         const bottom = Math.max(top + 1, Math.round(b) - gap)
         if (Math.round(b) <= head) continue
         const len = Math.max(1, (Math.abs(row.delta) / p.maxAbsDelta) * half)
-        ctx.fillStyle = row.delta > 0 ? DELTA_BUY : DELTA_SELL
+        const rank = ranks.get(row.price)
+        ctx.fillStyle = rank ? RANK_COLORS[rank] : row.delta > 0 ? DELTA_BUY : DELTA_SELL
         ctx.fillRect(row.delta > 0 ? mid : mid - len, top, len, bottom - top)
+        drawRankTag(ctx, rank, { x: row.delta > 0 ? mid - 2 * hpr : mid + 2 * hpr, top, height: bottom - top, alignRight: row.delta > 0, vpr, minHeight: 7 * vpr })
       }
     })
   }
