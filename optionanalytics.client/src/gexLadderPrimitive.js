@@ -18,6 +18,8 @@ const TAGS = [
   { key: 'callWall', text: 'CW', color: '#26a69a' },
   { key: 'putWall', text: 'PW', color: '#ef5350' },
   { key: 'maxGamma', text: 'MG', color: '#b37feb' },
+  { key: 'posGex', text: '+G', color: '#69c0ff' },
+  { key: 'negGex', text: '−G', color: '#ff9c6e' },
 ]
 const FLIP = '#ffd54f'
 const CR = 1e7

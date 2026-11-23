@@ -143,6 +143,8 @@ export const GEX_LEVELS = {
   putWall: 'Put wall (support)',
   callWall: 'Call wall (resistance)',
   maxGamma: 'Max gamma (magnet)',
+  posGex: '+GEX wall (sticky)',
+  negGex: '−GEX wall (accelerator)',
 }
 
 export const GEX_LEVEL_TABLE = [
@@ -152,6 +154,11 @@ export const GEX_LEVEL_TABLE = [
   { level: 'callWall', regime: 'negative', read: 'Resistance at risk - a break can accelerate higher (squeeze)', tone: 'bull' },
   { level: 'maxGamma', regime: 'positive', read: 'Pin - price tends to stick around the magnet (chop)', tone: 'neutral' },
   { level: 'maxGamma', regime: 'negative', read: 'Weak magnet - moves can run through it', tone: 'neutral' },
+  // The NET GEX walls (the strikes of the largest positive / negative net GEX): read as the GEX platforms read them.
+  { level: 'posGex', regime: 'positive', read: 'Sticky strike - dealer hedging damps moves here: expect stalls, rejection or a pin', tone: 'neutral' },
+  { level: 'posGex', regime: 'negative', read: 'Sticky strike in a short-gamma market - a likely pause / bounce zone, weaker than in long gamma', tone: 'neutral' },
+  { level: 'negGex', regime: 'positive', read: 'Slippery strike - hedging adds to moves here: a push through it can run to the next sticky strike', tone: 'neutral' },
+  { level: 'negGex', regime: 'negative', read: 'Accelerator - dealers short gamma here and overall: moves through it tend to speed up', tone: 'neutral' },
 ]
 
 /**

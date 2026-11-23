@@ -19,6 +19,8 @@ const { Text } = Typography
 const SPOT_COLOR = '#d9d9d9'
 const FLIP_COLOR = '#ffd54f'
 const MAX_GAMMA_COLOR = '#b37feb'
+const POS_GEX_COLOR = '#69c0ff'
+const NEG_GEX_COLOR = '#ff9c6e'
 const CR = 1e7
 const IST_MS = 330 * 60_000
 
@@ -119,6 +121,8 @@ function StrikeBars({ minute }) {
               {r.strike === minute.callWall && <Tag color="green" style={{ margin: '0 0 0 4px', fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>CW</Tag>}
               {r.strike === minute.putWall && <Tag color="red" style={{ margin: '0 0 0 4px', fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>PW</Tag>}
               {r.strike === minute.maxGamma && <Tag color="purple" style={{ margin: '0 0 0 4px', fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>MG</Tag>}
+              {r.strike === minute.posGex && <Tag color="blue" style={{ margin: '0 0 0 4px', fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>+G</Tag>}
+              {r.strike === minute.negGex && <Tag color="orange" style={{ margin: '0 0 0 4px', fontSize: 9, lineHeight: '14px', padding: '0 3px' }}>−G</Tag>}
             </div>
             {bar(r.call, 'call')}
             <div style={{ width: 92, textAlign: 'right', color: gexColor(r.net) }}>{cr(r.net)}</div>
@@ -170,6 +174,8 @@ function ProfileChart({ minute, height: givenHeight = 200 }) {
       { v: minute.callWall, color: UP_COLOR, label: 'CW' },
       { v: minute.putWall, color: DOWN_COLOR, label: 'PW' },
       { v: minute.maxGamma, color: MAX_GAMMA_COLOR, label: 'MG', dash: '1 2' },
+      { v: minute.posGex, color: POS_GEX_COLOR, label: '+G', dash: '6 3' },
+      { v: minute.negGex, color: NEG_GEX_COLOR, label: '−G', dash: '6 3' },
     ].filter((m) => Number.isFinite(m.v) && m.v >= xMin && m.v <= xMax).map((m) => ({ ...m, x: x(m.v) })).sort((a, b) => a.x - b.x)
     const labels = []
     for (const m of marks) {
@@ -344,6 +350,8 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
         { id: 'callWall', title: 'Call wall', color: UP_COLOR, width: 1, steps: true, data: line((m) => m.callWall) },
         { id: 'putWall', title: 'Put wall', color: DOWN_COLOR, width: 1, steps: true, data: line((m) => m.putWall) },
         { id: 'maxGamma', title: 'Max gamma', color: MAX_GAMMA_COLOR, width: 1, style: LineStyle.Dotted, steps: true, data: line((m) => m.maxGamma) },
+        { id: 'posGex', title: '+GEX wall', color: POS_GEX_COLOR, width: 1, style: LineStyle.LargeDashed, steps: true, data: line((m) => m.posGex) },
+        { id: 'negGex', title: '−GEX wall', color: NEG_GEX_COLOR, width: 1, style: LineStyle.LargeDashed, steps: true, data: line((m) => m.negGex) },
       ],
     }
   }, [minutes])
@@ -496,6 +504,12 @@ export function GexCard({ days, asOfMs, dayKey, expiry = null, expirySource = nu
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Call wall </Text><span style={{ color: UP_COLOR }}>{now.callWall ?? '-'}{away(now.callWall)}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Put wall </Text><span style={{ color: DOWN_COLOR }}>{now.putWall ?? '-'}{away(now.putWall)}</span></Col>
         <Col><Text type="secondary" style={{ fontSize: 12 }}>Max gamma </Text><span style={{ color: MAX_GAMMA_COLOR }}>{now.maxGamma ?? '-'}{away(now.maxGamma)}</span></Col>
+        <Col>
+          <Tooltip title="NET GEX WALLS (the GEX platforms' net GEX by strike): each strike's call + put GEX under the Sign picked, calls and puts there netting out. +GEX wall = the strike of the largest POSITIVE net GEX - dealers long gamma there, their hedging damps price (sticky: stalls, rejections, pins). −GEX wall = the largest NEGATIVE - dealers short gamma there, hedging adds to moves (slippery: a push through it can run). Unlike the call / put walls (each side's gamma x OI, whoever holds it) they follow the Sign.">
+            <Text type="secondary" style={{ fontSize: 12 }}>+GEX wall </Text><span style={{ color: POS_GEX_COLOR }}>{now.posGex ?? '-'}{away(now.posGex)}</span>
+            <Text type="secondary" style={{ fontSize: 12 }}> · −GEX wall </Text><span style={{ color: NEG_GEX_COLOR }}>{now.negGex ?? '-'}{away(now.negGex)}</span>
+          </Tooltip>
+        </Col>
         <Col flex="1 1 320px" style={{ minWidth: 0 }}>
           <FoldText id="gex.basis" label="how it is worked out" className="oa-note">
             <Text type="secondary" style={{ fontSize: 12 }}>

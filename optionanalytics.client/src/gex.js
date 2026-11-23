@@ -320,7 +320,8 @@ function chainAt(chain, t, spot) {
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
  * Each minute: `{ time, spot, forward, carry (forward / spot), years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
- * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, call, sigma, dealerOi, oi, years, carry }],
+ * flipEdge, callWall, putWall, maxGamma, posGex / negGex (the NET GEX walls: the strikes of the largest positive / negative
+ * net GEX), band: [lowest, highest strike read], options: [{ strike, call, sigma, dealerOi, oi, years, carry }],
  * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
  * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
  * leaves the flip out (null) - the costly part - for a caller that needs only the net and the walls.
@@ -341,7 +342,7 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
   const strikes = [...new Set(all.flatMap((c) => c.strikes))].sort((a, b) => b - a)
   const steps = strikes.slice(1).map((k, i) => strikes[i] - k).filter((d) => d > 0)
   const strikeStep = steps.length ? Math.min(...steps) : 0
-  const held = { call: null, put: null, max: null }   // the strikes holding the levels, minute to minute
+  const held = { call: null, put: null, max: null, pos: null, neg: null }   // the strikes holding the levels, minute to minute
   const minutes = []
   for (const { t, spot } of spots) {
     const first = chainAt(all[0], t, spot)
@@ -356,6 +357,11 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
     const rows = []
     let calls = 0, puts = 0
     const callWeights = new Map(), putWeights = new Map(), gammaWeights = new Map()
+    // NET GEX walls (the GEX platforms' "net GEX by strike" - Unusual Whales, Quant Data, GEXbot): each strike's call +
+    // put GEX under the Sign read, calls and puts at a strike netting out - the largest POSITIVE strike (dealers long
+    // gamma there: hedging damps price - sticky) and the largest NEGATIVE one (short gamma: hedging speeds price -
+    // slippery), anywhere in the strikes loaded, held like the other walls (WALL_SWITCH).
+    const posWeights = new Map(), negWeights = new Map()
     const zone = WALL_ZONE * strikeStep
     const unit = spot * spot * 0.01
     let lowStrike = Infinity, highStrike = -Infinity
@@ -386,11 +392,16 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       gammaWeights.set(strike, cWeight + pWeight)
       lowStrike = Math.min(lowStrike, strike)
       highStrike = Math.max(highStrike, strike)
-      rows.push({ strike, call, put, net: (call ?? 0) + (put ?? 0), ceOi, peOi, gamma: (cWeight + pWeight) * unit })
+      const net = (call ?? 0) + (put ?? 0)
+      if (net > 0) posWeights.set(strike, net)
+      else if (net < 0) negWeights.set(strike, -net)
+      rows.push({ strike, call, put, net, ceOi, peOi, gamma: (cWeight + pWeight) * unit })
     }
     held.call = holdLevel(callWeights, held.call)
     held.put = holdLevel(putWeights, held.put)
     held.max = holdLevel(gammaWeights, held.max)
+    held.pos = holdLevel(posWeights, held.pos)
+    held.neg = holdLevel(negWeights, held.neg)
     // The flip: within rangePct % of spot and the strikes loaded; near their edge (a strike step or a 1-sigma move),
     // the strikes not loaded weigh in.
     const { forward, carry, years, atmIv } = first
@@ -400,7 +411,7 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       time: t, spot, forward, carry, years, yearsFrom: first.yearsFrom, impliedYears: first.implied,
       atm: first.atm, atmIv, net: calls + puts, calls, puts,
       flip, flipEdge: flip != null && (flip - lowStrike < edge || highStrike - flip < edge),
-      callWall: held.call, putWall: held.put, maxGamma: held.max,
+      callWall: held.call, putWall: held.put, maxGamma: held.max, posGex: held.pos, negGex: held.neg,
       band: [lowStrike, highStrike], options, strikes: rows,
       ...(all.length > 1 ? { expiries: read.length } : {}),
     })

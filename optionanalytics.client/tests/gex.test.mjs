@@ -482,3 +482,37 @@ test('NSE positions + build-up: starts from the hedgers\' share, then the OI cha
   const one = day({ minutes: 1 })
   assert.ok(close(gexDay(one.ce, one.pe, one.spots, { sign: 'buildup', shares })[0].net, gexDay(one.ce, one.pe, one.spots, { shares })[0].net, 1e-6))
 })
+
+test('NET GEX walls: the strikes of the largest positive / negative net GEX; calls and puts at one strike cancel', () => {
+  // Every strike 1e6 calls and puts (net 0) but: 25100 extra calls (+), 24900 extra puts (−) and 25000 heavy on BOTH sides.
+  const d = day({
+    ceOi: (k) => (k === 25100 ? 6e6 : k === 25000 ? 8e6 : 1e6),
+    peOi: (k) => (k === 24900 ? 6e6 : k === 25000 ? 8e6 : 1e6),
+  })
+  const [m] = gexDay(d.ce, d.pe, d.spots)
+  assert.equal(m.posGex, 25100)
+  assert.equal(m.negGex, 24900)
+  // 25000 holds the most gamma x OI - max gamma (the absolute gamma strike) - but its calls and puts net out: no net wall.
+  assert.equal(m.maxGamma, 25000)
+  assert.ok(Math.abs(m.strikes.find((r) => r.strike === 25000).net) < 1e-6 * Math.abs(m.strikes.find((r) => r.strike === 25100).net))
+  // Each wall IS the strike with the largest net of its sign.
+  const pos = m.strikes.filter((r) => r.net > 0).sort((a, b) => b.net - a.net)[0]
+  const neg = m.strikes.filter((r) => r.net < 0).sort((a, b) => a.net - b.net)[0]
+  assert.deepEqual([pos.strike, neg.strike], [m.posGex, m.negGex])
+})
+
+test('NET GEX walls: held like the walls (10% more to move), nothing after the minute; none without a strike of that sign', () => {
+  // From minute 10 25150's calls outweigh 25100's by far: the +GEX wall moves there then, not before.
+  const d = day({ ceOi: (k, m) => (k === 25100 ? 6e6 : k === 25150 ? (m < 10 ? 1e6 : 30e6) : 1e6) })
+  const walls = gexDay(d.ce, d.pe, d.spots).map((x) => x.posGex)
+  assert.ok(walls.slice(0, 10).every((w) => w === 25100), walls.join(','))
+  assert.ok(walls.slice(10).every((w) => w === 25150), walls.join(','))
+  // A cut part way = the whole day's minutes up to it.
+  const cut = day({ minutes: 12, ceOi: (k, m) => (k === 25100 ? 6e6 : k === 25150 ? (m < 10 ? 1e6 : 30e6) : 1e6) })
+  assert.deepEqual(gexDay(cut.ce, cut.pe, cut.spots).map((x) => x.posGex), walls.slice(0, 12))
+  // Calls and puts equal at every strike: no strike nets either way - no net wall.
+  const flat = day({ minutes: 1 })
+  const [f] = gexDay(flat.ce, flat.pe, flat.spots)
+  assert.equal(f.posGex ?? null, null)
+  assert.equal(f.negGex ?? null, null)
+})

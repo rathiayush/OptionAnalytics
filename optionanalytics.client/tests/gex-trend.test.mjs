@@ -180,3 +180,36 @@ test('price near the GEX levels: put wall support, call wall resistance, the max
   assert.ok(both.every((l) => l.weak))
   assert.deepEqual(gexLevelsNear(null), [])
 })
+
+test('NET GEX walls at the levels: the +GEX wall reads sticky, the −GEX wall an accelerator, by the regime', () => {
+  const minute = (net, spot, levels) => ({ time: OPEN, net: net * CR, spot, calls: 500 * CR, puts: -500 * CR, ...levels })
+  const pos = gexLevelsNear(minute(300, 25020, { posGex: 25000, negGex: 25500 }))
+  assert.deepEqual(pos.map((l) => l.level), ['posGex'])
+  assert.match(pos[0].read, /^Sticky strike - dealer hedging damps/)
+  const neg = gexLevelsNear(minute(-300, 25020, { negGex: 25000 }))
+  assert.match(neg[0].read, /^Accelerator/)
+})
+
+test('NET GEX walls in the Signal backtest: near / broke the +GEX and −GEX walls, the level read the candle before; each mirrored', async () => {
+  const { RULE_CONDITIONS } = await import('../src/signalBacktest.js')
+  const c = RULE_CONDITIONS.find((x) => x.id === 'gexLevel')
+  const o = Object.fromEntries(c.options.map((x) => [x.value, x]))
+  assert.equal(o.brokeAboveNegGex.opposite, 'brokeBelowNegGex')
+  assert.equal(o.brokeBelowPosGex.opposite, 'brokeAbovePosGex')
+  assert.equal(o.nearPosGex.opposite, 'nearPosGex')
+  // Spot climbing 24990 -> 25030 through a −GEX wall at 25000 and up to a +GEX wall at 25050.
+  const closes = [24980, 24990, 24995, 25010, 25030, 25048]
+  const d = {
+    spot: { c: closes, h: closes.map((x) => x + 2), l: closes.map((x) => x - 2) },
+    gex: closes.map(() => ({ net: -1, negGex: 25000, posGex: 25050, maxGamma: 25050 })),
+  }
+  const at = (v, i, w = 5, p) => c.test(d, i, v, w, p ?? (o[v].param?.def ?? 0))
+  assert.equal(at('brokeAboveNegGex', 2), false)
+  assert.equal(at('brokeAboveNegGex', 3), true)
+  assert.equal(at('brokeAboveNegGex', 4), true)
+  assert.equal(at('brokeBelowNegGex', 4), false)
+  assert.equal(at('nearPosGex', 4, 1, 0.05), false)   // 25032 high, 25050 wall: 0.07% away
+  assert.equal(at('nearPosGex', 5, 1, 0.05), true)
+  assert.equal(at('nearMaxGamma', 5, 1, 0.05), true)
+  assert.equal(at('nearNegGex', 5, 1, 0.05), false)
+})

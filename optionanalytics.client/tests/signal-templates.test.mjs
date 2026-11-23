@@ -11,10 +11,10 @@ import { RULE_TEMPLATES, TEMPLATE_FAMILIES, compareTemplates, templateById, temp
 
 const countLines = (g) => g.items.reduce((n, it) => n + (it.line ? 1 : countLines(it.group)), 0)
 
-test('29 templates, each a whole rule: every condition kept, its logic read, a side for the mirror, its levels in range', () => {
-  assert.equal(RULE_TEMPLATES.length, 29)
-  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.id)).size, 29)
-  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.name)).size, 29)
+test('31 templates, each a whole rule: every condition kept, its logic read, a side for the mirror, its levels in range', () => {
+  assert.equal(RULE_TEMPLATES.length, 31)
+  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.id)).size, 31)
+  assert.equal(new Set(RULE_TEMPLATES.map((t) => t.name)).size, 31)
   // The delta profile family: 4, each reading yesterday's profile (the session before each day is loaded for it).
   const delta = RULE_TEMPLATES.filter((t) => t.family === 'delta')
   assert.deepEqual(delta.map((t) => t.id), ['dpBuyersDefend', 'dpSellersBroken', 'dpFailedBreak', 'dpSellPut'])
@@ -58,13 +58,13 @@ test('a template on the page keeps the page\'s own index, lots, charges and limi
   assert.equal(s.rule.action, 'buyCE')
 })
 
-test('compare all 29 over the days loaded: each one\'s own report through the page\'s engine, best net first', () => {
+test('compare all 31 over the days loaded: each one\'s own report through the page\'s engine, best net first', () => {
   const { run } = syntheticDay()
   const day = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
   const results = [{ date: day.date, day }]
   const page = cleanBacktestSettings({ underlying: 'NIFTY' })
   const rows = compareTemplates(results, page)
-  assert.equal(rows.length, 29)
+  assert.equal(rows.length, 31)
   for (let k = 1; k < rows.length; k++) assert.ok(rows[k - 1].net >= rows[k].net)
   for (const r of rows) assert.ok(Number.isFinite(r.net) && Number.isInteger(r.trades) && r.days === 1, r.id)
   // A row is that template's own report: the same numbers as running it on the page.

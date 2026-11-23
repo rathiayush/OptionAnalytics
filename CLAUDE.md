@@ -325,6 +325,21 @@ All must pass before committing.
   (A first DEX - delta exposure - card was built beside it and removed on request: its CE vs PE lean repeated the OI reads
   already on the page, and "delta" next to the order flow's cumulative delta / CDV confused the two. It came back as the
   DEALER HEDGING card below - flows only, no lean.)
+- NET GEX WALLS (asked for - "net GEX walls on strikes ... how professional and institutional systems use it, do the same";
+  `gex.js` `posGex` / `negGex` on every `gexDay` minute): as the GEX platforms publish NET GEX BY STRIKE (Unusual Whales, Quant
+  Data, GEXbot) - each strike's call + put GEX under the Sign read, calls and puts at a strike NETTING OUT - the +GEX WALL =
+  the strike of the largest POSITIVE net GEX (dealers long gamma there, hedging damps price: STICKY - stalls, rejections, pins)
+  and the −GEX WALL = the largest NEGATIVE (short gamma there, hedging adds to moves: SLIPPERY / the accelerator), anywhere in
+  the strikes loaded, held like the walls (`WALL_SWITCH` - 10% more to move; no above / below-spot dead zone - they are not
+  sided). The call / put walls and max gamma (= SpotGamma's "absolute gamma" strike: the most gamma x OI, whoever holds it) are
+  UNCHANGED; the net walls FOLLOW THE SIGN (Standard / OI build-up / NSE + build-up can put them on different strikes - the
+  point of reading positioning). Shown: the GEX card's number row (with the rule in its tooltip), "GEX by strike" tags +G / −G,
+  the spot-and-walls chart and the profile; the GEX levels on spot card's headline numbers, step lines (`GEX_SPOT_LINES` -
+  added ONCE to a saved choice of lines, `gexSpotNetSeen`) and ladder outlines; "At the levels" (`GEX_LEVEL_TABLE` - +GEX sticky,
+  −GEX an accelerator, by the regime). The Signal backtest's "GEX walls" condition takes them too (standard sign): near the
+  +GEX / −GEX wall, broke above / below each (mirrored), near max gamma; two templates - `stickyStrike` (long-gamma bounce off
+  the +GEX wall) and `acceleratorBreak` (short-gamma run through the −GEX wall). `tests/gex.test.mjs` (a strike whose calls and
+  puts cancel is max gamma but no net wall; the hold; a cut part way), `tests/gex-trend.test.mjs`. Reads - no alert or order.
 - OI Replay's DEALER HEDGING (DEX) card (asked for - "can you also add delta exposure", the hedging-flow version picked:
   named so it is not read as order-flow delta, no CE vs PE lean; `dex` - `DexCard.jsx`, the maths `dex.js`): from the page's
   GEX day (`useGexDays`, its Sign picked on the card - `optionanalytics.oiReplay.dexSign`, Standard / OI build-up / NSE +
