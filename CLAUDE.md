@@ -340,8 +340,17 @@ All must pass before committing.
   dealers' OI x delta at spot x spot, expiries summed) as a bar chart on the card (`DexStrikesChart` - + green / − red, the
   row spot is in blue, a hover reads calls / puts), and three headline levels by |dealer delta|: DEX RESISTANCE (the strike
   above spot with the most), DEX SUPPORT (below), DEX MAX (any) - the GEX walls' rules: a level moves only with 10% more, a
-  quarter-step dead zone around spot, carried minute to minute by `dexDay` (`held`). Under Standard a call's and a put's
-  deltas add to 1, so each bar is its call + put OI x spot and the walls are the biggest-OI strikes - said on the card.
+  quarter-step dead zone around spot, carried minute to minute by `dexDay` (`held`). THE STANDARD SIGN IS THE PUBLISHED DEX
+  (asked for - "DEX is incorrect, look how we do DEX"; the DEX platforms - FlashAlpha, Options Analysis Suite: DEX = the
+  negated sum of OI x the holder's delta x spot): `positions` 'market' (`positionsBook`) = dealers SHORT every option, calls
+  count −, puts + - they OFFSET: a call-heavy strike negative (dealers short delta - a latent bid on dips), a put-heavy one
+  positive (long delta - supply on rallies), the book crosses zero (the DEX flip exists) and a read line says which. It was
+  the GEX card's standard book (dealers long calls, short puts), where both legs are long delta: every bar green, the walls
+  the biggest-OI strikes, no flip. The net / strikes / walls / flip / profile read that book; the HEDGING FLOWS (±1%, vanna,
+  charm) stay on the GEX card's book (`dealerOi`) so they agree with its regime; OI build-up / NSE + build-up read both on
+  their own dealer book (`positions` 'dealer'). gexDay's `options` carry the raw `oi`. A delta to spot is N(d1) (call) /
+  N(d1) − 1 (put) - the slope of the DISCOUNTED Black-76 price, the carry cancelling the discount, as gex.js' gamma
+  n(d1) / (S sigma sqrt T); it was carry x N(d1), up to 0.5% high on a monthly. GEX itself was cross-checked and holds.
   Each minute from its own GEX minute - a cut at the clock = the whole
   day's up to it (`tests/dex.test.mjs` - the delta = the price's slope, the moves = the GEX, charm / vanna signs, the flip,
   no look-ahead under both signs). Added ONCE to a saved "Sections shown" right after the GEX levels on spot
