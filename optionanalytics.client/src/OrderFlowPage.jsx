@@ -27,7 +27,7 @@ import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, or
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
 import { FLOW_READ_SCORES, keepShownReads, scoredFlowReads, withScoredReads } from './flowReads.js'
-import { LiquidityNetCard, PositioningCard } from './FlowToolCards.jsx'
+import { LiquidityNetCard, PositioningCard, PressureCard } from './FlowToolCards.jsx'
 import { DomDrawer, useNarrow } from './DomDrawer.jsx'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
@@ -1040,6 +1040,12 @@ export default function OrderFlowPage() {
                 <LiquidityNetCard
                   view={view} rowSize={rowSize} lotSize={lotSize} showLots={showLots} dayKey={dayKey} narrow={narrow} noDepth={noDepth} isReplay={isReplay}
                   underlying={underlying}
+                />
+                {/* Selling pressure at the lows / buying pressure at the highs (sellingPressure.js): a later low on weaker
+                    normalised selling that claims back the earlier low = buying interest; the mirror at the highs. */}
+                <PressureCard
+                  view={view} clockMs={nowMs} isReplay={isReplay} underlying={underlying} lotSize={lotSize} showLots={showLots}
+                  dayKey={dayKey} narrow={narrow} estimated={estimated}
                 />
 
                 <Card size="small" title="Liquidity map · support / resistance, zones, confluence, what is happening now" extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>from the heatmap, OI walls, profiles and VWAP</Text>}>
