@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Checkbox, Col, Empty, Row, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, Row, Segmented, Select, Slider, Space, Tag, TimePicker, Tooltip, Typography } from 'antd'
+import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+import dayjs from 'dayjs'
 import { CandlestickSeries, CrosshairMode } from 'lightweight-charts'
 import {
   AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, POLL_HEADERS, UP_COLOR, asList, istTickMarkFormatter, istTimeFormatter,
@@ -9,7 +10,11 @@ import {
 import { createZoomableChart } from './chartZoom.js'
 import { FoldText } from './FoldText.jsx'
 import { useFollowReplayClock } from './replaySync.jsx'
-import { useViewport } from './useScreen.js'
+import { useOnScreen, useViewport } from './useScreen.js'
+import { useLiveIndexFeed } from './useLiveIndexFeed.js'
+import { FloatingReplayBar } from './FloatingReplayBar.jsx'
+import { inMarketSession } from './marketSession.js'
+import { SESSION_MINUTES, addLiveMinute, candlesAtClock, foldMinutes, sessionStartOf } from './structureLive.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
 import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, ltfLayers, lowerThan, structureShapes } from './structureShapes.js'
 
@@ -30,12 +35,20 @@ const IST_DATE_TIME = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 
 const IST_DATE = new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: '2-digit', timeZone: 'Asia/Kolkata' })
 const when = (bar, tf) => (bar ? (tf >= 1440 ? IST_DATE : IST_DATE_TIME).format(new Date(bar.time)) : '')
 const fmt = (v) => (v == null ? '—' : Math.round(v * 100) / 100)
+const istToday = () => new Date(Date.now() + 19_800_000).toISOString().slice(0, 10)
+const NO_BARS = []
+const NO_LIVE = { key: null, bars: NO_BARS, price: null, at: null }
 
-// The candles of one index and timeframe: loaded on a change, then again every minute while today is in them (a page
-// timer with POLL_HEADERS - the server's memory for today, the past from its disk); a failed load waits longer each time.
-function useStructureCandles(index, tf, days) {
+// The candles of one index and timeframe: loaded on a change, then again every minute while today is in them and
+// `keepFresh` (live, or today replayed - a page timer with POLL_HEADERS - the server's memory for today, the past from its
+// disk); a failed load waits longer each time. `liveSeen` (a live minute of today came on the feed): a load that held no
+// candle of today - the page opened before the open, or today could not be read then - is made again ONCE, so today's
+// candles and the minute refresh come in.
+function useStructureCandles(index, tf, days, keepFresh, liveSeen) {
   const [state, setState] = useState({ loading: true, data: null, error: null })
   const [nonce, setNonce] = useState(0)
+  const freshRef = useRef(keepFresh)
+  useEffect(() => { freshRef.current = keepFresh }, [keepFresh])
   useEffect(() => {
     let alive = true
     let timer = null
@@ -49,19 +62,64 @@ function useStructureCandles(index, tf, days) {
           const candles = asList(body.candles).map((c) => ({ time: new Date(c.time).getTime(), open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume }))
           setState({ loading: false, data: { ...body, candles }, error: candles.length ? null : body.error ?? 'No candles' })
           wait = 60_000
-          if (body.todayIncluded) timer = setTimeout(() => load(true), wait)
+          if (body.todayIncluded && freshRef.current) timer = setTimeout(() => load(true), wait)
         })
         .catch((e) => {
           if (!alive) return
           setState((s) => ({ loading: false, data: s.data, error: e.message }))
           wait = Math.min(30 * 60_000, wait * 2)
-          if (poll) timer = setTimeout(() => load(true), wait)
+          if (poll && freshRef.current) timer = setTimeout(() => load(true), wait)
         })
     }
     load(false)
     return () => { alive = false; clearTimeout(timer) }
   }, [index, tf, days, nonce])
+  const askedForTodayRef = useRef(null)
+  useEffect(() => {
+    if (!liveSeen || state.loading || !state.data || state.data.todayIncluded) return
+    const key = `${index}|${tf}|${days}|${istToday()}`
+    if (askedForTodayRef.current === key) return
+    askedForTodayRef.current = key
+    setNonce((n) => n + 1)
+  }, [liveSeen, state.loading, state.data, index, tf, days])
   return { ...state, reload: () => setNonce((n) => n + 1) }
+}
+
+// A replayed day's 1-minute spot bars (GET /api/oi-replay/{u}/spot-day - the server's memory / disk, the day OI Replay's
+// run reads): the candle FORMING at the replay clock is made from them. A past day is kept for the tab (it never changes);
+// today replayed is read again each minute (the server's memory). A failure is not kept - the completed candles still show.
+const SPOT_DAY_CACHE = new Map()
+const SPOT_DAY_CACHE_MAX = 30
+function useDayMinutes(index, dateKey, enabled) {
+  const [state, setState] = useState({ key: null, bars: [], error: null })
+  const [tick, setTick] = useState(0)
+  const key = `${index}|${dateKey}`
+  const today = dateKey === istToday()
+  useEffect(() => {
+    if (!enabled || !today) return undefined
+    const id = setInterval(() => setTick((n) => n + 1), 60_000)
+    return () => clearInterval(id)
+  }, [enabled, today])
+  useEffect(() => {
+    if (!enabled || (!today && SPOT_DAY_CACHE.has(key))) return undefined
+    let alive = true
+    fetch(`/api/oi-replay/${index}/spot-day?date=${dateKey}`, tick ? { headers: POLL_HEADERS } : undefined)
+      .then((r) => r.json().then((body) => (r.ok ? body : Promise.reject(new Error(body?.error ?? `HTTP ${r.status}`)))))
+      .then((body) => {
+        if (!alive) return
+        const bars = asList(body.bars).filter((b) => inMarketSession(b.time))
+          .map((b) => ({ time: new Date(b.time).getTime(), open: b.open, high: b.high, low: b.low, close: b.close, volume: b.volume ?? 0 }))
+        if (bars.length && !today) {
+          SPOT_DAY_CACHE.set(key, bars)
+          if (SPOT_DAY_CACHE.size > SPOT_DAY_CACHE_MAX) SPOT_DAY_CACHE.delete(SPOT_DAY_CACHE.keys().next().value)
+        }
+        setState({ key, bars, error: bars.length ? null : body.error ?? 'no minutes' })
+      })
+      .catch((e) => { if (alive) setState((s) => ({ key, bars: s.key === key ? s.bars : [], error: e.message })) })
+    return () => { alive = false }
+  }, [index, dateKey, enabled, key, today, tick])
+  if (!today && SPOT_DAY_CACHE.has(key)) return { key, bars: SPOT_DAY_CACHE.get(key), error: null }
+  return state.key === key ? state : { key, bars: NO_BARS, error: null }
 }
 
 function StructureChart({ analysis, shapes, height }) {
@@ -189,19 +247,30 @@ function SourceLine({ data }) {
   )
 }
 
-// FOLLOW OI REPLAY (asked for - "replay should also work there with OI sync"): the Profiles page's one-way clock
-// (useFollowReplayClock). While OI Replay replays a past day the page shows that index with only the candles COMPLETED at
-// its clock (nothing after it - the structure is read from what was known then); the window is asked far enough back to
-// hold that day. Live, or with the tick off, as before.
-const SESSION_MINUTES = 375
-const istToday = () => new Date(Date.now() + 19_800_000).toISOString().slice(0, 10)
+// REPLAY AND LIVE (asked for - "replay should also work there with OI sync", then "replay so they can follow OI ... also
+// live spot and data tick when it is live"): FOLLOWING OI REPLAY (the Profiles page's one-way clock, useFollowReplayClock)
+// the page shows OI Replay's index and day - live, or a past day at its replay clock; with no OI Replay tab answering it is
+// its own (Live, or a past day with its own Start / Pause, speed and slider - opened where OI Replay was last left when
+// that was kept in this browser, a phone's case). A replay shows the candles COMPLETED at the clock and the one FORMING,
+// made from the day's 1-minute bars up to it (structureLive.js candlesAtClock) - nothing after the clock; the window is
+// asked far enough back to hold the day. LIVE, the spot feed's pushes (hub group "u:{U}", useLiveIndexFeed) fold the
+// forming minute into each timeframe's last candle (foldMinutes) - the charts and the read tick with the price, at most
+// once a second; the minute re-read of the server's candles goes on underneath.
 const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000)
-/** The candles completed by `asOfMs` (null = all). */
-export function candlesAsOf(candles, tf, asOfMs) {
-  if (asOfMs == null) return candles
-  const dur = Math.min(tf, SESSION_MINUTES) * 60_000
-  return candles.filter((c) => c.time + dur <= asOfMs)
-}
+const LIVE_FLUSH_MS = 1000
+const MAX_DAYS = { 1440: 1100, 240: 365, 60: 180, 15: 60, 5: 21, 3: 10, 1: 5 }  // SpotStructureService.Timeframes
+// A replay's speed, as OI Replay's: milliseconds per market minute.
+const SPEED_OPTIONS = [
+  { value: 2000, label: '0.5x' },
+  { value: 1000, label: '1x' },
+  { value: 500, label: '2x' },
+  { value: 250, label: '4x' },
+  { value: 100, label: '10x' },
+]
+const hhmm = (ms) => (ms == null ? '' : new Date(ms + 19_800_000).toISOString().slice(11, 16))
+const hhmmss = (ms) => (ms == null ? '' : new Date(ms + 19_800_000).toISOString().slice(11, 19))
+const dayOpenOf = (dateKey) => sessionStartOf(Date.parse(`${dateKey}T12:00:00+05:30`))
+const clockText = (c) => (c?.live ? 'live' : c?.date ? `${c.date}${c.ms ? ` ${hhmm(c.ms - 60_000)}` : ''}` : c?.loadingDate ? `loading ${c.loadingDate}` : c?.failedDate ? `${c.failedDate} (its load failed)` : '')
 
 export default function SpotStructurePage() {
   const { width } = useViewport()
@@ -226,26 +295,94 @@ export default function SpotStructurePage() {
   // The lower chart's OWN markings - off, it shows the higher timeframe's levels over its candles and nothing else.
   const [ltfOwn, setLtfOwn] = usePersistedState('optionanalytics.structure.ltfOwn', true)
 
+  // Live, or a day replayed at a clock (the END of the newest minute shown; null = the day's first minute) - OI Replay's
+  // while following it, else the page's own.
+  const todayKey = istToday()
+  const [live, setLive] = useState(true)
+  const [dateKey, setDateKey] = useState(todayKey)
+  const [clockMs, setClockMs] = useState(null)
+  const [playing, setPlaying] = useState(false)
+  const [speedMs, setSpeedMs] = usePersistedState('optionanalytics.structure.speedMs', 500)
+
   // Following OI Replay: its index, day and clock.
   const [follow, setFollow] = usePersistedState('optionanalytics.structure.follow', true)
-  const [replay, setReplay] = useState(null)               // { date, ms } of the past day OI Replay replays; null = live
   const onClock = useCallback((msg) => {
-    if (!['NIFTY', 'BANKNIFTY', 'SENSEX'].includes(msg.underlying)) return
+    if (!INDICES.includes(msg.underlying)) return
     setIndex(msg.underlying)
-    if (msg.live) { setReplay(null); return }
+    setPlaying(false)
+    if (msg.live) { setLive(true); setDateKey(istToday()); setClockMs(null); return }
     const day = msg.date ?? msg.loadingDate ?? msg.failedDate
     if (!day) return
-    setReplay({ date: day, ms: msg.date ? msg.ms ?? null : null })
+    setLive(false)
+    setDateKey(day)
+    // A day OI Replay is still loading (or failed to load): none of it yet, only the days before it.
+    setClockMs(msg.date ? msg.ms ?? null : dayOpenOf(day))
   }, [setIndex])
   const followed = useFollowReplayClock(follow, onClock)
   const following = follow && followed.connected
-  const replayed = following ? replay : null
-  const asOfMs = replayed ? (replayed.ms ?? Date.parse(`${replayed.date}T09:15:00+05:30`)) : null
-  const back = replayed ? Math.max(0, dayDiff(istToday(), replayed.date)) : 0
-  const high = useStructureCandles(index, htf, htfDays + back)
-  const low = useStructureCandles(index, ltf, ltfDays + back)
-  const highCandles = useMemo(() => candlesAsOf(high.data?.candles ?? [], htf, asOfMs), [high.data, htf, asOfMs])
-  const lowCandles = useMemo(() => candlesAsOf(low.data?.candles ?? [], ltf, asOfMs), [low.data, ltf, asOfMs])
+
+  const dayOpen = dayOpenOf(dateKey)
+  const span = { start: dayOpen + 60_000, end: dayOpen + SESSION_MINUTES * 60_000 }
+  const clock = live ? null : Math.max(dayOpen, Math.min(span.end, clockMs ?? span.start))
+  const atEnd = clock != null && clock >= span.end
+  const ownReplay = !live && !following
+
+  // Its own replay, as OI Replay's: one market minute every speedMs, stopping at the session's last minute.
+  useEffect(() => {
+    if (!playing || !ownReplay) return undefined
+    const id = setInterval(() => setClockMs((ms) => {
+      const next = Math.max(span.start, ms ?? span.start) + 60_000
+      if (next >= span.end) { setPlaying(false); return span.end }
+      return next
+    }), speedMs)
+    return () => clearInterval(id)
+  }, [playing, ownReplay, span.start, span.end, speedMs])
+  // "Go to": the end of that minute (it shown), held inside the day.
+  const goTo = (v) => {
+    if (!v) return
+    setPlaying(false)
+    setClockMs(Math.max(span.start, Math.min(span.end, dayOpen + ((v.hour() * 60 + v.minute()) - (9 * 60 + 15)) * 60_000 + 60_000)))
+  }
+  const pickLive = () => { setLive(true); setDateKey(istToday()); setClockMs(null); setPlaying(false) }
+  const pickDay = (d) => { if (!d) return; setDateKey(d.format('YYYY-MM-DD')); setLive(false); setClockMs(null); setPlaying(false) }
+
+  // LIVE: the spot feed's pushes - the forming minute kept per minute (addLiveMinute), shown at most once a second.
+  const liveKey = live ? `${index}|${todayKey}` : null
+  const liveRef = useRef(NO_LIVE)
+  const flushRef = useRef(null)
+  const reloadAllRef = useRef(null)
+  const [liveState, setLiveState] = useState(NO_LIVE)
+  useEffect(() => () => clearTimeout(flushRef.current), [])
+  useLiveIndexFeed(index, live, {
+    onSpot: (snapshot) => {
+      if (!live || snapshot?.underlying !== index) return
+      let cur = liveRef.current
+      if (cur.key !== liveKey) cur = liveRef.current = { key: liveKey, bars: NO_BARS, price: null, at: null }
+      const bar = snapshot.currentBar
+      const ms = bar ? new Date(bar.time).getTime() : NaN
+      if (inMarketSession(ms) && sessionStartOf(ms) === sessionStartOf(Date.now())) cur.bars = addLiveMinute(cur.bars, bar)
+      if (Number.isFinite(snapshot.lastPrice)) { cur.price = snapshot.lastPrice; cur.at = snapshot.timestampUtc ?? null }
+      if (!flushRef.current) flushRef.current = setTimeout(() => { flushRef.current = null; setLiveState({ ...liveRef.current }) }, LIVE_FLUSH_MS)
+    },
+    onReconnected: () => reloadAllRef.current?.(),
+  }, 'Spot structure live feed')
+  const pushed = liveState.key === liveKey ? liveState : { bars: NO_BARS, price: null, at: null }
+  const liveBars = pushed.bars
+
+  const back = live ? 0 : Math.max(0, dayDiff(todayKey, dateKey))
+  const keepFresh = live || dateKey === todayKey
+  const high = useStructureCandles(index, htf, htfDays + back, keepFresh, liveBars.length > 0)
+  const low = useStructureCandles(index, ltf, ltfDays + back, keepFresh, liveBars.length > 0)
+  useEffect(() => { reloadAllRef.current = () => { high.reload(); low.reload() } })
+  const dayMinutes = useDayMinutes(index, dateKey, !live)
+  const highCandles = useMemo(
+    () => (live ? foldMinutes(high.data?.candles ?? NO_BARS, liveBars, htf) : candlesAtClock(high.data?.candles ?? NO_BARS, htf, clock, dayMinutes.bars)),
+    [live, high.data, liveBars, htf, clock, dayMinutes.bars],
+  )
+  const lowCandles = useMemo(
+    () => (live ? foldMinutes(low.data?.candles ?? NO_BARS, liveBars, ltf) : candlesAtClock(low.data?.candles ?? NO_BARS, ltf, clock, dayMinutes.bars)),
+    [live, low.data, liveBars, ltf, clock, dayMinutes.bars],
+  )
   const opts = useMemo(() => ({ swingLen, internalLen, trendLen: Math.max(3, Math.round((swingLen + internalLen) / 3)) }), [swingLen, internalLen])
   const ha = useMemo(() => analyzeStructure(highCandles, opts), [highCandles, opts])
   const la = useMemo(() => analyzeStructure(lowCandles, opts), [lowCandles, opts])
@@ -255,10 +392,39 @@ export default function SpotStructurePage() {
   const ltfShapes = useMemo(() => structureShapes(la, ltfLayers(layerSet, ltfOwn), { htf: ha, density }), [la, layerSet, ltfOwn, ha, density])
   const chartHeight = narrow ? 420 : Math.min(620, Math.max(420, Math.round(window.innerHeight * 0.6)))
 
+  // The live price, and whether the feed has gone quiet (no push for a minute inside the session).
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!live) return undefined
+    const id = setInterval(() => setNow(Date.now()), 10_000)
+    return () => clearInterval(id)
+  }, [live])
+  const tickAt = pushed.at ? new Date(pushed.at).getTime() : null
+  const quiet = live && inMarketSession(now) && (tickAt == null ? false : now - tickAt > 60_000)
+  // The floating replay bar (OI Replay's): once the inline replay controls are out of sight.
+  const [replayInlineEl, setReplayInlineEl] = useState(null)
+  const replayInlineOnScreen = useOnScreen(replayInlineEl)
+
+  // What a chart shows: live (its last candle ticking), or the replay's clock - and, replayed, how far back its window
+  // reaches (each timeframe holds so many days: a day older than that shows its own candles only).
+  const modeLine = (tf, days, data) => {
+    if (live) return liveBars.length || data.data?.todayIncluded ? 'Live - the last candle is forming and ticks with the spot feed.' : null
+    const parts = [`Replay at ${hhmm(clock - 60_000)} - the candles completed by then${dayMinutes.bars.length ? ' and the one forming (from the day\'s 1-minute bars)' : ''}; nothing after it.`]
+    if (dayMinutes.error) parts.push(`The forming candle could not be made: ${dayMinutes.error}.`)
+    if (back > MAX_DAYS[tf]) parts.push(`${dateKey} is older than the ${MAX_DAYS[tf]} days this timeframe holds - only that day's own candles.`)
+    else if (back + days > MAX_DAYS[tf]) parts.push(`Only ${MAX_DAYS[tf] - back} days before it (this timeframe holds ${MAX_DAYS[tf]}).`)
+    return parts.join(' ')
+  }
+
   const card = (title, tf, data, a, shapes, days, setDays, daysPicked, extra = null) => (
     <Card
       size="small"
-      title={<span>{title} · {TF_NAME[tf]}{data.data?.todayIncluded ? <Tag color="green" style={{ marginInlineStart: 8 }}>live</Tag> : null}</span>}
+      title={(
+        <span>{title} · {TF_NAME[tf]}
+          {live && (liveBars.length || data.data?.todayIncluded) ? <Tag color="green" style={{ marginInlineStart: 8 }}>live</Tag> : null}
+          {!live ? <Tag color="blue" style={{ marginInlineStart: 8 }}>{`replay ${hhmm(clock - 60_000)}`}</Tag> : null}
+        </span>
+      )}
       extra={(
         <Space size={6}>
           {extra}
@@ -272,6 +438,7 @@ export default function SpotStructurePage() {
       {a.n ? <StructureChart analysis={a} shapes={shapes} height={chartHeight} /> : <Empty description={data.loading ? 'Loading candles…' : 'No candles'} style={{ padding: 40 }} />}
       {a.n && shapes.length === 0 && <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>Nothing drawn - every layer is off for this chart.</Text>}
       {data.data && <SourceLine data={data.data} />}
+      {modeLine(tf, days, data) && <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>{modeLine(tf, days, data)}</Text>}
       <StructureSummary a={a} tf={tf} />
     </Card>
   )
@@ -287,11 +454,30 @@ export default function SpotStructurePage() {
         <Card size="small" title="Spot structure - market structure on a higher and a lower timeframe">
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]}>
-              <Segmented value={index} onChange={setIndex} options={INDICES} disabled={following} />
-              <Checkbox checked={follow} onChange={(e) => setFollow(e.target.checked)}>Follow OI Replay</Checkbox>
-              {follow && <Tag color={following ? (replayed ? 'blue' : 'green') : 'default'}>
-                {following ? (replayed ? `⇄ replay ${replayed.date}${replayed.ms ? ` ${new Date(replayed.ms + 19_800_000).toISOString().slice(11, 16)}` : ''}` : '⇄ OI Replay live') : 'OI Replay not open'}
-              </Tag>}
+              <Tooltip title={following ? 'Following OI Replay - untick Follow to pick here' : null}>
+                <Segmented value={index} onChange={(v) => { setIndex(v); setPlaying(false) }} options={INDICES} disabled={following} />
+              </Tooltip>
+              <Space size={4}>
+                <Button size="small" type={live ? 'primary' : 'default'} disabled={following} onClick={pickLive}>Live</Button>
+                <DatePicker
+                  size="small" allowClear={false} disabled={following} value={dayjs(live ? todayKey : dateKey)} aria-label="Day replayed"
+                  disabledDate={(d) => d.isAfter(dayjs(), 'day') || d.day() === 0 || d.day() === 6}
+                  onChange={pickDay}
+                />
+              </Space>
+              <Tooltip title="Follow the OI Replay page open in another tab - or on another device signed in to this account, with Sync and Devices on (OI Replay's switches): the same index and day - live, or a past day at its replay clock, so the structure replays along with it (the candles completed at its clock and the one forming). With no OI Replay running (a phone: one tab) this page opens where OI Replay was last left, and its own controls play on from there. Nothing you do here moves OI Replay.">
+                <Checkbox checked={follow} onChange={(e) => setFollow(e.target.checked)}>Follow OI Replay</Checkbox>
+              </Tooltip>
+              {follow && (following
+                ? <Tag color={followed.clock?.failedDate ? 'warning' : live ? 'green' : 'blue'} style={{ margin: 0 }}>⇄ OI Replay{followed.remote ? ` on ${followed.remote}` : ''} · {followed.clock?.underlying} {clockText(followed.clock)}</Tag>
+                : followed.kept
+                  ? <Tag color="blue" style={{ margin: 0, whiteSpace: 'normal' }}>Opened where OI Replay was left · {followed.kept.underlying} {clockText(followed.kept)} · it is not running - play on here</Tag>
+                  : <Tag style={{ margin: 0 }}>OI Replay is not open - this page&apos;s own choice</Tag>)}
+              {live && pushed.price != null && (
+                <Tag color={quiet ? 'orange' : 'default'} style={{ margin: 0, fontVariantNumeric: 'tabular-nums' }}>
+                  {`Spot ${pushed.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · ${quiet ? `no tick since ${hhmmss(tickAt)}` : hhmmss(tickAt)}`}
+                </Tag>
+              )}
               <Space size={4}><Text style={{ fontSize: 12 }}>Higher TF</Text>
                 <Select value={htf} onChange={setHtf} style={{ width: 86 }} aria-label="Higher timeframe" options={TIMEFRAMES.filter((t) => t.value > 1)} />
               </Space>
@@ -309,6 +495,30 @@ export default function SpotStructurePage() {
                   options={Object.entries(DENSITY).map(([key, v]) => ({ value: key, label: v.label }))} />
               </Space>
             </Space>
+            {ownReplay && (
+              <div ref={setReplayInlineEl}><Space direction="vertical" size={6} style={{ width: '100%' }}>
+                <Space size={8} wrap align="center">
+                  <Button size="small" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)}>
+                    {playing ? 'Pause' : 'Start'}
+                  </Button>
+                  <Button size="small" icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setClockMs(span.start) }}>Reset</Button>
+                  <Text type="secondary" style={{ fontSize: 12 }}>Speed</Text>
+                  <Select size="small" value={speedMs} onChange={setSpeedMs} style={{ width: 80 }} options={SPEED_OPTIONS} aria-label="Speed" />
+                  <Text type="secondary" style={{ fontSize: 12 }}>Go to</Text>
+                  <TimePicker
+                    size="small" format="HH:mm" minuteStep={1} allowClear={false} needConfirm={false} showNow={false} style={{ width: 96 }}
+                    value={dayjs(`2000-01-01T${hhmm(clock - 60_000)}`)}
+                    disabledTime={() => ({ disabledHours: () => [...Array(24).keys()].filter((h) => h < 9 || h > 15) })}
+                    onChange={goTo}
+                  />
+                  <Text strong style={{ fontSize: 12 }}>{`${dateKey} · ${hhmm(clock - 60_000)} candle`}</Text>
+                </Space>
+                {/* No tooltip on the handle (the minute is shown above): on a phone a tap left it open and it re-aligned at
+                    every replay step - the Profiles page's crash. */}
+                <Slider style={{ margin: '0 8px' }} min={span.start} max={span.end} step={60_000} value={Math.max(span.start, clock)}
+                  tooltip={{ open: false }} onChange={(v) => { setPlaying(false); setClockMs(v) }} />
+              </Space></div>
+            )}
             {narrow && (
               <Button size="small" onClick={() => setLayersOpen(!layersOpen)} aria-expanded={layersOpen}>
                 {`Layers (${asList(layers).length} of ${STRUCTURE_LAYERS.length}) ${layersOpen ? '▴' : '▾'}`}
@@ -360,6 +570,15 @@ export default function SpotStructurePage() {
           {' · '}<span style={{ color: STRUCTURE_COLORS.pattern }}>patterns</span>{' · '}<span style={{ color: STRUCTURE_COLORS.htf }}>higher TF levels</span>
         </Text>
       </Space>
+      {ownReplay && !replayInlineOnScreen && (
+        <FloatingReplayBar fabOn={false}>
+          <Button size="small" type="primary" shape="circle" aria-label={playing ? 'Pause' : 'Start'} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} disabled={!playing && atEnd} onClick={() => setPlaying((p) => !p)} />
+          <Button size="small" shape="circle" aria-label="Reset" icon={<ReloadOutlined />} onClick={() => { setPlaying(false); setClockMs(span.start) }} />
+          <Text strong style={{ fontSize: 12, whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{hhmm(clock - 60_000)}</Text>
+          <Slider style={{ flex: 1, minWidth: 60, margin: '0 6px' }} min={span.start} max={span.end} step={60_000} value={Math.max(span.start, clock)} tooltip={{ open: false }} onChange={(v) => { setPlaying(false); setClockMs(v) }} />
+          <Select size="small" value={speedMs} onChange={setSpeedMs} style={{ width: 72 }} options={SPEED_OPTIONS} aria-label="Speed" />
+        </FloatingReplayBar>
+      )}
     </div>
   )
 }

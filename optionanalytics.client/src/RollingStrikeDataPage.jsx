@@ -105,6 +105,9 @@ function RollingCandleChart({ bars, splices, height = 420, showVwap = false }) {
   useEffect(() => {
     markersRef.current?.setMarkers([...dayResetMarkers(bars), ...spliceMarkers(splices)].sort((a, b) => a.time - b.time))
   }, [bars, splices])
+  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times. (It sat in the
+  // page, where this chart's ref does not exist - a ReferenceError on every render.)
+  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
@@ -322,9 +325,6 @@ export default function RollingStrikeDataPage() {
   ]
 
   const hasLoaded = result !== null
-
-  // Session VWAP of this option from its own candles' volume (resets each IST day), on the candles' times.
-  useEffect(() => { vwapRef.current?.setData(showVwap ? sessionVwapFromBars(bars) ?? [] : []) }, [bars, showVwap])
 
   return (
     <div style={{ maxWidth: 1280, margin: '0 auto', padding: '24px 16px' }}>

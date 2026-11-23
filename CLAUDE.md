@@ -901,6 +901,13 @@ All must pass before committing.
   a real day. (`VolumeProfilePrimitive`, fed by `profiles.binsProfile` - the server's own bins, so the bars and the
   POC / VAH / VAL lines can never disagree; bins carry no buy / sell side, so they are one neutral colour). The page's
   "VP bars" tick, on with "Volume Profile"; off leaves the levels alone.
+- THE PROFILES CHARTS' DRAWINGS (`profilePrimitives.js`, `tests/profile-primitives.test.mjs` on a fake canvas; asked about - "delta
+  is coming empty ... BANKNIFTY and SENSEX", "for market profile there is no spot or future chart"): the market profile's
+  POC outline read an undefined `z` (a slip of the zone boxes' outline change) - it threw mid-paint, the TPO letters stopped
+  at the POC and the CANDLES WERE NEVER DRAWN; the Delta column took a 1 px gap off each row's top and bottom, so a row
+  under ~2 px (10-point rows on a wide BANKNIFTY / SENSEX range) had no height and every one was skipped - a thin row is now
+  drawn whole, at least 1 px. `npm run lint` now has `no-undef` (`.oxlintrc.json`, browser + node globals) - it also found
+  the Rolling strike data page's VWAP effect using its chart's ref from the page (moved into `RollingCandleChart`).
 - The PROFILES page (`/profiles`, "Volume & Market Profile" - `ProfilesPage.jsx`, `profileZones.js`, `profilePrimitives.js`): a
   row of two cards (`ProfilePair`) for the index's SPOT and one below for its near FUTURES, each over its own candles (timeframe
   1 - 30 min, profile row per index - `PROFILE_ROWS`), with the day's VWAP on every chart ("VWAP" tick, on by default - typical
@@ -1059,7 +1066,20 @@ All must pass before committing.
   "Follow OI Replay" tick): the Profiles page's one-way clock (`useFollowReplayClock`) - OI Replay's index (the picker locks) and,
   while it replays a PAST day, only the candles COMPLETED at its clock (`candlesAsOf`; a day just loading = none of it yet), the
   window asked `days` + the days back to that day so it holds it (the server clamps to the timeframe's limit - a day older than
-  that shows no candles); live or OI Replay not open = as before.
+  that shows its own candles only, said under the chart).
+  REPLAY AND LIVE TICK (asked for - "replay so they can follow OI ... also live spot and data tick when it is live";
+  `structureLive.js`, `tests/structure-live.test.mjs`): a replay shows the candles COMPLETED at the clock (`candlesAsOf` - a
+  candle ends at its span or 15:30, the afternoon 4H / last hour done at 15:30) AND the one FORMING, made from the day's
+  1-minute bars up to the clock (`candlesAtClock`; `GET /api/oi-replay/{u}/spot-day`, a past day kept for the tab, today's
+  replay read again each minute) - so a 1H chart grows minute by minute with OI Replay; at any clock = the chart built from
+  the minutes known then (held for every timeframe and minute). With no OI Replay tab answering the page is ITS OWN: Live, or a
+  day picked (DatePicker) with Start / Pause, Reset, Speed (`optionanalytics.structure.speedMs`), Go to and the slider, and
+  the floating replay bar once they scroll away; with OI Replay's kept clock (a phone) it opens where OI Replay was left. LIVE,
+  the spot feed's pushes (hub group "u:{U}" - `useLiveIndexFeed.js`, shared with the Profiles page) keep the forming minute
+  (`addLiveMinute`) and fold it into each timeframe's last candle or start the next (`foldMinutes` - the same buckets as
+  `SpotStructureService.Aggregate`), shown at most once a second, with a "Spot price · time" tag (orange "no tick since"
+  after a quiet minute in the session); the minute re-read goes on underneath (only live / today replayed), a load with no
+  candle of today is made again once the first live minute comes, and a reconnect reloads.
 - The SIGNAL BACKTEST page (`/signal-backtest`, `SignalBacktestPage.jsx`, `signalBacktest.js`): pick an index, a range of PAST
   weekdays (at most `MAX_BACKTEST_DAYS` 60 - `backtestDays`; THE DAYS PICKER - `DaysPicker`, `backtestDates.js`, asked for: "when
   I select dates it gets picked to an old date; I should be able to enter manually as well as previous years": on a phone

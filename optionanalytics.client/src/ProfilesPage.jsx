@@ -2,12 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Col, DatePicker, Empty, InputNumber, Row, Segmented, Select, Slider, Space, Switch, Tag, TimePicker, Tooltip, Typography } from 'antd'
 import { PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import * as signalR from '@microsoft/signalr'
 import { CandlestickSeries, CrosshairMode, LineSeries } from 'lightweight-charts'
 import {
   NavBar, usePersistedState, POLL_HEADERS, UP_COLOR, DOWN_COLOR, AXIS_COLOR, GRID_COLOR, BORDER_COLOR,
   toChartTime, istTimeFormatter, istTickMarkFormatter, istDateKey,
-  RECONNECT_RETRY_POLICY, joinAllSignalRGroups, onLiveBatch, syncSignalRGroups,
 } from './shared.jsx'
 import { mergeFuturesLive, mergeLiveFuturesTicks } from './futuresLive.js'
 import { inMarketSession } from './marketSession.js'
@@ -17,6 +15,7 @@ import { DELTA_COLUMN_SHARE, DeltaColumnPrimitive, TpoProfilePrimitive, ZoneBoxe
 import { deltaProfileLevels, futuresDeltaProfileOf, optionDeltaMinutes, optionDeltaProfileOf } from './deltaProfile.js'
 import { optionDayUrl } from './deltaProfileDays.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
+import { useLiveIndexFeed } from './useLiveIndexFeed.js'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { useOnScreen } from './useScreen.js'
 import {
@@ -141,36 +140,6 @@ function useInstrumentDay(kind, underlying, dateKey, reload = 0, pollNonce = 0) 
     return () => { cancelled = true }
   }, [kind, underlying, dateKey, reload, attempt, pollNonce])
   return useMemo(() => ({ ...state, retry }), [state, retry])
-}
-
-/** The live feed OI Replay listens to: the "/hubs/spot" connection, group "u:{index}" while `enabled` (live), and its
- *  conflated "liveBatch" (shared.jsx onLiveBatch - the newest state only, acknowledged after paint, so the page never
- *  falls behind): "spotUpdate" (the index's forming minute - OHLC; Dhan's index ticks carry no volume) and
- *  "futuresTicks" (the near futures, with Dhan's day volume). One connection for the page's life; only the group
- *  follows the index. A reconnect joins again and says so (onReconnected - the day is loaded again for what it missed). */
-function useLiveIndexFeed(underlying, enabled, handlers) {
-  const handlersRef = useRef(handlers)
-  handlersRef.current = handlers
-  const connectionRef = useRef(null)
-  const groupsRef = useRef([])
-  useEffect(() => {
-    const connection = new signalR.HubConnectionBuilder().withUrl('/hubs/spot').withAutomaticReconnect(RECONNECT_RETRY_POLICY).build()
-    connectionRef.current = connection
-    onLiveBatch(connection, {
-      spotUpdate: (snapshot) => handlersRef.current.onSpot?.(snapshot),
-      futuresTicks: (ticks) => handlersRef.current.onFutures?.(ticks ?? []),
-    })
-    connection.onreconnected(() => { joinAllSignalRGroups(connection, groupsRef.current); handlersRef.current.onReconnected?.() })
-    connection.start()
-      .then(() => joinAllSignalRGroups(connection, groupsRef.current))
-      .catch((err) => { if (err?.name !== 'AbortError') console.error('Profiles live feed connection failed:', err) })
-    return () => { connectionRef.current = null; connection.stop() }
-  }, [])
-  useEffect(() => {
-    const groups = enabled && underlying ? [`u:${underlying}`] : []
-    syncSignalRGroups(connectionRef.current, groupsRef.current, groups)
-    groupsRef.current = groups
-  }, [underlying, enabled])
 }
 
 /** A day's bars from its answer: the futures' recorded minutes with, where the server only recorded from part way (it
@@ -794,7 +763,7 @@ export default function ProfilesPage() {
       if (live && mine.length) updateLive((d) => ({ futures: mergeLiveFuturesTicks(d.futures, mine) }))
     },
     onReconnected: () => setReload((r) => r + 1),
-  })
+  }, 'Profiles live feed')
   // OI Replay has just loaded the day this page failed on: the server has fetched it now - ask once more.
   const retriedForRef = useRef(null)
   const oiDay = following ? followed.clock?.date ?? null : null

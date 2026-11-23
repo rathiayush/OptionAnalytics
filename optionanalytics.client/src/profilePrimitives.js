@@ -150,7 +150,7 @@ export class TpoProfilePrimitive extends BasePrimitive {
         })
         if (row.price === tpo.poc) {
           ctx.strokeStyle = POC_STROKE
-          ctx.lineWidth = Math.max(1, Math.round((z.lineWidth ?? 1) * hpr))
+          ctx.lineWidth = Math.max(1, Math.round(hpr))
           ctx.strokeRect(left - 1, band.top, bitmapSize.width - left, height)
         }
       }
@@ -223,9 +223,15 @@ export class DeltaColumnPrimitive {
         const yTop = this._series.priceToCoordinate(row.price + p.rowSize)
         const yBottom = this._series.priceToCoordinate(row.price)
         if (yTop == null || yBottom == null) continue
-        const top = Math.max(head, Math.round(Math.min(yTop, yBottom) * vpr) + 1)
-        const bottom = Math.round(Math.max(yTop, yBottom) * vpr) - 1
-        if (bottom <= top) continue
+        // A row a few pixels tall keeps a 1 px gap to the next; a thinner one (a wide price range - BANKNIFTY / SENSEX, several
+        // sessions: a 10-point row ~1.5 px) is drawn whole, at least 1 px - with the gap taken off it had no height and every
+        // row was skipped, the column empty.
+        const t = Math.min(yTop, yBottom) * vpr
+        const b = Math.max(yTop, yBottom) * vpr
+        const gap = b - t >= 4 * vpr ? 1 : 0
+        const top = Math.max(head, Math.round(t) + gap)
+        const bottom = Math.max(top + 1, Math.round(b) - gap)
+        if (Math.round(b) <= head) continue
         const len = Math.max(1, (Math.abs(row.delta) / p.maxAbsDelta) * half)
         ctx.fillStyle = row.delta > 0 ? DELTA_BUY : DELTA_SELL
         ctx.fillRect(row.delta > 0 ? mid : mid - len, top, len, bottom - top)
