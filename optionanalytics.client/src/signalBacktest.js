@@ -305,7 +305,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
   const gexByMinute = new Map(gexDay(run?.cePoints, run?.pePoints, spotForOptions, gexOptions).map((m) => [m.time, m]))
   const gex = t.map((ms) => {
     const m = gexByMinute.get(ms)
-    return m ? { net: m.net, callWall: m.callWall, putWall: m.putWall } : null
+    return m ? { net: m.net, callWall: m.callWall, putWall: m.putWall, maxGamma: m.maxGamma, posGex: m.posGex, negGex: m.negGex } : null
   })
 
   // The Auto ATM straddle against its VWAP, its decay-only line and the synthetic futures (straddle.js).
@@ -2019,10 +2019,24 @@ export const RULE_CONDITIONS = [
     options: [
       opt('nearPutWall', 'Near the put wall (support)', 'nearCallWall', NEAR(0.15)), opt('nearCallWall', 'Near the call wall (resistance)', 'nearPutWall', NEAR(0.15)),
       opt('brokeCallWall', 'Broke above the call wall', 'brokePutWall', { ...W, ...OVER }), opt('brokePutWall', 'Broke below the put wall', 'brokeCallWall', { ...W, ...OVER }),
+      // The NET GEX walls (gex.js posGex / negGex - the strikes of the largest positive / negative net GEX, standard sign).
+      opt('nearPosGex', 'Near the +GEX wall (sticky strike)', 'nearPosGex', NEAR(0.15)), opt('nearNegGex', 'Near the −GEX wall (accelerator)', 'nearNegGex', NEAR(0.15)),
+      opt('brokeAbovePosGex', 'Broke above the +GEX wall', 'brokeBelowPosGex', { ...W, ...OVER }), opt('brokeBelowPosGex', 'Broke below the +GEX wall', 'brokeAbovePosGex', { ...W, ...OVER }),
+      opt('brokeAboveNegGex', 'Broke above the −GEX wall', 'brokeBelowNegGex', { ...W, ...OVER }), opt('brokeBelowNegGex', 'Broke below the −GEX wall', 'brokeAboveNegGex', { ...W, ...OVER }),
+      opt('nearMaxGamma', 'Near max gamma (magnet)', 'nearMaxGamma', NEAR(0.15)),
     ],
     test: (d, i, v, w, p) => {
       const lvl = (k, side) => d.gex[k]?.[side] ?? null
+      // Spot's range reached within p% of the level, the level read the minute / candle before (as the walls are).
+      const near = (side) => inWindow(i, w, (k) => { const x = lvl(k - 1, side); return x != null && d.spot.l[k] <= x * (1 + p / 100) && d.spot.h[k] >= x * (1 - p / 100) }) >= 0
       switch (v) {
+        case 'nearPosGex': return near('posGex')
+        case 'nearNegGex': return near('negGex')
+        case 'nearMaxGamma': return near('maxGamma')
+        case 'brokeAbovePosGex': return brokeLevel(d.spot.c, (k) => lvl(k, 'posGex'), i, w, true, p)
+        case 'brokeBelowPosGex': return brokeLevel(d.spot.c, (k) => lvl(k, 'posGex'), i, w, false, p)
+        case 'brokeAboveNegGex': return brokeLevel(d.spot.c, (k) => lvl(k, 'negGex'), i, w, true, p)
+        case 'brokeBelowNegGex': return brokeLevel(d.spot.c, (k) => lvl(k, 'negGex'), i, w, false, p)
         case 'nearPutWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'putWall'); return x != null && d.spot.l[k] <= x * (1 + p / 100) }) >= 0
         case 'nearCallWall': return inWindow(i, w, (k) => { const x = lvl(k - 1, 'callWall'); return x != null && d.spot.h[k] >= x * (1 - p / 100) }) >= 0
         case 'brokeCallWall': return brokeLevel(d.spot.c, (k) => lvl(k, 'callWall'), i, w, true, p)
@@ -2030,7 +2044,7 @@ export const RULE_CONDITIONS = [
         default: return false
       }
     },
-    show: (d, i) => `GEX put wall ${d.gex[i]?.putWall ?? '—'} · call wall ${d.gex[i]?.callWall ?? '—'}`,
+    show: (d, i) => `GEX put wall ${d.gex[i]?.putWall ?? '—'} · call wall ${d.gex[i]?.callWall ?? '—'} · +GEX ${d.gex[i]?.posGex ?? '—'} · −GEX ${d.gex[i]?.negGex ?? '—'} · max γ ${d.gex[i]?.maxGamma ?? '—'}`,
   },
   {
     id: 'vwap', group: 'Price', name: 'Price vs VWAP',

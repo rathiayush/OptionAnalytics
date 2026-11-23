@@ -8,7 +8,7 @@ import { useChartUserControl } from './oiShared.jsx'
 import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { FoldText } from './FoldText.jsx'
 import { gexLevelsNear } from './gexTrend.js'
-import { GEX_SPOT_KEYS, GEX_SPOT_LINES, GEX_SPOT_TIMEFRAMES, gexLadder, gexLevelSeries, ladderStrikeAt, spotCandles, wallRange } from './gexSpot.js'
+import { GEX_NET_KEYS, GEX_SPOT_KEYS, GEX_SPOT_LINES, GEX_SPOT_TIMEFRAMES, gexLadder, gexLevelSeries, ladderStrikeAt, spotCandles, wallRange } from './gexSpot.js'
 import { GEX_LADDER_SHARE, GEX_LADDER_SHARE_NARROW, GexLadderPrimitive, crShort } from './gexLadderPrimitive.js'
 
 const { Text } = Typography
@@ -161,6 +161,14 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
   const [hover, setHover] = useState(null)
   const narrow = useMediaQuery('(max-width: 768px)')
   const tf = GEX_SPOT_TIMEFRAMES.includes(timeframe) ? timeframe : 5
+  // The net GEX walls joined the lines later: a choice saved before them takes them ONCE (`gexSpotNetSeen`) - unticked
+  // after that, they stay off.
+  const [netSeen, setNetSeen] = usePersistedState('optionanalytics.oiReplay.gexSpotNetSeen', false)
+  useEffect(() => {
+    if (netSeen) return
+    if (Array.isArray(savedShown)) setShown([...new Set([...savedShown, ...GEX_NET_KEYS])])
+    setNetSeen(true)
+  }, [netSeen, savedShown, setShown, setNetSeen])
   const shown = Array.isArray(savedShown) ? savedShown.filter((k) => GEX_SPOT_KEYS.includes(k)) : GEX_SPOT_KEYS
   const minutes = days?.[gexSignOf(days, sign)] ?? NONE
   const candles = useMemo(() => spotCandles(spotBars, tf), [spotBars, tf])
@@ -200,6 +208,8 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
             <Headline title="Gamma flip" value={num(now.flip)} color={COLOR.flip}
               sub={Number.isFinite(now.flip) ? `${away(now.flip, now.spot)} · spot ${now.spot >= now.flip ? 'above' : 'below'}` : 'none within ±3%'} />
             <Headline title="Max gamma (magnet)" value={num(now.maxGamma)} color={COLOR.maxGamma} sub={away(now.maxGamma, now.spot)} />
+            <Headline title="+GEX wall (sticky)" value={num(now.posGex)} color={COLOR.posGex} sub={away(now.posGex, now.spot) ?? 'no positive strike'} />
+            <Headline title="−GEX wall (accelerator)" value={num(now.negGex)} color={COLOR.negGex} sub={away(now.negGex, now.spot) ?? 'no negative strike'} />
             <Headline title="Net GEX" value={cr(now.net)} color={now.net >= 0 ? UP_COLOR : DOWN_COLOR}
               sub={now.net >= 0 ? 'dealers long gamma - moves damped' : 'dealers short gamma - moves can run'} />
           </Space>
@@ -217,7 +227,7 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
           <span>Ladder at {istHhmm(ladder.time)}: puts left · calls right (₹ Cr per 1% move)</span>
           <span><span style={{ color: UP_COLOR }}>■</span> dealers long gamma</span>
           <span><span style={{ color: DOWN_COLOR }}>■</span> dealers short gamma</span>
-          <span><Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>CW</Tag> <Tag color="red" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>PW</Tag> <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>MG</Tag> outlined</span>
+          <span><Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>CW</Tag> <Tag color="red" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>PW</Tag> <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>MG</Tag> <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>+G</Tag> <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>−G</Tag> outlined</span>
           <span style={{ color: COLOR.flip }}>- - flip</span>
         </div>
       )}

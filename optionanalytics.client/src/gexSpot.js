@@ -12,7 +12,12 @@ export const GEX_SPOT_LINES = [
   { key: 'putWall', title: 'Put wall', short: 'PW', color: '#ef5350', width: 2, style: 0 },
   { key: 'maxGamma', title: 'Max gamma', short: 'Max γ', color: '#b37feb', width: 1, style: 2 },
   { key: 'flip', title: 'Gamma flip', short: 'Flip', color: '#ffd54f', width: 1, style: 1 },
+  // The NET GEX walls (gex.js posGex / negGex - the strikes of the largest positive / negative net GEX).
+  { key: 'posGex', title: '+GEX wall', short: '+GEX', color: '#69c0ff', width: 2, style: 3 },
+  { key: 'negGex', title: '−GEX wall', short: '−GEX', color: '#ff9c6e', width: 2, style: 3 },
 ]
+/** The net GEX walls' keys - added once to a saved choice of lines made before them (GexSpotCard). */
+export const GEX_NET_KEYS = ['posGex', 'negGex']
 export const GEX_SPOT_KEYS = GEX_SPOT_LINES.map((l) => l.key)
 export const GEX_SPOT_TIMEFRAMES = [1, 3, 5, 15]
 
@@ -95,6 +100,7 @@ export function gexLadder(minute) {
     time: minute.time, spot: minute.spot, step, rows, net: minute.net,
     maxAbs: Math.max(0, ...rows.map((r) => Math.max(Math.abs(r.call), Math.abs(r.put)))),
     callWall: minute.callWall ?? null, putWall: minute.putWall ?? null, maxGamma: minute.maxGamma ?? null, flip: minute.flip ?? null,
+    posGex: minute.posGex ?? null, negGex: minute.negGex ?? null,
   }
 }
 

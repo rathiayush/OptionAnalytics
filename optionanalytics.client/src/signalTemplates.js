@@ -175,6 +175,18 @@ export const RULE_TEMPLATES = [
     settings: { timeframe: 3, slPct: 25, targetPct: 60, trailGap: 20, trailStart: 30 },
   },
   {
+    id: 'stickyStrike', family: 'reversal', name: 'Long-gamma bounce off the +GEX wall (net GEX)',
+    idea: 'The strike with the most positive NET GEX is where dealer hedging damps price hardest: with dealers long gamma overall, the first candle that crosses back up through the 9 EMA there tends to hold - the GEX platforms\' "sticky strike".',
+    rule: { tree: ALL(L('gexRegime', 'long'), L('gexLevel', 'nearPosGex', { param: 0.15, windowMin: 10 }), L('emaPrice', 'candleCrossUp', { param2: 9, windowMin: 5 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 35, timeStopMin: 40 },
+  },
+  {
+    id: 'acceleratorBreak', family: 'breakout', name: 'Short-gamma run through the −GEX wall (net GEX)',
+    idea: 'The strike with the most negative NET GEX is where dealer hedging adds to moves: with dealers short gamma, a close through it while the straddle is bought over its VWAP tends to run on to the next sticky strike.',
+    rule: { tree: ALL(L('gexRegime', 'short'), L('gexLevel', 'brokeAboveNegGex', { windowMin: 10 }), L('straddle', 'aboveVwap')), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 25, targetPct: 60, trailGap: 20, trailStart: 30 },
+  },
+  {
     id: 'pivotPullback', family: 'breakout', name: 'Pivot break, pullback, go',
     idea: 'Price breaks above the day\'s pivot, pulls back under its 9 EMA and reclaims it - the second leg after a shake-out, within 45 minutes of the break.',
     rule: { tree: THEN(45, L('pivotP', 'crossedAbove', { windowMin: 5 }), L('emaPrice', 'reclaimed', { param2: 9, windowMin: 15 })), action: 'buyCE', mirror: true },
