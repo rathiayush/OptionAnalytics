@@ -150,6 +150,7 @@ export function useVoiceCommands({ enabled, onCommand, lang = VOICE_LANG, mode =
         let command = null
         for (let k = 0; k < result.length && !command; k++) command = parseVoiceCommand(result[k]?.transcript ?? '')
         if (!command) continue
+        if (command.final && !result.isFinal) continue   // a prefix of a longer command ("1" of "10") waits for the final
         const now = Date.now()
         const text = best.trim().toLowerCase()
         if (text && text === lastText && now - lastAt < SAME_TEXT_MS && !result.isFinal) continue
