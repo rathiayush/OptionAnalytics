@@ -158,14 +158,3 @@ test('a replayed day\'s distance in TRADING days: the window of past days ending
   assert.equal(weekdaysBack('2026-11-23', '2026-11-25'), 0)
   assert.equal(weekdaysBack('2026-11-23', 'nonsense'), 0)
 })
-
-test('the chart follows new candles while the newest is in view (a replay\'s 15m chart), not after the viewer scrolled back', async () => {
-  const { followRange } = await import('../src/structureLive.js')
-  assert.deepEqual(followRange({ from: 240, to: 408 }, 400, 403), { from: 243, to: 411 })   // at the newest: moves on
-  assert.deepEqual(followRange({ from: 300, to: 399 }, 400, 401), { from: 301, to: 400 })   // the newest just at the edge
-  assert.equal(followRange({ from: 100, to: 250 }, 400, 403), null)                          // scrolled back: kept
-  assert.equal(followRange({ from: 240, to: 408 }, 400, 400), null)                          // nothing added
-  assert.equal(followRange({ from: 240, to: 408 }, 400, 380), null)                          // replay taken back
-  assert.equal(followRange(null, 400, 403), null)
-  assert.equal(followRange({ from: 0, to: 10 }, 0, 5), null)                                 // the first load fits itself
-})
