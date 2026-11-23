@@ -69,15 +69,19 @@ export function dayVolumeProfile(bars, rowSize) {
 }
 
 /** A candle's volume as footprint levels: spread evenly over the `rowSize` rows its range covers (orderFlowMath's
- *  volumeProfileFromCandles, one candle at a time). */
-function spreadLevels(c, rowSize) {
-  const volume = c.volume ?? (c.buy ?? 0) + (c.sell ?? 0)
+ *  volumeProfileFromCandles, one candle at a time). Its buy / sell split is the minute's OWN when it carries one (an
+ *  estimated minute's buy / sell - the bulk volume classification), else half and half for a candle that closed where it
+ *  opened, else the candle's direction. It gave the whole minute to one side by the candle's colour - a minute 52 / 48 read
+ *  as 100 / 0 in the delta profile. */
+export function spreadLevels(c, rowSize) {
+  const known = (c.buy ?? 0) + (c.sell ?? 0)
+  const volume = c.volume ?? known
   if (!(volume > 0) || !(c.high >= c.low) || !(c.low > 0)) return []
   const bottom = Math.floor(c.low / rowSize + 1e-9) * rowSize
   const n = Math.round((Math.floor(c.high / rowSize + 1e-9) * rowSize - bottom) / rowSize) + 1
+  const buyShare = known > 0 ? (c.buy ?? 0) / known : c.close > c.open ? 1 : c.close < c.open ? 0 : 0.5
   const share = volume / n
-  const up = c.close >= c.open
-  return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: up ? share : 0, sell: up ? 0 : share }))
+  return Array.from({ length: n }, (_, i) => ({ price: round2(bottom + i * rowSize), buy: share * buyShare, sell: share * (1 - buyShare) }))
 }
 
 /** A futures day the server recorded only from part way (it restarted - a deploy - during or after the session): its
