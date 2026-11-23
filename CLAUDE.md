@@ -1098,11 +1098,6 @@ All must pass before committing.
   "sessions"; a saved calendar-day value not offered now reads as the default), and a replayed day's distance in weekdays
   (`weekdaysBack` in `structureLive.js`) added so the window holds the day AND its N sessions before; 1-minute candles held
   for 45 calendar days (`MinuteDays`) so a replayed 1m / 3m chart's earlier sessions keep them.
-  THE VIEW FOLLOWS NEW CANDLES (asked for - "15 min charts also load full"): a chart was placed once, the newest ~160
-  candles with 8 slots of room, and never moved - a 1H chart's replayed day (7 candles) fit, a 15m one's (25) ran off the
-  right edge after two hours and read as not loading. Now a viewer whose view reaches the newest candle keeps it in view as
-  candles are added (`followRange` in `structureLive.js` - the range moved on by the candles added); one who scrolled back
-  keeps the view; a replay taken back changes nothing (`tests/structure-live.test.mjs`).
   HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
   `optionanalytics.structure.density`): how many patterns, blocks, gaps, zones, equal levels, sweeps and internal breaks are
   drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount

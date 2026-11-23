@@ -76,16 +76,6 @@ export function candlesAtClock(candles, tf, asOfMs, minutes = []) {
   return foldMinutes(done, shown, tf)
 }
 
-/** The chart's view after its candles went from `prevLen` to `newLen`: a viewer looking at the newest candle (the
- *  view's right edge at or past it) keeps looking at it - the range moves on by the candles added - so a replay's or the
- *  live feed's new candles never run off the right edge; one who scrolled back keeps the view; null = leave it. */
-export function followRange(range, prevLen, newLen) {
-  if (!range || !(newLen > prevLen) || !(prevLen > 0)) return null
-  if (!(range.to >= prevLen - 1)) return null
-  const d = newLen - prevLen
-  return { from: range.from + d, to: range.to + d }
-}
-
 /** How many weekdays from `dateKey` up to the day before `todayKey` (YYYY-MM-DD, IST days): the trading days a window of
  *  past days ending yesterday must add to reach back to `dateKey` (0 for today or a later day). */
 export function weekdaysBack(todayKey, dateKey) {
