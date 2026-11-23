@@ -2033,6 +2033,23 @@ All must pass before committing.
   floor and a loaded day reads smaller than the same day live - said on the card. Each column is parsed once (WeakMaps - a
   live day is ~11 000 columns); every point from the columns up to it. No depth (estimated / rebuilt day) = the card says
   so. Reads only - they feed no signal, strategy or alert, and `liquidityMap` / `pullStackSignals` are untouched.
+  PRESSURE AT THE LOWS / HIGHS (asked for - "compare selling pressure relative to total traded volume, then compare the price
+  response, and when the subsequent low has weaker normalised selling pressure and claims the previous low, interest is on the
+  buying side"; `PressureCard` in `FlowToolCards.jsx`, the maths `sellingPressure.js`, `tests/selling-pressure.test.mjs`; under
+  the Liquidity added vs pulled card): the futures' COMPLETED candles of its own timeframe (1 / 3 / 5 / 15, default 5 -
+  `optionanalytics.orderFlow.pressureTf`; `pressureCandles` from `view.minuteBars`, live the forming candle left out). SWINGS: a
+  candle's low under the `pivot` (2) candles before it and not over the 2 after - known 2 candles later (`pressureSwings`). The
+  PUSH into a swing low (`legInto`) = from the highest high since the swing low before it: its NORMALISED SELLING PRESSURE = the
+  aggressor sell volume / ALL its volume, its PRICE RESPONSE = how far it fell (points, and points per 100 lots sold). BUYING
+  INTEREST (`pressureRead`) = a later swing low AT OR UNDER the earlier one (within `equalShare` 0.1 of the median candle range),
+  at most `maxApart` 40 candles later, its selling share >= `weaker` 5 share points under the earlier push's, and a CLOSE back
+  over the earlier low within `reclaimWithin` 6 candles of it - dated the candle where the swing is known AND the low claimed
+  back; CONFIRMED by a close over the bounce high between the two lows, FAILED by a trade under the later low (the first of them).
+  SELLING INTEREST is the mirror at the highs (the buying share of the push into each swing high). The chart: the candles with
+  each swing labelled "S 66%" / "B 53%", BUY / SELL INTEREST arrows (✓ / ✗), each candle's buy − sell % of its volume under
+  them (`PaneChart` now takes `markers`); the latest read, the day's list, and tables of the last 4 lows / highs (share, vs the
+  one before - weaker / stronger, how far, pts / 100 lots). An estimated day says the split is estimated. A cut at any clock =
+  the whole day read up to it. A read - no strategy, alert or order.
   BOOK PRESSURE and the ORDER FLOW IMBALANCE (OFI) were two more cards here and were REMOVED on request ("from order flow
   remove OFI, book pressure"), code and tests: `bookPressure` / `pressureRead` and `OFI_*` / `ofiStep` / `ofiSeries` /
   `ofiCandles` / `ofiAgreement` / `ofiRead` are gone, `liquidityFlow`'s points and `bucketFlow`'s buckets no longer carry a

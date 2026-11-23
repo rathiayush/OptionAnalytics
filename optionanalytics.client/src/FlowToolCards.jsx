@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef } from 'react'
 import { Card, Empty, Segmented, Select, Space, Tag, Tooltip, Typography } from 'antd'
-import { BaselineSeries, CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries } from 'lightweight-charts'
+import { BaselineSeries, CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries, createSeriesMarkers } from 'lightweight-charts'
 import { createZoomableChart } from './chartZoom.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, istTickMarkFormatter, istTimeFormatter, toChartTime, usePersistedState } from './shared.jsx'
 import { useFitContentAsDataGrows } from './oiShared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { formatVolume } from './OrderFlowCharts.jsx'
+import { PRESSURE_DEFAULTS, PRESSURE_TIMEFRAMES, pressureCandles, pressureRead } from './sellingPressure.js'
 import {
   LIQUIDITY_BANDS, LIQUIDITY_BAND_DEFAULT, LIQUIDITY_FLOW_DEFAULTS, POSITIONING, POSITIONING_KEYS, POSITIONING_TIMEFRAMES, bucketFlow, liquidityFlow, liquidityRead, positioningCandles,
   positioningRead, positioningSummary,
@@ -26,8 +27,9 @@ const signedText = (v, format) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${format(M
 /** A chart of two panes sharing one time axis: `specs` - [{ key, type ('candles' | 'line' | 'histogram' | 'baseline'),
  *  pane (0 the upper), options }] (fixed for the chart's life) and `data` - { [key]: points } in chart time. `format`:
  *  the lower pane's numbers. */
-function PaneChart({ specs, data, height, dayKey, format, stretch = [3, 2] }) {
+function PaneChart({ specs, data, height, dayKey, format, stretch = [3, 2], markers = null }) {
   const containerRef = useRef(null)
+  const markersRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef({})
   const heightRef = useRef(height)
@@ -52,6 +54,8 @@ function PaneChart({ specs, data, height, dayKey, format, stretch = [3, 2] }) {
     for (const spec of specsRef.current) {
       seriesRef.current[spec.key] = chart.addSeries(SERIES[spec.type], { priceLineVisible: false, ...(spec.pane ? { priceFormat: lower } : {}), ...spec.options }, spec.pane ?? 0)
     }
+    // Markers on the candles (the pressure card's swings and signals), when asked.
+    if (seriesRef.current.candles) markersRef.current = createSeriesMarkers(seriesRef.current.candles, [])
     const [upper, under] = chart.panes()
     upper?.setStretchFactor(stretchRef.current[0])
     under?.setStretchFactor(stretchRef.current[1])
@@ -62,8 +66,10 @@ function PaneChart({ specs, data, height, dayKey, format, stretch = [3, 2] }) {
       chart.remove()
       chartRef.current = null
       seriesRef.current = {}
+      markersRef.current = null
     }
   }, [])
+  useEffect(() => { markersRef.current?.setMarkers(markers ?? []) }, [markers])
   // A new height is applied to the chart there is - drawn again it would have no data until the next update.
   useEffect(() => { chartRef.current?.applyOptions({ height }) }, [height])
   useEffect(() => {
@@ -261,3 +267,140 @@ export function LiquidityNetCard({ view, rowSize, lotSize, showLots, dayKey, nar
 
 // ---- 4. Order flow imbalance at the touch --------------------------------------------------------------------------
 
+
+// ---- 3. Pressure at the lows / highs ----------------------------------------------------------------------------------
+
+const PRESSURE_SPECS = [
+  { key: 'candles', type: 'candles', pane: 0, options: { upColor: UP_COLOR, downColor: DOWN_COLOR, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR, borderVisible: false } },
+  { key: 'pressure', type: 'histogram', pane: 1, options: { title: 'buy − sell % of volume', lastValueVisible: false } },
+]
+const pctText = (x) => (Number.isFinite(x) ? `${Math.round(x * 100)}%` : '—')
+const STATUS = { pending: '', confirmed: ' ✓', failed: ' ✗' }
+const STATUS_TEXT = { pending: 'pending', confirmed: 'confirmed - closed past the swing between them', failed: 'failed - traded past the later extreme' }
+
+/**
+ * "Pressure at the lows" (sellingPressure.js - asked for: "compare selling pressure relative to total traded volume, then
+ * the price response, and when the subsequent low has weaker normalised selling pressure and claims back the previous
+ * low, interest is on the buying side"): the futures' candles with each swing low labelled by the SELLING share of the
+ * push into it (each swing high by the BUYING share), BUYING INTEREST / SELLING INTEREST marked where a later low (high)
+ * came on weaker pressure and the earlier one was claimed back, each candle's buy − sell share under them, and a table
+ * comparing the lows and the highs - pressure, how far price went, how far per 100 lots. At the page's clock.
+ */
+export function PressureCard({ view, clockMs, isReplay, underlying, lotSize, showLots, dayKey, narrow, estimated }) {
+  const [timeframe, setTimeframe] = usePersistedState('optionanalytics.orderFlow.pressureTf', PRESSURE_DEFAULTS.minutes)
+  const tf = PRESSURE_TIMEFRAMES.includes(timeframe) ? timeframe : PRESSURE_DEFAULTS.minutes
+  // Live only the completed candles count - read again as the clock passes each minute.
+  const minute = Math.floor((clockMs ?? 0) / 60000)
+  const candles = useMemo(() => pressureCandles(view?.minuteBars, tf, clockMs), // eslint-disable-next-line react-hooks/exhaustive-deps
+    [view?.minuteBars, tf, minute])
+  const read = useMemo(() => pressureRead(candles), [candles])
+  const lot = lotSize > 0 ? lotSize : 1
+  const perHundred = (leg) => (leg.side > 0 ? (leg.move / (leg.side / lot)) * 100 : null)
+  const data = useMemo(() => ({
+    candles: candles.map((c) => ({ time: toChartTime(c.time), open: c.open, high: c.high, low: c.low, close: c.close })),
+    pressure: candles.filter((c) => c.buy + c.sell > 0).map((c) => {
+      const v = ((c.buy - c.sell) / (c.buy + c.sell)) * 100
+      return { time: toChartTime(c.time), value: v, color: v >= 0 ? 'rgba(38,166,154,0.7)' : 'rgba(239,83,80,0.7)' }
+    }),
+  }), [candles])
+  const markers = useMemo(() => {
+    const out = []
+    for (const s of read.swings) {
+      const low = s.kind === 'low'
+      out.push({ time: toChartTime(candles[s.index].time), position: low ? 'belowBar' : 'aboveBar', shape: 'circle', size: 0.5,
+        color: low ? 'rgba(239,83,80,0.85)' : 'rgba(38,166,154,0.85)', text: `${low ? 'S' : 'B'} ${pctText(s.leg.pressure)}` })
+    }
+    for (const g of read.signals) {
+      const buy = g.kind === 'buying'
+      out.push({ time: toChartTime(candles[g.at].time), position: buy ? 'belowBar' : 'aboveBar', shape: buy ? 'arrowUp' : 'arrowDown', size: 1.4,
+        color: buy ? UP_COLOR : DOWN_COLOR, text: `${buy ? 'BUY' : 'SELL'} INTEREST${STATUS[g.status]}` })
+    }
+    return out.sort((a, b) => a.time - b.time)
+  }, [read, candles])
+  const latest = read.signals.at(-1) ?? null
+  const rows = (kind) => {
+    const xs = read.swings.filter((s) => s.kind === kind).slice(-4)
+    return xs.map((s, i) => {
+      const prev = i > 0 ? xs[i - 1] : null
+      const vs = prev?.leg.pressure != null && s.leg.pressure != null ? s.leg.pressure - prev.leg.pressure : null
+      return { s, vs }
+    })
+  }
+  const controls = <Segmented size="small" value={tf} onChange={setTimeframe} options={PRESSURE_TIMEFRAMES.map((m) => ({ value: m, label: `${m}m` }))} />
+  const Table = ({ kind }) => {
+    const low = kind === 'low'
+    const list = rows(kind)
+    if (!list.length) return <Text type="secondary" style={{ fontSize: 11 }}>No swing {kind} yet.</Text>
+    return (
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ borderCollapse: 'collapse', fontSize: 11, width: '100%' }}>
+          <thead><tr style={{ color: '#8c8c8c' }}>
+            <th style={{ textAlign: 'left', padding: '2px 6px' }}>Swing {kind}</th>
+            <th style={{ textAlign: 'right', padding: '2px 6px' }}>{low ? 'Selling' : 'Buying'} share</th>
+            <th style={{ textAlign: 'right', padding: '2px 6px' }}>vs before</th>
+            <th style={{ textAlign: 'right', padding: '2px 6px' }}>{low ? 'Fell' : 'Rose'}</th>
+            <th style={{ textAlign: 'right', padding: '2px 6px' }}>pts / 100 lots</th>
+          </tr></thead>
+          <tbody>
+            {list.map(({ s, vs }) => (
+              <tr key={s.index}>
+                <td style={{ padding: '2px 6px' }}>{price(s.price)} <Text type="secondary" style={{ fontSize: 10 }}>{istTimeFormatter(toChartTime(candles[s.index].time))}</Text></td>
+                <td style={{ textAlign: 'right', padding: '2px 6px', color: low ? DOWN_COLOR : UP_COLOR }}>{pctText(s.leg.pressure)}</td>
+                <td style={{ textAlign: 'right', padding: '2px 6px', color: vs == null ? undefined : vs < 0 ? (low ? UP_COLOR : DOWN_COLOR) : undefined }}>
+                  {vs == null ? '—' : `${vs > 0 ? '+' : vs < 0 ? '−' : ''}${Math.abs(Math.round(vs * 100))} pts ${vs < 0 ? 'weaker' : vs > 0 ? 'stronger' : ''}`}
+                </td>
+                <td style={{ textAlign: 'right', padding: '2px 6px' }}>{price(s.leg.move)}</td>
+                <td style={{ textAlign: 'right', padding: '2px 6px' }}>{perHundred(s.leg) == null ? '—' : price(Math.round(perHundred(s.leg) * 100) / 100)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    )
+  }
+  return (
+    <Card size="small" title={`Pressure at the lows / highs · ${tf} min`} extra={!narrow && controls}>
+      {narrow && <div style={{ marginBottom: 8 }}>{controls}</div>}
+      {!candles.length ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No completed futures candles yet." />
+      ) : (
+        <>
+          {latest ? (
+            <Read read={{ tone: latest.kind === 'buying' ? 1 : -1, text: `${istTimeFormatter(toChartTime(latest.time))} · ${latest.text} · ${STATUS_TEXT[latest.status]}` }} />
+          ) : (
+            <Text type="secondary" style={{ display: 'block', fontSize: 12, margin: '4px 0 6px' }}>
+              {underlying} future{isReplay ? ' (replay)' : ''}: no buying / selling interest read yet - it needs two swing lows (highs), the later on weaker pressure, and the earlier one claimed back.
+            </Text>
+          )}
+          {read.signals.length > 1 && (
+            <Text type="secondary" style={{ display: 'block', fontSize: 11, marginBottom: 4 }}>
+              Today: {read.signals.map((g) => `${istTimeFormatter(toChartTime(g.time))} ${g.kind === 'buying' ? '▲' : '▼'}${STATUS[g.status]}`).join(' · ')}
+            </Text>
+          )}
+          {estimated && <Text type="warning" style={{ display: 'block', fontSize: 11, marginBottom: 4 }}>This day&apos;s buy / sell split is estimated from 1-minute candles, so the pressure is an estimate too.</Text>}
+          <PaneChart specs={PRESSURE_SPECS} data={data} markers={markers} height={narrow ? 380 : 460} dayKey={`${dayKey}-pressure-${tf}`} format={(v) => `${Math.round(v)}%`} />
+          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginTop: 6 }}>
+            <div style={{ flex: '1 1 320px', minWidth: 0 }}><Table kind="low" /></div>
+            <div style={{ flex: '1 1 320px', minWidth: 0 }}><Table kind="high" /></div>
+          </div>
+          <Text type="secondary" style={{ display: 'block', fontSize: 11, marginTop: 4 }}>
+            {showLots ? 'Volumes in lots' : 'Volumes in quantity'}; pts / 100 lots = how far price went per 100 lots of the side pushing it.
+          </Text>
+          <FoldText id="orderFlow.pressure" label="how to read it" className="oa-note">
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              Effort vs result. For each swing low, the push into it is measured from the highest point since the swing low before:
+              the SELLING SHARE is the aggressor sell volume of that push divided by ALL the volume traded in it (normalised, so a
+              busy and a quiet push compare), and the PRICE RESPONSE is how far it fell, in points and per 100 lots sold. BUYING
+              INTEREST is marked when a LATER low reaches the earlier one (at or under it) on a selling share at least 5 points
+              WEAKER, and price then closes back above the earlier low within 6 candles - the sellers could not keep the new low,
+              the buyers took it back. It is CONFIRMED once a candle closes over the bounce high between the two lows, FAILED once
+              price trades under the later low. SELLING INTEREST is the mirror at the highs (a later high on a weaker buying share,
+              the earlier high lost again). A swing is known only 2 candles after it, and only completed candles count - nothing
+              after the clock is read. The bars under the candles: each candle&apos;s buy − sell in % of its volume.
+            </Text>
+          </FoldText>
+        </>
+      )}
+    </Card>
+  )
+}
