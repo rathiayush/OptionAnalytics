@@ -221,6 +221,58 @@ export function unionZones({ rows = [], used = [] } = {}, rowSize = 5) {
     .map((z) => ({ ...z, score: round2(z.score), sources: TRAP_SOURCES.map((x) => x.id).filter((id) => z.sources.includes(id)), against: [] }))
 }
 
+/** A Total (OI − Net) row is an OUTLIER when its size is past the median row's by this many robust deviations (Hampel's
+ *  rule: median + Z x 1.4826 x MAD of the rows' sizes). */
+export const OUTLIER_Z = 3
+
+/**
+ * THE HIGHEST TOTAL (OI − NET) AND ITS OUTLIERS (asked for - "can you also show the highest total OI net outlier"): the option
+ * delta profile card's third column ("+ Total (OI − Net)") - at each price row the OI's CE − PE less the net CE − PE flow,
+ * the flow scaled to the OI's size so both count equally - read from the composite's rows: each profile there is scaled by
+ * its own largest row and signed bullish positive, so (parts.oi + parts.cdv) IS the card's Total divided by the OI's
+ * largest row, sign flipped - the same rows, the same order (+ here = the card's negative = BULLISH: puts written and / or
+ * calls bought). Needs both the OI and the flow (null otherwise). { bull, bear } - the HIGHEST row of each side { low, high,
+ * level (the row's middle), total, times (its size over the median row's), outlier, kind (zoneKind against `price`) } or
+ * null; `outliers` - the rows past the rule as BANDS (adjacent rows of one side joined, each with its peak row's level / size),
+ * largest first (at most 6); `typical` - the median row's size.
+ */
+export function totalOutliers(rows = [], used = [], rowSize = 5, price = null) {
+  if (!used.includes('oi') || !used.includes('cdv')) return null
+  const list = (rows ?? []).map((r) => ({ price: r.price, total: (r.parts?.oi ?? 0) + (r.parts?.cdv ?? 0) })).filter((r) => Math.abs(r.total) > 1e-9)
+  if (!list.length) return null
+  const median = (xs) => { const a = [...xs].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2 }
+  const sizes = list.map((r) => Math.abs(r.total))
+  const typical = median(sizes)
+  const mad = median(sizes.map((x) => Math.abs(x - typical)))
+  const cut = typical + OUTLIER_Z * 1.4826 * mad
+  const view = (r) => {
+    const bullish = r.total > 0
+    const zone = { bullish, low: r.price, high: round2(r.price + rowSize) }
+    return {
+      low: zone.low, high: zone.high, level: round2(r.price + rowSize / 2), total: round2(r.total),
+      times: typical > 0 ? round2(Math.abs(r.total) / typical) : null, outlier: mad > 0 ? Math.abs(r.total) > cut : false, kind: zoneKind(zone, price),
+    }
+  }
+  const top = (bullish) => list.filter((r) => (r.total > 0) === bullish).sort((a, b) => Math.abs(b.total) - Math.abs(a.total))[0]
+  const bull = top(true), bear = top(false)
+  // The outlier rows as BANDS: adjacent rows of one side are one cluster, not several outliers - each band by its peak row.
+  const bands = []
+  if (mad > 0) {
+    for (const r of list.filter((x) => Math.abs(x.total) > cut).sort((a, b) => a.price - b.price)) {
+      const last = bands[bands.length - 1]
+      if (last && (r.total > 0) === last.bullish && Math.abs(r.price - last.top - rowSize) < 1e-6) {
+        last.top = r.price
+        if (Math.abs(r.total) > Math.abs(last.peak.total)) last.peak = r
+      } else bands.push({ bullish: r.total > 0, low: r.price, top: r.price, peak: r })
+    }
+  }
+  return {
+    bull: bull ? view(bull) : null, bear: bear ? view(bear) : null, typical: round2(typical),
+    outliers: bands.sort((a, b) => Math.abs(b.peak.total) - Math.abs(a.peak.total)).slice(0, 6)
+      .map((b) => ({ ...view(b.peak), low: b.low, high: round2(b.top + rowSize) })),
+  }
+}
+
 /** How the zones are built: 'composite' (the default - one profile, disagreements cancel) or 'union' (the first version). */
 export const ZONE_MODES = ['composite', 'union']
 

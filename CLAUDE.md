@@ -720,7 +720,16 @@ All must pass before committing.
   red, deeper the stronger (>= 5% shown), a profile not read an empty dashed column; and the "Levels by profile" block
   (`profileLevels(rows, used, rowSize, price)` - each profile's strongest bullish / bearish cluster from its own `parts` via
   `deltaZones`, its busiest row and its role against price now - `zoneKind`), the previous day(s) and the current day, "not
-  present - left out" for a profile not read. The CDV's own levels = `cdvLevels` (held equal in the test). `openingRead` /
+  present - left out" for a profile not read. The CDV's own levels = `cdvLevels` (held equal in the test). THE HIGHEST TOTAL
+  (OI − NET) AND ITS OUTLIERS (asked for - "can you also show the highest total OI net outlier"; `totalOutliers`): the option
+  delta card's third column ("+ Total (OI − Net)" - at each row the OI's CE − PE less the net flow scaled to the OI's size)
+  read from the composite rows - (parts.oi + parts.cdv) IS that Total over the OI's largest row, sign flipped (held equal row by
+  row in the test; + here = the card's negative = bullish); needs both the OI and the flow. Its HIGHEST bullish (▲) and bearish
+  (▼) row - the times the median row's size, OUTLIER when past median + `OUTLIER_Z` 3 x 1.4826 x MAD of the rows' sizes (Hampel),
+  its role now - for the previous day(s) and the current day, a section of "Levels by profile"; the outliers as BANDS (adjacent
+  rows of one side joined, at their peak row - listed when more than two); an OUTLIER highest row drawn as a line on the chart
+  and the ladder ("Total ▲ / ▼", "Prev ..." dashed; the "Total (OI − Net) outliers" tick, `...trapZonesTotals`, on) - none for
+  a highest row that is not an outlier. `openingRead` /
   `dayRead` / `positionProfile` return the composite's `rows`. THE FIRST VERSION, TO COMPARE (asked for - "just to see this
   version as well give a checkbox, and you suggest what is better"; the "Zones" switch in the card's top row, `optionanalytics.
   oiReplay.trapZonesMode` - 'composite' "Combined (recommended)", the default, or 'union' "Each profile (first version)",
