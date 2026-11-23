@@ -282,3 +282,23 @@ test("the lower chart's own structure can be hidden - the higher timeframe's lev
   assert.ok(hidden.every((s) => /^HTF/.test(s.label ?? '')), hidden.map((s) => s.label).join(', '))
   assert.ok(structureShapes(a, ltfLayers(DEFAULT_LAYERS, true), { htf: a, density: 'normal' }).length > hidden.length)
 })
+
+test('too few candles (a replay\'s first minutes - one forming Day / 4H candle): readable, every trend undecided, nothing drawn that throws', () => {
+  const layers = STRUCTURE_LAYERS.map((l) => l.key)
+  const c = (i) => ({ time: i * 60_000, open: 100 + i, high: 101 + i, low: 99 + i, close: 100.5 + i })
+  for (const k of [0, 1, 2]) {
+    const a = analyzeStructure(Array.from({ length: k }, (_, i) => c(i)))
+    assert.equal(a.n, k)
+    assert.equal(a.bias.swing, 'undecided')
+    assert.equal(a.bias.internal, 'undecided')
+    assert.equal(a.swing.trendName, 'undecided')
+    assert.deepEqual(a.swing.swings, [])
+    const big = analyzeStructure(Array.from({ length: 60 }, (_, i) => c(i)))
+    for (const [h, l] of [[a, a], [a, big], [big, a]]) {
+      const r = topDownRead(h, l, { htf: 'Day', ltf: '1H' })
+      assert.equal(typeof r.verdict, 'string')
+      assert.doesNotThrow(() => structureShapes(l, layers, { htf: h }))
+    }
+  }
+  assert.equal(topDownRead(null, null).verdict, 'Not enough candles')
+})

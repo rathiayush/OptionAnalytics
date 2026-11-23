@@ -1084,6 +1084,11 @@ All must pass before committing.
   wish"): its card's "Its own structure" tick ("Own" on a phone, `optionanalytics.structure.ltfOwn`, ON by default) - off,
   `ltfLayers` leaves only the 'htf' layer, so the higher timeframe's S/R, swing order blocks and dealing range are drawn over
   bare candles (nothing at all when that layer is unticked too - the chart says so); the reading under it is unchanged.
+  TOO FEW CANDLES (asked about - the page fell over with "Cannot read properties of null (reading 'swing')"): a replay's
+  first minutes give a Day / 4H chart ONE forming candle; `analyzeStructure` under 3 candles returned `bias` / `swing`
+  null with `n` 1 or 2, and every reader guards on `n` (`topDownRead`, the summary's trend tags, the shapes). It now
+  returns the same shape with nothing found and every trend "undecided" (`tests/market-structure.test.mjs` - 0 / 1 / 2
+  candles through the top-down read and the shapes).
   HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
   `optionanalytics.structure.density`): how many patterns, blocks, gaps, zones, equal levels, sweeps and internal breaks are
   drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount

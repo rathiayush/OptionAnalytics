@@ -395,7 +395,15 @@ export function analyzeStructure(rawBars, options = {}) {
   const o = { ...STRUCTURE_DEFAULTS, ...options }
   const bars = (rawBars ?? []).map((b) => ({ ...b, open: num(b.open), high: num(b.high), low: num(b.low), close: num(b.close) }))
   const n = bars.length
-  const empty = { bars, n, atr: [], swing: null, internal: null, events: [], swings: [], sweeps: [], orderBlocks: [], fvgs: [], equal: [], zones: [], trendlines: [], patterns: [], range: null, strongWeak: null, bias: null }
+  // Too few candles to read (a replay's first minutes: one forming Day / 4H candle): the same shape with nothing found and
+  // every trend undecided - n is still the candles there, so a reader guarding on `n` must find bias / swing readable.
+  const none = { events: [], swings: [], sweeps: [], lastHigh: null, lastLow: null, trend: 0, trendName: 'undecided' }
+  const empty = {
+    bars, n, atr: [], price: bars[n - 1]?.close ?? null, lastAtr: 0, options: o,
+    swing: { ...none }, internal: { ...none }, events: [], swings: [], sweeps: [], orderBlocks: [], fvgs: [], equal: [], zones: [],
+    trendlines: [], patterns: [], range: null, strongWeak: null,
+    bias: { swing: 'undecided', internal: 'undecided', lastSwing: null, lastInternal: null },
+  }
   if (n < 3) return empty
   const atr = atrSeries(bars, o.atrPeriod)
   const atrAt = (i) => atr[Math.max(0, Math.min(n - 1, i))] ?? 0
@@ -481,7 +489,7 @@ export function activeLevels(a, { maxOb = 3, maxFvg = 5, maxZones = 3 } = {}) {
 /** The TOP-DOWN read of a higher and a lower timeframe's analyses: the higher one's swing trend and where price sits in its
  *  dealing range, the lower one's structure against it. Returns { verdict, side, lines: [string] }. */
 export function topDownRead(htf, ltf, names = { htf: 'Higher TF', ltf: 'Lower TF' }) {
-  if (!htf?.n || !ltf?.n) return { verdict: 'Not enough candles', side: 'neutral', lines: [] }
+  if (!htf?.n || !ltf?.n || !htf.bias || !ltf.bias) return { verdict: 'Not enough candles', side: 'neutral', lines: [] }
   const h = htf.bias.swing
   const lInt = ltf.bias.internal
   const lSw = ltf.bias.swing
