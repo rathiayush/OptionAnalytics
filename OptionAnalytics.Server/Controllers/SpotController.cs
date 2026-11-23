@@ -60,6 +60,12 @@ public sealed class SpotController : ControllerBase
                     firstCandle = candles.Count > 0 ? candles[0].Time : (DateTimeOffset?)null,
                     lastCandle = candles.Count > 0 ? candles[^1].Time : (DateTimeOffset?)null,
                     lastPrice = s.LastPrice,
+                    // When the last tick came in, the exchange time it carried and how far apart they were - an exchange
+                    // time off by more than 5 s files the candles by arrival (SpotUnderlyingState.FiledTime).
+                    lastTickUtc = s.LastUpdateUtc,
+                    lastExchangeTimeUtc = s.LastExchangeTimeUtc,
+                    exchangeGapSeconds = s.LastExchangeGap?.TotalSeconds,
+                    filedByArrival = s.LastFiledByArrival,
                 };
             }),
             // A tracked strike with no candles got no backfill - a whole expiry of them means the

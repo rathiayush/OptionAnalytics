@@ -43,6 +43,26 @@ public sealed class SpotUnderlyingState
     public DateTimeOffset LastUpdateUtc { get; private set; }
     public DateTimeOffset? LastExchangeTimeUtc { get; private set; }
 
+    /// <summary>How far a tick's EXCHANGE time may be from when it came off the socket (SpotTick.ReceivedAt) and still decide
+    /// its minute - the Order Flow engine's own rule (OrderFlowEngine.MaxFeedLag). An index ticks about once a second, so a
+    /// healthy packet's time is within a second or two of its arrival.</summary>
+    public static readonly TimeSpan MaxExchangeLag = TimeSpan.FromSeconds(5);
+
+    /// <summary>The time a tick is FILED under - its minute and whether it is in the session: the exchange time, or the
+    /// arrival time when the two are more than MaxExchangeLag apart (asked about - "spot price is updating but spot charts
+    /// are not": the last price followed the index while no candle was built). Dhan's index packets can carry a stale or
+    /// shifted time; every tick then read as outside 09:15 - 15:30 (or as an old minute the page ignores), so the spot
+    /// chart stood still while the option charts - which file by arrival (OiReplayLiveFeedService) - kept ticking. A tick
+    /// with no arrival time (history, tests) keeps its exchange time.</summary>
+    internal static DateTimeOffset FiledTime(SpotTick tick) =>
+        tick.ReceivedAt is { } arrived && (arrived - tick.ExchangeTimestamp).Duration() > MaxExchangeLag ? arrived : tick.ExchangeTimestamp;
+
+    /// <summary>Whether the last tick was filed by its arrival time (its exchange time was off) and by how much the exchange
+    /// time was off then (arrival minus exchange; null when the tick carried no arrival time) - for the log and
+    /// /api/spot/diagnostics.</summary>
+    public bool LastFiledByArrival { get; private set; }
+    public TimeSpan? LastExchangeGap { get; private set; }
+
     /// <summary>Fired once a 1-minute bar finishes (the moment the NEXT bar starts, not on every
     /// tick) - EmaCrossoverAlertService is the consumer, computing EMA9/21 only against stable,
     /// fully-closed bars so a crossover alert never fires (or flip-flops) off a still-forming bar's
@@ -131,10 +151,13 @@ public sealed class SpotUnderlyingState
             LastPrice = tick.LastPrice;
             LastUpdateUtc = DateTimeOffset.UtcNow;
             LastExchangeTimeUtc = tick.ExchangeTimestamp;
+            var filed = FiledTime(tick);
+            LastFiledByArrival = filed != tick.ExchangeTimestamp;
+            LastExchangeGap = tick.ReceivedAt is { } arrived ? arrived - tick.ExchangeTimestamp : null;
 
-            var minute = FloorToMinute(tick.ExchangeTimestamp);
+            var minute = FloorToMinute(filed);
 
-            if (!MarketHours.InTradingSession(tick.ExchangeTimestamp))
+            if (!MarketHours.InTradingSession(filed))
             {
                 // Out-of-session volume never reaches a bar; the baseline still moves, so the session's
                 // first tick does not count it either.
