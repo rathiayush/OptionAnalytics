@@ -710,6 +710,49 @@ const hexA = (hex, a) => {
 }
 /** Zones (read against price) as the boxes the primitive draws. `best` (bestZones): its best support / resistance drawn
  *  first (their labels placed first), brighter, a thicker outline and a ★ label - shown even when their layer is hidden. */
+/**
+ * THE SPOT READOUT over the card's chart (asked about - "this component spot price does not move"): the price on the axis is
+ * one of seven labels stacked at the same level (the CDV and Total lines, the open, the previous close), so a live price that
+ * had stopped looked just like one that was moving. `spotFeedRead(bars, asOfMs, { live, inSession })` - the last spot minute
+ * and its close, and, LIVE inside the session, how far behind the clock its end is: more than `SPOT_STALE_MS` (2 min - the
+ * forming minute is never that old) = the feed is behind, said on the card with the minute it stopped at. Never for a
+ * replayed day (its clock is the slider) or outside the session. { price, minute, behindMs, stale } or null with no bar.
+ */
+export const SPOT_STALE_MS = 2 * 60_000
+export function spotFeedRead(bars = [], asOfMs = null, { live = false, inSession = true } = {}) {
+  let last = null
+  for (let i = (bars?.length ?? 0) - 1; i >= 0; i--) if (bars[i]?.close > 0 && Number.isFinite(bars[i].time)) { last = bars[i]; break }
+  if (!last) return null
+  const behind = live && inSession && Number.isFinite(asOfMs) ? asOfMs - (last.time + 60_000) : 0
+  return { price: last.close, minute: last.time, behindMs: Math.max(0, behind), stale: behind > SPOT_STALE_MS }
+}
+
+/**
+ * THE PRICE SCALE OF THE CARD'S SPOT CHART (asked about - "this component spot price does not move"): the candles' own range
+ * (`low` - `high`, what the chart shows) widened to take in the zones just off them - but only up to `reach` each way,
+ * `ZONE_REACH_RANGE` x the candles' range or `ZONE_REACH_PRICE` of the price, whichever is more - and each zone only as far
+ * as that. The scale used to hold every zone within 1% of price whole, so a floor from the day before a point and a half
+ * under the candles stretched it until a minute's move was a pixel and the live candle looked stuck. A zone beyond the reach
+ * stays in the ladder and the table; here it is a band running off the edge. { min, max } or null with no range.
+ */
+export const ZONE_REACH_RANGE = 0.75
+export const ZONE_REACH_PRICE = 0.0025
+export function zoneScaleRange(low, high, zones = [], price = null) {
+  if (!Number.isFinite(low) || !Number.isFinite(high) || high < low) return null
+  const ref = Number.isFinite(price) && price > 0 ? price : (low + high) / 2
+  const reach = Math.max((high - low) * ZONE_REACH_RANGE, ref * ZONE_REACH_PRICE)
+  const lo = low - reach
+  const hi = high + reach
+  let min = low
+  let max = high
+  for (const z of zones ?? []) {
+    if (!Number.isFinite(z?.low) || !Number.isFinite(z?.high) || z.high < lo || z.low > hi) continue
+    min = Math.min(min, Math.max(z.low, lo))
+    max = Math.max(max, Math.min(z.high, hi))
+  }
+  return { min, max }
+}
+
 export function zoneBoxes(zones, { showPrev = true, showToday = true, best = null } = {}) {
   const starred = new Map([[best?.support?.zone, 'support'], [best?.resistance?.zone, 'resistance']].filter(([z]) => z).map(([z, side]) => [zoneKey(z), side]))
   const list = (zones ?? []).filter((z) => starred.has(zoneKey(z)) || (z.from === 'today' ? showToday : showPrev))

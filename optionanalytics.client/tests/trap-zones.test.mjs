@@ -1,7 +1,7 @@
 // Trapped / squeeze zones (trapZones.js): clusters, their role against price, the open rule, the crossings, no look-ahead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { compositeProfile, compositeZones, dayRead, openRuleDay, openingRead, positionProfile, readZones, zoneCrossings, zoneKind } from '../src/trapZones.js'
+import { compositeProfile, compositeZones, dayRead, openRuleDay, openingRead, positionProfile, readZones, zoneCrossings, zoneKind, zoneScaleRange, ZONE_REACH_RANGE, spotFeedRead, SPOT_STALE_MS } from '../src/trapZones.js'
 
 const T0 = Date.UTC(2026, 10, 16, 3, 45)  // 09:15 IST
 const MIN = 60_000
@@ -390,4 +390,54 @@ test('the highest Total (OI − Net) and its outliers: the delta card\'s third c
   assert.deepEqual(f.outliers, [])
   // Without both the OI and the flow there is no Total.
   assert.equal(totalOutliers(p.rows, ['oi'], 5, 128), null)
+})
+
+test('the spot chart\'s price scale: the candles, widened to the zones just off them but never by more than the reach - a far band cannot flatten the live candle', () => {
+  // The candles 64250 - 64350 (100 points) at a price of 64300: the reach is the larger of 75 points and 0.25% of the price (160).
+  const reach = Math.max(100 * ZONE_REACH_RANGE, 64300 * 0.0025)
+  assert.equal(reach, 160.75)
+  // No zones: exactly the candles.
+  assert.deepEqual(zoneScaleRange(64250, 64350, [], 64300), { min: 64250, max: 64350 })
+  // A zone touching the candles' range only inside it adds nothing; one a little under adds its lower part.
+  assert.deepEqual(zoneScaleRange(64250, 64350, [{ low: 64260, high: 64300 }], 64300), { min: 64250, max: 64350 })
+  assert.deepEqual(zoneScaleRange(64250, 64350, [{ low: 64190, high: 64240 }], 64300), { min: 64190, max: 64350 })
+  // A band running far under (the day before's floor, 1.5% away) is taken only as far as the reach...
+  const far = zoneScaleRange(64250, 64350, [{ low: 63000, high: 64200 }], 64300)
+  assert.equal(far.max, 64350)
+  assert.equal(far.min, 64250 - reach)
+  // ...so the candles keep at least a third of the height whatever the zones are (the old scale gave them a few pixels).
+  assert.ok((64350 - 64250) / (far.max - far.min) > 0.25)
+  // A zone wholly beyond the reach is left out; both sides at once.
+  assert.deepEqual(zoneScaleRange(64250, 64350, [{ low: 62000, high: 62100 }, { low: 66000, high: 66100 }], 64300), { min: 64250, max: 64350 })
+  const both = zoneScaleRange(64250, 64350, [{ low: 64000, high: 64200 }, { low: 64400, high: 65000 }], 64300)
+  assert.deepEqual(both, { min: 64250 - reach, max: 64350 + reach })
+  // A wide day's range: the reach follows it (75% of the range), a tiny range: the price's 0.25%.
+  assert.equal(zoneScaleRange(100, 200, [{ low: 0, high: 1000 }], 150).min, 25)
+  assert.equal(zoneScaleRange(64300, 64300, [{ low: 0, high: 70000 }], 64300).max, 64300 + 64300 * 0.0025)
+  // Junk in, nothing out; zones with no numbers ignored.
+  assert.equal(zoneScaleRange(NaN, 1), null)
+  assert.equal(zoneScaleRange(5, 1), null)
+  assert.deepEqual(zoneScaleRange(10, 20, [{ low: null, high: 5 }, null, undefined], 15), { min: 10, max: 20 })
+})
+
+test('the spot readout: the last spot minute, and live inside the session a feed that stopped (over 2 min behind the clock) says so', () => {
+  const bars = [{ time: T0, close: 100 }, { time: T0 + MIN, close: 101 }, { time: T0 + 2 * MIN, close: 102.5 }]
+  // Live, the clock in the forming minute after the last bar: not behind.
+  assert.deepEqual(spotFeedRead(bars, T0 + 2 * MIN + 30_000, { live: true }), { price: 102.5, minute: T0 + 2 * MIN, behindMs: 0, stale: false })
+  // Two minutes after the last bar's end exactly: still ok; a second more: behind.
+  assert.equal(spotFeedRead(bars, T0 + 3 * MIN + SPOT_STALE_MS, { live: true }).stale, false)
+  const late = spotFeedRead(bars, T0 + 3 * MIN + SPOT_STALE_MS + 1_000, { live: true })
+  assert.equal(late.stale, true)
+  assert.equal(late.behindMs, SPOT_STALE_MS + 1_000)
+  assert.equal(late.minute, T0 + 2 * MIN)
+  // The user's case: the feed's last minute 09:23 and the clock at 09:31.
+  assert.equal(spotFeedRead(bars, T0 + 16 * MIN, { live: true }).stale, true)
+  // Never for a replayed day, outside the session, or with no clock.
+  assert.equal(spotFeedRead(bars, T0 + 60 * MIN, { live: false }).stale, false)
+  assert.equal(spotFeedRead(bars, T0 + 60 * MIN, { live: true, inSession: false }).stale, false)
+  assert.equal(spotFeedRead(bars, null, { live: true }).stale, false)
+  // A bar with no price is skipped for the last one with it; none = null.
+  assert.equal(spotFeedRead([{ time: T0, close: 100 }, { time: T0 + MIN, close: 0 }], null).price, 100)
+  assert.equal(spotFeedRead([], T0), null)
+  assert.equal(spotFeedRead(undefined, T0), null)
 })

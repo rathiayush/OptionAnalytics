@@ -7,12 +7,13 @@ import { useChartHeight, useFitHeight } from './DashboardCard.jsx'
 import { ZoneBoxesPrimitive } from './profilePrimitives.js'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, UP_COLOR, fromChartTime, istTickMarkFormatter, istTimeFormatter, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
+import { inMarketSession } from './marketSession.js'
 import { barsUpTo, optionDeltaMinutes } from './deltaProfile.js'
 import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, spotFeedRead, tradeSetups, zoneBoxes, zoneScaleRange } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -80,7 +81,7 @@ function ZonesSpotChart({ candles, boxes, lines, dayKey, height: givenHeight = 3
   const seriesRef = useRef(null)
   const boxesRef = useRef(null)
   const linesRef = useRef([])
-  const rangeRef = useRef(null)
+  const zonesRef = useRef({ boxes: [], last: null })
   useEffect(() => {
     if (!containerRef.current) return undefined
     const chart = createZoomableChart(containerRef.current, {
@@ -96,12 +97,14 @@ function ZonesSpotChart({ candles, boxes, lines, dayKey, height: givenHeight = 3
     chartRef.current = chart
     const series = chart.addSeries(CandlestickSeries, {
       upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false, wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
-      // The scale also holds the zones nearest price (within ~1%) so a support / resistance just off the candles shows.
+      // The scale is the candles' own range, widened only as far as `zoneScaleRange` allows to show the zones just off them -
+      // a band far from price used to stretch it until the candles were a few pixels and the live price looked frozen.
       autoscaleInfoProvider: (original) => {
         const base = original()
-        const r = rangeRef.current
-        if (!r || !base?.priceRange) return base
-        return { ...base, priceRange: { minValue: Math.min(base.priceRange.minValue, r.low), maxValue: Math.max(base.priceRange.maxValue, r.high) } }
+        if (!base?.priceRange) return base
+        const { boxes: zones, last } = zonesRef.current
+        const r = zoneScaleRange(base.priceRange.minValue, base.priceRange.maxValue, zones, last)
+        return r ? { ...base, priceRange: { minValue: r.min, maxValue: r.max } } : base
       },
     })
     seriesRef.current = series
@@ -122,10 +125,7 @@ function ZonesSpotChart({ candles, boxes, lines, dayKey, height: givenHeight = 3
   useEffect(() => {
     boxesRef.current?.setZones(boxes)
     const last = candles.at(-1)?.close
-    if (Number.isFinite(last)) {
-      const near = boxes.filter((b) => Math.abs((b.low + b.high) / 2 - last) / last <= 0.01)
-      rangeRef.current = near.length ? { low: Math.min(...near.map((b) => b.low)), high: Math.max(...near.map((b) => b.high)) } : null
-    }
+    zonesRef.current = { boxes, last: Number.isFinite(last) ? last : null }
     if (!userControlRef.current) chartRef.current?.priceScale('right').applyOptions({ autoScale: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [boxes, candles])
@@ -530,6 +530,8 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const dayOpen = spotMs.length ? (spotMs[0].open > 0 ? spotMs[0].open : spotMs[0].close) : null
   const bias = useMemo(() => openingBias({ opening, prevOptions: pastOpt.sessions, open: dayOpen, rowSize }), [opening, pastOpt.sessions, dayOpen, rowSize])
   const chartCandles = useMemo(() => candlesOf((spotBars ?? []).filter((b) => clock == null || fromChartTime(b.time) * 1000 <= clock), CHART_TF.includes(chartTf) ? chartTf : 5), [spotBars, clock, chartTf])
+  // The live price over the chart and, when the spot feed has stopped (the last minute is over 2 min behind the clock), a warning.
+  const spotRead = useMemo(() => spotFeedRead(spotMs, asOfMs, { live: isLive, inSession: asOfMs != null && inMarketSession(asOfMs) }), [spotMs, asOfMs, isLive])
   const sides = useMemo(() => supportResistance(day ? day.zones : opening.zones), [day, opening.zones])
   const tableZones = useMemo(() => (day ? day.zones : (opening.zones ?? []).map((z) => ({ ...z, from: 'prev' }))), [day, opening.zones])
   // The biggest CDV support / resistance: the sessions before (fixed from the start of the day) and the day so far
@@ -677,6 +679,20 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
         <Checkbox checked={showTotals} onChange={(e) => setShowTotals(e.target.checked)}>Total (OI − Net) outliers</Checkbox>
       </Space>
+      {spotRead && (
+        <Space wrap size={[8, 2]} align="center">
+          <Text style={{ fontSize: 13 }}>
+            Spot <b>{px(spotRead.price)}</b>
+            {opening.close > 0 && <Text type="secondary" style={{ fontSize: 12 }}> ({pct((spotRead.price - opening.close) / opening.close * 100)} vs previous close)</Text>}
+            <Text type="secondary" style={{ fontSize: 12 }}> · {isLive ? 'last minute' : 'at'} {hhmm(spotRead.minute)}</Text>
+          </Text>
+          {spotRead.stale && (
+            <Tooltip title="The page's live spot feed has not delivered a new minute for over 2 minutes while the market is open - the price here is the last one received. Check the Live badge / connection at the top of the page, or reload.">
+              <Tag color="warning" style={{ margin: 0 }}>Spot feed behind: stopped at {hhmm(spotRead.minute)}, now {hhmm(asOfMs)}</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      )}
       {chartCandles.length ? (
         <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={allLines} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}

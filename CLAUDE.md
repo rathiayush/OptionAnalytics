@@ -777,7 +777,16 @@ All must pass before committing.
   the open / the floor below it) and FAILED SQUEEZE / BREAKDOWN (back inside within 15 min of the break - the breakout traders trapped); targets = the next
   zones the other way (near edges), R:R = the first target against the stop; READY = price at the trigger now, WATCH = wait; flagged with / against the
   day's read (the verdict's score, else the bias from the open); ready and with the read first, at most 4; levels are spot. Only the minutes up
-  to the clock count (`tests/trap-zones.test.mjs`). A read -
+  to the clock count (`tests/trap-zones.test.mjs`). THE SPOT CHART'S PRICE (asked about - "this component spot price does not
+  move"; checked in a browser with a mock hub - the card follows the live feed, also after being scrolled out of view and back,
+  so what looked frozen was two things on the card): (1) the PRICE SCALE (`zoneScaleRange`) - it held every zone within 1% of price
+  WHOLE, so a floor from the day before stretched it until a minute's move was a pixel; now the candles' own range widened to the
+  zones just off them by at most `ZONE_REACH_RANGE` 0.75 x that range or `ZONE_REACH_PRICE` 0.25% of price, each zone only as far
+  as that (price lines never count - lightweight-charts v5 leaves them out of the autoscale); (2) a SPOT READOUT over the chart
+  (`spotFeedRead`: "Spot 64,250.05 (-0.60% vs previous close) · last minute 09:23" - the live price's axis label is one of
+  seven stacked at one level, the CDV / Total lines, the open, the previous close) and, LIVE inside the session, a "Spot feed
+  behind: stopped at 09:21, now 09:31" tag once the last minute ended over `SPOT_STALE_MS` 2 min before the clock (never on a
+  replayed day or outside the session) - a stalled feed was silent here. A read -
   it feeds no strategy or alert.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
