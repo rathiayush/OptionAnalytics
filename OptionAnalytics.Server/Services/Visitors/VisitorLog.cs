@@ -54,6 +54,9 @@ public sealed class VisitorLog
         MoveJsonLinesDays();
     }
 
+    /// <summary>The folder of the day files (the admin Cache page lists it for download).</summary>
+    public string Root => _root;
+
     private static string ResolveRoot(IHostEnvironment environment, IConfiguration configuration)
     {
         var configured = configuration["Storage:VisitorLogPath"];

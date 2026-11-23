@@ -1684,7 +1684,21 @@ All must pass before committing.
   cache needs no disk; gzip / zip files are STORED (already compressed), the rest deflated fast; `.tmp` files (a write in
   progress) and symlinks are left out, a file busy or gone on the way skipped; the same path checks as a delete; the browser's
   stop ends it (`RequestAborted`). On a phone the cards' buttons sit in their body, not beside the title (they squeezed
-  the folder's trail to nothing). No timer - loaded on opening, after a delete, by Refresh; a block an entry on
+  the folder's trail to nothing). THE SERVER'S OWN RECORDS (asked for - "whatever files the system is generating, all CSV,
+  give an option to download them as well; show the folders with their paths"): read-only roots in their own row of cards
+  ("Server records - download only", `CacheRoot`'s `ReadOnly`, `Kind` "records") - the Telegram message log
+  (`TelegramMessageLog.Root`), the visitor log (`VisitorLog.Root`), the saved strategies (`{ScannerRunnerPath}/signal-strategies`
+  - strategies.csv and history/, each history file named after its strategy), the background runs (`.../signal-backtests` -
+  each file named after its run), and the trade / risk settings CSVs as ONE-FILE roots (`Only` - their folder is the data
+  folder, which also holds the login keys: only that file is ever listed, downloaded or zipped, any other path refused). NEVER
+  deleted here (`Delete` refuses a read-only root; the page shows no delete button for one). Not listed at all: the login keys,
+  the Telegram sign-in, the preferences, paper positions, the runner's config. FULL PATHS: every card shows its folder's full
+  path on the server (a one-file root: the file's), the folder open shows its own (`CacheListing.FullPath`) and each folder
+  row its own (`CacheEntry.FullPath`), all copyable. ZIPS BY KIND (`GET /api/cache/everything.zip?kind=` - caches, the default
+  as before / records / csv / all; `AllFolders(kind)`, `WriteZip`'s `include` by file name and a FILE as a source):
+  "All caches", "All records" and "All CSV files" (every CSV of every root, caches and records) - `everythingUrl` /
+  `groupRoots` in `cacheBrowser.js`. `CacheBrowserTests.cs` (the records read-only, the one-file root reaching nothing else,
+  the full paths, the zips by kind), `tests/cache-browser.test.mjs`; checked in a browser at 375 px and 1280 px. No timer - loaded on opening, after a delete, by Refresh; a block an entry on
   a phone (`CacheBrowserTests.cs`, `tests/cache-browser.test.mjs`).
 - ORDER FLOW in real time (`OrderFlowEngine`, `OrderFlowService`). Dhan sends a tick per
   UPDATE, not per trade - there is no time & sales feed: a trade is the rise in the day's running volume between ticks, at the

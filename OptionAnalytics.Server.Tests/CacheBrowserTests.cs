@@ -257,6 +257,106 @@ public sealed class CacheBrowserTests : IDisposable
         Assert.Equal(8, Entries(allBody).Count);
     }
 
+    private string Data => Path.Combine(_dir, "data");
+
+    /// <summary>The caches above plus the server's own records: a log folder, the strategies folder, and the trade settings
+    /// CSV - one file of a data folder that also holds the login keys.</summary>
+    private CacheBrowser BrowserWithRecords()
+    {
+        Write(Path.Combine(Data, "telegram-log"), "2026-11-06.csv", 40);
+        Write(Path.Combine(Data, "telegram-log"), "from-telegram/2026-11-01.json.gz", 12);
+        Write(Path.Combine(Data, "scanner-runner", "signal-strategies"), "history/abc-trades.csv", 30);
+        File.WriteAllText(Path.Combine(Data, "scanner-runner", "signal-strategies", "strategies.csv"), "id,name\nabc,Buyers hold\n");
+        Write(Data, "trade-settings.csv", 25);
+        Write(Data, "dataprotection-keys/key-1.xml", 99);                                        // never listed
+        Write(Data, "risk-settings.csv", 15);
+        return new CacheBrowser(new[]
+        {
+            new CacheRoot("dhan", "Dhan data cache", Dhan, "Dhan's past days", () => _afterDhan++),
+            new CacheRoot("telegram-log", "Telegram message log", Path.Combine(Data, "telegram-log"), "Messages", null, ReadOnly: true),
+            new CacheRoot("signal-strategies", "Saved strategies", Path.Combine(Data, "scanner-runner", "signal-strategies"), "Strategies", null, ReadOnly: true),
+            new CacheRoot("trade-settings", "Trade settings CSV", Data, "Trade settings", null, ReadOnly: true, Only: new[] { "trade-settings.csv" }),
+        }, NullLogger.Instance) { Today = () => "2026-11-07" };
+    }
+
+    [Fact]
+    public void The_servers_own_records_are_download_only_with_their_full_paths_and_a_one_file_root_shows_nothing_else()
+    {
+        var browser = BrowserWithRecords();
+        var roots = browser.Roots();
+        var log = roots.Single(r => r.Id == "telegram-log");
+        Assert.Equal((true, "records", Path.GetFullPath(Path.Combine(Data, "telegram-log"))), (log.ReadOnly, log.Kind, log.Path));
+        Assert.Equal((false, "cache"), (roots[0].ReadOnly, roots[0].Kind));
+        // A one-file root: the file's own path, its size alone (not the whole data folder's).
+        var settings = roots.Single(r => r.Id == "trade-settings");
+        Assert.Equal((Path.GetFullPath(Path.Combine(Data, "trade-settings.csv")), 1L, 25L), (settings.Path, settings.Totals.Files, settings.Totals.Bytes));
+
+        // Listings carry the folder's full path and each entry's.
+        var top = browser.List("telegram-log", "").Listing!;
+        Assert.Equal((Path.GetFullPath(Path.Combine(Data, "telegram-log")), true), (top.FullPath, top.ReadOnly));
+        Assert.Equal(Path.GetFullPath(Path.Combine(Data, "telegram-log", "2026-11-06.csv")), top.Entries.Single(e => e.Name == "2026-11-06.csv").FullPath);
+        Assert.Contains("sent that day", top.Entries.Single(e => e.Name == "2026-11-06.csv").About);
+        // A strategy's history file is named after the strategy.
+        var history = browser.List("signal-strategies", "history").Listing!;
+        Assert.Equal("Buyers hold - trades - written as each signal comes", Assert.Single(history.Entries).About);
+
+        // The one-file root lists its file only - the login keys and the risk CSV beside it are never reached.
+        var only = browser.List("trade-settings", "").Listing!;
+        Assert.Equal(new[] { "trade-settings.csv" }, only.Entries.Select(e => e.Name));
+        Assert.Equal("Not a path inside this cache.", browser.List("trade-settings", "dataprotection-keys").Error);
+        Assert.Equal("Not a path inside this cache.", browser.Download("trade-settings", "dataprotection-keys/key-1.xml").Error);
+        Assert.Equal("Not a path inside this cache.", browser.Download("trade-settings", "risk-settings.csv").Error);
+        Assert.False(browser.Download("trade-settings", "trade-settings.csv").Download!.Folder);
+        // Its zip: that file alone.
+        var (zipped, _) = browser.Download("trade-settings", "");
+        using var z = new MemoryStream();
+        browser.WriteZip(z, zipped!.Sources!);
+        Assert.Equal(new[] { "trade-settings/trade-settings.csv" }, Entries(z).Keys);
+
+        // Never deleted here - a file, a folder or everything.
+        Assert.Contains("download only", browser.Delete("telegram-log", "2026-11-06.csv", "admin").Error);
+        Assert.Contains("download only", browser.Delete("trade-settings", "", "admin").Error);
+        Assert.True(File.Exists(Path.Combine(Data, "telegram-log", "2026-11-06.csv")));
+
+        // The zips by kind: the caches as before, the records, and every CSV of every root.
+        Assert.Equal(new[] { "dhan" }, browser.AllFolders().Select(f => f.Prefix));
+        Assert.Equal(new[] { "telegram-log", "signal-strategies", "trade-settings" }, browser.AllFolders("records").Select(f => f.Prefix));
+        using var records = new MemoryStream();
+        browser.WriteZip(records, browser.AllFolders("records"));
+        var keys = Entries(records).Keys.OrderBy(k => k).ToList();
+        Assert.Equal(new[]
+        {
+            "signal-strategies/history/abc-trades.csv", "signal-strategies/strategies.csv", "telegram-log/2026-11-06.csv",
+            "telegram-log/from-telegram/2026-11-01.json.gz", "trade-settings/trade-settings.csv",
+        }, keys);
+        Assert.DoesNotContain(keys, k => k.Contains("key-1") || k.Contains("risk-settings"));
+        using var csv = new MemoryStream();
+        browser.WriteZip(csv, browser.AllFolders("all"), include: n => n.EndsWith(".csv", StringComparison.OrdinalIgnoreCase));
+        Assert.All(Entries(csv).Keys, k => Assert.EndsWith(".csv", k));
+        Assert.Contains("dhan/scrip-master/api-scrip-master.csv", Entries(csv).Keys);
+        Assert.Contains("telegram-log/2026-11-06.csv", Entries(csv).Keys);
+    }
+
+    [Fact]
+    public async Task The_everything_endpoint_zips_by_kind()
+    {
+        var controller = new CacheController(BrowserWithRecords()) { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
+        async Task<List<string>> Zip(string? kind)
+        {
+            var http = new DefaultHttpContext();
+            using var body = new MemoryStream();
+            http.Response.Body = body;
+            await controller.DownloadEverything(kind).ExecuteResultAsync(new ActionContext { HttpContext = http });
+            Assert.Contains($"option-analytics-{kind ?? "caches"}-", http.Response.Headers.ContentDisposition.ToString());
+            return Entries(body).Keys.ToList();
+        }
+        Assert.Equal(5, (await Zip(null)).Count);                                                // the Dhan cache's 5 files
+        Assert.All(await Zip("records"), k => Assert.True(k.StartsWith("telegram-log/") || k.StartsWith("signal-strategies/") || k.StartsWith("trade-settings/")));
+        Assert.All(await Zip("csv"), k => Assert.EndsWith(".csv", k));
+        Assert.Equal(5 + 5, (await Zip("all")).Count);
+        Assert.IsType<BadRequestObjectResult>(controller.DownloadEverything("secrets"));
+    }
+
     public void Dispose()
     {
         try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }
