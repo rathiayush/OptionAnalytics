@@ -6,6 +6,8 @@
 // vah, val, maxVolume, maxAbsDelta). The chart leaves the panel's share of the plot empty on the right (rightOffset), so
 // the candles stand beside it, not under it.
 
+import { RANK_COLORS, deltaRanks, drawRankTag } from './deltaRanks.js'
+
 export const PANEL_SHARE = 0.38
 const PANEL_BG = 'rgba(13,17,23,0.86)'
 const VOL_OUT = 'rgba(150,170,200,0.45)'
@@ -117,6 +119,7 @@ export class DeltaProfilePrimitive {
       xs.forEach((x, i) => {
         const mid2 = deltaX + (i + 1) * (colW + pad) + Math.round(colW / 2)
         ctx.fillRect(mid2, head, Math.max(1, Math.round(hpr)), H - head)
+        const xRanks = deltaRanks(x.rows, x.bullishNegative)
         for (const row of x.rows) {
           if (!(x.maxAbsDelta > 0) || !row.delta) continue
           const box = this._rowBox(row, vpr)
@@ -124,10 +127,15 @@ export class DeltaProfilePrimitive {
           const top = Math.max(head, box.top)
           const len = Math.max(1, (Math.abs(row.delta) / x.maxAbsDelta) * (colW / 2))
           // Each column's own sign: `bullishNegative` (the OI's, the total's) - a negative row is the green one.
-          ctx.fillStyle = (x.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
-          ctx.fillRect(row.delta > 0 ? mid2 : mid2 - len, top, len, Math.max(1, box.top + box.height - top))
+          const rank = xRanks.get(row.price)
+          const h2 = Math.max(1, box.top + box.height - top)
+          ctx.fillStyle = rank ? RANK_COLORS[rank] : (x.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
+          ctx.fillRect(row.delta > 0 ? mid2 : mid2 - len, top, len, h2)
+          drawRankTag(ctx, rank, { x: row.delta > 0 ? mid2 - 2 * hpr : mid2 + 2 * hpr, top, height: h2, alignRight: row.delta > 0, vpr, minHeight: 7 * vpr })
         }
       })
+      // The 1st / 2nd biggest buying and selling rows, each in its own colour with a B1 / B2 / S1 / S2 tag (deltaRanks.js).
+      const ranks = deltaRanks(p.rows, p.bullishNegative)
       for (const row of p.rows) {
         const box = this._rowBox(row, vpr)
         if (!box || box.top > H || box.top + box.height < head) continue
@@ -141,8 +149,11 @@ export class DeltaProfilePrimitive {
         if (p.maxAbsDelta > 0 && row.delta !== 0) {
           const len = Math.max(1, (Math.abs(row.delta) / p.maxAbsDelta) * (colW / 2))
           // `bullishNegative` (the option OI's CE − PE): a negative row is the bullish one - green.
-          ctx.fillStyle = (p.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
+          const rank = ranks.get(row.price)
+          ctx.fillStyle = rank ? RANK_COLORS[rank] : (p.bullishNegative ? row.delta < 0 : row.delta > 0) ? BUY : SELL
           ctx.fillRect(row.delta > 0 ? mid : mid - len, top, len, height)
+          // The tag on the other side of the centre line (the bar's own side may run to the column's edge).
+          drawRankTag(ctx, rank, { x: row.delta > 0 ? mid - 2 * hpr : mid + 2 * hpr, top, height, alignRight: row.delta > 0, vpr, minHeight: 7 * vpr })
         }
         if (this._hover != null && row.price === this._hover) {
           ctx.strokeStyle = LABEL
