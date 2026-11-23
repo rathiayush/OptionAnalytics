@@ -353,3 +353,41 @@ test('the first version, to compare: each profile\'s own clusters joined where t
   assert.equal(openingRead({ prevOptions: [prev], rowSize: 5, mode: 'union' }).zones.length, 2)
   assert.equal(dayRead({ opening: { zones: [] }, options: items.map((m) => ({ ...m, t: T0 })), spot, rowSize: 5, mode: 'union' }).zones.filter((z) => z.from === 'today').length, 2)
 })
+
+test('the highest Total (OI − Net) and its outliers: the delta card\'s third column, read from the composite rows', async () => {
+  const { totalOutliers, OUTLIER_Z } = await import('../src/trapZones.js')
+  // The card's Total at a row = OI − (oiMax / netMax) x net; here OI CE − PE and the net flow on 8 rows.
+  const oiRows = [100, 105, 110, 115, 120, 125, 130, 135].map((price, k) => ({ price, delta: [-20, 10, -15, 12, -900, 8, -10, 600][k] }))
+  const netRows = [100, 105, 110, 115, 120, 125, 130, 135].map((price, k) => ({ price, delta: [2, -1, 1, -2, 40, 1, -1, -50][k] }))
+  const p = compositeProfile([{ id: 'oi', rows: oiRows, bullishNegative: true }, { id: 'cdv', rows: netRows }], 5)
+  const t = totalOutliers(p.rows, p.used, 5, 128)
+  // The card's own Total, row by row (negative = bullish), and ours = minus it over the OI's largest row.
+  const oiMax = 900, netMax = 50
+  const card = oiRows.map((r, k) => r.delta - (oiMax / netMax) * netRows[k].delta)
+  const ours = p.rows.map((r) => (r.parts.oi ?? 0) + (r.parts.cdv ?? 0))
+  ours.forEach((x, k) => assert.ok(Math.abs(x - (-card[k] / oiMax)) < 1e-9))
+  // The highest bullish row: 120 (puts written AND calls bought there) - an outlier, a floor under 128.
+  assert.deepEqual([t.bull.low, t.bull.level, t.bull.outlier, t.bull.kind], [120, 122.5, true, 'support'])
+  assert.ok(t.bull.times > 10)
+  // The highest bearish row: 135 (calls written AND selling) - an outlier, a ceiling over 128.
+  assert.deepEqual([t.bear.low, t.bear.outlier, t.bear.kind], [135, true, 'resistance'])
+  assert.deepEqual(t.outliers.map((o) => o.low), [120, 135])
+  assert.equal(OUTLIER_Z, 3)
+  // Adjacent outlier rows of one side are ONE band, at its peak row.
+  const wide = compositeProfile([
+    { id: 'oi', rows: [100, 105, 110, 115, 120, 125, 130, 135, 140, 145].map((price, k) => ({ price, delta: [-5, 4, -6, 5, -800, -900, 3, -4, 6, -5][k] })), bullishNegative: true },
+    { id: 'cdv', rows: [100, 105, 110, 115, 120, 125, 130, 135, 140, 145].map((price) => ({ price, delta: 1 })) },
+  ], 5)
+  const w = totalOutliers(wide.rows, wide.used, 5, 160)
+  assert.deepEqual(w.outliers.map((o) => [o.low, o.high, o.level]), [[120, 130, 127.5]])
+  // A flat profile: a highest row, but no outlier.
+  const flat = compositeProfile([
+    { id: 'oi', rows: [100, 105, 110].map((price) => ({ price, delta: -10 })), bullishNegative: true },
+    { id: 'cdv', rows: [100, 105, 110].map((price) => ({ price, delta: 1 })) },
+  ], 5)
+  const f = totalOutliers(flat.rows, flat.used, 5, 120)
+  assert.equal(f.bull.outlier, false)
+  assert.deepEqual(f.outliers, [])
+  // Without both the OI and the flow there is no Total.
+  assert.equal(totalOutliers(p.rows, ['oi'], 5, 128), null)
+})

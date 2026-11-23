@@ -12,7 +12,7 @@ import { optionOiMinutes } from './oiProfile.js'
 import { usePastDeltaSessions } from './usePastDeltaSessions.js'
 import { useFuturesFootprintDay } from './DeltaProfileCard.jsx'
 import { PROFILE_ROWS } from './profileZones.js'
-import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
+import { TRAP_SOURCES, ZONE_KINDS, ZONE_MODES, bestZones, cdvLevels, dayRead, dayTimeline, ladderLayout, openingBias, profileLevels, totalOutliers, openingRead, supportResistance, tradeSetups, zoneBoxes } from './trapZones.js'
 
 // OI Replay's TRAPPED / SQUEEZE ZONES card (asked for - "from the start of day ... previous idea of the last session ...
 // identify trapped zones, short squeeze zones ... keep updating as it goes ... a separate component"): the previous
@@ -334,9 +334,31 @@ export function ZoneLadder({ zones, price, marks, best, rows, used, prevLabel = 
 
 /** LEVELS BY PROFILE (profileLevels): each profile's own strongest bullish / bearish cluster, the previous day(s) and the
  *  current day, with its range, its busiest row and what it is against price now. */
-export function ProfileLevels({ prev, today, prevLabel }) {
+export function ProfileLevels({ prev, today, prevLabel, totals }) {
   const ids = TRAP_SOURCES.map((x) => x.id).filter((id) => prev?.some((p) => p.id === id) || today?.some((p) => p.id === id))
-  if (!ids.length) return null
+  if (!ids.length && !totals?.prev && !totals?.today) return null
+  // THE HIGHEST TOTAL (OI − NET): its row, how many times the usual row's size, OUTLIER when past the rule, its role now.
+  const totalCell = (t, bullish) => {
+    if (!t) return <Text type="secondary" style={{ fontSize: 12 }}>{bullish ? '▲' : '▼'} none</Text>
+    const k = ZONE_KINDS[t.kind]
+    return (
+      <span style={{ fontSize: 12, display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', columnGap: 4, rowGap: 2 }}>
+        <Text style={{ fontSize: 12, color: bullish ? '#52c41a' : '#ff4d4f', whiteSpace: 'nowrap' }}>{bullish ? '▲' : '▼'} {px(t.low)}–{px(t.high)}</Text>
+        {t.times != null && <Text type="secondary" style={{ fontSize: 11 }}> {t.times}× the usual row</Text>}{' '}
+        {t.outlier ? <Tag color="gold" style={{ margin: 0, fontSize: 11, lineHeight: '16px', padding: '0 4px' }}>OUTLIER</Tag> : <Text type="secondary" style={{ fontSize: 11 }}>(not an outlier)</Text>}{' '}
+        {k && <Tooltip title={k.text}><Tag color={k.color} style={{ margin: 0, color: '#000', fontSize: 11, lineHeight: '16px', padding: '0 4px' }}>{k.short}</Tag></Tooltip>}
+      </span>
+    )
+  }
+  const totalSide = (t, label) => (
+    <div>
+      <Space wrap size={[8, 2]} align="center">
+        <Text type="secondary" style={{ fontSize: 11, minWidth: 80, display: 'inline-block' }}>{label}</Text>
+        {t ? <>{totalCell(t.bull, true)}{totalCell(t.bear, false)}</> : <Text type="secondary" style={{ fontSize: 12 }}>needs both the OI and the flow</Text>}
+        {t?.outliers?.length > 2 && <Text type="secondary" style={{ fontSize: 11 }}>{t.outliers.length} outlier bands: {t.outliers.map((o) => `${o.total > 0 ? '▲' : '▼'} ${px(o.low)}–${px(o.high)}`).join(', ')}</Text>}
+      </Space>
+    </div>
+  )
   const cell = (lv, bullish) => {
     if (!lv) return <Text type="secondary" style={{ fontSize: 12 }}>{bullish ? '▲' : '▼'} none</Text>
     const k = ZONE_KINDS[lv.kind]
@@ -370,6 +392,17 @@ export function ProfileLevels({ prev, today, prevLabel }) {
           {side(today, id, 'Current day')}
         </div>
       ))}
+      {totals && (
+        <div style={{ borderTop: `1px solid ${BORDER_COLOR}`, marginTop: 4, paddingTop: 4 }}>
+          <div>
+            <Tooltip title="The option delta profile card's third column: at each price the OI's CE − PE less the net CE − PE flow, the flow scaled to the OI's size so both count equally - bullish when puts are written and / or calls bought there. The highest row of each side; OUTLIER = far past the usual row's size (median + 3 robust deviations).">
+              <Text strong style={{ fontSize: 12, borderBottom: '1px dotted #8c8c8c' }}>Total (OI − Net) - the highest, and its outliers</Text>
+            </Tooltip>
+          </div>
+          {totalSide(totals.prev, prevLabel)}
+          {totalSide(totals.today, 'Current day')}
+        </div>
+      )}
     </div>
   )
 }
@@ -477,6 +510,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const [showLadder, setShowLadder] = usePersistedState('optionanalytics.oiReplay.trapZonesLadder', true)
   const [ladderSpan, setLadderSpan] = usePersistedState('optionanalytics.oiReplay.trapZonesLadderSpan', 1)
   const [showStrips, setShowStrips] = usePersistedState('optionanalytics.oiReplay.trapZonesStrips', true)
+  const [showTotals, setShowTotals] = usePersistedState('optionanalytics.oiReplay.trapZonesTotals', true)
   const [modeSaved, setMode] = usePersistedState('optionanalytics.oiReplay.trapZonesMode', 'composite')
   const mode = ZONE_MODES.includes(modeSaved) ? modeSaved : 'composite'
   const rowSize = PROFILE_ROWS[underlying] ?? 5
@@ -521,7 +555,24 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
   const nowPrice = day?.price ?? opening.close
   const levelsPrev = useMemo(() => profileLevels(opening.rows, opening.used, rowSize, nowPrice), [opening.rows, opening.used, rowSize, nowPrice])
   const levelsToday = useMemo(() => (day ? profileLevels(day.rows, day.used, rowSize, nowPrice) : null), [day, rowSize, nowPrice])
-  const ladderMarks = useMemo(() => chartLines.filter((l) => l.title).map((l) => ({ price: l.price, label: l.title, color: l.color, dashed: l.style === 2 })), [chartLines])
+  const totalsRead = useMemo(() => ({
+    prev: totalOutliers(opening.rows, opening.used, rowSize, nowPrice),
+    today: day ? totalOutliers(day.rows, day.used, rowSize, nowPrice) : null,
+  }), [opening.rows, opening.used, day, rowSize, nowPrice])
+  // The highest Total (OI − Net) rows that are OUTLIERS, as lines on the chart and the ladder - the previous day(s) dashed,
+  // the current day solid (none when the highest is not an outlier - a line for an ordinary row says nothing).
+  const allLines = useMemo(() => {
+    if (!showTotals) return chartLines
+    const out = []
+    const add = (t, prefix, style) => {
+      if (t?.bull?.outlier) out.push({ price: t.bull.level, color: '#36cfc9', title: `${prefix}Total ▲`, style, width: 2 })
+      if (t?.bear?.outlier) out.push({ price: t.bear.level, color: '#f759ab', title: `${prefix}Total ▼`, style, width: 2 })
+    }
+    add(totalsRead.prev, 'Prev ', 2)
+    add(totalsRead.today, '', 0)
+    return [...chartLines, ...out]
+  }, [chartLines, showTotals, totalsRead])
+  const ladderMarks = useMemo(() => allLines.filter((l) => l.title).map((l) => ({ price: l.price, label: l.title, color: l.color, dashed: l.style === 2 })), [allLines])
   // The day re-read every STEP_MIN minutes - worked out again only when a new step completes (live pushes every second
   // would otherwise redo it all), from the minutes up to each step.
   const lastStep = spotMs.length ? Math.floor((spotMs[spotMs.length - 1].time - spotMs[0].time + MIN) / (STEP_MIN * MIN)) : 0
@@ -624,9 +675,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
         <Checkbox checked={showToday} onChange={(e) => setShowToday(e.target.checked)}>Today&apos;s zones (solid)</Checkbox>
         <Checkbox checked={showCdv} onChange={(e) => setShowCdv(e.target.checked)}>CDV S / R lines</Checkbox>
         <Checkbox checked={showLadder} onChange={(e) => setShowLadder(e.target.checked)}>Ladder</Checkbox>
+        <Checkbox checked={showTotals} onChange={(e) => setShowTotals(e.target.checked)}>Total (OI − Net) outliers</Checkbox>
       </Space>
       {chartCandles.length ? (
-        <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={chartLines} dayKey={`${underlying}|${date}|${chartTf}`} />
+        <ZonesSpotChart candles={chartCandles} boxes={chartBoxes} lines={allLines} dayKey={`${underlying}|${date}|${chartTf}`} />
       ) : <Text type="secondary" style={{ fontSize: 12 }}>No spot candles up to this minute yet.</Text>}
 
       {showLadder && (
@@ -636,7 +688,7 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           prevLabel={prevLabel} spanPct={LADDER_SPANS.includes(ladderSpan) ? ladderSpan : 1} onSpan={setLadderSpan}
         />
       )}
-      <ProfileLevels prev={levelsPrev} today={levelsToday} prevLabel={prevLabel} />
+      <ProfileLevels prev={levelsPrev} today={levelsToday} prevLabel={prevLabel} totals={totalsRead} />
 
       <FoldText id="oiReplay.trapZones.table" label="all zones" summary={<Text type="secondary" style={{ fontSize: 12 }}>All zones ({tableZones.length}) - open for the table</Text>}>
         <ZoneTable zones={tableZones} />
@@ -687,7 +739,10 @@ export function TrapZonesCard({ cePoints, pePoints, spotBars, asOfMs, underlying
           resistance are starred - the bounce / rejection setups trade those. BIGGEST CDV SUPPORT / RESISTANCE: the net CE − PE
           flow&apos;s strongest buying cluster (support) and selling cluster (resistance) - of the sessions before, fixed from the
           start of the day (dashed &quot;Prev CDV S / R&quot; lines at each cluster&apos;s busiest row), and of the day so far,
-          developing (solid &quot;CDV S / R&quot;). LEVELS BY PROFILE: the zones add the profiles together, so where two disagree they cancel - the
+          developing (solid &quot;CDV S / R&quot;). TOTAL (OI − NET): the option delta card&apos;s third column - at each price the OI&apos;s
+          CE − PE less the net flow, both scaled to count equally; its highest bullish (▲) and bearish (▼) row, how many times
+          the usual row&apos;s size, and OUTLIER when far past it (median + 3 robust deviations) - an outlier drawn as a line
+          (&quot;Total ▲ / ▼&quot;, dashed for the days before). LEVELS BY PROFILE: the zones add the profiles together, so where two disagree they cancel - the
           profile strips in the ladder (O / OI = OI CE − PE, the OI delta; N / Net = net CE − PE, which IS the option CDV; B /
           OBV; F / Fut = futures delta) and the &quot;Levels by profile&quot; list show each one ON ITS OWN: green where it is
           bullish at a price, red where bearish; its strongest bullish / bearish cluster with its range, busiest row and role
