@@ -293,3 +293,24 @@ test('CDV and OBV profiles: OBV signs a strike\'s volume by its close\'s directi
   assert.deepEqual(cdv.rows, plain.rows)                              // the default metric is the delta profile as before
   assert.equal(obv.metric, 'obv')
 })
+
+test('a minute with no footprint rows is spread with ITS OWN buy / sell split, not given to one side by its colour', async () => {
+  const { spreadLevels, dayVolumeProfile } = await import('../src/profileZones.js')
+  // 100 lots over 25000 - 25010 (3 rows of 5), 52 bought / 48 sold, a green candle: it read as 100 bought, 0 sold.
+  const c = { time: 0, open: 25000, high: 25010, low: 25000, close: 25008, volume: 100, buy: 52, sell: 48 }
+  const rows = spreadLevels(c, 5)
+  assert.equal(rows.length, 3)
+  const buy = rows.reduce((a, r) => a + r.buy, 0), sell = rows.reduce((a, r) => a + r.sell, 0)
+  assert.ok(Math.abs(buy - 52) < 1e-9 && Math.abs(sell - 48) < 1e-9)
+  // No split known: a doji half and half, a green candle buying, a red one selling.
+  const half = spreadLevels({ open: 10, high: 12, low: 9, close: 10, volume: 40 }, 1)
+  assert.ok(half.every((r) => r.buy === r.sell))
+  assert.ok(spreadLevels({ open: 10, high: 12, low: 9, close: 11, volume: 40 }, 1).every((r) => r.sell === 0))
+  assert.ok(spreadLevels({ open: 11, high: 12, low: 9, close: 10, volume: 40 }, 1).every((r) => r.buy === 0))
+  // Through the profile: a bar of rows is untouched, a bar of none carries its split; the lots keep it (footprintBars).
+  const vp = dayVolumeProfile([c, { time: 60000, open: 1, high: 25000, low: 25000, close: 1, levels: [{ price: 25000, buy: 7, sell: 3 }] }], 5)
+  const total = vp.rows.reduce((a, r) => ({ buy: a.buy + r.buy, sell: a.sell + r.sell }), { buy: 0, sell: 0 })
+  assert.ok(Math.abs(total.buy - 59) < 1e-9 && Math.abs(total.sell - 51) < 1e-9)
+  const lots = footprintBars({ meta: { lotSize: 4 }, bars: [{ time: Date.parse('2026-10-05T10:00:00+05:30'), open: 1, high: 2, low: 1, close: 2, volume: 100, buy: 52, sell: 48, levels: [] }] })
+  assert.deepEqual([lots[0].buy, lots[0].sell], [13, 12])
+})

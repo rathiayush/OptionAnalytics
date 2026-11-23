@@ -78,6 +78,8 @@ export function footprintBars(body) {
   const whole = body?.source === 'estimated'
   const inLots = (b, estimated) => ({
     time: b.time, open: b.open, high: b.high, low: b.low, close: b.close, volume: (b.volume ?? 0) / lot,
+    // The minute's own buy / sell (a bar with no rows is spread with this split, not by its colour - spreadLevels).
+    ...(Number.isFinite(b.buy) && Number.isFinite(b.sell) ? { buy: b.buy / lot, sell: b.sell / lot } : {}),
     levels: (b.levels ?? []).map((l) => ({ price: l.price, buy: (l.buy ?? 0) / lot, sell: (l.sell ?? 0) / lot })),
     ...(estimated || b.estimated ? { estimated: true } : {}),
   })
