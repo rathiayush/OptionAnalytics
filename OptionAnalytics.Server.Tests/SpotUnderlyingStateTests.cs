@@ -100,4 +100,80 @@ public sealed class SpotUnderlyingStateTests
         var bar = Assert.Single(state.GetCandles());
         Assert.Equal((T0, 100m, 102m), (bar.Time, bar.Open, bar.Close));
     }
+
+    // A tick off the live feed: Dhan's exchange time and when it came off the socket.
+    private static SpotTick LiveTick(DateTimeOffset exchange, DateTimeOffset arrived, decimal price) =>
+        Tick(exchange, price) with { ReceivedAt = arrived };
+
+    [Fact]
+    public void AnExchangeTimeHoursOff_FilesTheTickByItsArrival_SoTheSpotChartStillMoves()
+    {
+        // Asked about: "spot price is updating but spot charts are not". 09:31 IST, but the packet's time reads 5h30 earlier
+        // (04:01 IST - before the open): every tick read as outside the session, the price moved and no candle was built.
+        var state = new SpotUnderlyingState("NIFTY", 50);
+        var at0931 = Close.AddHours(-6).AddMinutes(1);   // 09:31 IST
+        var shifted = TimeSpan.FromHours(5.5);
+        state.ApplyTick(LiveTick(at0931.AddSeconds(5) - shifted, at0931.AddSeconds(5), 25560m));
+        state.ApplyTick(LiveTick(at0931.AddSeconds(40) - shifted, at0931.AddSeconds(40), 25571.75m));
+        state.ApplyTick(LiveTick(at0931.AddSeconds(65) - shifted, at0931.AddSeconds(65), 25566m));   // 09:32
+
+        Assert.Equal(25566m, state.LastPrice);
+        var candles = state.GetCandles();
+        Assert.Equal(new[] { at0931, at0931.AddMinutes(1) }, candles.Select(c => c.Time));
+        Assert.Equal((25560m, 25571.75m, 25571.75m), (candles[0].Open, candles[0].High, candles[0].Close));
+        Assert.Equal(at0931.AddMinutes(1), state.ToSnapshot().CurrentBar?.Time);
+        Assert.True(state.LastFiledByArrival);
+        Assert.Equal(shifted, state.LastExchangeGap);
+        // The raw exchange time is still reported as Dhan sent it.
+        Assert.Equal(at0931.AddSeconds(65) - shifted, state.LastExchangeTimeUtc);
+    }
+
+    [Fact]
+    public void AFrozenExchangeTime_FilesTheTicksByArrival_NotIntoTheOldMinute()
+    {
+        // The packet's time stuck at 09:21:10 while ticks keep arriving to 09:31: the page ignores a bar older than the one
+        // it holds, so filed by the stuck time the chart stood at 09:21.
+        var state = new SpotUnderlyingState("NIFTY", 50);
+        var at0921 = Close.AddHours(-6).AddMinutes(-9);   // 09:21 IST
+        state.ApplyTick(LiveTick(at0921.AddSeconds(10), at0921.AddSeconds(10), 25600m));
+        foreach (var (minute, price) in new[] { (5, 25590m), (9, 25580m), (10, 25571m) })
+            state.ApplyTick(LiveTick(at0921.AddSeconds(10), at0921.AddMinutes(minute).AddSeconds(3), price));
+
+        Assert.Equal(new[] { at0921, at0921.AddMinutes(5), at0921.AddMinutes(9), at0921.AddMinutes(10) }, state.GetCandles().Select(c => c.Time));
+        Assert.Equal(25600m, state.GetCandles()[0].Close);   // the 09:21 bar keeps only its own minute's price
+        Assert.Equal(at0921.AddMinutes(10), state.GetCurrentBar()?.Time);
+    }
+
+    [Fact]
+    public void AHealthyExchangeTime_WithinFiveSecondsOfArrival_StillDecidesTheMinute()
+    {
+        // Exchange 09:59:58, arrived 10:00:02: the exchange's minute, as Dhan's own candles have it - unchanged.
+        var state = new SpotUnderlyingState("NIFTY", 50);
+        var at1000 = Close.AddHours(-5).AddMinutes(-30);   // 10:00 IST
+        state.ApplyTick(LiveTick(at1000.AddSeconds(-2), at1000.AddSeconds(2), 25550m));
+
+        Assert.Equal(at1000.AddMinutes(-1), Assert.Single(state.GetCandles()).Time);
+        Assert.False(state.LastFiledByArrival);
+        Assert.Equal(TimeSpan.FromSeconds(4), state.LastExchangeGap);
+        Assert.Equal(SpotUnderlyingState.MaxExchangeLag, TimeSpan.FromSeconds(5));
+        // Exactly 5 s apart still counts as healthy; a tick with no arrival time (history, tests) keeps its exchange time.
+        Assert.Equal(at1000, SpotUnderlyingState.FiledTime(LiveTick(at1000, at1000.AddSeconds(5), 1m)));
+        Assert.Equal(at1000.AddSeconds(6), SpotUnderlyingState.FiledTime(LiveTick(at1000, at1000.AddSeconds(6), 1m)));
+        Assert.Equal(at1000, SpotUnderlyingState.FiledTime(Tick(at1000)));
+    }
+
+    [Fact]
+    public void AfterTheClose_ByArrival_TheShiftedTickStillBuildsNoBar()
+    {
+        // 15:31 IST with a time 5h30 earlier (10:01 IST - inside the session by the packet): filed by arrival it is after
+        // the close, so the chart still ends at 15:29.
+        var state = new SpotUnderlyingState("NIFTY", 50);
+        state.ApplyTick(LiveTick(Close.AddMinutes(-1), Close.AddMinutes(-1).AddSeconds(1), 100m));
+        var arrived = Close.AddMinutes(1);
+        state.ApplyTick(LiveTick(arrived - TimeSpan.FromHours(5.5), arrived, 101m));
+
+        Assert.Equal(101m, state.LastPrice);
+        Assert.Null(state.GetCurrentBar());
+        Assert.Equal(Close.AddMinutes(-1), Assert.Single(state.GetCandles()).Time);
+    }
 }

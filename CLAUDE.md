@@ -109,6 +109,16 @@ All must pass before committing.
   Page: `marketSession.js` - `groupByStrike` (every OI chart, heatmap, totals, walls, the External page),
   `mergeFuturesLive`, and the OI Replay / External spot candles and VWAP (loaded and live) drop readings outside it. A new
   chart feed must do the same (`tests/market-session.test.mjs`, `SpotUnderlyingStateTests.cs`).
+  THE SPOT CANDLES' MINUTE (asked about - "spot price is updating but spot charts are not", the dashboard's and OI Replay's
+  spot charts frozen while their last price moved and CE / PE ticked): `SpotUnderlyingState.FiledTime` - a tick's EXCHANGE time
+  decides its minute and whether it is in the session only while it is within `MaxExchangeLag` 5 s of when it came off the
+  socket (`SpotTick.ReceivedAt`), else the ARRIVAL time (the Order Flow engine's `MaxFeedLag` rule; OI Replay's option /
+  futures feed always files by arrival). Dhan's index packets can carry a stale or shifted time: filed by it, every tick read
+  as outside 09:15 - 15:30 (or an old minute the page ignores) - the price followed the index, no candle was built, and the
+  watchdog (it judges ticks ARRIVING) saw nothing wrong. The raw exchange time is still reported (`LastExchangeTimeUtc`); the
+  log says it once every 10 min an index ("ticks carry an exchange time Ns away from their arrival"), and
+  `/api/spot/diagnostics` gives each index's `lastTickUtc`, `lastExchangeTimeUtc`, `exchangeGapSeconds`, `filedByArrival`.
+  A tick with no arrival time (history, tests) keeps its exchange time.
 
 - Never commit local-only auth bypasses, credentials or `appsettings.Local.json`; never change Dhan
   credentials. Don't run the real server against Dhan just to test - use the tests, `vite preview` with

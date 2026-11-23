@@ -493,10 +493,29 @@ public sealed class SpotFeedHostedService : BackgroundService
         if (!_bySecurityId.TryGetValue(tick.SecurityId, out var state)) return;
 
         state.ApplyTick(tick);
+        WarnIfFiledByArrival(state);
         TrimHistoryOnceDaily();
         // Conflated like every other live push (see LiveBroadcastBatcher) - the snapshot is built at
         // flush time, and a browser that can't keep up gets the newest one rather than a queue.
         _batcher.SetLatest($"u:{state.Underlying}", "spotUpdate", state.Underlying, state.ToSnapshot);
+    }
+
+    // When each index last logged that its ticks were filed by arrival time (OnTick runs on the one "Spot" consumer worker).
+    private readonly Dictionary<string, DateTimeOffset> _arrivalWarnedAt = new();
+    private static readonly TimeSpan ArrivalWarningInterval = TimeSpan.FromMinutes(10);
+
+    /// <summary>Says in the log - at most once every 10 minutes an index - that Dhan's index packets carry an exchange time
+    /// off from their arrival, so the spot candles are being filed by arrival time (SpotUnderlyingState.FiledTime). Without
+    /// it the chart simply ran on; with the old rule it stood still and nothing said why.</summary>
+    private void WarnIfFiledByArrival(SpotUnderlyingState state)
+    {
+        if (!state.LastFiledByArrival) return;
+        var now = DateTimeOffset.UtcNow;
+        if (_arrivalWarnedAt.TryGetValue(state.Underlying, out var last) && now - last < ArrivalWarningInterval) return;
+        _arrivalWarnedAt[state.Underlying] = now;
+        _logger.LogWarning(
+            "Spot feed: {Underlying} ticks carry an exchange time {Gap:F0}s away from their arrival (exchange {Exchange:O}) - its candles are filed by arrival time.",
+            state.Underlying, state.LastExchangeGap?.TotalSeconds ?? 0, state.LastExchangeTimeUtc);
     }
 
     /// <summary>SpotUnderlyingState.ApplyTick only ever APPENDS a closed candle - BackfillAsync's
