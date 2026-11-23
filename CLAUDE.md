@@ -708,7 +708,12 @@ All must pass before committing.
   side; each zone's `score` = its peak row (1 = one profile at its largest), `sources` = the profiles behind it (>= 15% of it) and
   `against` = those pushing the other way. The FUTURES ARE LEFT OUT when there are none or no same-day close to put them on spot
   (`positionProfile`'s `futures`: 'used' / 'none' / 'noBasis'; the verdict's flows count them only when present) - the card's
-  "Profiles read" tags show each read's profiles, a struck-through tag with why. THE LADDER, TO SCALE (asked for back - "continue to show the ladder as well", then "previous day, current day like the
+  "Profiles read" tags show each read's profiles, a struck-through tag with why. THE LADDER IS A LIST BY DEFAULT AGAIN (asked for - "older ladder was better than
+  this" - the first ladder, `ZoneList` on `ladderItems`): a row per zone or line from the highest price down - the zones within
+  2% of price (the nearest 12) in a "Previous day" / "Current day" column, each with its range, kind, profiles and strength (★
+  the best), the price / open / previous close / CDV / OI / Total lines between them, the distance from price at the right -
+  nothing can overlap. The "List / To scale" switch beside the Ladder tick (`optionanalytics.oiReplay.trapZonesLadderView`,
+  'list') keeps the to-scale ladder below. THE LADDER, TO SCALE (asked for back - "continue to show the ladder as well", then "previous day, current day like the
   older way so I know what is happening"; `ladderLayout` + `ZoneLadder`, under the chart, the "Ladder" tick
   `optionanalytics.oiReplay.trapZonesLadder`, on, and its scale ±0.5 / 1 / 2% of price - `...trapZonesLadderSpan`, 1): a
   price axis and TWO LANES - "Previous day" ("Previous N days") and "Current day" - each zone a band at its REAL price
