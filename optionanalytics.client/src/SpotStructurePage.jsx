@@ -14,7 +14,7 @@ import { useOnScreen, useViewport } from './useScreen.js'
 import { useLiveIndexFeed } from './useLiveIndexFeed.js'
 import { FloatingReplayBar } from './FloatingReplayBar.jsx'
 import { inMarketSession } from './marketSession.js'
-import { SESSION_MINUTES, addLiveMinute, candlesAtClock, foldMinutes, sessionStartOf } from './structureLive.js'
+import { SESSION_MINUTES, addLiveMinute, candlesAtClock, foldMinutes, sessionStartOf, weekdaysBack } from './structureLive.js'
 import { STRUCTURE_DEFAULTS, activeLevels, analyzeStructure, topDownRead } from './marketStructure.js'
 import { DEFAULT_DENSITY, DEFAULT_LAYERS, DENSITY, HISTORY_CHOICES, STRUCTURE_COLORS, STRUCTURE_LAYERS, StructurePrimitive, TIMEFRAMES, ltfLayers, lowerThan, structureShapes } from './structureShapes.js'
 
@@ -256,9 +256,8 @@ function SourceLine({ data }) {
 // asked far enough back to hold the day. LIVE, the spot feed's pushes (hub group "u:{U}", useLiveIndexFeed) fold the
 // forming minute into each timeframe's last candle (foldMinutes) - the charts and the read tick with the price, at most
 // once a second; the minute re-read of the server's candles goes on underneath.
-const dayDiff = (a, b) => Math.round((Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86_400_000)
 const LIVE_FLUSH_MS = 1000
-const MAX_DAYS = { 1440: 1100, 240: 365, 60: 180, 15: 60, 5: 21, 3: 10, 1: 5 }  // SpotStructureService.Timeframes
+const MAX_DAYS = { 1440: 780, 240: 260, 60: 130, 15: 42, 5: 15, 3: 10, 1: 5 }  // SpotStructureService.Timeframes - trading days
 // A replay's speed, as OI Replay's: milliseconds per market minute.
 const SPEED_OPTIONS = [
   { value: 2000, label: '0.5x' },
@@ -282,8 +281,10 @@ export default function SpotStructurePage() {
   const ltf = lowerThan(htf, HISTORY_CHOICES[ltfPicked] ? ltfPicked : 5)
   const [htfDaysPicked, setHtfDays] = usePersistedState('optionanalytics.structure.htfDays', {})
   const [ltfDaysPicked, setLtfDays] = usePersistedState('optionanalytics.structure.ltfDays', {})
-  const htfDays = htfDaysPicked?.[htf] ?? HISTORY_CHOICES[htf][0]
-  const ltfDays = ltfDaysPicked?.[ltf] ?? HISTORY_CHOICES[ltf][0]
+  // A history saved before it was counted in trading days (400 calendar days...) is not a choice now - the default instead.
+  const pickedDays = (picked, tf) => (HISTORY_CHOICES[tf].includes(picked?.[tf]) ? picked[tf] : HISTORY_CHOICES[tf][0])
+  const htfDays = pickedDays(htfDaysPicked, htf)
+  const ltfDays = pickedDays(ltfDaysPicked, ltf)
   const [swingLen, setSwingLen] = usePersistedState('optionanalytics.structure.swingLen', STRUCTURE_DEFAULTS.swingLen)
   const [internalLen, setInternalLen] = usePersistedState('optionanalytics.structure.internalLen', STRUCTURE_DEFAULTS.internalLen)
   const [layers, setLayers] = usePersistedState('optionanalytics.structure.layers', DEFAULT_LAYERS)
@@ -369,7 +370,7 @@ export default function SpotStructurePage() {
   const pushed = liveState.key === liveKey ? liveState : { bars: NO_BARS, price: null, at: null }
   const liveBars = pushed.bars
 
-  const back = live ? 0 : Math.max(0, dayDiff(todayKey, dateKey))
+  const back = live ? 0 : weekdaysBack(todayKey, dateKey)
   const keepFresh = live || dateKey === todayKey
   const high = useStructureCandles(index, htf, htfDays + back, keepFresh, liveBars.length > 0)
   const low = useStructureCandles(index, ltf, ltfDays + back, keepFresh, liveBars.length > 0)
@@ -411,8 +412,8 @@ export default function SpotStructurePage() {
     if (live) return liveBars.length || data.data?.todayIncluded ? 'Live - the last candle is forming and ticks with the spot feed.' : null
     const parts = [`Replay at ${hhmm(clock - 60_000)} - the candles completed by then${dayMinutes.bars.length ? ' and the one forming (from the day\'s 1-minute bars)' : ''}; nothing after it.`]
     if (dayMinutes.error) parts.push(`The forming candle could not be made: ${dayMinutes.error}.`)
-    if (back > MAX_DAYS[tf]) parts.push(`${dateKey} is older than the ${MAX_DAYS[tf]} days this timeframe holds - only that day's own candles.`)
-    else if (back + days > MAX_DAYS[tf]) parts.push(`Only ${MAX_DAYS[tf] - back} days before it (this timeframe holds ${MAX_DAYS[tf]}).`)
+    if (back > MAX_DAYS[tf]) parts.push(`${dateKey} is older than the ${MAX_DAYS[tf]} trading days this timeframe holds - only that day's own candles.`)
+    else if (back + days > MAX_DAYS[tf]) parts.push(`Only ${MAX_DAYS[tf] - back} trading days before it (this timeframe holds ${MAX_DAYS[tf]}).`)
     return parts.join(' ')
   }
 
@@ -428,8 +429,8 @@ export default function SpotStructurePage() {
       extra={(
         <Space size={6}>
           {extra}
-          <Select size="small" value={days} onChange={(v) => setDays({ ...(daysPicked ?? {}), [tf]: v })} style={{ width: 104 }} aria-label={`${title} history`}
-            options={HISTORY_CHOICES[tf].map((d) => ({ value: d, label: `${d} days` }))} />
+          <Select size="small" value={days} onChange={(v) => setDays({ ...(daysPicked ?? {}), [tf]: v })} style={{ width: 128 }} aria-label={`${title} history`}
+            options={HISTORY_CHOICES[tf].map((d) => ({ value: d, label: `${d} sessions` }))} />
           <Button size="small" icon={<ReloadOutlined />} onClick={data.reload} loading={data.loading} aria-label={`Reload ${title}`} />
         </Space>
       )}

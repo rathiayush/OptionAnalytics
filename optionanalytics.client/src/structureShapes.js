@@ -43,8 +43,10 @@ export const TIMEFRAMES = [
   { value: 1, label: '1m' },
 ]
 // How many calendar days each timeframe can show (the server's defaults first) - its "History" choices.
+// Each timeframe's history in TRADING days (weekdays) before the day - SpotStructureService.Timeframes. Calendar days left a
+// Monday's "2 days" on Saturday and Sunday: no past session, only the day's own candles.
 export const HISTORY_CHOICES = {
-  1440: [400, 730, 1100], 240: [120, 240, 365], 60: [60, 120, 180], 15: [21, 40, 60], 5: [7, 14, 21], 3: [4, 7, 10], 1: [2, 3, 5],
+  1440: [280, 520, 780], 240: [85, 170, 260], 60: [40, 85, 130], 15: [15, 28, 42], 5: [5, 10, 15], 3: [3, 5, 10], 1: [2, 3, 5],
 }
 /** The lower timeframe kept under the higher one: the one asked when it is lower, else the next lower. */
 export function lowerThan(htf, ltf) {

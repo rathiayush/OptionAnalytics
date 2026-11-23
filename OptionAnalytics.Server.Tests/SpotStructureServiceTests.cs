@@ -49,6 +49,15 @@ public sealed class SpotStructureServiceTests
         Assert.Equal(new DateOnly(2026, 11, 17), SpotStructureService.LastWeekdayBefore(new DateOnly(2026, 11, 18)));
     }
 
+    [Fact]
+    public void History_counts_trading_days_so_a_Monday_still_has_the_sessions_before_it()
+    {
+        // "2 days" on Monday 23 Nov = Thursday and Friday (calendar days were Saturday and Sunday - no past session at all).
+        Assert.Equal(new[] { new DateOnly(2026, 11, 19), new DateOnly(2026, 11, 20) }, SpotStructureService.PastWeekdays(new DateOnly(2026, 11, 23), 2));
+        Assert.Equal(new[] { new DateOnly(2026, 11, 13), new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 17) }, SpotStructureService.PastWeekdays(new DateOnly(2026, 11, 18), 3));
+        Assert.Equal(new[] { new DateOnly(2026, 11, 20) }, SpotStructureService.PastWeekdays(new DateOnly(2026, 11, 22), 1));   // a Sunday
+    }
+
     // One session of 1-minute candles (09:15 - 15:29) of `day`, rising a point a minute from `from`.
     private static IEnumerable<CandleWithVolume> Session(int day, decimal from) =>
         Enumerable.Range(0, 375).Select(i => C(At(day, 9, 15).AddMinutes(i), from + i, from + i + 1, from + i - 1, from + i + 0.5m, 1));
@@ -70,8 +79,8 @@ public sealed class SpotStructureServiceTests
             (u, date, ct) => { todayAsked++; return Task.FromResult<(IReadOnlyList<CandleWithVolume>, string?)>((Session(18, 300).Take(45).ToList(), null)); },
             () => now);
 
-        var day = await service.CandlesAsync("nifty", 1440, 3, default);
-        Assert.Equal((new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 17)), Assert.Single(asked));   // 15 Nov a Sunday: never asked
+        var day = await service.CandlesAsync("nifty", 1440, 2, default);
+        Assert.Equal((new DateOnly(2026, 11, 16), new DateOnly(2026, 11, 17)), Assert.Single(asked));   // the 2 weekdays before Wednesday
         Assert.Equal(3, day.Candles.Count);                                                               // Mon, Tue and today so far
         Assert.Equal((100m, 475m, 99m, 474.5m), (day.Candles[0].Open, day.Candles[0].High, day.Candles[0].Low, day.Candles[0].Close));
         Assert.Equal(375L, day.Candles[0].Volume);
@@ -79,12 +88,12 @@ public sealed class SpotStructureServiceTests
         Assert.Equal((0, 2, 0), (day.DaysHeld, day.DaysFromDisk, day.DaysAskedOfDhan));
 
         // 4H / 1H / 15m / 5m / 3m / 1m of the same held days: nothing asked again, each bucketed on the session.
-        var fourHour = await service.CandlesAsync("NIFTY", 240, 3, default);
+        var fourHour = await service.CandlesAsync("NIFTY", 240, 2, default);
         Assert.Equal(new[] { At(16, 9, 15), At(16, 13, 15), At(17, 9, 15), At(17, 13, 15), At(18, 9, 15) }, fourHour.Candles.Select(c => c.Time));
-        Assert.Equal(7 * 2 + 1, (await service.CandlesAsync("NIFTY", 60, 3, default)).Candles.Count);
-        Assert.Equal(25 * 2 + 3, (await service.CandlesAsync("NIFTY", 15, 3, default)).Candles.Count);
-        Assert.Equal(125 * 2 + 15, (await service.CandlesAsync("NIFTY", 3, 3, default)).Candles.Count);
-        var one = await service.CandlesAsync("NIFTY", 1, 3, default);
+        Assert.Equal(7 * 2 + 1, (await service.CandlesAsync("NIFTY", 60, 2, default)).Candles.Count);
+        Assert.Equal(25 * 2 + 3, (await service.CandlesAsync("NIFTY", 15, 2, default)).Candles.Count);
+        Assert.Equal(125 * 2 + 15, (await service.CandlesAsync("NIFTY", 3, 2, default)).Candles.Count);
+        var one = await service.CandlesAsync("NIFTY", 1, 2, default);
         Assert.Equal(375 * 2 + 45, one.Candles.Count);
         Assert.Equal((2, 0, 0), (one.DaysHeld, one.DaysFromDisk, one.DaysAskedOfDhan));
         Assert.Single(asked);

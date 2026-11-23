@@ -149,3 +149,12 @@ test('the live minutes kept: a minute replaced as it grows, in time order, a lat
   assert.equal(many.length, 50)
   assert.equal(many.at(-1).time, at(d, '09:15') + 399 * MIN)
 })
+
+test('a replayed day\'s distance in TRADING days: the window of past days ending yesterday reaches it, weekends not counted', async () => {
+  const { weekdaysBack } = await import('../src/structureLive.js')
+  assert.equal(weekdaysBack('2026-11-23', '2026-11-23'), 0)   // today (a Monday)
+  assert.equal(weekdaysBack('2026-11-23', '2026-11-20'), 1)   // Friday: one weekday back - the weekend is not
+  assert.equal(weekdaysBack('2026-11-23', '2026-11-16'), 5)   // the Monday before: Mon - Fri
+  assert.equal(weekdaysBack('2026-11-23', '2026-11-25'), 0)
+  assert.equal(weekdaysBack('2026-11-23', 'nonsense'), 0)
+})

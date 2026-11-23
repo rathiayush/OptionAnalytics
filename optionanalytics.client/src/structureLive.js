@@ -76,6 +76,21 @@ export function candlesAtClock(candles, tf, asOfMs, minutes = []) {
   return foldMinutes(done, shown, tf)
 }
 
+/** How many weekdays from `dateKey` up to the day before `todayKey` (YYYY-MM-DD, IST days): the trading days a window of
+ *  past days ending yesterday must add to reach back to `dateKey` (0 for today or a later day). */
+export function weekdaysBack(todayKey, dateKey) {
+  const day = (k) => Date.parse(`${k}T00:00:00Z`)
+  const today = day(todayKey)
+  let d = day(dateKey)
+  if (!Number.isFinite(today) || !Number.isFinite(d)) return 0
+  let n = 0
+  for (; d < today; d += 86_400_000) {
+    const w = new Date(d).getUTCDay()
+    if (w !== 0 && w !== 6) n++
+  }
+  return n
+}
+
 /** Live 1-minute bars kept from the pushes: `bar` (the feed's forming minute - its time ISO or ms) put in its minute's
  *  place, the list kept in time order and to the IST day of the newest; at most `max` minutes. */
 export function addLiveMinute(list, bar, max = SESSION_MINUTES + 5) {

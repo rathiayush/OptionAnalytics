@@ -17,16 +17,17 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public sealed class SpotStructureService
 {
-    /// <summary>The timeframes offered, in minutes (1440 = a day), with how many calendar days back they show by default and
-    /// at most.</summary>
+    /// <summary>The timeframes offered, in minutes (1440 = a day), with how many TRADING days (weekdays) before today they show
+    /// by default and at most. Weekdays, not calendar days: "2 days" on a Monday was Saturday and Sunday - no past session at
+    /// all, only today's candles.</summary>
     public static readonly IReadOnlyDictionary<int, (int DefaultDays, int MaxDays)> Timeframes = new Dictionary<int, (int, int)>
     {
-        [1440] = (400, 1100),
-        [240] = (120, 365),
-        [60] = (60, 180),
-        [15] = (21, 60),
-        [5] = (7, 21),
-        [3] = (4, 10),
+        [1440] = (280, 780),
+        [240] = (85, 260),
+        [60] = (40, 130),
+        [15] = (15, 42),
+        [5] = (5, 15),
+        [3] = (3, 10),
         [1] = (2, 5),
     };
 
@@ -34,7 +35,7 @@ public sealed class SpotStructureService
     internal const int ChunkDays = 80;
     /// <summary>A held day keeps its 1-minute candles (for 3m / 1m) when it is at most this many days old - every older one
     /// only its 5-minute candles (Day / 4H / 1H / 15m / 5m are made from them).</summary>
-    internal const int MinuteDays = 14;
+    internal const int MinuteDays = 45;
 
     private static readonly TimeOnly SessionStart = new(9, 15);
     private static readonly TimeOnly SessionEnd = new(15, 30);
@@ -87,15 +88,12 @@ public sealed class SpotStructureService
             throw new ArgumentException($"Timeframe {timeframe} is not offered - one of {string.Join(", ", Timeframes.Keys)} (minutes; 1440 = a day).");
         var span = Math.Clamp(days ?? spec.DefaultDays, 1, spec.MaxDays);
         var today = IstClock.IstDate(_now());
-        var from = today.AddDays(-span);
-        var lastPast = LastWeekdayBefore(today);
+        var weekdays = PastWeekdays(today, span);
+        var from = weekdays[0];
         if (_heldOn != today) { _held.Clear(); _heldOn = today; }
         var minutes = timeframe % 5 != 0;   // 3m / 1m need the 1-minute candles
 
         var errors = new List<string>();
-        var weekdays = new List<DateOnly>();
-        for (var d = from; d <= lastPast; d = d.AddDays(1))
-            if (d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)) weekdays.Add(d);
         bool Held(DateOnly d) => _held.TryGetValue((underlying, d), out var h) && (!minutes || h.One is not null);
         var needed = weekdays.Where(d => !Held(d)).ToList();
         int fromDisk = 0, asked = 0;
@@ -131,6 +129,16 @@ public sealed class SpotStructureService
 
     /// <summary>The weekday before `today` - the last day a window of past days asks for (a weekend after the last session
     /// would never be kept on disk, so a window ending on it went to Dhan at every load).</summary>
+    /// <summary>The `count` weekdays before `today`, oldest first (a holiday among them is a day with no candles).</summary>
+    internal static List<DateOnly> PastWeekdays(DateOnly today, int count)
+    {
+        var days = new List<DateOnly>();
+        for (var d = LastWeekdayBefore(today); days.Count < count; d = d.AddDays(-1))
+            if (d.DayOfWeek is not (DayOfWeek.Saturday or DayOfWeek.Sunday)) days.Add(d);
+        days.Reverse();
+        return days;
+    }
+
     internal static DateOnly LastWeekdayBefore(DateOnly today)
     {
         var d = today.AddDays(-1);
