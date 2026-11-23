@@ -575,7 +575,13 @@ All must pass before committing.
   index, so the final that follows is ignored) and several commands can be said in one hold.
   Each sentence is read by `voiceCommands.js` into ONE command (`parseVoiceCommand`): a phrase matches ANYWHERE in it
   ("okay now start the replay please"), the LONGEST phrase wins ("stop listening" over "stop", "option delta profile" over "delta profile",
-  "gex levels on spot" - the card - over "gex" - the popup), number words become digits ("go to ten thirty" = 10:30,
+  "gex levels on spot" - the card - over "gex" - the popup), A DOT IS KEPT ONLY INSIDE A NUMBER (asked - "day OI, GEX, DEX do not
+  catch": the engine ends a final result with a full stop - "Gex.", "Day Oi." - and spells letters - "G.E.X." - and those
+  matched nothing; `normalizeSpeech` joins spelled letters and drops other dots, 10.30 kept), more mishearings (doi, gecks,
+  deks...), BY NUMBER (asked for - "add number for them as well"; `VOICE_NUMBERS`): "1" - "9" the quick views by their own
+  digit (QUICK_VIEWS' `digit` = Ctrl + Shift + 1 - 9), "10" DEX, "11" GEX levels on spot - alone or after open / show / view /
+  number ("open 3"; "to" / "for" / "won" read as 2 / 4 / 1 only there); "1" waits for the FINAL text (`final` - it can be the
+  start of 10 / 11; useVoiceCommands skips it on an interim), the list in "what can I say"; number words become digits ("go to ten thirty" = 10:30,
   "to" / "for" / "oh" deliberately NOT numbers), the engine's own alternatives are tried in order (its first guess at
   "gex" is often "jacks"), and the same final transcript twice within 1.2 s is one command. What can be said: the replay
   (start / stop / pause / reset - never a toggle, so twice is harmless), the speed ("faster" / "slower" step through
@@ -616,6 +622,13 @@ All must pass before committing.
   opened - one used to take a third of the screen); "CLEAR ALL (N)" over them while two or more are open
   (`NotificationClearAll`, `notification.destroy()`; on a phone beside the ☰, not over it). A new alert needs nothing:
   `notification.open` as before (`tests/notification-stack.test.mjs`).
+- THE CHARTS' AUTO-FIT (`chartFit.js` - `fitWholeDay` / `autoFitRange`, every chart on `useFitContentAsDataGrows`: the spot,
+  the entry charts, the futures, OI charts; `tests/chart-fit.test.mjs`; asked for - "like in the delta profile candles are by
+  default adjusted and on the left side ... adjust spot charts, CE PE and other things as well"): under `MIN_FIT_SLOTS` (30)
+  candles the chart holds 30 candle widths and they stand FROM THE LEFT, the rest empty - the delta profile cards' MIN_SPAN;
+  from 30 on, all of them fitted. Set straight from the bar count (`setVisibleLogicalRange`) - the old cap (8 px a minute) read
+  the visible range back right after `fitContent()`, which the chart applies a frame later, so at a replay's first minutes
+  one candle filled the whole chart.
 - OI Replay's keyboard order ticket (F1 buy - B is the Futures quick view; S / F2 sell) is not taken from a box being TYPED in (`isTypingField` in
   `quickViews.js`): a text / number / date box, a searchable or tags dropdown, a text area. A checkbox, a radio (antd's
   Segmented), a switch or a plain dropdown (antd marks its input read-only) only hold the focus after a click - they used

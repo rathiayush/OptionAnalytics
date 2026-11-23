@@ -1,8 +1,7 @@
-// The charts' auto-fit caps a candle at 8 px per minute it spans - a 15-minute chart's day fills the width instead of
-// being crushed into a sliver at the right edge (the cap used to be a flat 8 px a candle).
+// The charts' auto-fit (chartFit.js): few candles at 30 candle widths from the left, then all of them fitted.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { barMinutesOf, fitWholeDay } from '../src/chartFit.js'
+import { autoFitRange, barMinutesOf, fitWholeDay } from '../src/chartFit.js'
 
 // A stand-in for a lightweight-charts chart: one series of `bars` bars `minutes` apart, a time axis `width` px wide.
 function fakeChart(bars, minutes, width) {
@@ -14,6 +13,7 @@ function fakeChart(bars, minutes, width) {
     width: () => width,
     applyOptions: (o) => calls.push(o),
     scrollToRealTime: () => calls.push('scroll'),
+    setVisibleLogicalRange: (r) => calls.push(r),
   }
   return { calls, chart: { timeScale: () => timeScale, panes: () => [{ getSeries: () => [{ data: () => data }] }] } }
 }
@@ -25,20 +25,22 @@ test('bar minutes from the series itself', () => {
   assert.equal(barMinutesOf({ panes: () => { throw new Error('gone') } }), 1)
 })
 
-test('a full 15-minute day fills a wide chart - no cap', () => {
-  const { chart, calls } = fakeChart(25, 15, 1500)   // 60 px a candle, under 8 x 15 = 120
+test('a full 15-minute day (25 candles) and more: fit them all', () => {
+  const { chart, calls } = fakeChart(30, 15, 1500)
   fitWholeDay(chart)
   assert.deepEqual(calls, ['fit'])
 })
 
-test('a few 1-minute candles early in the day are still capped at 8 px', () => {
-  const { chart, calls } = fakeChart(20, 1, 1500)   // 75 px a candle, over 8
+test('few candles stand at 30 candle widths FROM THE LEFT, whatever the timeframe (the delta profile cards\' rule)', () => {
+  for (const [bars, minutes] of [[1, 3], [2, 15], [20, 1]]) {
+    const { chart, calls } = fakeChart(bars, minutes, 1500)
+    fitWholeDay(chart)
+    assert.deepEqual(calls, [{ from: -0.5, to: 29.5 }], `${bars} x ${minutes}m`)
+  }
+  assert.deepEqual(autoFitRange(29), { from: -0.5, to: 29.5 })
+  assert.equal(autoFitRange(30), null)
+  assert.equal(autoFitRange(0), null)
+  const { chart, calls } = fakeChart(0, 1, 1000)
   fitWholeDay(chart)
-  assert.deepEqual(calls, ['fit', { barSpacing: 8 }, 'scroll'])
-})
-
-test('two 15-minute candles at the open are capped at 120 px', () => {
-  const { chart, calls } = fakeChart(2, 15, 1500)
-  fitWholeDay(chart)
-  assert.deepEqual(calls, ['fit', { barSpacing: 120 }, 'scroll'])
+  assert.deepEqual(calls, ['fit'])
 })

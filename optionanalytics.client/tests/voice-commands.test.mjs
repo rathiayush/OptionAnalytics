@@ -1,5 +1,7 @@
 // OI Replay's VOICE COMMANDS (voiceCommands.js): what is said -> the one command the page carries out.
 // Run: npm test (node --test) - see CLAUDE.md.
+import test from 'node:test'
+import assert from 'node:assert/strict'
 import { QUICK_VIEWS } from '../src/quickViews.js'
 import {
   VOICE_CARDS, VOICE_MODES, VOICE_MODE_DEFAULT, VOICE_NEVER, VOICE_VIEWS, normalizeSpeech, parseVoiceCommand,
@@ -174,3 +176,42 @@ const is = (said, want) => check(`"${said}" -> ${json(want)}`, json(parseVoiceCo
 
 console.log(fails ? `${fails} FAILED` : 'all passed')
 process.exitCode = fails ? 1 : 0
+
+test('a full stop / spelled letters from the engine still match ("Gex.", "Day Oi.", "G.E.X.", "D.E.X."); times keep their dot', async () => {
+  const { parseVoiceCommand, normalizeSpeech } = await import('../src/voiceCommands.js')
+  assert.deepEqual(parseVoiceCommand('Gex.'), { kind: 'view', view: 'gex' })
+  assert.deepEqual(parseVoiceCommand('Day Oi.'), { kind: 'view', view: 'dayOi' })
+  assert.deepEqual(parseVoiceCommand('Open day O.I.'), { kind: 'view', view: 'dayOi' })
+  assert.deepEqual(parseVoiceCommand('G.E.X.'), { kind: 'view', view: 'gex' })
+  assert.equal(parseVoiceCommand('Dex.').card, 'dex')
+  assert.equal(parseVoiceCommand('D.E.X.').card, 'dex')
+  assert.equal(parseVoiceCommand('decks').card, 'dex')
+  assert.deepEqual(parseVoiceCommand('day OI chart'), { kind: 'view', view: 'dayOi' })
+  assert.equal(normalizeSpeech('Go to 10.30.'), 'go to 10.30')
+  assert.deepEqual(parseVoiceCommand('Go to 10.30.'), { kind: 'goto', hour: 10, minute: 30 })
+})
+
+test('by number: 1 - 9 the quick views by their digit, 10 DEX, 11 GEX levels; alone or after open / show / view / number', async () => {
+  const { parseVoiceCommand, VOICE_NUMBERS, voiceHelpLines } = await import('../src/voiceCommands.js')
+  const { QUICK_VIEWS } = await import('../src/quickViews.js')
+  for (const v of QUICK_VIEWS.filter((q) => q.digit)) {
+    for (const said of [String(v.digit), `open ${v.digit}`, `number ${v.digit}`]) assert.equal(parseVoiceCommand(said)?.view, v.key, said)
+  }
+  assert.equal(parseVoiceCommand('one').view, 'dayOi')
+  assert.equal(parseVoiceCommand('view two').view, 'oiCharts')
+  assert.equal(parseVoiceCommand('open to').view, 'oiCharts')      // "two" heard as "to"
+  assert.equal(parseVoiceCommand('10').card, 'dex')
+  assert.equal(parseVoiceCommand('show 11').card, 'gexSpot')
+  // "1" can be the start of "10" / "11" - it waits for the final text; the others do not.
+  assert.equal(parseVoiceCommand('1').final, true)
+  assert.equal(parseVoiceCommand('3').final, undefined)
+  assert.equal(parseVoiceCommand('10').final, undefined)
+  // Not a number command: out of range, a lone "to", or a number inside another command.
+  assert.equal(parseVoiceCommand('12'), null)
+  assert.equal(parseVoiceCommand('to'), null)
+  assert.deepEqual(parseVoiceCommand('go to 10 30'), { kind: 'goto', hour: 10, minute: 30 })
+  assert.deepEqual(parseVoiceCommand('forward 5 minutes'), { kind: 'skip', minutes: 5 })
+  assert.equal(parseVoiceCommand('buy 3').kind, 'refused')
+  assert.equal(new Set(VOICE_NUMBERS.map((v) => v.n)).size, VOICE_NUMBERS.length)
+  assert.ok(voiceHelpLines().some((l) => l.startsWith('By number') && l.includes('"10" DEX')))
+})

@@ -1,3 +1,4 @@
+import { QUICK_VIEWS } from './quickViews.js'
 // VOICE COMMANDS for the OI Replay page (asked for - "integrate voice command to start replay stop replay and open any
 // card in popup or anything on oi page"): spoken text -> ONE command the page carries out with its OWN handlers (the
 // same ones the buttons call). This file is PURE - no browser API, no React - so every phrase is tested
@@ -57,6 +58,10 @@ export function normalizeSpeech(text) {
   const words = String(text ?? '')
     .toLowerCase()
     .replace(/[’']/g, '')
+    // A dot is kept only inside a number (10.30): the engine ends a final result with a full stop ("Gex.", "Day Oi.") and
+    // spells letters out ("G.E.X.", "O.I.") - those read as nothing at all before (asked - "day oi, gex, dex do not catch").
+    .replace(/([a-z])\.(?=[a-z])/g, '$1')
+    .replace(/(?<!\d)\.|\.(?!\d)/g, ' ')
     .replace(/[^a-z0-9:.]+/g, ' ')
     .trim()
     .split(/\s+/)
@@ -95,11 +100,11 @@ export const VOICE_VIEWS = [
   { view: 'futuresDelta', say: ['futures delta profile', 'futures delta', 'future delta', 'delta profile futures', 'footprint profile'] },
   { view: 'oiHeatmap', say: ['oi heatmap', 'oi heat map', 'oi change heatmap', 'heatmap', 'heat map'] },
   { view: 'oiCharts', say: ['oi charts', 'oi totals charts', 'totals charts', 'oi chart'] },
-  { view: 'dayOi', say: ['day oi', 'day o i', 'oi since open', 'day open interest', 'day oil'] },
+  { view: 'dayOi', say: ['day oi', 'day o i', 'oi since open', 'day open interest', 'day oil', 'day oi chart', 'dayoi', 'doi', 'd o i', 'day boy', 'they oi', 'day oy', 'day toy', 'day ohio'] },
   { view: 'premium', say: ['option premium', 'premium charts', 'premium chart', 'premium'] },
   { view: 'straddle', say: ['atm straddle', 'straddle', 'straddled', 'stradle'] },
   { view: 'futures', say: ['futures chart', 'futures', 'future chart'] },
-  { view: 'gex', say: ['gex', 'gamma exposure', 'gamma', 'g e x', 'jacks', 'geeks', 'jex'] },
+  { view: 'gex', say: ['gex', 'gamma exposure', 'gamma', 'g e x', 'jacks', 'geeks', 'jex', 'gecks', 'geks', 'gax', 'gix', 'jax', 'jaks', 'gex card'] },
   // "delta profile" alone is the OPTION one (the first delta card on the page).
   { view: 'optionDelta', say: ['delta profile'] },
 ]
@@ -111,12 +116,34 @@ export const VOICE_CARDS = [
   { card: 'marketRead', label: 'Market Read', say: ['market read'] },
   { card: 'topStats', label: 'Top stats', say: ['top stats', 'snapshot'] },
   { card: 'gexSpot', label: 'GEX levels on spot', say: ['gex levels on spot', 'gex levels', 'gex spot', 'gamma levels'] },
-  { card: 'dex', label: 'Dealer hedging (DEX)', say: ['dealer hedging', 'dex', 'decks', 'delta exposure'] },
+  { card: 'dex', label: 'Dealer hedging (DEX)', say: ['dealer hedging', 'dex', 'decks', 'delta exposure', 'deks', 'decs', 'dax', 'd e x', 'dex card', 'dealer delta'] },
   { card: 'oiTotals', label: 'OI totals', say: ['oi totals', 'oi total'] },
   { card: 'optionFlow', label: 'Option CDV / OBV', say: ['option cdv', 'cdv', 'obv', 'option flow'] },
   { card: 'entryCharts', label: 'Fast entry charts', say: ['entry charts', 'fast entry charts', 'entry chart'] },
   { card: 'ladder', label: 'OI ladder', say: ['ladder', 'oi ladder', 'strike ladder'] },
 ]
+
+/** BY NUMBER (asked for - "can you add number for them as well"): "1" ... "9" are the quick views by their own digit
+ *  (QUICK_VIEWS' `digit` - the same as Ctrl + Shift + 1 - 9), 10 and 11 two cards - said alone or after "open" / "show"
+ *  / "view" / "number" ("open 3", "number 10"). A number word the engine hears as a word ("to" / "for" / "won") counts
+ *  only there. */
+export const VOICE_NUMBERS = [
+  ...QUICK_VIEWS.filter((v) => v.digit).map((v) => ({ n: v.digit, command: { kind: 'view', view: v.key }, label: v.label })),
+  { n: 10, command: { kind: 'card', card: 'dex', label: 'Dealer hedging (DEX)' }, label: 'DEX' },
+  { n: 11, command: { kind: 'card', card: 'gexSpot', label: 'GEX levels on spot' }, label: 'GEX levels' },
+].sort((a, b) => a.n - b.n)
+const NUMBER_SOUNDS = { to: 2, too: 2, for: 4, won: 1, ate: 8 }
+const NUMBER_LEAD = new Set(['open', 'show', 'view', 'number', 'no', 'popup', 'quick', 'card', 'the'])
+function numberCommand(said) {
+  const words = said.split(' ')
+  const last = words.at(-1)
+  const n = /^\d{1,2}$/.test(last) ? Number(last) : words.length > 1 ? NUMBER_SOUNDS[last] : null
+  if (n == null || !words.slice(0, -1).every((w) => NUMBER_LEAD.has(w))) return null
+  const hit = VOICE_NUMBERS.find((v) => v.n === n)?.command
+  // "1" can be the start of "10" / "11": it waits for the engine's FINAL text (`final`); every other command fires on
+  // the interim text, as soon as it is recognisable.
+  return hit ? { ...hit, ...(VOICE_NUMBERS.some((v) => v.n !== n && String(v.n).startsWith(String(n))) ? { final: true } : {}) } : null
+}
 
 const INDICES = [
   { underlying: 'BANKNIFTY', say: ['banknifty', 'bank nifty', 'bank nifty 50', 'bnf'] },
@@ -228,6 +255,9 @@ export function parseVoiceCommand(text) {
     if (x > 0 && x <= 100) return { kind: 'speed', x }
   }
 
+  const byNumber = numberCommand(said)
+  if (byNumber) return { ...byNumber }
+
   for (const row of PHRASES) if (saidPhrase(said, row.say)) return { ...row.command }
   return null
 }
@@ -252,7 +282,8 @@ export function voiceHelpLines() {
     'Speed: "faster" · "slower" · "2x" · "normal speed"',
     'Minute: "go to 10 30" · "forward 5 minutes" · "back 10 minutes"',
     'Popups: "GEX" · "straddle" · "futures" · "heatmap" · "day OI" · "premium" · "option delta profile" · "futures delta profile" · "OI charts"',
-    'Cards: "entry checklist" · "dealer hedging" · "GEX levels on spot" · "market read" · "OI totals" · "option CDV" · "ladder"',
+    'Cards: "entry checklist" · "dealer hedging" / "DEX" · "GEX levels on spot" · "market read" · "OI totals" · "option CDV" · "ladder"',
+    `By number: ${VOICE_NUMBERS.map((v) => `"${v.n}" ${v.label}`).join(' · ')} (or "open 3")`,
     'Close: "close" · "close popup"',
     'Day: "nifty" · "banknifty" · "sensex" · "go live"',
     'Order: "open order panel" (it only opens the panel - a trade still needs its own confirm)',
