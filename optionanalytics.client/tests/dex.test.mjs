@@ -40,11 +40,12 @@ function chain({ minutes = 60, spot = () => 25000, oi = () => 1e6 }) {
   return { ce, pe, spots }
 }
 
-test('a delta is the slope of the Black-76 price to spot (carry included); the dealers\' delta adds OI x delta', () => {
-  const S = 25000, K = 25200, sigma = 0.13, T = 5 / 365, carry = 1.002
+test('a delta is the slope of the DISCOUNTED Black-76 price to spot (the carry cancels the discount); the dealers\' delta adds OI x delta', () => {
+  const S = 25000, K = 25200, sigma = 0.13, T = 30 / 365, carry = Math.exp(0.065 * 30 / 365)
   for (const call of [true, false]) {
     const h = 0.5
-    const slope = (black76((S + h) * carry, K, sigma, T, call) - black76((S - h) * carry, K, sigma, T, call)) / (2 * h)
+    const price = (s) => black76(s * carry, K, sigma, T, call) / carry   // e^-rT x Black-76 on the forward
+    const slope = (price(S + h) - price(S - h)) / (2 * h)
     assert.ok(Math.abs(optionDelta(call, S, K, sigma, T, carry) - slope) < 1e-3, `${call} ${optionDelta(call, S, K, sigma, T, carry)} vs ${slope}`)
   }
   // At expiry: the intrinsic step.
@@ -68,7 +69,7 @@ test('the standard sign: dealers lean against moves - a 1% rally = selling, a fa
   // Long every call, short every put: both long delta - the book never crosses zero.
   assert.ok(m.net > 0)
   assert.equal(m.flip, null)
-  assert.match(dexRead(m)[0].text, /AGAINST moves/)
+  assert.match(dexRead(m).find((r) => r.key === 'move').text, /AGAINST moves/)
   // Each flow worked out directly.
   const opts = { years: g.years, carry: g.carry }
   const base = dealerDelta(g.options, g.spot, opts)
@@ -110,7 +111,7 @@ test('the DEX flip: where the dealers\' delta crosses zero - short calls above, 
   assert.ok(Math.abs(dealerDelta(minute.options, m.flip, { years: YEARS0 })) < 0.02 * Math.abs(dealerDelta(minute.options, 25400, { years: YEARS0 })))
   // Short gamma: they chase moves.
   assert.ok(m.up > 0 && m.down < 0)
-  assert.match(dexRead(m)[0].text, /CHASE/)
+  assert.match(dexRead(m).find((r) => r.key === 'move').text, /CHASE/)
   // The profile crosses zero there.
   const profile = dexProfile(minute)
   assert.ok(profile.length === 81 && profile[0].net > 0 && profile.at(-1).net < 0)
@@ -173,4 +174,36 @@ test('the day carries its walls minute to minute; a cut equals the whole day up 
   const until = T0 + 15 * MIN
   const part = dexDay(gexDay(d.ce.filter((p) => Date.parse(p.time) <= until), d.pe.filter((p) => Date.parse(p.time) <= until), d.spots.filter((s) => s.time <= until), { expiry: EXPIRY, sign: 'buildup' }))
   assert.deepEqual(part, dexUpTo(whole, until))
+})
+
+test('the published DEX (Standard): dealers short every option - calls −, puts +, offsetting; the flows stay on the GEX book', () => {
+  // Calls heavy above the money, puts heavy below - as a real chain.
+  const d = chain({ oi: (k, isCall) => (isCall ? (k >= 25000 ? 3e6 : 0.5e6) : (k <= 25000 ? 3e6 : 0.5e6)) })
+  const gex = gexDay(d.ce, d.pe, d.spots, { expiry: EXPIRY })
+  const g = gex[0]
+  const market = dexAt(g, { positions: 'market' })
+  const dealer = dexAt(g, { positions: 'dealer' })
+  // Each strike = -(call OI x call delta + put OI x put delta) x spot: a call-heavy strike negative, a put-heavy one positive.
+  for (const row of market.strikes) {
+    const want = -g.options.filter((o) => o.strike === row.strike)
+      .reduce((t, o) => t + o.oi * optionDelta(o.call, g.spot, o.strike, o.sigma, o.years, o.carry), 0) * g.spot
+    assert.ok(Math.abs(row.net - want) < 1, `${row.strike}`)
+  }
+  assert.ok(market.strikes.find((r) => r.strike === 25100).net < 0, 'call-heavy strike negative')
+  assert.ok(market.strikes.find((r) => r.strike === 24900).net > 0, 'put-heavy strike positive')
+  assert.ok(market.strikes.find((r) => r.strike === 25100).call < 0 && market.strikes.find((r) => r.strike === 24900).put > 0)
+  // The old book (dealers long calls, short puts) had every strike positive and no flip; this one crosses zero near the money.
+  assert.ok(dealer.strikes.every((r) => r.net >= 0))
+  assert.equal(dealer.flip, null)
+  assert.ok(market.flip != null && Math.abs(market.flip - 25000) < 300, `flip ${market.flip}`)
+  const profile = dexProfile(g, 80, 'market')
+  assert.ok(profile[0].net > 0 && profile.at(-1).net < 0, 'put-heavy below = long delta, call-heavy above = short')
+  // The hedging flows are the GEX book's under both.
+  for (const k of ['up', 'down', 'vanna', 'charmHour', 'charmClose']) assert.equal(market[k], dealer[k], k)
+  assert.equal(market.positions, 'market')
+  assert.match(dexRead(market).find((r) => r.key === 'net').text, market.net > 0 ? /LONG/ : /SHORT/)
+  // The day under the market book: every minute's net = its strikes' sum.
+  for (const m of dexDay(gex, { positions: 'market' })) {
+    assert.ok(Math.abs(m.strikes.reduce((t, r) => t + r.net, 0) - m.net) < 1e-3 * Math.max(1, Math.abs(m.net)))
+  }
 })

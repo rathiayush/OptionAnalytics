@@ -320,7 +320,7 @@ function chainAt(chain, t, spot) {
  * `cePoints` / `pePoints`: the OI Replay run's option points (strike, time, price, openInterest, impliedVolatility);
  * `spotBars`: `[{ time (ms), close }]` one per minute; `expiry`: the options' expiry day ('YYYY-MM-DD'), null = implied.
  * Each minute: `{ time, spot, forward, carry (forward / spot), years, yearsFrom ('expiry' | 'straddle'), impliedYears, atm, atmIv, net, calls, puts, flip,
- * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, call, sigma, dealerOi, years, carry }],
+ * flipEdge, callWall, putWall, maxGamma, band: [lowest, highest strike read], options: [{ strike, call, sigma, dealerOi, oi, years, carry }],
  * strikes: [{ strike, call, put, net, ceOi, peOi, gamma }] }` (GEX in rupees per 1% move; `strikes` high to low; `options`
  * what the profile is worked out from). A minute with no ATM straddle and no time to expiry yet is left out. `flips: false`
  * leaves the flip out (null) - the costly part - for a caller that needs only the net and the walls.
@@ -366,13 +366,13 @@ export function gexDay(cePoints, pePoints, spotBars, { sign = 'standard', rangeP
       for (const { leg, cm } of legs) {
         if (leg.c) {
           call = (call ?? 0) + leg.cGamma * leg.cDealer * unit
-          options.push({ strike, call: true, sigma: leg.sigma, dealerOi: leg.cDealer, years: cm.years, carry: cm.carry })
+          options.push({ strike, call: true, sigma: leg.sigma, dealerOi: leg.cDealer, oi: leg.c.oi, years: cm.years, carry: cm.carry })
           cWeight += leg.cGamma * leg.c.oi
           ceOi = (ceOi ?? 0) + leg.c.oi
         }
         if (leg.p) {
           put = (put ?? 0) + leg.pGamma * leg.pDealer * unit
-          options.push({ strike, call: false, sigma: leg.sigma, dealerOi: leg.pDealer, years: cm.years, carry: cm.carry })
+          options.push({ strike, call: false, sigma: leg.sigma, dealerOi: leg.pDealer, oi: leg.p.oi, years: cm.years, carry: cm.carry })
           pWeight += leg.pGamma * leg.p.oi
           peOi = (peOi ?? 0) + leg.p.oi
         }

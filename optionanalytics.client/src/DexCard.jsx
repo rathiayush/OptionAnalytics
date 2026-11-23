@@ -127,11 +127,13 @@ export function DexCard({ days, asOfMs, dayKey, isLive }) {
   const narrow = useMediaQuery('(max-width: 768px)')
   const picked = gexSignOf(days, sign)
   const gex = days?.[picked] ?? NONE
-  const day = useMemo(() => dexDay(gex), [gex])
+  // Standard = the published DEX (dealers short every option - calls −, puts +); the build-up signs = their own dealer book.
+  const positions = picked === 'standard' ? 'market' : 'dealer'
+  const day = useMemo(() => dexDay(gex, { positions }), [gex, positions])
   const minutes = useMemo(() => dexUpTo(day, asOfMs), [day, asOfMs])
   const now = minutes.at(-1) ?? null
   const gexNow = useMemo(() => (now ? gex.find((m) => m.time === now.time) ?? null : null), [gex, now])
-  const profile = useMemo(() => dexProfile(gexNow), [gexNow])
+  const profile = useMemo(() => dexProfile(gexNow, 80, positions), [gexNow, positions])
   const read = useMemo(() => dexRead(now), [now])
   const lines = useMemo(() => {
     const line = (pick) => minutes.map((m) => ({ time: m.time, value: pick(m) / CRORE }))
@@ -150,7 +152,7 @@ export function DexCard({ days, asOfMs, dayKey, isLive }) {
   return (
     <div>
       <Space size={[12, 6]} wrap style={{ marginBottom: 6 }}>
-        <Tooltip title="Who the dealers are, as on the GEX card: Standard = long every call, short every put; OI build-up = each OI change signed by its own IV's move; NSE + build-up = NSE's participant positions, then the day's changes.">
+        <Tooltip title="Standard = the DEX the platforms publish: dealers SHORT every option the customers bought - calls count −, puts + (a call-heavy strike is negative, a put-heavy one positive); the hedging flows keep the GEX card's book (dealers long calls, short puts) so they agree with its regime. OI build-up = each OI change signed by its own IV's move; NSE + build-up = NSE's participant positions, then the day's changes - those read the positions and the flows on that book.">
           {signPicker}
         </Tooltip>
         {now?.expiries > 1 && <Text type="secondary" style={{ fontSize: 12 }}>Σ {now.expiries} expiries</Text>}
@@ -166,8 +168,8 @@ export function DexCard({ days, asOfMs, dayKey, isLive }) {
             <Headline title={`Charm to 15:30 (${now.minutesToClose} min)`} value={flowText(now.charmClose)} color={flowColor(now.charmClose)}
               sub={`${flowText(now.charmHour)} per hour`} tip="Time passing alone, spot and IV held: the out-of-the-money options' delta melts and the dealers' hedge with it." />
             <Headline title="DEX flip" value={num(now.flip)} color={FLIP_COLOR}
-              sub={now.flip == null ? (picked === 'standard' ? 'none under Standard' : 'none within ±3%') : `${now.flip >= now.spot ? 'above' : 'below'} spot by ${num(Math.abs(now.flip - now.spot))}${now.flipEdge ? ' · rough (edge)' : ''}`}
-              tip="The spot at which the dealers' book would turn from net long to net short delta (OI, IV and time kept). Under Standard both legs are long delta, so there is none - pick OI build-up / NSE + build-up." />
+              sub={now.flip == null ? 'none within ±3%' : `${now.flip >= now.spot ? 'above' : 'below'} spot by ${num(Math.abs(now.flip - now.spot))}${now.flipEdge ? ' · rough (edge)' : ''}`}
+              tip="The spot at which the dealers' book would turn from net long to net short delta (OI, IV and time kept) - above it the calls' delta outweighs the puts', below it the puts'." />
             <Headline title="Dealers' net delta" value={`${now.net < 0 ? '−' : ''}${crore(now.net)}`} sub="of the strikes loaded"
               tip="Rupees of index the dealers' options are worth in delta - only the strikes loaded (ATM ± 10), so a level for those strikes; the flows above are local and not affected." />
             <Headline title="DEX resistance" value={num(now.walls?.resistance)} color={WALL_COLORS.resistance}
@@ -192,9 +194,9 @@ export function DexCard({ days, asOfMs, dayKey, isLive }) {
           {now.strikes?.length > 0 && (
             <>
               <Text strong style={{ fontSize: 12 }}>Dealers&apos; delta by strike</Text>
-              <Text type="secondary" style={{ fontSize: 11 }}> · ₹ Cr at {hhmm(now.time)} - each strike&apos;s calls + puts (dealers&apos; OI x delta x spot) · R / S / MAX = the DEX walls · hover a row for its calls / puts</Text>
+              <Text type="secondary" style={{ fontSize: 11 }}> · ₹ Cr at {hhmm(now.time)} - each strike&apos;s calls + puts (dealers&apos; OI x delta x spot, netted) · R / S / MAX = the DEX walls · hover a row for its calls / puts</Text>
               {picked === 'standard' && (
-                <div><Text type="secondary" style={{ fontSize: 11 }}>Under Standard a call&apos;s and a put&apos;s deltas add up to 1, so each strike&apos;s bar is just its call + put OI x spot - the walls are the biggest-OI strikes. Pick OI build-up / NSE + build-up to read who holds them (bars can then turn red).</Text></div>
+                <div><Text type="secondary" style={{ fontSize: 11 }}>Standard: dealers short every option - a strike&apos;s calls count − (red: dealers short delta there, they buy dips) and its puts + (green: long delta, they sell rallies); a strike&apos;s bar is the two netted. OI build-up / NSE + build-up read who holds them from the data.</Text></div>
               )}
               <DexStrikesChart strikes={now.strikes} spot={now.spot} walls={now.walls} />
             </>

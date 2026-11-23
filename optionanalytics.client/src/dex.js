@@ -9,13 +9,21 @@
 //
 // Flow sign: + = the dealers BUY the index, - = they SELL (their delta rose, they sell to stay flat). In rupees of index
 // (Dhan's OI is in units - no lot size); per 1% move, per vol point, to the close / per hour.
-// Delta on the forward (Black-76, F = spot x carry): a call's delta to spot = carry x N(d1), a put's = carry x (N(d1) - 1).
+// Delta on the forward (Black-76, F = spot x carry): a call's delta to spot = N(d1), a put's = N(d1) - 1 - the premium is the
+// DISCOUNTED Black-76 price, e^-rT x Black76(F), and the carry e^rT cancels the discount (it was carry x N(d1), the slope of
+// the undiscounted price - up to 0.5% high on a monthly, and out of line with gex.js' gamma, n(d1) / (S sigma sqrt T)).
 //
-//  - NET dealer delta (rupees) and the DEX FLIP - the spot where the dealers' book would turn from net long to net short
-//    delta (their delta worked out again at spots across the strikes loaded, OI / IV / time kept, the crossing nearest
-//    spot within +/- 3% and the strikes loaded; `flipEdge` = near their edge, rough). Under the STANDARD sign (dealers long
-//    every call, short every put) both legs are long delta, so the book never crosses zero: no flip - it needs OI
-//    build-up / NSE + build-up. The net counts only the strikes loaded (ATM +/- 10) - a deep in-the-money option has a
+//  - THE POSITIONS - net dealer delta (rupees), DEX by strike, the DEX walls, the DEX FLIP (the spot where the book would
+//    turn from net long to net short delta - worked out again at spots across the strikes loaded, OI / IV / time kept, the
+//    crossing nearest spot within +/- 3% and the strikes loaded; `flipEdge` = near their edge, rough) and the profile - are
+//    read on the `positions` book: 'market' (the STANDARD sign - asked for: "DEX is incorrect ... look how we do DEX") = the
+//    DEX the platforms publish: dealers SHORT every option (the customer bought it), dealer delta = -sum(OI x delta), delta
+//    the holder's (calls +, puts -) - so a CALL-heavy strike is NEGATIVE (dealers short delta - a latent bid on dips) and a
+//    PUT-heavy strike POSITIVE (dealers long delta - supply on rallies); calls and puts OFFSET and the book can cross zero.
+//    It was the GEX card's standard book (dealers long every call, short every put), where a long call and a short put are
+//    BOTH long delta: every strike's bar added up green, the walls were just the biggest-OI strikes and no flip existed.
+//    'dealer' (OI build-up / NSE + build-up) = the dealers' OI those signs read from the data. The FLOWS stay on the GEX
+//    card's book under every sign (`dealerOi`), so the hedging they show agrees with the GEX regime. The net counts only the strikes loaded (ATM +/- 10) - a deep in-the-money option has a
 //    delta of 1 and is not there - so it is a level for the strikes read; the FLOWS are local (gamma, vanna and charm fade
 //    away from the money) and do not suffer from it.
 //
@@ -50,8 +58,8 @@ function cdf(x) {
   return x >= 0 ? 1 - tail : tail
 }
 
-/** The delta to spot of one option (`call`), spot `S`, the forward S x `carry`, IV `sigma`, `T` years: carry x N(d1) for a
- *  call, carry x (N(d1) - 1) for a put; at expiry (T <= 0) its intrinsic step. */
+/** The delta to spot of one option (`call`), spot `S`, the forward S x `carry`, IV `sigma`, `T` years: N(d1) for a call,
+ *  N(d1) - 1 for a put (the discounted price's slope - the carry cancels the discount); at expiry its intrinsic step. */
 export function optionDelta(call, S, K, sigma, T, carry = 1) {
   const F = S * carry
   if (!(F > 0 && K > 0)) return 0
@@ -61,7 +69,14 @@ export function optionDelta(call, S, K, sigma, T, carry = 1) {
     const v = sigma * Math.sqrt(T)
     n = cdf((Math.log(F / K) + v * v / 2) / v)
   }
-  return carry * (call ? n : n - 1)
+  return call ? n : n - 1
+}
+
+/** `options` as the positions book: 'market' = dealers short every option (-OI, calls and puts alike - the published
+ *  DEX); 'dealer' = as given (`dealerOi`). An option with no raw `oi` takes |dealerOi|. */
+export function positionsBook(options, positions = 'market') {
+  if (positions !== 'market') return options ?? []
+  return (options ?? []).map((o) => ({ ...o, dealerOi: -(Number.isFinite(o.oi) ? o.oi : Math.abs(o.dealerOi ?? 0)) }))
 }
 
 /** The dealers' delta (index units) of `options` (gexDay's) if spot were `S`, each IV moved by `volShift` and `dt` years
@@ -132,15 +147,16 @@ export function dexWalls(strikes, S, held = {}) {
   return { resistance: holdWall(above, held.resistance), support: holdWall(below, held.support), max: holdWall(strikes, held.max) }
 }
 
-/** One GEX minute (gexDay's) read as the dealers' hedging: `{ time, spot, net (rupees of dealer delta), up / down (flow for
+/** One GEX minute (gexDay's) read as the dealers' hedging (`positions` - the book the net / strikes / walls / flip are read on): `{ time, spot, net (rupees of dealer delta), up / down (flow for
  *  spot +/- 1%), vanna (flow for IV -1 vol point), charmClose (flow from now to 15:30, minutesToClose), charmHour (flow over
  *  the next hour), flip, flipEdge }` - flows in rupees, + = dealers buy. Null without options read. `flips: false` leaves
  *  the flip out. */
-export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT, held = {} } = {}) {
+export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT, held = {}, positions = 'dealer' } = {}) {
   const options = (minute?.options ?? []).filter((o) => typeof o.call === 'boolean')
   if (!options.length || !(minute.spot > 0)) return null
   const S = minute.spot
   const opts = { years: minute.years, carry: minute.carry ?? 1 }
+  const book = positionsBook(options, positions)
   const base = dealerDelta(options, S, opts)
   const flow = (d) => -(d - base) * S
   const nearest = Math.min(...options.map((o) => o.years ?? minute.years).filter((y) => y > 0))
@@ -148,15 +164,16 @@ export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT, held = {
   const dtClose = Math.min(toClose / YEAR_MS, Number.isFinite(nearest) ? nearest : 0)
   const dtHour = Math.min(HOUR_MS / YEAR_MS, Number.isFinite(nearest) ? nearest : 0)
   const [low, high] = minute.band ?? [Math.min(...options.map((o) => o.strike)), Math.max(...options.map((o) => o.strike))]
-  const flip = flips ? flipOf(options, S, opts, Math.max(S * (1 - rangePct / 100), low), Math.min(S * (1 + rangePct / 100), high)) : null
+  const flip = flips ? flipOf(book, S, opts, Math.max(S * (1 - rangePct / 100), low), Math.min(S * (1 + rangePct / 100), high)) : null
   const steps = [...new Set(options.map((o) => o.strike))].sort((a, b) => a - b)
   const gaps = steps.slice(1).map((k, i) => k - steps[i]).filter((g) => g > 0)
   const edge = Math.max(gaps.length ? Math.min(...gaps) : 0, (minute.atmIv ?? 0) * Math.sqrt(minute.years ?? 0) * S)
-  const strikes = dexStrikes(options, S, opts)
+  const strikes = dexStrikes(book, S, opts)
   return {
     strikes, walls: dexWalls(strikes, S, held),
     time: minute.time, spot: S,
-    net: base * S,
+    net: dealerDelta(book, S, opts) * S,
+    positions,
     up: flow(dealerDelta(options, S * (1 + DEX_MOVE_PCT / 100), opts)),
     down: flow(dealerDelta(options, S * (1 - DEX_MOVE_PCT / 100), opts)),
     vanna: flow(dealerDelta(options, S, { ...opts, volShift: -DEX_VOL_POINT })),
@@ -169,11 +186,11 @@ export function dexAt(minute, { flips = true, rangePct = DEX_RANGE_PCT, held = {
 }
 
 /** The day's dealer hedging, a minute per GEX minute (`gexMinutes` - gexDay's, already cut or whole). */
-export function dexDay(gexMinutes, { flips = true } = {}) {
+export function dexDay(gexMinutes, { flips = true, positions = 'dealer' } = {}) {
   const out = []
   let held = {}
   for (const m of gexMinutes ?? []) {
-    const d = dexAt(m, { flips, held })
+    const d = dexAt(m, { flips, held, positions })
     if (d) { out.push(d); held = d.walls }
   }
   return out
@@ -187,8 +204,8 @@ export function dexUpTo(minutes, asOfMs) {
 
 /** The dealers' delta (rupees) if spot were at each of `steps` + 1 prices across the strikes loaded - `[{ price, net }]`;
  *  it crosses zero at the flip. */
-export function dexProfile(minute, steps = 80) {
-  const options = (minute?.options ?? []).filter((o) => typeof o.call === 'boolean')
+export function dexProfile(minute, steps = 80, positions = 'dealer') {
+  const options = positionsBook((minute?.options ?? []).filter((o) => typeof o.call === 'boolean'), positions)
   const [lo, hi] = minute?.band ?? []
   if (!(hi > lo) || !options.length) return []
   const opts = { years: minute.years, carry: minute.carry ?? 1 }
@@ -211,6 +228,12 @@ export function dexRead(dex) {
   const scale = Math.max(Math.abs(dex.up), Math.abs(dex.down))
   const small = (v) => Math.abs(v) < SMALL_SHARE * scale || Math.abs(v) < 0.05 * CRORE
   const out = []
+  // The net of the positions book: long delta = put-heavy (they sell rallies to flatten), short = call-heavy (they buy dips).
+  if (Number.isFinite(dex.net) && Math.abs(dex.net) >= 0.05 * CRORE) {
+    const long = dex.net > 0
+    const whose = dex.positions === 'market' ? (long ? ' (puts outweigh calls in delta)' : ' (calls outweigh puts in delta)') : ''
+    out.push({ key: 'net', tone: long ? 'bear' : 'bull', text: `Dealers net ${long ? 'LONG' : 'SHORT'} ${cr(dex.net)} of delta${whose} - ${long ? 'supply overhead: they sell into rallies to flatten' : 'a latent bid: they buy dips to flatten'}.` })
+  }
   if (scale >= 0.05 * CRORE) {
     const damp = dex.up < 0 && dex.down > 0
     const chase = dex.up > 0 && dex.down < 0
