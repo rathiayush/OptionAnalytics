@@ -1089,6 +1089,15 @@ All must pass before committing.
   null with `n` 1 or 2, and every reader guards on `n` (`topDownRead`, the summary's trend tags, the shapes). It now
   returns the same shape with nothing found and every trend "undecided" (`tests/market-structure.test.mjs` - 0 / 1 / 2
   candles through the top-down read and the shapes).
+  HISTORY IS IN TRADING DAYS (asked about - "replay should load the previous data then run as per OI, not only the current
+  data - that I have in spot already"): each timeframe's "History" counted CALENDAR days back from today with the window
+  ending on the last weekday, so on a Monday "2 days" (1m) was Saturday and Sunday - NO past session, the chart only the
+  replayed day's own minutes (OI Replay's spot chart again), and "4 days" (3m) only Thu / Fri. Now the N WEEKDAYS before
+  today (`SpotStructureService.PastWeekdays`, a holiday a day with no candles; `Timeframes` / `HISTORY_CHOICES` rescaled -
+  Day 280 / 520 / 780, 4H 85 / 170 / 260, 1H 40 / 85 / 130, 15m 15 / 28 / 42, 5m 5 / 10 / 15, 3m 3 / 5 / 10, 1m 2 / 3 / 5
+  "sessions"; a saved calendar-day value not offered now reads as the default), and a replayed day's distance in weekdays
+  (`weekdaysBack` in `structureLive.js`) added so the window holds the day AND its N sessions before; 1-minute candles held
+  for 45 calendar days (`MinuteDays`) so a replayed 1m / 3m chart's earlier sessions keep them.
   HOW MUCH is the "Detail" picker (`DENSITY` - Clean (the default) / Normal / Everything,
   `optionanalytics.structure.density`): how many patterns, blocks, gaps, zones, equal levels, sweeps and internal breaks are
   drawn and how many of those may carry a label (Clean labels no internal break at all and leaves the premium / discount
