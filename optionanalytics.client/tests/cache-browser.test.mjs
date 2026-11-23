@@ -54,3 +54,23 @@ test('a download: a file as it is, a folder or a whole cache as one zip, every c
   assert.equal(downloadText({ name: 'v1', folder: true, files: 21345, bytes: 4.2 * 1024 ** 3 }), 'Download "v1" as one zip - 21,345 files, 4.20 GB?')
   assert.equal(downloadText({ name: 'a.csv', folder: false, files: 1, bytes: 1024 }), 'Download "a.csv" (1.00 KB)?')
 })
+
+test('the server records are their own group, and the zips by kind', async () => {
+  const { groupRoots, everythingUrl } = await import('../src/cacheBrowser.js')
+  const roots = [
+    { id: 'dhan', exists: true, readOnly: false, totals: { files: 5, bytes: 1200 } },
+    { id: 'historical', exists: false, readOnly: false, totals: { files: 0, bytes: 0 } },
+    { id: 'telegram-log', exists: true, readOnly: true, totals: { files: 3, bytes: 90 } },
+    { id: 'trade-settings', exists: true, readOnly: true, totals: { files: 1, bytes: 25 } },
+  ]
+  const g = groupRoots(roots)
+  assert.deepEqual(g.caches.map((r) => r.id), ['dhan', 'historical'])
+  assert.deepEqual(g.records.map((r) => r.id), ['telegram-log', 'trade-settings'])
+  assert.deepEqual(g.cacheTotals, { files: 5, bytes: 1200 })
+  assert.deepEqual(g.recordTotals, { files: 4, bytes: 115 })
+  assert.deepEqual(g.allTotals, { files: 9, bytes: 1315 })
+  assert.deepEqual(groupRoots(null).allTotals, { files: 0, bytes: 0 })
+  assert.equal(everythingUrl(), '/api/cache/everything.zip')
+  assert.equal(everythingUrl('records'), '/api/cache/everything.zip?kind=records')
+  assert.equal(everythingUrl('csv'), '/api/cache/everything.zip?kind=csv')
+})

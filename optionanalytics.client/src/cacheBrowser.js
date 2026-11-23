@@ -55,6 +55,18 @@ export function sortEntries(entries, by = 'name') {
 /** Where a download comes from: a file as it is, a folder ('' = the whole cache) as one zip; every cache in one zip. */
 export const downloadUrl = (root, path) => `/api/cache/${encodeURIComponent(root)}/download?path=${encodeURIComponent(path ?? '')}`
 export const EVERYTHING_URL = '/api/cache/everything.zip'
+/** Many roots in one zip: 'caches' (every data cache - the default), 'records' (the server's own records), 'csv' (every
+ *  CSV file of every root) or 'all'. */
+export const everythingUrl = (kind = 'caches') => (kind === 'caches' ? EVERYTHING_URL : `${EVERYTHING_URL}?kind=${encodeURIComponent(kind)}`)
+
+/** The roots split into the data CACHES (fetched again when deleted) and the server's own RECORDS (download only), each
+ *  with its files / bytes added up (the roots kept on disk). */
+export function groupRoots(roots) {
+  const sum = (list) => list.filter((r) => r.exists).reduce((a, r) => ({ files: a.files + (r.totals?.files ?? 0), bytes: a.bytes + (r.totals?.bytes ?? 0) }), { files: 0, bytes: 0 })
+  const caches = (roots ?? []).filter((r) => !r.readOnly)
+  const records = (roots ?? []).filter((r) => r.readOnly)
+  return { caches, records, cacheTotals: sum(caches), recordTotals: sum(records), allTotals: sum(roots ?? []) }
+}
 
 /** What a download is about to fetch, in words - so a big zip is never a surprise. */
 export function downloadText(entry) {

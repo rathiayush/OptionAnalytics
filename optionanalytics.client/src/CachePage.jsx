@@ -2,18 +2,23 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Alert, Breadcrumb, Button, Card, Col, Popconfirm, Row, Segmented, Space, Statistic, Table, Tag, Typography, message } from 'antd'
 import { ArrowUpOutlined, DeleteOutlined, DownloadOutlined, FileOutlined, FolderOutlined, HomeOutlined, ReloadOutlined } from '@ant-design/icons'
 import { NavBar, useMediaQuery, usePersistedState } from './shared.jsx'
-import { EVERYTHING_URL, countOf, crumbsOf, deleteText, deletedText, downloadText, downloadUrl, formatBytes, parentOf, sortEntries } from './cacheBrowser.js'
+import { countOf, crumbsOf, deleteText, deletedText, downloadText, downloadUrl, everythingUrl, formatBytes, groupRoots, parentOf, sortEntries } from './cacheBrowser.js'
 
 const { Title, Text } = Typography
 
 // The admin CACHE page (asked for - "a page to see all the cache files and manage them; I can delete ... delete folder"):
 // the server's data caches (GET /api/cache - CacheBrowser): the Dhan data cache, the Order Flow days, the Expired
 // Backtest's CSVs - each with its size; open one and walk its folders, each with what is under it; delete a file, a
-// folder and everything in it, or everything in a cache - each confirmed, with what it will remove. Everything here can be
-// fetched again (the confirm says how); settings, strategies, preferences and logs are not caches and are not listed.
+// folder and everything in it, or everything in a cache - each confirmed, with what it will remove. Every cache can be
+// fetched again (the confirm says how); the server's own records (below) are download only.
 // DOWNLOAD (asked for - "give option to download whole data as zip"): a file as it is, a folder / a whole cache as one
 // zip, or every cache in one zip - a zip confirmed first with its size; the server writes it as it reads (no copy on its
 // disk), so the browser's own download shows it coming in.
+// THE SERVER'S OWN RECORDS (asked for - "whatever files the system is generating, all CSV, give an option to download them
+// as well; show the folders with their paths"): the Telegram and visitor logs, the saved strategies and their history, the
+// background runs and the trade / risk settings CSVs - their own row of cards, DOWNLOAD ONLY (no delete anywhere for
+// them); every card shows its folder's full path on the server, the folder open shows its full path (copyable) and each
+// folder row its own; one zip of every cache, of every record, or of EVERY CSV file the server keeps.
 // No timer: loaded on opening, after a delete and by Refresh.
 
 const TIME = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
@@ -93,12 +98,14 @@ export default function CachePage() {
   }
 
   const entries = useMemo(() => sortEntries(listing?.entries, sortBy), [listing, sortBy])
-  const deleteButton = (e) => (
+  const readOnly = !!root?.readOnly
+  const groups = useMemo(() => groupRoots(roots), [roots])
+  const deleteButton = (e) => (readOnly ? null : (
     <Popconfirm title={deleteText(e)} description="It is fetched again the next time it is needed." okText="Delete" okButtonProps={{ danger: true }}
       onConfirm={() => remove(e.path, e.name)}>
       <Button size="small" danger type="text" icon={<DeleteOutlined />} loading={busy === e.path} aria-label={`Delete ${e.name}`} title={`Delete ${e.name}`} />
     </Popconfirm>
-  )
+  ))
   const downloadButton = (e) => (e.folder
     ? (
       <Popconfirm title={downloadText(e)} okText="Download" onConfirm={() => startDownload(downloadUrl(root.id, e.path))}>
@@ -107,11 +114,15 @@ export default function CachePage() {
     )
     : <Button size="small" type="text" icon={<DownloadOutlined />} href={downloadUrl(root.id, e.path)} download aria-label={`Download ${e.name}`} title={`Download ${e.name}`} />)
   const nameCell = (e) => (
-    <Space size={6} style={{ minWidth: 0 }}>
-      {e.folder ? <FolderOutlined style={{ color: '#d4b106' }} /> : <FileOutlined style={{ opacity: 0.6 }} />}
-      {e.folder
-        ? <a onClick={() => setPath(e.path)} style={{ wordBreak: 'break-all' }}>{e.name}</a>
-        : <Text style={{ wordBreak: 'break-all' }}>{e.name}</Text>}
+    <Space size={6} style={{ minWidth: 0 }} align="start" title={e.fullPath ?? undefined}>
+      {e.folder ? <FolderOutlined style={{ color: '#d4b106', marginTop: 4 }} /> : <FileOutlined style={{ opacity: 0.6, marginTop: 4 }} />}
+      <Space direction="vertical" size={0} style={{ minWidth: 0 }}>
+        {e.folder
+          ? <a onClick={() => setPath(e.path)} style={{ wordBreak: 'break-all' }}>{e.name}</a>
+          : <Text style={{ wordBreak: 'break-all' }}>{e.name}</Text>}
+        {/* A folder's own full path on the server (asked for - "show folders with their paths"). */}
+        {e.folder && e.fullPath && <Text type="secondary" copyable={{ text: e.fullPath, tooltips: ['Copy the path', 'Copied'] }} style={{ fontSize: 11, wordBreak: 'break-all' }}>{e.fullPath}</Text>}
+      </Space>
     </Space>
   )
   const columns = [
@@ -120,7 +131,7 @@ export default function CachePage() {
     { title: 'Size', dataIndex: 'bytes', key: 'bytes', width: 100, align: 'right', render: (v) => formatBytes(v) },
     { title: 'Files', key: 'files', width: 90, align: 'right', render: (_, e) => (e.folder ? Number(e.files).toLocaleString('en-IN') : '') },
     { title: 'Last changed', dataIndex: 'modifiedUtc', key: 'modified', width: 170, render: (v) => <Text style={{ fontSize: 12 }}>{fmtTime(v)}</Text> },
-    { title: '', key: 'actions', width: 80, align: 'center', render: (_, e) => <Space size={0}>{downloadButton(e)}{deleteButton(e)}</Space> },
+    { title: '', key: 'actions', width: readOnly ? 50 : 80, align: 'center', render: (_, e) => <Space size={0}>{downloadButton(e)}{deleteButton(e)}</Space> },
   ]
 
   const rootCard = (r) => {
@@ -129,7 +140,7 @@ export default function CachePage() {
       <Col key={r.id} xs={24} sm={12} xl={6}>
         <Card size="small" hoverable={r.exists} onClick={() => r.exists && open(r.id)}
           style={{ height: '100%', borderColor: selected ? '#1677ff' : undefined, opacity: r.exists ? 1 : 0.6 }}
-          title={<Space size={6}><span>{r.name}</span>{selected && <Tag color="blue" style={{ margin: 0 }}>open</Tag>}</Space>}>
+          title={<Space size={6} wrap><span>{r.name}</span>{r.readOnly && <Tag style={{ margin: 0 }}>download only</Tag>}{selected && <Tag color="blue" style={{ margin: 0 }}>open</Tag>}</Space>}>
           {r.exists
             ? (
               <Space direction="vertical" size={4} style={{ width: '100%' }}>
@@ -138,7 +149,11 @@ export default function CachePage() {
                   <Statistic title="Files" value={Number(r.totals.files).toLocaleString('en-IN')} />
                 </Space>
                 <Text type="secondary" style={{ fontSize: 11 }}>Newest {fmtTime(r.totals.newestUtc)} · oldest {fmtTime(r.totals.oldestUtc)}</Text>
-                <Text type="secondary" style={{ fontSize: 11, wordBreak: 'break-all' }}>{r.path}</Text>
+                <span onClick={(ev) => ev.stopPropagation()}>
+                  <Text type="secondary" copyable={{ text: r.path, tooltips: ['Copy the path', 'Copied'] }} style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                    <FolderOutlined /> {r.path}
+                  </Text>
+                </span>
                 <span onClick={(ev) => ev.stopPropagation()}>
                   <Popconfirm title={downloadText({ name: r.name, folder: true, files: r.totals.files, bytes: r.totals.bytes })} okText="Download"
                     onConfirm={() => startDownload(downloadUrl(r.id, ''))} disabled={!r.totals.files}>
@@ -147,7 +162,12 @@ export default function CachePage() {
                 </span>
               </Space>
             )
-            : <Text type="secondary" style={{ fontSize: 12 }}>Not kept on disk on this server.</Text>}
+            : (
+              <Space direction="vertical" size={2}>
+                <Text type="secondary" style={{ fontSize: 12 }}>{r.path ? 'Nothing written there yet.' : 'Not kept on disk on this server.'}</Text>
+                {r.path && <Text type="secondary" copyable={{ text: r.path }} style={{ fontSize: 11, wordBreak: 'break-all' }}>{r.path}</Text>}
+              </Space>
+            )}
         </Card>
       </Col>
     )
@@ -158,19 +178,21 @@ export default function CachePage() {
     ...crumbsOf(path).map((c, k, all) => ({ title: k === all.length - 1 ? <Text strong>{c.name}</Text> : <a onClick={() => setPath(c.path)}>{c.name}</a> })),
   ]
   const here = listing?.totals
-  const everything = (roots ?? []).filter((r) => r.exists).reduce((a, r) => ({ files: a.files + r.totals.files, bytes: a.bytes + r.totals.bytes }), { files: 0, bytes: 0 })
   const emptyLabel = path ? `Delete this folder` : `Empty ${root?.name ?? 'this cache'}`
+  const zipButton = (kind, label, totals, about) => (
+    <Popconfirm key={kind} title={`${label} - ${countOf(totals.files, 'file')}${kind === 'csv' ? ' at most (the CSV files among them)' : ''}, ${formatBytes(totals.bytes)}${kind === 'csv' ? ' at most' : ''}?`}
+      description={about} okText="Download" onConfirm={() => startDownload(everythingUrl(kind))} disabled={!totals.files}>
+      <Button size="small" icon={<DownloadOutlined />} disabled={!totals.files}>{label}</Button>
+    </Popconfirm>
+  )
 
   // On a phone the actions go in the card's body, not its header: beside the title they squeezed it to nothing (the
   // folder's trail could not be seen or tapped).
   const topActions = (
     <Space size={6} wrap>
-      <Popconfirm
-        title={`Download EVERY cache as one zip - ${countOf(everything.files, 'file')}, ${formatBytes(everything.bytes)}?`}
-        description="Each cache is its own folder in it. A big one takes a while - the browser shows it coming in."
-        okText="Download" onConfirm={() => startDownload(EVERYTHING_URL)} disabled={!everything.files}>
-        <Button size="small" icon={<DownloadOutlined />} disabled={!everything.files}>Download everything</Button>
-      </Popconfirm>
+      {zipButton('caches', 'All caches (zip)', groups.cacheTotals, 'Each cache is its own folder in it. A big one takes a while - the browser shows it coming in.')}
+      {zipButton('records', 'All records (zip)', groups.recordTotals, 'The logs, saved strategies and their history, background runs and the settings CSVs - each its own folder in it.')}
+      {zipButton('csv', 'All CSV files (zip)', groups.allTotals, 'Every CSV the server keeps - caches and records - each under its folder.')}
       <Button size="small" icon={<ReloadOutlined />} onClick={refresh}>Refresh</Button>
     </Space>
   )
@@ -181,13 +203,13 @@ export default function CachePage() {
         okText="Download" onConfirm={() => startDownload(downloadUrl(root.id, path))} disabled={!here?.files}>
         <Button size="small" icon={<DownloadOutlined />} disabled={!here?.files}>Download zip</Button>
       </Popconfirm>
-      <Popconfirm
+      {!readOnly && <Popconfirm
         title={path ? deleteText({ name: crumbsOf(path).at(-1)?.name, folder: true, files: here?.files, bytes: here?.bytes }) : `Delete EVERYTHING in ${root.name} - ${countOf(here?.files, 'file')}, ${formatBytes(here?.bytes)}?`}
         description={path ? 'It is fetched again the next time it is needed.' : 'The folder stays, empty; every day in it is fetched again the next time it is needed.'}
         okText={path ? 'Delete' : 'Empty it'} okButtonProps={{ danger: true }} onConfirm={() => remove(path, path ? crumbsOf(path).at(-1)?.name : root.name)}
         disabled={!here?.files && !listing?.entries?.length}>
         <Button size="small" danger icon={<DeleteOutlined />} loading={busy === (path || '*')} disabled={!here?.files && !listing?.entries?.length}>{emptyLabel}</Button>
-      </Popconfirm>
+      </Popconfirm>}
     </Space>
   )
 
@@ -199,15 +221,27 @@ export default function CachePage() {
           <NavBar />
         </Space>
 
-        <Card size="small" title="Cache - the server's data caches" extra={narrow ? null : topActions}>
+        <Card size="small" title="Cache and server files" extra={narrow ? null : topActions}>
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
             {narrow && topActions}
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              Everything here is data the server can fetch again - a day deleted is asked of Dhan (or NSE) again the next time it
-              is needed. Settings, saved strategies, preferences and logs are not caches and are not listed.
-            </Text>
             {rootsError && <Alert type="error" showIcon message={`Could not load the caches: ${rootsError}`} />}
-            <Row gutter={[12, 12]}>{(roots ?? []).map(rootCard)}</Row>
+            <Text strong style={{ fontSize: 13 }}>Data caches</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Data the server can fetch again - a day deleted is asked of Dhan (or NSE) again the next time it is needed.
+            </Text>
+            <Row gutter={[12, 12]}>{groups.caches.map(rootCard)}</Row>
+            {groups.records.length > 0 && (
+              <>
+                <Text strong style={{ fontSize: 13 }}>Server records - download only</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  What the server writes itself - the Telegram and visitor logs, the saved strategies and their trades / days /
+                  alerts / live orders, the background runs (reports and Feature finder datasets) and the settings CSVs. They are
+                  not fetched again, so they are never deleted here. The login keys, the Telegram sign-in and the preferences are
+                  not listed.
+                </Text>
+                <Row gutter={[12, 12]}>{groups.records.map(rootCard)}</Row>
+              </>
+            )}
             {root?.about && <Text type="secondary" style={{ fontSize: 12 }}>{root.about}</Text>}
           </Space>
         </Card>
@@ -218,6 +252,11 @@ export default function CachePage() {
             extra={narrow ? null : folderActions}>
             <Space direction="vertical" size={10} style={{ width: '100%' }}>
               {narrow && folderActions}
+              {listing?.fullPath && (
+                <Text type="secondary" copyable={{ text: listing.fullPath, tooltips: ['Copy the path', 'Copied'] }} style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                  <FolderOutlined /> {listing.fullPath}{readOnly && <Tag style={{ marginLeft: 8 }}>download only</Tag>}
+                </Text>
+              )}
               <Space size={12} wrap>
                 <Text style={{ fontSize: 12 }}>{here ? `${countOf(here.files, 'file')} · ${formatBytes(here.bytes)} in this folder` : ' '}</Text>
                 <Segmented size="small" value={sortBy} onChange={setSortBy}

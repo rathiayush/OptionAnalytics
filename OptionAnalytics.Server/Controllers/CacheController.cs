@@ -10,8 +10,10 @@ namespace OptionAnalytics.Server.Controllers;
 /// <summary>
 /// The admin CACHE page (CacheBrowser): the server's data caches - the Dhan data cache, the Order Flow days, the Expired
 /// Backtest's CSVs - folder by folder with their sizes, a file or folder deleted, and DOWNLOADED (a file as it is, a folder
-/// or a cache as one zip, every cache as one zip - streamed). Admin only: the User, Runner and External accounts never reach
-/// it (ExternalAccess denies it by default).
+/// or a cache as one zip, every cache as one zip - streamed); and the server's OWN RECORDS - the Telegram and visitor logs,
+/// the saved strategies and their history, the background runs, the trade / risk settings CSVs - download only. Every folder
+/// with its full path. Admin only: the User, Runner and External accounts never reach it (ExternalAccess denies it by
+/// default).
 /// </summary>
 [ApiController]
 [Route("api/cache")]
@@ -48,16 +50,22 @@ public sealed class CacheController : ControllerBase
         _logger.LogInformation("{Who} downloaded {Cache}/{Path} ({Bytes} bytes{Zip}).", User.Identity?.Name, root, string.IsNullOrWhiteSpace(path) ? "(everything)" : path,
             download.Bytes, download.Folder ? ", zipped" : "");
         return download.Folder
-            ? new ZipStreamResult(_browser, new[] { (download.Prefix, download.FullPath) }, download.FileName)
+            ? new ZipStreamResult(_browser, download.Sources ?? new[] { (download.Prefix, download.FullPath) }, download.FileName)
             : PhysicalFile(download.FullPath, ContentTypeOf(download.FileName), download.FileName);
     }
 
-    /// <summary>GET /api/cache/everything.zip - every cache in one zip, each its own top folder.</summary>
+    /// <summary>GET /api/cache/everything.zip?kind= - many roots in one zip, each its own top folder: `caches` (the default -
+    /// every data cache), `records` (the server's own records), `csv` (every CSV file of every root - caches and records)
+    /// or `all`.</summary>
     [HttpGet("everything.zip")]
-    public IActionResult DownloadEverything()
+    public IActionResult DownloadEverything([FromQuery] string? kind = null)
     {
-        _logger.LogInformation("{Who} downloaded every cache as one zip.", User.Identity?.Name);
-        return new ZipStreamResult(_browser, _browser.AllFolders(), $"option-analytics-caches-{IstClock.Today():yyyy-MM-dd}.zip");
+        var k = (kind ?? "caches").ToLowerInvariant();
+        if (k is not ("caches" or "records" or "csv" or "all")) return BadRequest(new { error = "kind is caches, records, csv or all." });
+        _logger.LogInformation("{Who} downloaded {Kind} as one zip.", User.Identity?.Name, k);
+        var folders = _browser.AllFolders(k == "csv" ? "all" : k);
+        Func<string, bool>? include = k == "csv" ? n => n.EndsWith(".csv", StringComparison.OrdinalIgnoreCase) : null;
+        return new ZipStreamResult(_browser, folders, $"option-analytics-{k}-{IstClock.Today():yyyy-MM-dd}.zip", include);
     }
 
     internal static string ContentTypeOf(string name) =>
@@ -68,7 +76,8 @@ public sealed class CacheController : ControllerBase
 
     /// <summary>A zip written straight into the response as the files are read (CacheBrowser.WriteZip) - .NET's ZipArchive
     /// writes synchronously, so this one response allows it; stops when the browser goes away.</summary>
-    internal sealed class ZipStreamResult(CacheBrowser browser, IReadOnlyList<(string Prefix, string Folder)> folders, string fileName) : IActionResult
+    internal sealed class ZipStreamResult(CacheBrowser browser, IReadOnlyList<(string Prefix, string Folder)> folders, string fileName,
+        Func<string, bool>? include = null) : IActionResult
     {
         public async Task ExecuteResultAsync(ActionContext context)
         {
@@ -76,7 +85,7 @@ public sealed class CacheController : ControllerBase
             http.Response.ContentType = "application/zip";
             http.Response.Headers.ContentDisposition = new ContentDispositionHeaderValue("attachment") { FileNameStar = fileName, FileName = fileName }.ToString();
             if (http.Features.Get<IHttpBodyControlFeature>() is { } body) body.AllowSynchronousIO = true;
-            try { await Task.Run(() => browser.WriteZip(http.Response.Body, folders, http.RequestAborted)); }
+            try { await Task.Run(() => browser.WriteZip(http.Response.Body, folders, http.RequestAborted, include)); }
             catch (OperationCanceledException) { /* the browser went away */ }
         }
     }

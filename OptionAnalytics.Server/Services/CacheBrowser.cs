@@ -3,6 +3,9 @@ using System.IO.Compression;
 using System.Text.Json;
 using OptionAnalytics.Server.Dhan;
 using OptionAnalytics.Server.Services.OrderFlow;
+using OptionAnalytics.Server.Services.SignalStrategies;
+using OptionAnalytics.Server.Services.Visitors;
+using OptionAnalytics.Server.Telegram;
 
 namespace OptionAnalytics.Server.Services;
 
@@ -24,7 +27,14 @@ namespace OptionAnalytics.Server.Services;
 /// zip, or every cache in one zip (each its own top folder) - written straight into the response as it is read
 /// (WriteZip - no copy on the server's disk first, a 10 GB cache included); the cache's gzip files are stored as they are
 /// (squeezing gzip again only costs time), the rest deflated; a file being written (.tmp) or gone meanwhile is left out.
-/// Nothing else is listed: settings, saved strategies, preferences, logs and the login keys are not caches. Every path is
+/// THE SERVER'S OWN RECORDS (asked for - "whatever files the system is generating, all CSV, give an option to download them
+/// as well; show the folders with their paths"): read-only roots beside the caches - DOWNLOAD ONLY, never deleted here
+/// (they are not fetched again): the Telegram message log (a CSV a day), the visitor log (a CSV a day), the saved strategies
+/// (strategies.csv and each one's trades / days / events / live orders CSVs), the background runs (settings, reports, the
+/// Feature finder's dataset CSV), and the trade / risk settings CSVs (single files in the data folder - `Only`, so nothing
+/// else of that folder is ever listed or zipped). Not listed at all: the login keys (data protection), the Telegram
+/// sign-in, the preferences and paper positions, the runner's config. Every root and every listing says its folder's FULL
+/// path on the server. Every path is
 /// RELATIVE to its cache's folder and checked: no "..", nothing absolute, nothing that resolves outside the folder, and no
 /// symlink is followed - one on the way is refused, one inside a folder being deleted is removed itself, never what it
 /// points at. Folder totals are counted on request (kept 30 s; a delete drops them).
@@ -44,6 +54,7 @@ public sealed class CacheBrowser
     internal Func<string> Today { get; set; } = () => IstClock.Today().ToString("yyyy-MM-dd");
 
     public CacheBrowser(DhanDataCache dhan, OrderFlowDayStore orderFlow, HistoricalSpotDataStore historical, ExpiredOptionDataStore expiredOptions,
+        TelegramMessageLog telegramLog, VisitorLog visitors, ScannerRunnerStore scanner, TradeSettingsStore tradeSettings, RiskSettingsStore riskSettings,
         ILogger<CacheBrowser> logger)
         : this(new[]
         {
@@ -59,6 +70,24 @@ public sealed class CacheBrowser
             new CacheRoot("expired-options", "Expired option CSVs", expiredOptions.Folder,
                 "Rolling / expired option bars, one CSV per expiry, for the Expired Backtest - fetched again when needed.",
                 null),
+            new CacheRoot("telegram-log", "Telegram message log", telegramLog.Root,
+                "Every Telegram message the server sent, a CSV a day (IST) - time, status and the text as sent - and the days read back from the Telegram channel (from-telegram). Download only.",
+                null, ReadOnly: true),
+            new CacheRoot("visitor-log", "Visitor log", visitors.Root,
+                "Every page opened, sign-in and sign-out with the city / country of the connection (never an IP address), a CSV a day (IST), 90 days. Download only.",
+                null, ReadOnly: true),
+            new CacheRoot("signal-strategies", "Saved strategies", Path.Combine(scanner.DataDirectory, "signal-strategies"),
+                "strategies.csv - every saved strategy with its settings - and history/: each strategy's trades, day reports, alerts sent and live Dhan orders, a CSV each. Download only.",
+                null, ReadOnly: true),
+            new CacheRoot("signal-backtests", "Background runs", Path.Combine(scanner.DataDirectory, "signal-backtests"),
+                "The Signal backtest's background runs - each run's settings and progress (.json), its report (.result.json) and a Feature finder run's dataset (.features.csv). Download only.",
+                null, ReadOnly: true),
+            new CacheRoot("trade-settings", "Trade settings CSV", Path.GetDirectoryName(Path.GetFullPath(tradeSettings.FilePath)),
+                "Lots, SL / target / trail, slippage and the server alerts per index - the file the Trade settings page writes. Download only.",
+                null, ReadOnly: true, Only: new[] { Path.GetFileName(tradeSettings.FilePath) }),
+            new CacheRoot("risk-settings", "Risk settings CSV", Path.GetDirectoryName(Path.GetFullPath(riskSettings.FilePath)),
+                "The risk limits - the file the Risk page writes. Download only.",
+                null, ReadOnly: true, Only: new[] { Path.GetFileName(riskSettings.FilePath) }),
         }, logger)
     { }
 
@@ -68,13 +97,26 @@ public sealed class CacheBrowser
         _logger = logger;
     }
 
-    /// <summary>Each cache: what it is, its folder and what it holds now.</summary>
+    /// <summary>Each cache / record folder: what it is, its FULL path (a one-file root: the file's), whether it is download
+    /// only, and what it holds now.</summary>
     public IReadOnlyList<CacheRootInfo> Roots() => _roots.Select(r =>
     {
-        var exists = r.Path is not null && Directory.Exists(r.Path);
-        return new CacheRootInfo(r.Id, r.Name, r.About, r.Path is null ? null : Path.GetFullPath(r.Path), exists,
-            exists ? Totals(Path.GetFullPath(r.Path!)) : CacheTotals.Empty);
+        var exists = r.Path is not null && Directory.Exists(r.Path) && (r.Only is null || OnlyFiles(r).Any());
+        var shown = r.Path is null ? null : r.Only is { Count: 1 } ? Path.Combine(Path.GetFullPath(r.Path), r.Only[0]) : Path.GetFullPath(r.Path);
+        return new CacheRootInfo(r.Id, r.Name, r.About, shown, exists, !exists ? CacheTotals.Empty : r.Only is null ? Totals(Path.GetFullPath(r.Path!)) : FilesTotals(OnlyFiles(r)),
+            r.ReadOnly, r.ReadOnly ? "records" : "cache");
     }).ToList();
+
+    /// <summary>A one-file root's files that are there, as FileInfos.</summary>
+    private static IEnumerable<FileInfo> OnlyFiles(CacheRoot r) =>
+        (r.Only ?? Array.Empty<string>()).Select(n => new FileInfo(Path.Combine(Path.GetFullPath(r.Path!), n))).Where(f => f.Exists && !IsLink(f));
+
+    private static CacheTotals FilesTotals(IEnumerable<FileInfo> files)
+    {
+        var list = files.ToList();
+        if (list.Count == 0) return CacheTotals.Empty;
+        return new CacheTotals(list.Count, list.Sum(f => f.Length), Utc(list.Max(f => f.LastWriteTimeUtc)), Utc(list.Min(f => f.LastWriteTimeUtc)));
+    }
 
     /// <summary>One folder of a cache (`path` relative to its root, "" = the root): its folders (with their totals) and files.</summary>
     public (CacheListing? Listing, string? Error) List(string rootId, string? path)
@@ -82,6 +124,12 @@ public sealed class CacheBrowser
         var (root, full, rel, error) = Resolve(rootId, path);
         if (error is not null) return (null, error);
         if (!Directory.Exists(full)) return (null, File.Exists(full) ? "That is a file - open its folder." : "Not found - deleted already?");
+        if (root!.Only is not null)
+        {
+            var only = OnlyFiles(root).ToList();
+            var listed = only.Select(f => new CacheEntry(f.Name, f.Name, false, f.Length, 1, Utc(f.LastWriteTimeUtc), Hint(root.Id, "", f), f.FullName)).ToList();
+            return (new CacheListing(root.Id, root.Name, "", FilesTotals(only), listed, null, full, root.ReadOnly), null);
+        }
         var entries = new List<CacheEntry>();
         var count = 0;
         foreach (var info in Children(full!).OrderBy(i => i is FileInfo).ThenBy(i => i.Name, StringComparer.Ordinal))
@@ -91,15 +139,15 @@ public sealed class CacheBrowser
             var about = Hint(root!.Id, rel, info);
             entries.Add(info is DirectoryInfo dir
                 ? Folder(dir, childRel, about)
-                : new CacheEntry(info.Name, childRel, false, ((FileInfo)info).Length, 1, Utc(info.LastWriteTimeUtc), about));
+                : new CacheEntry(info.Name, childRel, false, ((FileInfo)info).Length, 1, Utc(info.LastWriteTimeUtc), about, info.FullName));
         }
-        return (new CacheListing(root!.Id, root.Name, rel, Totals(full!), entries, count > MaxEntries ? count : null), null);
+        return (new CacheListing(root!.Id, root.Name, rel, Totals(full!), entries, count > MaxEntries ? count : null, full, root.ReadOnly), null);
     }
 
     private CacheEntry Folder(DirectoryInfo dir, string rel, string? about)
     {
         var totals = Totals(dir.FullName);
-        return new CacheEntry(dir.Name, rel, true, totals.Bytes, totals.Files, totals.NewestUtc, about);
+        return new CacheEntry(dir.Name, rel, true, totals.Bytes, totals.Files, totals.NewestUtc, about, dir.FullName);
     }
 
     /// <summary>Deletes a file, or a folder and everything in it; `path` "" = everything IN the cache (the folder itself
@@ -108,6 +156,7 @@ public sealed class CacheBrowser
     {
         var (root, full, rel, error) = Resolve(rootId, path);
         if (error is not null) return (null, error);
+        if (root!.ReadOnly) return (null, $"{root.Name}: the server's own records - download only, never deleted here.");
         var tally = new Tally();
         if (rel.Length == 0 || Directory.Exists(full))
         {
@@ -143,37 +192,55 @@ public sealed class CacheBrowser
         var stamp = Today();
         if (rel.Length > 0 && File.Exists(full)) return (new CacheDownload(full!, false, Path.GetFileName(full!), "", new FileInfo(full!).Length), null);
         if (!Directory.Exists(full)) return (null, "Not found - deleted already?");
+        if (root!.Only is not null)
+        {
+            var files = OnlyFiles(root).ToList();
+            return (new CacheDownload(full!, true, $"{root.Id}-{stamp}.zip", root.Id, files.Sum(f => f.Length))
+            { Sources = files.Select(f => (root.Id, f.FullName)).ToList() }, null);
+        }
         var inside = rel.Length == 0 ? root!.Id : rel.Split('/')[^1];
         var name = rel.Length == 0 ? $"{root!.Id}-{stamp}.zip" : $"{root!.Id}-{rel.Replace('/', '-')}-{stamp}.zip";
         return (new CacheDownload(full!, true, name, inside, Totals(full!).Bytes), null);
     }
 
-    /// <summary>Every cache kept on disk, as (its id, its folder) - for the one zip of everything.</summary>
-    public IReadOnlyList<(string Prefix, string Folder)> AllFolders() =>
-        _roots.Where(r => r.Path is not null && Directory.Exists(r.Path)).Select(r => (r.Id, Path.GetFullPath(r.Path!))).ToList();
+    /// <summary>What a zip of many roots holds, as (its id, a folder - or one file of a one-file root): `kind` "caches" (the
+    /// default - the data caches, as the one zip of everything always was), "records" (the server's own records) or "all".</summary>
+    public IReadOnlyList<(string Prefix, string Folder)> AllFolders(string kind = "caches") =>
+        _roots.Where(r => r.Path is not null && Directory.Exists(r.Path))
+            .Where(r => kind == "all" || (kind == "records") == r.ReadOnly)
+            .SelectMany(r => r.Only is null
+                ? new[] { (r.Id, Path.GetFullPath(r.Path!)) }
+                : OnlyFiles(r).Select(f => (r.Id, f.FullName)).ToArray())
+            .ToList();
 
     /// <summary>The folders written as ONE zip into <paramref name="output"/> as they are read (nothing kept on the server):
     /// each file under its folder's prefix, by its path inside the folder; links not followed, a file being written (.tmp)
     /// or gone meanwhile left out; a gzip / zip file stored as it is, the rest deflated (fastest). Stops at
-    /// <paramref name="cancel"/> (the browser went away). Returns the files and bytes put in.</summary>
-    public (long Files, long Bytes) WriteZip(Stream output, IEnumerable<(string Prefix, string Folder)> folders, CancellationToken cancel = default)
+    /// <paramref name="cancel"/> (the browser went away). Returns the files and bytes put in. A source that is a FILE (a
+    /// one-file root's) goes in as {prefix}/{its name}; `include` (by file name - the CSV-only zip) leaves the rest out.</summary>
+    public (long Files, long Bytes) WriteZip(Stream output, IEnumerable<(string Prefix, string Folder)> folders, CancellationToken cancel = default,
+        Func<string, bool>? include = null)
     {
         long files = 0, bytes = 0;
         using var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true);
         foreach (var (prefix, folder) in folders)
         {
-            if (!Directory.Exists(folder)) continue;
+            var single = !Directory.Exists(folder) && File.Exists(folder);
+            if (!single && !Directory.Exists(folder)) continue;
+            var baseDir = single ? Path.GetDirectoryName(folder)! : folder;
             var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.ReparsePoint };
-            foreach (var file in new DirectoryInfo(folder).EnumerateFiles("*", options).OrderBy(f => f.FullName, StringComparer.Ordinal))
+            IEnumerable<FileInfo> found = single ? new[] { new FileInfo(folder) } : new DirectoryInfo(folder).EnumerateFiles("*", options).OrderBy(f => f.FullName, StringComparer.Ordinal);
+            foreach (var file in found)
             {
                 cancel.ThrowIfCancellationRequested();
                 if (file.Name.EndsWith(".tmp", StringComparison.Ordinal) || IsLink(file)) continue;
+                if (include is not null && !include(file.Name)) continue;
                 FileStream source;
                 try { source = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { continue; }       // gone / locked meanwhile
                 using (source)
                 {
-                    var inside = Path.GetRelativePath(folder, file.FullName).Replace(Path.DirectorySeparatorChar, '/');
+                    var inside = Path.GetRelativePath(baseDir, file.FullName).Replace(Path.DirectorySeparatorChar, '/');
                     var stored = file.Name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) || file.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase);
                     var entry = zip.CreateEntry(prefix.Length > 0 ? $"{prefix}/{inside}" : inside, stored ? CompressionLevel.NoCompression : CompressionLevel.Fastest);
                     entry.LastWriteTime = file.LastWriteTime;
@@ -238,6 +305,8 @@ public sealed class CacheBrowser
         if (root.Path is null) return (null, null, "", $"{root.Name} are not kept on disk on this server.");
         var rel = Clean(path);
         if (rel is null) return (null, null, "", "Not a path inside this cache.");
+        // A one-file root: only its own files, nothing else of the folder it sits in.
+        if (root.Only is not null && rel.Length > 0 && !root.Only.Contains(rel, StringComparer.Ordinal)) return (null, null, "", "Not a path inside this cache.");
         var rootFull = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root.Path));
         var full = rel.Length == 0 ? rootFull : Path.GetFullPath(Path.Combine(rootFull, rel.Replace('/', Path.DirectorySeparatorChar)));
         if (full != rootFull && !full.StartsWith(rootFull + Path.DirectorySeparatorChar, StringComparison.Ordinal))
@@ -352,33 +421,110 @@ public sealed class CacheBrowser
                 if (name.EndsWith("_spot_1m.csv", StringComparison.Ordinal)) return $"{name.Split('_')[0]} 1-minute spot candles";
                 if (name.EndsWith(".meta.json", StringComparison.Ordinal)) return "Which days the CSV covers";
                 return null;
+            case "telegram-log":
+                if (info is DirectoryInfo && name == "from-telegram") return "Days read back from the Telegram channel - one gzip file a day";
+                if (name == "covered-from.txt") return "Since when the log records - a day after it is whole";
+                if (name.EndsWith(".csv", StringComparison.Ordinal)) return name.StartsWith(Today(), StringComparison.Ordinal) ? "Today's messages - still being written" : "The messages sent that day (IST)";
+                return null;
+            case "visitor-log":
+                if (name.EndsWith(".csv", StringComparison.Ordinal)) return name.StartsWith(Today(), StringComparison.Ordinal) ? "Today's visits - still being written" : "The visits that day (IST)";
+                return null;
+            case "signal-strategies":
+                if (depth == 0 && name == "strategies.csv") return "Every saved strategy - its switches and settings";
+                if (depth == 0 && info is DirectoryInfo && name == "history") return "Each strategy's trades, day reports, alerts and live orders";
+                if (info is FileInfo && parentRel == "history" && name.EndsWith(".csv", StringComparison.Ordinal))
+                {
+                    var stem = name[..^4];
+                    var cut = stem.LastIndexOf('-');
+                    if (cut <= 0) return null;
+                    var kind = stem[(cut + 1)..] switch
+                    {
+                        "trades" => "Trades - written as each signal comes",
+                        "days" => "Day reports",
+                        "events" => "Entries / exits sent",
+                        "orders" => "Live Dhan orders",
+                        _ => null,
+                    };
+                    var strategy = StrategyNames(info is FileInfo f ? f.Directory?.Parent?.FullName : null).GetValueOrDefault(stem[..cut]);
+                    return kind is null ? null : strategy is null ? kind : $"{strategy} - {kind.ToLowerInvariant()}";
+                }
+                return null;
+            case "signal-backtests":
+                if (name.EndsWith(".features.csv", StringComparison.Ordinal)) return RunName(info, ".features.csv") is { } run ? $"{run} - Feature finder dataset (a row a candle)" : "Feature finder dataset (a row a candle)";
+                if (name.EndsWith(".result.json", StringComparison.Ordinal)) return RunName(info, ".result.json") is { } r2 ? $"{r2} - its report" : "A run's report";
+                if (name.EndsWith(".json", StringComparison.Ordinal)) return RunName(info, ".json") is { } r3 ? $"{r3} - settings and progress" : "A run's settings and progress";
+                return null;
+            case "trade-settings":
+                return "Trade settings per index";
+            case "risk-settings":
+                return "Risk limits";
             default:
                 return null;
         }
+    }
+
+    /// <summary>The saved strategies' names by id (strategies.csv in `folder`) - to name each history file.</summary>
+    private static Dictionary<string, string> StrategyNames(string? folder)
+    {
+        var names = new Dictionary<string, string>(StringComparer.Ordinal);
+        try
+        {
+            var file = folder is null ? null : Path.Combine(folder, "strategies.csv");
+            if (file is null || !File.Exists(file)) return names;
+            foreach (var row in CsvTable.Read(file))
+                if (row.TryGetValue("id", out var id) && row.TryGetValue("name", out var name) && id.Length > 0) names[id] = name;
+        }
+        catch { /* a name is only a hint */ }
+        return names;
+    }
+
+    /// <summary>A background run's name from its {id}.json beside the file (`suffix` cut off the file's name to get the id).</summary>
+    private static string? RunName(FileSystemInfo info, string suffix)
+    {
+        try
+        {
+            var id = info.Name[..^suffix.Length];
+            var dir = (info as FileInfo)?.DirectoryName;
+            if (dir is null || id.Length == 0) return null;
+            var job = Path.Combine(dir, $"{id}.json");
+            if (!File.Exists(job) || new FileInfo(job).Length > 512 * 1024) return null;
+            using var doc = JsonDocument.Parse(File.ReadAllText(job));
+            return doc.RootElement.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
+        }
+        catch { return null; }
     }
 
     private sealed record ContractName(string? ContractSymbol, DateOnly? Expiry);
 }
 
 /// <summary>A cache the page lists: its id, name, folder (null = not kept on disk here), what it is, and what to do after a
-/// delete in it (drop copies held in memory, count it again).</summary>
-public sealed record CacheRoot(string Id, string Name, string? Path, string About, Action? AfterDelete);
+/// delete in it (drop copies held in memory, count it again).
+/// `ReadOnly` = the server's own records: download only, never deleted here. `Only` = the file names this root shows of its
+/// folder (a settings CSV in the data folder) - nothing else of that folder is listed, downloaded or zipped.</summary>
+public sealed record CacheRoot(string Id, string Name, string? Path, string About, Action? AfterDelete, bool ReadOnly = false, IReadOnlyList<string>? Only = null);
 
 public sealed record CacheTotals(long Files, long Bytes, DateTimeOffset? NewestUtc, DateTimeOffset? OldestUtc)
 {
     public static readonly CacheTotals Empty = new(0, 0, null, null);
 }
 
-public sealed record CacheRootInfo(string Id, string Name, string About, string? Path, bool Exists, CacheTotals Totals);
+/// <summary>`Path` - the folder's full path on the server (a one-file root's: the file's); `Kind` "cache" / "records".</summary>
+public sealed record CacheRootInfo(string Id, string Name, string About, string? Path, bool Exists, CacheTotals Totals, bool ReadOnly = false, string Kind = "cache");
 
-/// <summary>A folder (its totals) or a file in a listing; `Path` relative to the cache's folder.</summary>
-public sealed record CacheEntry(string Name, string Path, bool Folder, long Bytes, long Files, DateTimeOffset? ModifiedUtc, string? About);
+/// <summary>A folder (its totals) or a file in a listing; `Path` relative to the cache's folder, `FullPath` on the server.</summary>
+public sealed record CacheEntry(string Name, string Path, bool Folder, long Bytes, long Files, DateTimeOffset? ModifiedUtc, string? About, string? FullPath = null);
 
-/// <summary>`Truncated`: how many entries the folder has when over MaxEntries (only the first are listed).</summary>
-public sealed record CacheListing(string Root, string RootName, string Path, CacheTotals Totals, IReadOnlyList<CacheEntry> Entries, int? Truncated);
+/// <summary>`Truncated`: how many entries the folder has when over MaxEntries (only the first are listed); `FullPath` - the
+/// folder's path on the server; `ReadOnly` - the server's own records (download only).</summary>
+public sealed record CacheListing(string Root, string RootName, string Path, CacheTotals Totals, IReadOnlyList<CacheEntry> Entries, int? Truncated,
+    string? FullPath = null, bool ReadOnly = false);
 
 public sealed record CacheDeleteResult(long Files, long Bytes, int Failed, string? FirstError);
 
 /// <summary>A download: the file or folder on disk, whether it is zipped, the name it is saved under, the folder name
 /// inside the zip, and its size (before zipping).</summary>
-public sealed record CacheDownload(string FullPath, bool Folder, string FileName, string Prefix, long Bytes);
+public sealed record CacheDownload(string FullPath, bool Folder, string FileName, string Prefix, long Bytes)
+{
+    /// <summary>What a zip holds when not the one folder - a one-file root's files.</summary>
+    public IReadOnlyList<(string Prefix, string Folder)>? Sources { get; init; }
+}
