@@ -102,3 +102,10 @@ test('the card filters: calls / puts, buyers / sellers, far out-of-the-money hed
   assert.deepEqual(filterBigOrders(list, { cheapBelow: 50 }), [list[2], list[3]])
   assert.deepEqual(filterBigOrders(list, { type: 'puts', side: 'sell', hideFarOtm: 5 }), [list[3]])
 })
+
+test('OI changed only keeps the orders whose OI moved; the rest are plain bought / sold', async () => {
+  const { filterBigOrders } = await import('../src/tickBigOrders.js')
+  const list = [{ oiChange: 650 }, { oiChange: 0 }, { oiChange: null }, { oiChange: -120 }]
+  assert.equal(filterBigOrders(list).length, 4)
+  assert.deepEqual(filterBigOrders(list, { oiChangedOnly: true }), [list[0], list[3]])
+})
