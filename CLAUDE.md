@@ -860,6 +860,25 @@ All must pass before committing.
   behind: stopped at 09:21, now 09:31" tag once the last minute ended over `SPOT_STALE_MS` 2 min before the clock (never on a
   replayed day or outside the session) - a stalled feed was silent here. A read -
   it feeds no strategy or alert.
+- OI Replay's BIG OPTION TRADES card (asked for - "is there any way that we can identify big trades on option buy combining the data from
+  ATM +- 10 ... create a component"; `bigOptionTrades` - `BigOptionTradesCard.jsx`, the maths `bigOptionTrades.js`, section version 10 /
+  `SECTIONS_VERSION` '10', added once right after the trapped / squeeze zones): Dhan sends NO time & sales for options, only a 1-minute bar
+  (OHLC, volume, OI) per strike, so a "big trade" is a BIG MINUTE at a strike, never one print - the strike's volume that minute >=
+  `multiple` (4) x ITS OWN usual (the median of its last `history` 20 earlier bars with volume, none before `minHistory` 5) AND >= `minLots` (20);
+  only strikes within ATM +- N (default 10) of THAT minute's ATM (the spot's nearest strike). Read from the bar and the OI (`readOf`): who pushed
+  (the close's place in the range, else the move from the minute before) x OI change = long build-up (price up, OI up - buyers opened), short
+  build-up (writers), short covering, long unwinding, or just bought / sold with no OI reading; the bias for the INDEX (call bought / put written
+  bullish, put bought / call written bearish; a build-up counts 1, the others 0.5). COMBINED across the strikes: the last N minutes' money by
+  kind (calls bought / puts bought / calls written / puts written, rupees = premium x volume), a net lean ((bullish - bearish) / both, +-25% =
+  bullish / bearish, else mixed) and a SWEEP (the same type and direction at 3+ strikes within 3 minutes - one decision over the chain). Each
+  minute uses only the bars up to it - a cut at any clock = the whole day's up to it; live the forming minute is left out
+  (`tests/big-option-trades.test.mjs`). A big minute can be many small trades and a hedger looks like a buyer: a lead to check against the
+  OI, straddle and flow, not a signal - it feeds no strategy or alert.
+- THE FOOTPRINTS DO NOT TAKE THE WHEEL (asked about - "footprint chart ... I can not scroll on big screens"; the Order Flow page's footprint
+  `OrderFlowCharts.jsx`, the Tick Flow footprint and bubble chart): the chart cancelled every wheel event, so on a big screen - where the chart
+  fills the window - the page could not be scrolled with the pointer over it. A plain wheel now SCROLLS THE PAGE; Ctrl / Cmd + wheel (a
+  trackpad pinch too) = bar width / bars shown / time zoom, Shift + wheel (or the price axis, Order Flow) = row height / price zoom, a sideways
+  swipe = back in time. A new chart must not `preventDefault` a plain wheel.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is

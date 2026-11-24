@@ -627,10 +627,10 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
-    // Wheel: wider/narrower bars. Shift+wheel (or the wheel over the price axis): taller/shorter rows
-    // around the price under the cursor. A sideways trackpad swipe scrolls through time.
+    // A plain wheel SCROLLS THE PAGE (on a big screen the footprint fills the window - a wheel that zoomed the bars trapped the
+    // page under the pointer: "I can not scroll"). Ctrl + wheel (a trackpad pinch too) = wider / narrower bars; Shift + wheel (or
+    // the wheel over the price axis) = taller / shorter rows around the price under the cursor; a sideways swipe scrolls time.
     const onWheel = (e) => {
-      e.preventDefault()
       const g = geomRef.current
       const l = g.layout
       if (!l) return
@@ -638,14 +638,19 @@ export function FootprintChart({ bars, rowSize, lotSize, showLots, height = 620,
       const x = e.clientX - rect.left
       const y = e.clientY - rect.top
       if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault()
         setPan(g.panFor(l.endIdx + e.deltaX / g.colWidth))
         return
       }
       if (e.shiftKey || x > g.plotW) {
+        e.preventDefault()
         setVview(zoomRows(l, e.deltaY < 0 ? 1.15 : 1 / 1.15, y, g.step, g.plotH))
         return
       }
-      setColWidth((w) => Math.max(40, Math.min(240, w + (e.deltaY < 0 ? 10 : -10))))
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault()
+        setColWidth((w) => Math.max(40, Math.min(240, w + (e.deltaY < 0 ? 10 : -10))))
+      }
     }
     canvas.addEventListener('wheel', onWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', onWheel)

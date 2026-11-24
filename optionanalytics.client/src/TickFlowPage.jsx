@@ -254,13 +254,13 @@ export default function TickFlowPage() {
           </Space>
         )}
 
-        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
+        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel scrolls the page · Ctrl+wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
           {!day || day.bubbles.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : replay ? 'No trade in this day up to the clock.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
             : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={showLots ? minLots : minQty / (lotSize || 1)} rMax={bubbleSize} height={narrow ? 380 : 560} />}
         </Card>
 
-        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel: bars shown · Shift+wheel: row height · drag: move back</span>}>
+        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>
           {bars.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : 'No trade yet today.'} />
             : <TickFootprintChart bars={bars} cvd={cvd} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 520 : 680} rowDelta={rowDelta} />}
