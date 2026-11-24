@@ -13,6 +13,7 @@ public static class TrueDataRegistration
         // The LIVE tick feed (the Tick Flow page) has its own switch: TrueData:Live:Enabled, with the login set.
         if (options?.Live.Enabled == true && options.IsConfigured)
         {
+            services.AddSingleton<TickHistoryDays>();
             services.AddSingleton<TrueDataLiveFeed>();
             services.AddHostedService(sp => sp.GetRequiredService<TrueDataLiveFeed>());
         }

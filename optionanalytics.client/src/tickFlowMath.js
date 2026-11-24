@@ -111,3 +111,90 @@ export function axisTicks(lo, hi, count = 8) {
   for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(Math.round(v / step) * step)
   return out
 }
+
+// ---- Replay ------------------------------------------------------------------------------------------------------------------
+
+const rowOf = (price, row) => Math.round(Math.floor(price / row + 1e-9) * row * 1e4) / 1e4
+
+/** A day as the page holds it for replay: every time also as milliseconds (`ms`), so cutting it at a clock is a binary search. */
+export function prepareTickDay(day) {
+  if (!day) return null
+  return {
+    ...day,
+    bars: (day.bars ?? []).map((b) => ({ ...b, ms: msOf(b.time) })),
+    bubbles: (day.bubbles ?? []).map((b) => ({ ...b, ms: msOf(b.time) })),
+    quotes: (day.quotes ?? []).map((q) => ({ ...q, ms: msOf(q.time) })),
+  }
+}
+
+/** The count of items (sorted by `ms`) at or before `ms`. */
+export function countUpTo(list, ms) {
+  let lo = 0
+  let hi = list.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (list[mid].ms <= ms) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/** A minute's bar built from the bubbles that traded in it (a bubble merges prints of one price and side, so the totals are exact). */
+export function barFromBubbles(bubbles, minuteMs, rowSize) {
+  const inMinute = (bubbles ?? []).filter((b) => b.ms >= minuteMs && b.ms < minuteMs + MIN)
+  if (inMinute.length === 0) return null
+  const levels = new Map()
+  let buy = 0
+  let sell = 0
+  let prints = 0
+  let high = -Infinity
+  let low = Infinity
+  for (const b of inMinute) {
+    const price = rowOf(b.price, rowSize)
+    const l = levels.get(price) ?? { price, buy: 0, sell: 0 }
+    if (b.buy) { l.buy += b.qty; buy += b.qty } else { l.sell += b.qty; sell += b.qty }
+    levels.set(price, l)
+    prints += b.prints ?? 1
+    high = Math.max(high, b.price)
+    low = Math.min(low, b.price)
+  }
+  return {
+    time: minuteMs, ms: minuteMs, open: inMinute[0].price, high, low, close: inMinute.at(-1).price, buy, sell, prints,
+    levels: [...levels.values()].sort((a, b) => b.price - a.price),
+  }
+}
+
+/**
+ * The prepared day (prepareTickDay) as it stood at `clockMs`: the minute bars that had finished, the minute running built from the
+ * bubbles up to the clock, the bubbles and the best bid / ask up to it. Nothing after the clock - a cut at any clock is the whole
+ * day's up to it.
+ */
+export function replayCut(day, clockMs, rowSize) {
+  if (!day || clockMs == null) return null
+  const done = day.bars.slice(0, countUpTo(day.bars, clockMs - MIN)) // minutes that had finished: start + 1 min <= the clock
+  const bubbleCount = countUpTo(day.bubbles, clockMs)
+  const bubbles = day.bubbles.slice(0, bubbleCount)
+  const minute = Math.floor(clockMs / MIN) * MIN
+  const forming = barFromBubbles(bubbles.slice(countUpTo(bubbles, minute - 1)), minute, rowSize)
+  const bars = forming ? [...done.filter((b) => b.ms < minute), forming] : done
+  const quotes = day.quotes.slice(0, countUpTo(day.quotes, clockMs))
+  const q = quotes.at(-1)
+  return { bars, bubbles, quotes, lastPrice: bubbles.at(-1)?.price ?? 0, bid: q?.bid ?? 0, bidQty: q?.bidQty ?? 0, ask: q?.ask ?? 0, askQty: q?.askQty ?? 0 }
+}
+
+/** The last `count` weekdays up to `today` (a yyyy-MM-dd), newest first - the days a replay can be asked for (holidays just come back empty). */
+export function weekdayChoices(today, count = 6) {
+  const out = []
+  const d = new Date(`${today}T00:00:00Z`)
+  while (out.length < count) {
+    const dow = d.getUTCDay()
+    if (dow !== 0 && dow !== 6) out.push(d.toISOString().slice(0, 10))
+    d.setUTCDate(d.getUTCDate() - 1)
+  }
+  return out
+}
+
+/** Exchange volume the feed delivered, as a percentage (null when the exchange's own total is not known). */
+export function coveragePct(booked, exchange) {
+  return exchange > 0 ? Math.min(100, (booked / exchange) * 100) : null
+}

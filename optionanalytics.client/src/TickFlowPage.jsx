@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Alert, Card, Checkbox, Empty, InputNumber, Segmented, Select, Space, Statistic, Tag, Tooltip, Typography } from 'antd'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Alert, Button, Card, Checkbox, Empty, InputNumber, Segmented, Select, Slider, Space, Statistic, Tag, Tooltip, Typography } from 'antd'
+import { PauseCircleOutlined, PlayCircleOutlined, StepBackwardOutlined } from '@ant-design/icons'
 import { NavBar, POLL_HEADERS, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
-import { aggregateTickBars, cumulativeDelta, fmtQty } from './tickFlowMath.js'
+import { aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
 
-const { Title } = Typography
+const { Title, Text } = Typography
 
 // TICK FLOW - a page of its own on TrueData's real-time TICK feed (TrueDataLiveFeed / TickBook on the server, TrueData:Live:Enabled),
 // NIFTY and BANKNIFTY near futures. Nothing here is shared with the Order Flow page: its own server store, its own maths
@@ -30,16 +31,21 @@ function useNarrowScreen() {
   return narrow
 }
 
-function useTickDay(underlying, rowSize) {
-  const key = `${underlying}|${rowSize}`
+// Live: the day so far, again every 2 s. Replay: a day loaded ONCE (every order and the whole quote trail, cut at the replay clock on
+// the page); a failed load is shown, never retried in a loop - "Reload" asks again.
+function useTickDay(underlying, rowSize, replayDate, reloadKey) {
+  const key = `${underlying}|${rowSize}|${replayDate ?? 'live'}|${reloadKey}`
   const [held, setHeld] = useState({ key: null, day: null, error: null })
   const [status, setStatus] = useState(null)
   useEffect(() => {
     let alive = true
+    const query = replayDate
+      ? `date=${replayDate}&rowSize=${rowSize}&maxBubbles=400000&maxQuotes=100000`
+      : `rowSize=${rowSize}&maxBubbles=8000`
     const load = async () => {
       try {
         const [dayRes, statusRes] = await Promise.all([
-          fetch(`/api/tick-flow/${underlying}?rowSize=${rowSize}&maxBubbles=8000`, { headers: POLL_HEADERS }),
+          fetch(`/api/tick-flow/${underlying}?${query}`, { headers: replayDate ? undefined : POLL_HEADERS }),
           fetch('/api/tick-flow/status', { headers: POLL_HEADERS }),
         ])
         const statusBody = statusRes.ok ? await statusRes.json() : null
@@ -56,12 +62,16 @@ function useTickDay(underlying, rowSize) {
       }
     }
     load()
-    const timer = setInterval(load, POLL_MS)
-    return () => { alive = false; clearInterval(timer) }
-  }, [underlying, rowSize, key])
+    const timer = replayDate ? null : setInterval(load, POLL_MS)
+    return () => { alive = false; if (timer) clearInterval(timer) }
+  }, [underlying, rowSize, replayDate, key])
   const current = held.key === key ? held : { day: null, error: null }
   return { day: current.day, error: current.error, loading: held.key !== key, status }
 }
+
+const SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600].map((v) => ({ value: v, label: `${v}x` }))
+const istToday = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)
+const hhmmss = (ms) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
 export default function TickFlowPage() {
   const narrow = useNarrowScreen()
@@ -71,9 +81,43 @@ export default function TickFlowPage() {
   const [showLots, setShowLots] = usePersistedState('optionanalytics.tickFlow.showLots', true)
   const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.tickFlow.rowDelta', false)
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.minLots', 1)
+  const [mode, setMode] = usePersistedState('optionanalytics.tickFlow.mode', 'live')
+  const [bubbleSize, setBubbleSize] = usePersistedState('optionanalytics.tickFlow.bubbleSize', 34)
+  const days = useMemo(() => weekdayChoices(istToday(), 6), [])
+  const [replayDay, setReplayDay] = useState(() => days[1] ?? days[0])
+  const [reload, setReload] = useState(0)
+  const [pos, setPos] = useState({ key: null, ms: null })
+  const [playState, setPlayState] = useState({ key: null, on: false })
+  const [speed, setSpeed] = useState(60)
   const index = INDICES.includes(underlying) ? underlying : 'NIFTY'
   const rowSize = rowSizes?.[index] ?? DEFAULT_ROWS[index]
-  const { day, error, loading, status } = useTickDay(index, rowSize)
+  const replay = mode === 'replay'
+  const { day: loaded, error, loading, status } = useTickDay(index, rowSize, replay ? replayDay : null, reload)
+
+  // A replayed day: every time as ms once, the clock at the day's first minute, and the page shows the day cut at the clock.
+  const prepared = useMemo(() => (replay ? prepareTickDay(loaded) : null), [replay, loaded])
+  const range = useMemo(() => {
+    if (!prepared || prepared.bars.length === 0) return null
+    return { start: prepared.bars[0].ms, end: prepared.bars.at(-1).ms + 60_000 }
+  }, [prepared])
+  // The clock and play state belong to the day loaded: another day (or a reload) starts at its first minute, paused.
+  const rangeKey = range ? `${range.start}-${range.end}` : null
+  const clock = range ? (pos.key === rangeKey ? pos.ms : range.start) : null
+  const playing = playState.key === rangeKey && playState.on
+  const setClock = (ms) => setPos({ key: rangeKey, ms })
+  const setPlaying = (on) => setPlayState({ key: rangeKey, on })
+  const clockRef = useRef(null)
+  useEffect(() => { clockRef.current = clock }, [clock])
+  useEffect(() => {
+    if (!playing || !range) return undefined
+    const timer = setInterval(() => {
+      const next = (clockRef.current ?? range.start) + speed * 200
+      if (next >= range.end) { setPos({ key: rangeKey, ms: range.end }); setPlayState({ key: rangeKey, on: false }) } else setPos({ key: rangeKey, ms: next })
+    }, 200)
+    return () => clearInterval(timer)
+  }, [playing, range, rangeKey, speed])
+  const cut = useMemo(() => (prepared && clock != null ? replayCut(prepared, clock, rowSize) : null), [prepared, clock, rowSize])
+  const day = replay ? (cut ? { meta: { ...loaded.meta, lastPrice: cut.lastPrice, bid: cut.bid, bidQty: cut.bidQty, ask: cut.ask, askQty: cut.askQty }, bars: cut.bars, bubbles: cut.bubbles, quotes: cut.quotes } : null) : loaded
 
   const meta = day?.meta
   const lotSize = meta?.lotSize ?? 1
@@ -83,6 +127,8 @@ export default function TickFlowPage() {
   const feedState = status?.status?.state ?? status?.state ?? 'unknown'
   const off = status && status.enabled === false
   const total = cvd.at(-1) ?? 0
+  const mt = loaded?.meta
+  const coverage = coveragePct(mt?.bookedVolume ?? 0, mt?.exchangeVolume ?? 0)
 
   return (
     <div style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px 120px' : '24px 16px 120px', overflowX: 'clip' }}>
@@ -95,18 +141,29 @@ export default function TickFlowPage() {
         <Card size="small" title="Tick Flow - footprint and order bubbles from TrueData's tick feed">
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]}>
+              <Segmented value={mode} onChange={setMode} options={[{ value: 'live', label: 'Live' }, { value: 'replay', label: 'Replay' }]} />
               <Segmented value={index} onChange={setUnderlying} options={INDICES} />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={[1, 3, 5, 15].map((v) => ({ value: v, label: `${v} min` }))} />
               <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [index]: v })} style={{ width: 120 }} options={ROW_OPTIONS} />
               <Tooltip title="The smallest order drawn as a bubble, in lots. 1 = every order; raise it on a busy day to see only the larger ones.">
                 <span>Bubbles ≥ <InputNumber size="small" min={1} max={1000} value={minLots} onChange={(v) => setMinLots(v ?? 1)} style={{ width: 70 }} /> lots</span>
               </Tooltip>
+              <Tooltip title="The biggest bubble's size on the chart.">
+                <Select value={bubbleSize} onChange={setBubbleSize} style={{ width: 120 }} options={[{ value: 22, label: 'Small bubbles' }, { value: 34, label: 'Medium bubbles' }, { value: 52, label: 'Large bubbles' }]} />
+              </Tooltip>
               <Checkbox checked={showLots} onChange={(e) => setShowLots(e.target.checked)}>Lots</Checkbox>
               <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}>Delta per row</Checkbox>
+              {replay && <Select value={replayDay} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
+              {replay && <Button size="small" onClick={() => setReload((n) => n + 1)}>Reload</Button>}
               <Tag color={feedState === 'streaming' ? 'green' : off ? 'default' : 'orange'}>TrueData: {off ? 'off' : feedState}</Tag>
               {stream && (
                 <Tooltip title="TrueData numbers every tick: a count here means ticks were lost on the way to the server (their feed's own sequence number).">
                   <Tag color={stream.sequenceGaps > 0 ? 'red' : 'green'}>{stream.trades.toLocaleString()} trades · {stream.sequenceGaps} lost</Tag>
+                </Tooltip>
+              )}
+              {coverage != null && (
+                <Tooltip title="What the feed delivered against the exchange's own running volume since the first trade it saw. 100% = every trade is in the footprint; less = trades the feed did not send.">
+                  <Tag color={coverage >= 99 ? 'green' : coverage >= 95 ? 'orange' : 'red'}>{coverage.toFixed(1)}% of exchange volume</Tag>
                 </Tooltip>
               )}
             </Space>
@@ -119,6 +176,25 @@ export default function TickFlowPage() {
         {!off && error && <Alert type="warning" showIcon message={error} />}
         {status?.status?.error && !off && <Alert type="warning" showIcon message={`TrueData: ${status.status.error}`} />}
 
+        {replay && (
+          <Card size="small">
+            {!range
+              ? <Text type="secondary">{loading ? 'Loading the day…' : error ? '' : 'No ticks for that day.'}</Text>
+              : (
+                <Space size={12} wrap style={{ width: '100%' }}>
+                  <Button type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} onClick={() => { if (!playing && clock >= range.end) setClock(range.start); setPlaying(!playing) }}>{playing ? 'Pause' : 'Play'}</Button>
+                  <Button icon={<StepBackwardOutlined />} onClick={() => { setPlaying(false); setClock(range.start) }}>Reset</Button>
+                  <Select value={speed} onChange={setSpeed} style={{ width: 90 }} options={SPEEDS} />
+                  <Text strong style={{ minWidth: 70 }}>{clock != null ? hhmmss(clock) : ''}</Text>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <Slider min={range.start} max={range.end} step={1000} value={clock ?? range.start} tooltip={{ open: false }}
+                      onChange={(v) => setClock(v)} onChangeComplete={() => {}} />
+                  </div>
+                </Space>
+              )}
+          </Card>
+        )}
+
         {meta && (
           <Space size={24} wrap>
             <Statistic title={`${meta.symbol} last`} value={meta.lastPrice || '-'} />
@@ -128,13 +204,13 @@ export default function TickFlowPage() {
           </Space>
         )}
 
-        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel: zoom time · drag: move back · double-click: live · hover a bubble</span>}>
+        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
           {!day || day.bubbles.length === 0
-            ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
-            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={minLots} height={narrow ? 380 : 560} />}
+            ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : replay ? 'No trade in this day up to the clock.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
+            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={minLots} rMax={bubbleSize} height={narrow ? 380 : 560} />}
         </Card>
 
-        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel: bars shown · drag: move back</span>}>
+        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel: bars shown · Shift+wheel: row height · drag: move back</span>}>
           {bars.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : 'No trade yet today.'} />
             : <TickFootprintChart bars={bars} cvd={cvd} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 520 : 680} rowDelta={rowDelta} />}

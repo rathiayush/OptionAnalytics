@@ -69,3 +69,66 @@ test('lots, units and axis ticks', () => {
   assert.equal(fmtQty(65 * 25_000, 65, true), '25.0K')
   assert.deepEqual(axisTicks(24990, 25010, 4), [24990, 24995, 25000, 25005, 25010])
 })
+
+import { barFromBubbles, countUpTo, coveragePct, prepareTickDay, replayCut, weekdayChoices } from '../src/tickFlowMath.js'
+
+const B0 = Date.UTC(2026, 10, 24, 3, 45, 0) // 09:15 IST
+const iso = (ms) => new Date(ms).toISOString()
+const bub = (sec, price, qty, buy) => ({ time: iso(B0 + sec * 1000), price, qty, buy, prints: 1 })
+function day() {
+  const bubbles = [bub(1, 100, 65, true), bub(20, 101, 130, true), bub(40, 100, 65, false), bub(61, 102, 65, true), bub(90, 101, 195, false), bub(130, 103, 65, true)]
+  const barOf = (min) => barFromBubbles(prepareTickDay({ bubbles }).bubbles, B0 + min * 60_000, 1)
+  const bars = [0, 1, 2].map(barOf).map((b) => ({ ...b, time: iso(b.ms) }))
+  const quotes = [{ time: iso(B0), bid: 99.5, bidQty: 10, ask: 100, askQty: 10 }, { time: iso(B0 + 100_000), bid: 101.5, bidQty: 20, ask: 102, askQty: 20 }]
+  return prepareTickDay({ meta: {}, bars, bubbles, quotes })
+}
+
+test('a minute bar built from bubbles: rows, totals, open / high / low / close', () => {
+  const d = day()
+  const b = barFromBubbles(d.bubbles, B0, 1)
+  assert.equal(b.buy, 195)
+  assert.equal(b.sell, 65)
+  assert.deepEqual([b.open, b.high, b.low, b.close], [100, 101, 100, 100])
+  assert.deepEqual(b.levels.map((l) => [l.price, l.buy, l.sell]), [[101, 130, 0], [100, 65, 65]])
+  assert.equal(barFromBubbles(d.bubbles, B0 + 10 * 60_000, 1), null)
+})
+
+test('a replay cut shows only what had happened by the clock - finished minutes whole, the running minute from its orders so far', () => {
+  const d = day()
+  const at = replayCut(d, B0 + 30_000, 1) // 30 s in: the first two orders only
+  assert.equal(at.bubbles.length, 2)
+  assert.equal(at.bars.length, 1)
+  assert.equal(at.bars[0].buy, 195)
+  assert.equal(at.bars[0].sell, 0)          // the sell at 40 s has not happened yet
+  assert.equal(at.lastPrice, 101)
+  assert.equal(at.bid, 99.5)                // the second quote (at 100 s) is not out yet
+
+  const later = replayCut(d, B0 + 100_000, 1) // 1:40: minute 0 is whole, minute 1 has two orders
+  assert.equal(later.bars.length, 2)
+  assert.equal(later.bars[0].sell, 65)
+  assert.equal(later.bars[1].buy, 65)
+  assert.equal(later.bars[1].sell, 195)
+  assert.equal(later.bid, 101.5)
+})
+
+test('a cut at any clock equals the whole day up to it: totals match the bubbles counted directly', () => {
+  const d = day()
+  for (const sec of [0, 5, 59, 60, 61, 119, 125, 200]) {
+    const cut = replayCut(d, B0 + sec * 1000, 1)
+    const direct = d.bubbles.filter((b) => b.ms <= B0 + sec * 1000)
+    assert.equal(cut.bars.reduce((a, b) => a + b.buy + b.sell, 0), direct.reduce((a, b) => a + b.qty, 0), `at ${sec}s`)
+    assert.equal(cut.bubbles.length, direct.length)
+  }
+  assert.equal(replayCut(null, 5, 1), null)
+})
+
+test('countUpTo, the weekdays a replay can ask for, and coverage', () => {
+  assert.equal(countUpTo([{ ms: 1 }, { ms: 5 }, { ms: 5 }, { ms: 9 }], 5), 3)
+  assert.equal(countUpTo([], 5), 0)
+  // 2026-11-24 is a Tuesday: back over the weekend.
+  assert.deepEqual(weekdayChoices('2026-11-24', 5), ['2026-11-24', '2026-11-23', '2026-11-20', '2026-11-19', '2026-11-18'])
+  assert.equal(weekdayChoices('2026-11-22', 2)[0], '2026-11-20') // a Sunday starts on the Friday
+  assert.equal(coveragePct(95, 100), 95)
+  assert.equal(coveragePct(120, 100), 100)
+  assert.equal(coveragePct(5, 0), null)
+})
