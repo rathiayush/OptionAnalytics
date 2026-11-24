@@ -26,7 +26,10 @@ const KINDS = [
  * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only. The size is set in lots or in
  * QUANTITY (units) - the page's Lots / Quantity switch (`showLots`), each unit keeping its own number.
  */
-export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, replayDate, clockMs, priceBars }) {
+export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = true, index, replayDate, clockMs, priceBars }) {
+  // The card has its own Lots / Quantity pick (starting from the page's switch), so the size filter is always right here beside "× usual".
+  const [unit, setUnit] = usePersistedState('optionanalytics.tickFlow.bigUnit', pageShowLots ? 'lots' : 'qty')
+  const showLots = unit === 'lots'
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.bigMinLots', TICK_ORDER_DEFAULTS.minLots)
   const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.bigMinQty', TICK_ORDER_DEFAULTS.minLots * 65)
   const [multiple, setMultiple] = usePersistedState('optionanalytics.tickFlow.bigMultiple', TICK_ORDER_DEFAULTS.multiple)
@@ -42,10 +45,11 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, rep
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
 
-  if (replay && dayFeed.error) return <Alert type="warning" showIcon message={`Big option orders: ${dayFeed.error}`} />
-  if (replay && dayFeed.answer?.state === 'failed') return <Alert type="warning" showIcon message="The day's option ticks could not be built" description={dayFeed.answer.error} />
-  if (replay && !dayFeed.ready) return <Alert type="info" showIcon message={`Loading the day's option ticks from TrueData… ${dayFeed.answer?.done ?? 0} of ${dayFeed.answer?.total ?? '?'} contracts`} description="One history call per option (ATM ± 10 over the day's range) - a few minutes the first time; the day is kept on the server after." />
-  if (!replay && !enabled) return <Alert type="info" showIcon message="The TrueData live feed is off" />
+  // Why there is nothing to show yet - said BELOW the filters, which stay on the card (size, quantity, × usual).
+  const notice = replay && dayFeed.error ? <Alert type="warning" showIcon message={`Big option orders: ${dayFeed.error}`} />
+    : replay && dayFeed.answer?.state === 'failed' ? <Alert type="warning" showIcon message="The day's option ticks could not be built" description={dayFeed.answer.error} />
+      : replay && !dayFeed.ready ? <Alert type="info" showIcon message={`Loading the day's option ticks from TrueData… ${dayFeed.answer?.done ?? 0} of ${dayFeed.answer?.total ?? '?'} contracts`} description="One history call per option (ATM ± 10 over the day's range) - a few minutes the first time; the day is kept on the server after." />
+        : !replay && !enabled ? <Alert type="info" showIcon message="The TrueData live feed is off" /> : null
 
   const columns = [
     { title: 'Time', dataIndex: 't', width: 78, render: (t) => hhmmss(t) },
@@ -83,7 +87,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, rep
         </Tooltip>
         <span>ATM ± <Select size="small" value={state?.strikes ?? 10} disabled={!isAdmin || !state?.underlying} style={{ width: 70 }} options={STRIKE_CHOICES.map((v) => ({ value: v, label: v }))} onChange={(v) => put(state.underlying, v)} /></span>
         </>)}
-        <Tooltip title={showLots ? 'At least this many lots in one tick (a lot = the contract\'s lot size). The page\'s Lots / Quantity switch changes the unit.' : 'At least this QUANTITY (units) in one tick - the page\'s Lots / Quantity switch is on Quantity.'}>
+        <Segmented size="small" value={unit} onChange={setUnit} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Quantity' }]} aria-label="Size unit" />
+        <Tooltip title={showLots ? 'At least this many lots in one tick (a lot = the contract\'s lot size).' : 'At least this QUANTITY (units) in one tick.'}>
           {showLots
             ? <span>≥ <InputNumber size="small" min={1} max={100000} value={minLots} onChange={(v) => setMinLots(v ?? TICK_ORDER_DEFAULTS.minLots)} style={{ width: 80 }} /> lots</span>
             : <span>≥ <InputNumber size="small" min={1} max={10_000_000} step={65} value={minQty} onChange={(v) => setMinQty(v ?? TICK_ORDER_DEFAULTS.minLots * 65)} style={{ width: 100 }} /> qty</span>}
@@ -94,6 +99,9 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, rep
         <span>Last <Select size="small" value={lookback} onChange={setLookback} style={{ width: 80 }} options={LOOKBACKS.map((m) => ({ value: m, label: `${m} min` }))} /></span>
         <Checkbox checked={sweepsOnly} onChange={(e) => setSweepsOnly(e.target.checked)}>Sweeps only</Checkbox>
       </Space>
+
+      {notice}
+      {!notice && (<>
 
       {replay && dayFeed.ready && (
         <Text type="secondary" style={{ fontSize: 12 }}>{`${index} · expiry ${dayFeed.answer.expiry} · from TrueData's tick history, orders of ${Math.round(TICK_ORDER_DEFAULTS.minLots)}+ lots and ${TICK_ORDER_DEFAULTS.multiple}× usual or more${dayFeed.answer.failed ? ` · ${dayFeed.answer.failed} contracts had no data` : ''}`}</Text>
@@ -129,6 +137,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, rep
 
       <Table size="small" pagination={false} columns={columns} dataSource={rows} scroll={{ x: 'max-content' }}
         locale={{ emptyText: (replay || state?.underlying) ? (orders.length ? 'No order passes the filters' : replay ? 'No big option order up to the clock' : 'No big option order yet') : 'Pick an index above' }} />
+
+      </>)}
 
       <FoldText id="tickBigOrders.how" className="oa-note" summary="How big option orders are read from TrueData's live ticks - and what they cannot tell">
         <div style={{ fontSize: 12 }}>
