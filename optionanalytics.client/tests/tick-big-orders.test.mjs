@@ -98,6 +98,7 @@ test('the card filters: calls / puts, buyers / sellers, far out-of-the-money hed
   assert.deepEqual(filterBigOrders(list, { type: 'puts' }), [list[1], list[3]])
   assert.deepEqual(filterBigOrders(list, { side: 'buy' }), [list[0], list[2]])
   assert.deepEqual(filterBigOrders(list, { hideFarOtm: 5 }), [list[2], list[3]])
+  assert.deepEqual(filterBigOrders(list, { onlyFarOtm: 5 }), [list[0], list[1]])
   assert.deepEqual(filterBigOrders(list, { cheapBelow: 50 }), [list[2], list[3]])
   assert.deepEqual(filterBigOrders(list, { type: 'puts', side: 'sell', hideFarOtm: 5 }), [list[3]])
 })
