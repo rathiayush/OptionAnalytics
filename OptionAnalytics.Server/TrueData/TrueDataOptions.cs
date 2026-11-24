@@ -66,8 +66,9 @@ public sealed class TrueDataLiveOptions
 
     /// <summary>The index whose OPTIONS (ATM +- OptionStrikes, calls and puts) are streamed for the Tick Flow page's big option orders
     /// ("NIFTY" / "BANKNIFTY", empty = none) - the page's choice (kept in a file) beats this first default. TrueData's trial allows
-    /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit; a second index's would not.</summary>
-    public string OptionsUnderlying { get; set; } = "";
+    /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit, both indices' (84) do not - so it is
+    /// ONE index, NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY").</summary>
+    public string OptionsUnderlying { get; set; } = "NIFTY";
     public int OptionStrikes { get; set; } = 10;
     public int MaxSymbols { get; set; } = 50;
 

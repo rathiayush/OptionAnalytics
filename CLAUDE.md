@@ -1776,8 +1776,8 @@ All must pass before committing.
   `TrueDataOptionChainSource`; the feed's option stream; client `TickBigOrdersCard.jsx`, `tickBigOrders.js`): the SAME TrueData login also streams the
   OPTIONS ATM +- N (default 10, calls and puts) of ONE index the page picks ("Options of: Off / NIFTY / BANKNIFTY", `PUT /api/tick-flow/options`, ADMIN
   ONLY, kept in `tick-flow-options.json` under `Live.StatePath`; `GET /api/tick-flow/options?since=` - the stream's state and the orders after a
-  sequence, a page timer with POLL_HEADERS) - the trial allows `Live:MaxSymbols` 50 symbols: the two futures and one index's 42 options fit, a second
-  index's would not (the cap is held, nearest the ATM first). THE CHAIN: `GET https://api.truedata.in/getOptionChain?user&password&symbol&expiry=yyyyMMdd&csv=true`
+  sequence, a page timer with POLL_HEADERS) - the trial allows `Live:MaxSymbols` 50 symbols: the two futures and one index's 42 options fit, both
+  indices' 84 do not, so it is ONE index and NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY"; the cap is held, nearest the ATM first). THE CHAIN: `GET https://api.truedata.in/getOptionChain?user&password&symbol&expiry=yyyyMMdd&csv=true`
   (TESTED against the trial account: "symbolid,symbol,series,isin,exchange,lotsize,strike,expiry,..." one row an option, names like NIFTY26120117350CE =
   index + yyMMdd + strike + CE / PE, the symbol id given - so the ids are known before the subscribe reply; an expiry with no chain answers empty - a
   date that is not an expiry, or one already past) - the nearest expiry that has one is found once a day by asking each day from today (not today after

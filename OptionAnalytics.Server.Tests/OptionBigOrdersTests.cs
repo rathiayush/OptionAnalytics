@@ -257,4 +257,24 @@ public sealed class OptionBigOrdersTests
         }
         finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
     }
+
+    [Fact]
+    public void WithNoChoiceMadeItIsNiftyAlone_BothIndicesOptionsDoNotFitUnderFiftySymbols()
+    {
+        var options = new TrueDataLiveOptions();
+        Assert.Equal("NIFTY", options.OptionsUnderlying);
+        // The two futures + 42 options of one index = 44 under 50; both indices' options would be 2 + 84.
+        Assert.True(2 + 42 <= options.MaxSymbols);
+        Assert.True(2 + 84 > options.MaxSymbols);
+        var feed = new TrueDataLiveFeed(Options.Create(new TrueDataOptions
+        {
+            Enabled = true, UserId = "u", Password = "p",
+            Live = new TrueDataLiveOptions
+            {
+                Enabled = true,
+                Instruments = new() { new() { Underlying = "NIFTY", Symbol = "NIFTY-I", LotSize = 65 }, new() { Underlying = "BANKNIFTY", Symbol = "BANKNIFTY-I", LotSize = 30 } },
+            },
+        }), NullLogger<TrueDataLiveFeed>.Instance);
+        Assert.Equal("NIFTY", feed.OptionsSnapshot().Underlying);
+    }
 }
