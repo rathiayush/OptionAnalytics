@@ -10,6 +10,7 @@ import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import OiReplayPage from './OiReplayPage.jsx'
 import GlobalFloating from './GlobalFloating.jsx'
 import OrderFlowPage from './OrderFlowPage.jsx'
+import TickFlowPage from './TickFlowPage.jsx'
 import ProfilesPage from './ProfilesPage.jsx'
 import SpotStructurePage from './SpotStructurePage.jsx'
 import SignalBacktestPage from './SignalBacktestPage.jsx'
@@ -1822,6 +1823,7 @@ export default function App() {
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
         <Route path="/order-flow" element={<OrderFlowPage />} />
+        <Route path="/tick-flow" element={<TickFlowPage />} />
         <Route path="/profiles" element={<ProfilesPage />} />
         <Route path="/structure" element={<SpotStructurePage />} />
         <Route path="/signal-backtest" element={<SignalBacktestPage />} />

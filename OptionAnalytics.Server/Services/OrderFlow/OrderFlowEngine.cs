@@ -593,6 +593,9 @@ public sealed class OrderFlowEngine
     /// server - started); everything traded before is NOT in the bars. Null before the first tick.</summary>
     public DateTimeOffset? RecordedFrom() { lock (_lock) return _recordedFrom; }
 
+    /// <summary>The day's running volume at the last tick (null before any) - a quote-only tick (TrueData's "bidask") carries it on.</summary>
+    public long? LastKnownVolume { get { lock (_lock) return _prevVolume; } }
+
     /// <summary>The IST day this engine holds, or null before its first event.</summary>
     public DateOnly? ExportDayDate() { lock (_lock) return _day == default ? null : _day; }
 

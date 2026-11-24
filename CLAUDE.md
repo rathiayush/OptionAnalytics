@@ -1692,6 +1692,22 @@ All must pass before committing.
   server's disk, 3 asked of Dhan (the first time - kept on the server now)" - and the runs list says how many days a
   running job asked of Dhan. The OI break reads are worked out once a completed bucket (`completedBuckets` - the same
   results, `prepareDay` a little faster on 3 / 5 / 15-minute buckets).
+- The TICK FLOW page (`/tick-flow`, `TickFlowPage.jsx`; asked for - "a tick by tick order flow page with TrueData ... deep charts and the footprint,
+  NIFTY and BANKNIFTY first"): TrueData's REAL-TIME tick WebSocket (`TrueDataLiveFeed`, `TrueData:Live:Enabled` OFF by default AND the login set -
+  `TrueData__UserId` / `TrueData__Password` in the environment or the git-ignored appsettings.Local.json, NEVER a committed file; `Live:Port` 8086 sandbox /
+  8084 production, `Live:Instruments` the symbols with their lot / tick size - NIFTY-I 65 / 0.05, BANKNIFTY-I 30 / 0.20: NSE changes lot sizes, update them
+  there) into ITS OWN `OrderFlowEngine` per index - the Dhan engines and the Order Flow page are untouched. Spec v2.6: a "trade" message per trade carries
+  its OWN quantity (LTQ), the day's running volume (TTQ), a SEQUENCE number (gaps are counted - `sequenceGaps`, shown "N lost") and the best bid / ask in the
+  same packet; a "bidask" message when only the quote moved (`TrueDataLiveParser`, pure). Each becomes a `SpotTick` whose `LastTradedQty` is the volume
+  it adds, so a trade is read exactly (no several-trades-in-one-snapshot guess) and sided by the engine's rule against the quote BEFORE it. A quote before
+  the first trade is held back (it would make the first trade's whole day volume one print - the first TRADE sets the baseline). Connects only IST weekday
+  08:30 - 15:45 inside `MarketHours.BackgroundScope`; one connection per account, so a refusal ("User Already Connected", a wrong login) backs off 5 min, never a
+  loop; a drop backs off 5 s doubling to 2 min. Memory only (a restart starts the day again). NSE DEPTH IS LEVEL 1 ONLY on TrueData (BSE has 5): the "deep
+  chart" is the best bid / ask TRAIL on `DepthHeatmap` (one level a side, said on the card), not a 20 / 200-level book - that stays Dhan's, on the Order Flow
+  page. `GET /api/tick-flow/status` / `{underlying}` (the Order Flow snapshot's shape, so the charts are the Order Flow page's own `FootprintChart` /
+  `DepthHeatmap` / `CumulativeDeltaChart`) / `{underlying}/tape`, Admin / User (External denied by default), the page polls every 2 s with `POLL_HEADERS`.
+  `TrueDataLiveTests.cs`; checked in a browser with a mocked API (NOT against the real feed - run it with the trial login to compare TrueData's delta with
+  the Order Flow page's). A read - no strategy, alert or order.
 - ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
   telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
   `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures
