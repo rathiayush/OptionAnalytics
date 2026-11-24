@@ -89,3 +89,15 @@ test('a whole replayed day: oldest first, none dropped past the live cap, cut at
   assert.equal(ordersUpTo(day, t0 + 9_000).length, 10)
   assert.equal(ordersUpTo(day, null).length, 2500)
 })
+
+test('the card filters: calls / puts, buyers / sellers, far out-of-the-money hedges and a price under X', async () => {
+  const { filterBigOrders } = await import('../src/tickBigOrders.js')
+  const o = (type, atmDistance, side, price) => ({ type, atmDistance, side, price })
+  const list = [o('CE', 6, 1, 3), o('PE', -7, -1, 40), o('CE', 1, 1, 120), o('PE', 4, -1, 200)]
+  assert.equal(filterBigOrders(list).length, 4)
+  assert.deepEqual(filterBigOrders(list, { type: 'puts' }), [list[1], list[3]])
+  assert.deepEqual(filterBigOrders(list, { side: 'buy' }), [list[0], list[2]])
+  assert.deepEqual(filterBigOrders(list, { hideFarOtm: 5 }), [list[2], list[3]])
+  assert.deepEqual(filterBigOrders(list, { cheapBelow: 50 }), [list[2], list[3]])
+  assert.deepEqual(filterBigOrders(list, { type: 'puts', side: 'sell', hideFarOtm: 5 }), [list[3]])
+})
