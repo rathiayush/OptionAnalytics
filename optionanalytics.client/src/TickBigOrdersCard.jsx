@@ -48,9 +48,10 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const [farOtmSteps, setFarOtmSteps] = usePersistedState('optionanalytics.tickFlow.farOtmSteps', 5)
   const [hideCheap, setHideCheap] = usePersistedState('optionanalytics.tickFlow.hideCheap', false)
   const [cheapBelow, setCheapBelow] = usePersistedState('optionanalytics.tickFlow.cheapBelow', 10)
+  const [oiOnly, setOiOnly] = usePersistedState('optionanalytics.tickFlow.oiChangedOnly', false)
   const sized = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
-  const big = useMemo(() => filterBigOrders(sized, { type: typeOnly, side: sideOnly, hideFarOtm: hedgeMode === 'hide' ? farOtmSteps : 0, onlyFarOtm: hedgeMode === 'only' ? farOtmSteps : 0, cheapBelow: hideCheap ? cheapBelow : 0 }),
-    [sized, typeOnly, sideOnly, hedgeMode, farOtmSteps, hideCheap, cheapBelow])
+  const big = useMemo(() => filterBigOrders(sized, { type: typeOnly, side: sideOnly, hideFarOtm: hedgeMode === 'hide' ? farOtmSteps : 0, onlyFarOtm: hedgeMode === 'only' ? farOtmSteps : 0, cheapBelow: hideCheap ? cheapBelow : 0, oiChangedOnly: oiOnly }),
+    [sized, typeOnly, sideOnly, hedgeMode, farOtmSteps, hideCheap, cheapBelow, oiOnly])
   const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback), [big, replay, clockMs, now, lookback])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
@@ -113,6 +114,9 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
           <span>Hedge positions (deep OTM calls and puts) <Segmented size="small" value={hedgeMode} onChange={setHedgeMode} options={[{ value: 'all', label: 'All' }, { value: 'hide', label: 'Hide' }, { value: 'only', label: 'Only' }]} aria-label="Hedge positions" /> ≥ <Select size="small" value={farOtmSteps} onChange={setFarOtmSteps} style={{ width: 60 }} options={Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: i + 1 }))} /> strikes out</span>
         </Tooltip>
         <Checkbox checked={hideCheap} onChange={(e) => setHideCheap(e.target.checked)}>Hide price under ₹ <InputNumber size="small" min={0} max={5000} value={cheapBelow} onChange={(v) => setCheapBelow(v ?? 10)} style={{ width: 72 }} onClick={(e) => e.stopPropagation()} /></Checkbox>
+        <Tooltip title="Only orders where the option's open interest actually changed - a real position (long / short build-up, covering, unwinding). Orders with no OI change are plain 'bought' / 'sold' and are left out when this is ticked.">
+          <Checkbox checked={oiOnly} onChange={(e) => setOiOnly(e.target.checked)}>OI changed only</Checkbox>
+        </Tooltip>
         <Checkbox checked={sweepsOnly} onChange={(e) => setSweepsOnly(e.target.checked)}>Sweeps only</Checkbox>
       </Space>
 
