@@ -1794,10 +1794,10 @@ All must pass before committing.
   at / through the bid = sold, inside the nearer half, then the tick rule; the packet's own quote is the next tick's "before"), HOW IT HIT THE BOOK
   (`TouchRatio` = its size over the size shown at the touch it took, `Through` = its price went past the touch - a sweep), `Ratio`, the OI change since
   the option's tick before (OI is in the trade message - with the side it is read as long build-up / short build-up / short covering / long unwinding by
-  OI Replay's `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
+  `tickReads.js`' `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
   before and the distance from the ATM. The page adds the strikes up over the last 5 - 60 min by kind (calls bought / puts bought / calls written / puts
-  written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `bigOptionTrades.js`'s
-  `markSweeps` / `bigTradesSummary` (OI Replay's own module - NOT the Order Flow page's). Live only: a past day would need the tick history of ~42 option
+  written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `tickReads.js`'s
+  `readOf` / `markSweeps` / `bigTradesSummary` (the page's OWN copy - TrueData and Dhan data are never mixed: nothing here imports OI Replay's Dhan-bar `bigOptionTrades.js`, nor the Order Flow page's code). Live only: a past day would need the tick history of ~42 option
   contracts (5 calls a second, flaky). NOT TESTED AGAINST THE LIVE SOCKET (the sandbox cannot reach it): the real trade message's LTQ / OI fields,
   whether option ticks come as often as the futures' (the history of options was not measured) and whether `addsymbol` / `removesymbol` mid-stream
   behave as the Python client's use implies - the status line ("N of M option symbols streaming · ticks · last tick") and the raw-message box show it.
@@ -1823,16 +1823,16 @@ All must pass before committing.
   error that works seconds later), all ticks merged by time through one `OptionBigOrderWatch` (ATM from put-call parity every 30 s, orders outside ATM +- N
   dropped, floor 30 lots / 3x usual, at most 20 000 - over it the BIGGEST kept). A day takes minutes the first time (70 contracts ~ 7 min on the trial; some
   contracts come back empty - counted as "without data"), then it is in memory (4 days). The page polls every 3 s while it builds (`POLL_HEADERS`), holds the
-  whole day (`ordersOfDay`, uncapped) and cuts at the replay clock (`ordersUpTo`) - on the Tick Flow card (summary at the clock) and OI Replay's spot markers
-  (the minute shown counted whole). The 20 Nov / 23 Nov trial days work; `OptionTickHistoryDaysTests.cs`, `tests/tick-big-orders.test.mjs`.
-  BIG OPTION ORDERS ON OI REPLAY'S SPOT CHART (asked for - "I also want it on spot charts ... I should be able to define quantity"): the spot card's
-  "Big option orders (live ticks)" tick (`optionanalytics.oiReplay.bigOrdersOnSpot`, off by default) with the size in LOTS or in QUANTITY (units - a Lots / Qty
-  switch, each keeping its own number: `...bigOrdersLots` 30, `...bigOrdersQty` 1950) draws the Tick Flow page's orders as markers on the candles
-  (`orderMarkers` in `tickBigOrders.js`, merged with the absorption marks and sorted): a green arrow under the candle for a bullish order (call bought / put
-  written ...), a red one over it for a bearish one, a grey dot for no direction, one marker a candle and direction - "CE 25000 B 80 L" for one order, "3× 190 L" for
-  several, a ⚡ for a sweep. Only the size decides here (no "x usual" test). LIVE only, only when the tick stream is on THIS index (the status text says which
-  index it is on, or that none is - an admin picks it on the Tick Flow page), never in the popup host. The Tick Flow card has the same Lots / Quantity choice
-  (its own switch - `bigMinQty`). One hook - `useBigOptionOrders` - polls the orders for both. Not drawn on the Profiles / Structure pages' spot charts.
+  whole day (`ordersOfDay`, uncapped) and cuts at the replay clock (`ordersUpTo`) - on the Tick Flow card (summary at the clock). The 20 Nov / 23 Nov trial days work; `OptionTickHistoryDaysTests.cs`, `tests/tick-big-orders.test.mjs`.
+  THE OPTION LIQUIDITY MAP ON THE TICK FLOW PAGE (asked for - "add it on order flow tick because it was related to TrueData"; `TickLiquidityMap.jsx`, the maths
+  `tickLiquidityMap.js`, inside the Big option orders card above its table): strikes x time (1 / 3 / 5 / 15 min buckets, the newest that fit at >= 6 px), each cell
+  the MONEY of the card's big orders (its size filters applied, live or up to the replay clock) in the colour of the kind with most money in it - FOUR colours, one
+  per `kindOf` kind: calls bought green and puts written blue (the bullish pair, cool), puts bought red and calls written orange (the bearish pair, warm) - as deep
+  as the cell's rupees against the 95th percentile of the cells in view; the near FUTURES price (TrueData has no index feed) as a white line across it from the page's
+  1-minute bars; hover = the cell's money by kind. An order with no read (no side) is left out; written kinds need an OI reading. The strike step is 50 (NIFTY) /
+  100 (BANKNIFTY). A read - no strategy or alert (`tests/tick-liquidity-map.test.mjs`; not checked in a browser).
+  TRUEDATA STAYS OFF THE OI REPLAY PAGE (asked for - "with TrueData changes do not touch OI Replay page"): the big option orders were once drawn as markers on OI Replay's
+  spot chart; that was REMOVED (tick, controls, hook use) - TrueData's orders and the liquidity map live on the Tick Flow page only. Do not wire TrueData data into OI Replay.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,

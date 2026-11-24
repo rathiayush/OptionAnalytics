@@ -304,6 +304,7 @@ test('cards added since a "Sections shown" was saved come in ONCE - by the versi
   assert.deepEqual(withAddedSections(['gex'], '8'), ['gex', 'trapZones', 'bigOptionTrades'])
   assert.deepEqual(withAddedSections(['gex'], '9'), ['gex', 'bigOptionTrades'])
   assert.deepEqual(withAddedSections(['gex'], '10'), ['gex'])
+  assert.deepEqual(withAddedSections(['gex'], '11'), ['gex'])
   assert.deepEqual(withAddedSections(['futuresDeltaProfile', 'futures', 'gexSpot'], '3'), ['futuresDeltaProfile', 'futures', 'gexSpot', 'dex', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'bigOptionTrades'])
   assert.equal(withAddedSections(null, '3'), null)
 })

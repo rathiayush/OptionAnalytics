@@ -4,6 +4,7 @@ import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText, ordersUpTo } from './tickBigOrders.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
+import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
 const { Text } = Typography
 const SHOWN = 50
@@ -25,7 +26,7 @@ const KINDS = [
  * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only. The size is set in lots or in
  * QUANTITY (units) - the page's Lots / Quantity switch (`showLots`), each unit keeping its own number.
  */
-export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, replayDate, clockMs }) {
+export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, replayDate, clockMs, priceBars }) {
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.bigMinLots', TICK_ORDER_DEFAULTS.minLots)
   const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.bigMinQty', TICK_ORDER_DEFAULTS.minLots * 65)
   const [multiple, setMultiple] = usePersistedState('optionanalytics.tickFlow.bigMultiple', TICK_ORDER_DEFAULTS.multiple)
@@ -123,6 +124,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots = true, index, rep
           </div>
         ))}
       </Space>
+
+      <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
 
       <Table size="small" pagination={false} columns={columns} dataSource={rows} scroll={{ x: 'max-content' }}
         locale={{ emptyText: (replay || state?.underlying) ? (orders.length ? 'No order passes the filters' : replay ? 'No big option order up to the clock' : 'No big option order yet') : 'Pick an index above' }} />
