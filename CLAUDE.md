@@ -1819,6 +1819,11 @@ All must pass before committing.
   `HEDGE_STEPS` (3, picked 2 - 5 on the card, `optionanalytics.tickFlow.hedgeSteps`) or more strikes IN the money is a LIKELY HEDGE (it trades like the index; mostly a
   hedge or stock replacement) - tagged "HEDGE?" in the table, counted in the summary, and left out of the lean, the delta flow, the map and the table by the "Hide
   likely hedges" tick (`...hideHedges`, off by default). An order with no read (no side) has no delta. A lean, not intent (`tests/tick-big-orders.test.mjs`).
+  WHO, AND FAR OUT-OF-THE-MONEY (asked for - "give option to select sell only, buyers only, both" and "hedge is not deep in the money, it is deep out of
+  the money ... 1-10, or a price under something"): the card's "Buyers + sellers / Buyers only / Sellers only" switch (`optionanalytics.tickFlow.sideOnly`, by the
+  order's BUY / SELL) and two more filters that leave orders out of the lean, the delta flow, the map and the table - "Hide far OTM (>= N strikes out)", N 1 - 10
+  (`isFarOtm`, `...hideFarOtm` / `...farOtmSteps`, default 5; tagged FAR OTM on the table) and "Hide price under ₹ X" (`isCheap`, `...hideCheap` / `...cheapBelow`,
+  default 10) - beside the deep-in-the-money HEDGE? one, which stays. All in `tickReads.js`; TrueData only.
   THE OPTION LIQUIDITY MAP ON THE TICK FLOW PAGE (asked for - "add it on order flow tick because it was related to TrueData"; `TickLiquidityMap.jsx`, the maths
   `tickLiquidityMap.js`, inside the Big option orders card above its table): strikes x time (1 / 3 / 5 / 15 min buckets, the newest that fit at >= 6 px), each cell
   the MONEY of the card's big orders (its size filters applied, live or up to the replay clock) in the colour of the kind with most money in it - FOUR colours, one

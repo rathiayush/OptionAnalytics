@@ -107,3 +107,9 @@ export const deltaLots = (e) => kindSign(e) * e.lots * deltaApprox(e)
 
 /** A deep in-the-money order (>= `steps` strikes) - likely a hedge or stock replacement rather than a directional bet. */
 export const isLikelyHedge = (e, steps = HEDGE_STEPS) => itmSteps(e) >= steps
+
+/** A FAR OUT-OF-THE-MONEY order (>= `steps` strikes out; asked for - "hedge is deep OUT of the money": tail-protection puts / calls) - cheap, lottery-ticket or insurance flow. */
+export const isFarOtm = (e, steps) => steps > 0 && itmSteps(e) <= -steps
+
+/** A cheap premium (under `below` rupees; 0 = off) - the far strikes' tail hedges. */
+export const isCheap = (e, below) => below > 0 && e.price < below

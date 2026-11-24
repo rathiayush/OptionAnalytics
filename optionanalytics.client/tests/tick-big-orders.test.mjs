@@ -115,3 +115,17 @@ test('the summary adds the delta flow and counts likely hedges', () => {
   assert.equal(Math.round(s.netDeltaLots), Math.round(100 * 0.97 - 100 * 0.5))
   assert.equal(s.hedges, 1)
 })
+
+test('far out-of-the-money and cheap orders are told apart', async () => {
+  const { isFarOtm, isCheap } = await import('../src/tickReads.js')
+  const call = (atmDistance, price) => ({ type: 'CE', atmDistance, price })
+  const put = (atmDistance, price) => ({ type: 'PE', atmDistance, price })
+  assert.equal(isFarOtm(call(6, 3), 5), true)
+  assert.equal(isFarOtm(call(4, 30), 5), false)
+  assert.equal(isFarOtm(put(-7, 2), 5), true)
+  assert.equal(isFarOtm(put(-7, 2), 0), false)
+  assert.equal(isFarOtm(call(-6, 400), 5), false)
+  assert.equal(isCheap(call(6, 3), 10), true)
+  assert.equal(isCheap(call(6, 30), 10), false)
+  assert.equal(isCheap(call(6, 3), 0), false)
+})
