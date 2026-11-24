@@ -29,6 +29,9 @@ public sealed class TrueDataLiveFeed : BackgroundService
     private volatile string? _lastError;
     private DateTimeOffset? _connectedAt, _lastFrameAt;
     private long _frames;
+    // The newest raw messages (heartbeats left out, each cut at 400 characters - they hold no login): what TrueData actually sends, for the
+    // page to show when nothing arrives. A message has no credentials in it.
+    private readonly Queue<string> _recent = new();
 
     public TrueDataLiveFeed(IOptions<TrueDataOptions> options, ILogger<TrueDataLiveFeed> logger)
     {
@@ -50,7 +53,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
         public long Quotes;
     }
 
-    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams);
+    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames);
     public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
     public TickBook? BookFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Book : null;
@@ -65,7 +68,19 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 {
                     var m = s.Book.Meta();
                     return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.BookedVolume, m.ExchangeVolume, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
-                }).ToList());
+                }).ToList(), RecentFramesCopy());
+    }
+
+    private string[] RecentFramesCopy() { lock (_recent) return _recent.ToArray(); }
+
+    private void Remember(string text, string kind)
+    {
+        if (kind == "heartbeat") return;
+        lock (_recent)
+        {
+            _recent.Enqueue(text.Length > 400 ? text[..400] + "…" : text);
+            while (_recent.Count > 12) _recent.Dequeue();
+        }
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -136,6 +151,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             _lastFrameAt = DateTimeOffset.UtcNow;
             Interlocked.Increment(ref _frames);
             var frame = TrueDataLiveParser.Parse(text);
+            Remember(text, frame.Kind);
             switch (frame.Kind)
             {
                 case "login" when !subscribed:

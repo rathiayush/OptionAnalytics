@@ -176,6 +176,25 @@ export default function TickFlowPage() {
         {!off && error && <Alert type="warning" showIcon message={error} />}
         {status?.status?.error && !off && <Alert type="warning" showIcon message={`TrueData: ${status.status.error}`} />}
 
+        {!off && !replay && status?.status && (!stream || stream.trades === 0) && (
+          <Alert type="info" showIcon
+            message={`Nothing traded yet - feed: ${status.status.state}${status.status.error ? ` (${status.status.error})` : ''}`}
+            description={(
+              <div>
+                <div>
+                  {status.status.frames.toLocaleString()} messages received · last {status.status.lastFrameAt ? new Date(status.status.lastFrameAt).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata' }) : 'never'} IST · {status.status.port}.
+                  {' '}It connects 08:30 - 15:45 IST on weekdays and TrueData's sandbox sends trades only while the market trades (09:15 - 15:30).
+                </div>
+                {(status.status.recentFrames ?? []).length > 0 && (
+                  <>
+                    <div style={{ marginTop: 6 }}>The newest messages TrueData sent (select and copy):</div>
+                    <pre style={{ margin: 0, maxHeight: 180, overflow: 'auto', fontSize: 11, whiteSpace: 'pre-wrap', userSelect: 'all' }}>{status.status.recentFrames.join('\n')}</pre>
+                  </>
+                )}
+              </div>
+            )} />
+        )}
+
         {replay && (
           <Card size="small">
             {!range
