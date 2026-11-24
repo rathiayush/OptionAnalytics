@@ -874,14 +874,6 @@ All must pass before committing.
   minute uses only the bars up to it - a cut at any clock = the whole day's up to it; live the forming minute is left out
   (`tests/big-option-trades.test.mjs`). A big minute can be many small trades and a hedger looks like a buyer: a lead to check against the
   OI, straddle and flow, not a signal - it feeds no strategy or alert.
-- OI Replay's OI LIQUIDITY MAP card (asked for - "a liquidity map type of component which will also show spot price and PE and CE, choose 4 colors";
-  `oiLiquidityMap` - `OiLiquidityMapCard.jsx`, the maths `oiLiquidityMap.js`, section version 11 / `SECTIONS_VERSION` '11', added once right after the OI
-  change heatmap): strikes up the side (ATM +- 5 / 8 / 10 / 15 of the tracked strikes), time along the bottom (1 / 3 / 5 / 15 min buckets, the newest that fit at
-  >= 7 px a column), each cell SPLIT - the CALL half left, the PUT half right - in FOUR colours: calls added red, calls cut orange, puts added green, puts cut
-  blue (`LIQ_COLORS`), as deep as the bucket's OI change against the 95th percentile of the changes in view; the SPOT price a white line across it (1-minute
-  closes at their own time, on a dark outline); hover = strike, time, call and put change. Each cell is the page's own `buildOiChangeMatrix` (passed in as
-  `buildMatrix` - no import cycle), so the Σ 3 expiries sum, the live-seam rule and "readings up to the clock" are the OI heatmap's. A read - no strategy or
-  alert (`tests/oi-liquidity-map.test.mjs`; not checked in a browser).
 - THE FOOTPRINTS DO NOT TAKE THE WHEEL (asked about - "footprint chart ... I can not scroll on big screens"; the Order Flow page's footprint
   `OrderFlowCharts.jsx`, the Tick Flow footprint and bubble chart): the chart cancelled every wheel event, so on a big screen - where the chart
   fills the window - the page could not be scrolled with the pointer over it. A plain wheel now SCROLLS THE PAGE; Ctrl / Cmd + wheel (a
@@ -1839,8 +1831,7 @@ All must pass before committing.
   per `kindOf` kind: calls bought green and puts written blue (the bullish pair, cool), puts bought red and calls written orange (the bearish pair, warm) - as deep
   as the cell's rupees against the 95th percentile of the cells in view; the near FUTURES price (TrueData has no index feed) as a white line across it from the page's
   1-minute bars; hover = the cell's money by kind. An order with no read (no side) is left out; written kinds need an OI reading. The strike step is 50 (NIFTY) /
-  100 (BANKNIFTY). A read - no strategy or alert (`tests/tick-liquidity-map.test.mjs`; not checked in a browser). OI Replay's own OI liquidity map card (Dhan OI
-  change by strike) is separate.
+  100 (BANKNIFTY). A read - no strategy or alert (`tests/tick-liquidity-map.test.mjs`; not checked in a browser).
   BIG OPTION ORDERS ON OI REPLAY'S SPOT CHART (asked for - "I also want it on spot charts ... I should be able to define quantity"): the spot card's
   "Big option orders (live ticks)" tick (`optionanalytics.oiReplay.bigOrdersOnSpot`, off by default) with the size in LOTS or in QUANTITY (units - a Lots / Qty
   switch, each keeping its own number: `...bigOrdersLots` 30, `...bigOrdersQty` 1950) draws the Tick Flow page's orders as markers on the candles

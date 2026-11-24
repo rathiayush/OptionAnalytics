@@ -44,7 +44,6 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { TrapZonesCard } from './TrapZonesCard.jsx'
 import { BigOptionTradesCard } from './BigOptionTradesCard.jsx'
-import { OiLiquidityMapCard } from './OiLiquidityMapCard.jsx'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
 import { bigEnough, orderMarkers, ordersUpTo } from './tickBigOrders.js'
 import { StraddleCard } from './StraddleCard.jsx'
@@ -761,7 +760,6 @@ const SECTION_OPTIONS = [
   { value: 'optionCdvObvProfile', label: 'Option CDV / OBV profile (on spot)' },
   { value: 'trapZones', label: 'Trapped / squeeze zones' },
   { value: 'bigOptionTrades', label: 'Big option trades (ATM ± 10)' },
-  { value: 'oiLiquidityMap', label: 'OI liquidity map (strikes x time, spot, CE / PE)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -803,7 +801,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'bigOptionTrades', 'oiLiquidityMap', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'bigOptionTrades', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -7645,19 +7643,6 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   <BigOptionTradesCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
                     underlying={underlying} isLive={isLive}
-                  />
-                </Card>
-              </LiveSection>
-              </DashboardCard>
-            )}
-            {/* OI LIQUIDITY MAP (OiLiquidityMapCard.jsx, oiLiquidityMap.js): strikes x time, the call / put OI added or cut in four colours, spot across it. */}
-            {visibleSections.includes('oiLiquidityMap') && (
-              <DashboardCard key="oiLiquidityMap" {...dash('oiLiquidityMap')}>
-              <LiveSection version={sectionVersion}>
-                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />OI liquidity map (CE / PE OI change by strike, with spot){isLive ? ' · live' : ''}</Space>}>
-                  <OiLiquidityMapCard
-                    ceByStrike={ceByStrike} peByStrike={peByStrike} strikes={heatmapStrikes} atmStrike={atmStrike} asOfMs={asOfMs}
-                    spotBars={oneMinBars} buildMatrix={buildOiChangeMatrix}
                   />
                 </Card>
               </LiveSection>

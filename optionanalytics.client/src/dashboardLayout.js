@@ -63,7 +63,6 @@ const CARD_ROWS = {
   optionCdvObvProfile: 20,
   trapZones: 24,
   bigOptionTrades: 20,
-  oiLiquidityMap: 20,
   futuresDeltaProfile: 20,
 }
 export const defaultRows = (id) => CARD_ROWS[id] ?? DEFAULT_ROWS
@@ -334,8 +333,6 @@ export const SECTION_ADDITIONS = [
   { version: 9, card: 'trapZones', after: 'optionCdvObvProfile' },
   // Big option trades (asked for - "identify big trades on option buy combining the data from ATM +- 10").
   { version: 10, card: 'bigOptionTrades', after: 'trapZones' },
-  // The OI liquidity map (asked for - "a liquidity map type of component ... spot price and PE and CE, 4 colors").
-  { version: 11, card: 'oiLiquidityMap', after: 'oiHeatmap' },
 ]
 
 /** A saved choice of cards (`stored`, saved at `savedVersion` - none = before any) with the cards added since. */
@@ -398,7 +395,7 @@ export const LAYOUT_VERSION = '2'
 // and bring back an OI totals card someone hid.
 // '4' added the two delta profiles (SECTION_ADDITIONS), '5' the GEX levels on spot, '6' the volatility skew.
 export const STORED_SECTIONS_VERSION = 'optionanalytics.oiReplay.sectionsVersion'
-export const SECTIONS_VERSION = '11'
+export const SECTIONS_VERSION = '10'
 
 // ---- Charts first ----
 // The charts are the cards' main part: where no card is sized (a sized card's own fit decides there), each chart stands

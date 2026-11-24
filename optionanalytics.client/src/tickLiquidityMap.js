@@ -5,7 +5,6 @@
 // the futures price (TrueData's near future - the index itself is not on this feed) runs across it. Only orders up to the replay clock are passed in, so a
 // cut at any clock = the whole day's up to it. A read - it feeds no strategy or alert.
 import { kindOf } from './bigOptionTrades.js'
-import { spotRowPosition } from './oiLiquidityMap.js'
 
 export const TLM_COLORS = { ceBought: '#26a69a', peWritten: '#42a5f5', peBought: '#ef5350', ceWritten: '#ff9800' }
 export const TLM_LABELS = { ceBought: 'Calls bought (bullish)', peWritten: 'Puts written (bullish)', peBought: 'Puts bought (bearish)', ceWritten: 'Calls written (bearish)' }
@@ -68,4 +67,11 @@ export function tickLiquidityDepth(total, scale) {
 }
 
 /** The price's row position on the strike rows (0 = the top row's centre), or null outside them - the OI map's rule. */
-export const priceRowPosition = spotRowPosition
+export function priceRowPosition(price, rows) {
+  if (!rows.length || !Number.isFinite(price)) return null
+  const top = rows[0]
+  const bottom = rows[rows.length - 1]
+  const step = rows.length > 1 ? (top - bottom) / (rows.length - 1) : 1
+  if (price > top + step / 2 || price < bottom - step / 2) return null
+  return (top - price) / step
+}
