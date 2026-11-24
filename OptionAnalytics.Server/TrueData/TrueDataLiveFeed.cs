@@ -39,12 +39,14 @@ public sealed class TrueDataLiveFeed : BackgroundService
         _options = options.Value;
         _logger = logger;
         _transport = LoadTransport();
+        ChainSource = new TrueDataOptionChainSource(_options);
         foreach (var i in _options.Live.Instruments.Where(i => i.Underlying.Length > 0 && i.Symbol.Length > 0))
         {
             var stream = new Stream(i, new TickBook(i.Underlying.ToUpperInvariant(), i.Symbol, i.LotSize, i.TickSize));
             _byUnderlying[i.Underlying] = stream;
             _byName[i.Symbol] = stream;
         }
+        (_optUnderlying, _optStrikes) = LoadOptions();   // after the instruments: the index picked must be one of them
     }
 
     public sealed class Stream
@@ -55,7 +57,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
         public long Quotes;
     }
 
-    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames, string Transport);
+    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames, string Transport, OptionsStatus Options);
     public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
     private volatile string _transport = "websocket";
@@ -93,6 +95,190 @@ public sealed class TrueDataLiveFeed : BackgroundService
         return string.Equals(_options.Live.Transport, "tcp", StringComparison.OrdinalIgnoreCase) ? "tcp" : "websocket";
     }
 
+    // ---- BIG OPTION ORDERS: the options' ticks (ATM +- N of the index picked on the page), watched for big orders ----
+    private readonly OptionBigOrderWatch _watch = new();
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private readonly HashSet<string> _subscribedOptions = new(StringComparer.Ordinal);
+    private volatile Func<string, Task>? _sender;
+    private int _epoch, _subscribedEpoch = -1;
+    private string _optUnderlying = "";
+    private string _subscribedFor = "";
+    private int _optStrikes = 10;
+    private Dictionary<string, OptionContract>? _chain;
+    private DateOnly _chainDay;
+    private DateOnly? _chainExpiry;
+    private decimal _optStep = 50, _optCentre;
+    private string? _optError;
+    private DateTimeOffset _chainRetryAt;
+    private TimeSpan _chainBackoff = TimeSpan.FromSeconds(30);
+
+    public OptionBigOrderWatch Watch => _watch;
+    /// <summary>Where the option chain comes from (TrueData's REST master; a test sets a fake).</summary>
+    internal IOptionChainSource ChainSource { get; set; }
+
+    public sealed record OptionsStatus(string Underlying, int Strikes, string? Expiry, decimal Atm, decimal Step, int Subscribed, int Cap, long Ticks,
+        DateTimeOffset? LastTickAt, long LastSeq, string? Error);
+
+    public OptionsStatus OptionsSnapshot()
+    {
+        var m = _watch.Meta();
+        return new OptionsStatus(_optUnderlying, _optStrikes, _chainExpiry?.ToString("yyyy-MM-dd"), _optCentre, _optStep, _subscribedOptions.Count,
+            Math.Max(0, _options.Live.MaxSymbols - _byUnderlying.Count), m.Ticks, m.LastTickAt, m.LastSeq, _optError);
+    }
+
+    private string? OptionsFile => string.IsNullOrWhiteSpace(_options.Live.StatePath) ? null : Path.Combine(_options.Live.StatePath, "tick-flow-options.json");
+
+    private (string, int) LoadOptions()
+    {
+        var underlying = _options.Live.OptionsUnderlying?.Trim().ToUpperInvariant() ?? "";
+        var strikes = _options.Live.OptionStrikes;
+        try
+        {
+            if (OptionsFile is { } f && File.Exists(f))
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(f));
+                if (doc.RootElement.TryGetProperty("underlying", out var u) && u.ValueKind == System.Text.Json.JsonValueKind.String) underlying = u.GetString()!.ToUpperInvariant();
+                if (doc.RootElement.TryGetProperty("strikes", out var k) && k.TryGetInt32(out var n)) strikes = n;
+            }
+        }
+        catch { }
+        return (_byUnderlying.ContainsKey(underlying) ? underlying : "", Math.Clamp(strikes, 1, 15));
+    }
+
+    /// <summary>The index whose options are watched ("" = none) and how many strikes each side of the ATM. Kept in a file. False for an index that is not streamed.</summary>
+    public bool SetOptions(string? underlying, int strikes)
+    {
+        var u = underlying?.Trim().ToUpperInvariant() ?? "";
+        if (u.Length > 0 && !_byUnderlying.ContainsKey(u)) return false;
+        _optUnderlying = u;
+        _optStrikes = Math.Clamp(strikes, 1, 15);
+        _optError = null;
+        try
+        {
+            if (OptionsFile is { } f)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(f)!);
+                File.WriteAllText(f, System.Text.Json.JsonSerializer.Serialize(new { underlying = u, strikes = _optStrikes }));
+            }
+        }
+        catch (Exception ex) { _logger.LogWarning("TrueData live feed: the option choice was not saved: {Error}", ex.Message); }
+        return true;
+    }
+
+    /// <summary>A connection that has logged in and subscribed the futures: the option stream sends through it (null = none - the connection ended).</summary>
+    internal void UseConnection(Func<string, Task>? send)
+    {
+        if (send is not null) _epoch++;
+        _sender = send;
+    }
+
+    private async Task LockedSend(Func<Task> send)
+    {
+        await _sendGate.WaitAsync();
+        try { await send(); } finally { _sendGate.Release(); }
+    }
+
+    private async Task OptionsLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            try { await Task.Delay(TimeSpan.FromSeconds(5), token); } catch (OperationCanceledException) { return; }
+            if (!InWindow(DateTimeOffset.UtcNow)) continue;
+            try { await SyncOptionsAsync(DateTimeOffset.UtcNow, token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+            catch (Exception ex) { _optError = ex.Message; _logger.LogWarning("TrueData option stream: {Error}", ex.Message); }
+        }
+    }
+
+    /// <summary>One round: keep the subscribed options ATM +- N of the index picked (the ATM from the options' own put-call parity once they tick, else
+    /// the futures' price), within the symbol cap - adds the new strikes, drops those two steps past the window. A new connection starts with only the futures,
+    /// so everything is subscribed again. Internal for the tests.</summary>
+    internal async Task SyncOptionsAsync(DateTimeOffset now, CancellationToken token)
+    {
+        var send = _sender;
+        if (send is null) return;
+        if (_subscribedEpoch != _epoch) { _subscribedOptions.Clear(); _subscribedEpoch = _epoch; }
+        var u = _optUnderlying;
+        if (u.Length == 0 || !_byUnderlying.TryGetValue(u, out var stream))
+        {
+            if (_subscribedOptions.Count > 0) await RemoveOptionsAsync(send, _subscribedOptions.ToList());
+            _chain = null; _subscribedFor = "";
+            return;
+        }
+        if (_subscribedFor != u)
+        {
+            if (_subscribedOptions.Count > 0) await RemoveOptionsAsync(send, _subscribedOptions.ToList());
+            _watch.Clear(); _chain = null; _subscribedFor = u;
+        }
+        var today = IstClock.IstDate(now);
+        if (_chain is null || _chainDay != today)
+        {
+            if (now < _chainRetryAt) return;
+            try { await LoadChainAsync(u, now, token); _chainBackoff = TimeSpan.FromSeconds(30); _optError = null; }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception ex)
+            {
+                _optError = ex.Message;
+                _chainRetryAt = now + _chainBackoff;
+                _chainBackoff = TimeSpan.FromSeconds(Math.Min(600, _chainBackoff.TotalSeconds * 2));
+                return;
+            }
+        }
+        var chain = _chain!;
+        var step = _optStep;
+        var implied = _watch.ImpliedAtm(now);
+        var price = implied?.Forward ?? stream.Book.Meta().LastPrice;
+        if (price <= 0) return;
+        var centre = implied?.Strike ?? Math.Round(price / step) * step;
+        _optCentre = centre; _watch.Atm = centre; _watch.Step = step;
+
+        var n = _optStrikes;
+        var cap = Math.Max(0, _options.Live.MaxSymbols - _byUnderlying.Count);
+        var remove = _subscribedOptions.Where(id => chain.TryGetValue(id, out var c) && Math.Abs(c.Strike - centre) > (n + 2) * step).ToList();
+        var add = chain.Values.Where(c => Math.Abs(c.Strike - centre) <= n * step && !_subscribedOptions.Contains(c.SymbolId))
+            .OrderBy(c => Math.Abs(c.Strike - centre)).ThenBy(c => c.Call ? 0 : 1).ToList();
+        var room = cap - (_subscribedOptions.Count - remove.Count);
+        if (add.Count > room) add = add.Take(Math.Max(0, room)).ToList();
+        if (remove.Count > 0) await RemoveOptionsAsync(send, remove);
+        if (add.Count > 0)
+        {
+            foreach (var c in add) { _watch.Track(c); _subscribedOptions.Add(c.SymbolId); }
+            await send(JsonSerializer.Serialize(new { method = "addsymbol", symbols = add.Select(c => c.Symbol).ToArray() }));
+        }
+    }
+
+    private async Task RemoveOptionsAsync(Func<string, Task> send, List<string> ids)
+    {
+        var names = ids.Where(id => _chain?.ContainsKey(id) == true).Select(id => _chain![id].Symbol).ToArray();
+        if (names.Length > 0) await send(JsonSerializer.Serialize(new { method = "removesymbol", symbols = names }));
+        foreach (var id in ids) { _subscribedOptions.Remove(id); _watch.Untrack(id); }
+    }
+
+    /// <summary>The chain of the nearest expiry that has one: each day from today (not today once it is past 15:30) on the expiry weekday or the day before
+    /// it (a holiday moves an expiry earlier) is asked of TrueData until one answers - at most ~12 calls, once a day.</summary>
+    private async Task LoadChainAsync(string underlying, DateTimeOffset now, CancellationToken token)
+    {
+        var ist = now.ToOffset(IstClock.Offset);
+        var today = IstClock.IstDate(now);
+        var first = ist.TimeOfDay >= new TimeSpan(15, 30, 0) ? today.AddDays(1) : today;
+        for (var d = first; d <= first.AddDays(40); d = d.AddDays(1))
+        {
+            var rule = ExpiryCalendar.OptionExpiryWeekday(underlying, d);
+            if (d.DayOfWeek != rule && d.AddDays(1).DayOfWeek != rule) continue;
+            var contracts = await ChainSource.GetAsync(underlying, d, token);
+            if (contracts.Count == 0) continue;
+            _chain = contracts.ToDictionary(c => c.SymbolId, StringComparer.Ordinal);
+            _chainExpiry = d; _chainDay = today;
+            var strikes = contracts.Select(c => c.Strike).Distinct().OrderBy(k => k).ToList();
+            var step = decimal.MaxValue;
+            for (var i = 1; i < strikes.Count; i++) step = Math.Min(step, strikes[i] - strikes[i - 1]);
+            _optStep = step == decimal.MaxValue || step <= 0 ? 50 : step;
+            _subscribedOptions.Clear();
+            return;
+        }
+        throw new InvalidOperationException($"No {underlying} option chain found for the next 40 days");
+    }
+
     public TickBook? BookFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Book : null;
     public TrueDataLiveInstrument? InstrumentFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Instrument : null;
 
@@ -105,7 +291,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 {
                     var m = s.Book.Meta();
                     return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.BookedVolume, m.ExchangeVolume, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
-                }).ToList(), RecentFramesCopy(), _transport);
+                }).ToList(), RecentFramesCopy(), _transport, OptionsSnapshot());
     }
 
     private string[] RecentFramesCopy() { lock (_recent) return _recent.ToArray(); }
@@ -128,6 +314,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             return;
         }
         using var background = MarketHours.BackgroundScope();
+        _ = Task.Run(() => OptionsLoopAsync(stoppingToken), stoppingToken);
         var wait = TimeSpan.FromSeconds(5);
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -158,6 +345,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 _lastError = ex.Message;
                 _logger.LogWarning("TrueData live feed: {Error}", ex.Message);
             }
+            UseConnection(null);
             _state = refused ? "refused" : "reconnecting";
             // A refusal (wrong login, a session already open elsewhere) is never retried quickly; a dropped connection backs off.
             wait = refused ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(Math.Min(120, Math.Max(5, wait.TotalSeconds * 2)));
@@ -198,7 +386,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             if (text is null) break;
             var frame = TrueDataLiveParser.Parse(text);
             var (nowSubscribed, refused) = await OnFrameAsync(frame, text, subscribed,
-                json => SendAsync(socket, json, token));
+                json => LockedSend(() => SendAsync(socket, json, token)));
             subscribed = nowSubscribed;
             if (refused) { await CloseAsync(socket); return true; }
         }
@@ -236,7 +424,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             foreach (var frame in frames)
             {
                 var (nowSubscribed, refused) = await OnFrameAsync(frame, Describe(frame), subscribed,
-                    json => stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\r\n"), token).AsTask());
+                    json => LockedSend(() => stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\r\n"), token).AsTask()));
                 subscribed = nowSubscribed;
                 if (refused) return true;
             }
@@ -265,6 +453,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             case "login" when !subscribed:
                 _state = "connected";
                 await send(JsonSerializer.Serialize(new { method = "addsymbol", symbols = _byName.Keys.ToArray() }));
+                UseConnection(send);
                 return (true, false);
             case "error":
                 _lastError = frame.Message;
@@ -312,7 +501,10 @@ public sealed class TrueDataLiveFeed : BackgroundService
     {
         lock (_byUnderlying)
             foreach (var s in symbols)
+            {
                 if (_byName.TryGetValue(s.Name, out var stream)) _byId[s.SymbolId] = stream;
+                else _watch.Alias(s.Name, s.SymbolId);
+            }
     }
 
     private Stream? StreamOf(string symbolId)
@@ -322,12 +514,14 @@ public sealed class TrueDataLiveFeed : BackgroundService
 
     internal void OnTrade(TrueDataTrade t)
     {
+        if (_watch.Tracks(t.SymbolId)) { _watch.OnTrade(t, t.Time ?? Clock()); return; }
         if (StreamOf(t.SymbolId) is not { } s) return;
         s.Book.OnTrade(t.Time ?? Clock(), t.Sequence, t.Price, t.Quantity, t.Bid, t.BidQty, t.Ask, t.AskQty, t.TotalVolume);
     }
 
     internal void OnQuote(TrueDataQuote q)
     {
+        if (_watch.Tracks(q.SymbolId)) { _watch.OnQuote(q.SymbolId, q.Bid, q.BidQty, q.Ask, q.AskQty); return; }
         if (StreamOf(q.SymbolId) is not { } s) return;
         Interlocked.Increment(ref s.Quotes);
         s.Book.OnQuote(q.Time ?? Clock(), q.Bid, q.BidQty, q.Ask, q.AskQty);

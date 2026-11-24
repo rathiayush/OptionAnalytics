@@ -26,6 +26,28 @@ public sealed class TickFlowController : ControllerBase
             ? Ok(new { enabled = false, state = "off", note = "TrueData:Live:Enabled is off or the TrueData login is not set (TrueData__UserId / TrueData__Password)." })
             : Ok(new { enabled = true, status = _feed.Snapshot() });
 
+    /// <summary>The big option orders watched from TrueData's live ticks (the Tick Flow page's card): the option stream's state (the index, the
+    /// expiry, the ATM, how many options are subscribed against the symbol cap, the ticks seen, why not) and the orders after <paramref name="since"/>.</summary>
+    [HttpGet("options")]
+    public ActionResult Options([FromQuery] long since = 0, [FromQuery] int limit = 1000) =>
+        _feed is null
+            ? Ok(new { enabled = false })
+            : Ok(new { enabled = true, options = _feed.OptionsSnapshot(), events = _feed.Watch.Since(since, Math.Clamp(limit, 1, 5000)) });
+
+    public sealed record OptionsRequest(string? Underlying, int Strikes);
+
+    /// <summary>Picks the index whose options are streamed ("" = none) and the strikes either side of the ATM. Admin only - it changes what the one
+    /// TrueData login subscribes to (the trial allows 50 symbols); kept across a restart.</summary>
+    [HttpPut("options")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Roles = AuthRoles.Admin)]
+    public ActionResult SetOptions([FromBody] OptionsRequest request)
+    {
+        if (_feed is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        return _feed.SetOptions(request.Underlying, request.Strikes)
+            ? Ok(new { options = _feed.OptionsSnapshot() })
+            : BadRequest(new { error = "That index is not streamed (TrueData:Live:Instruments)." });
+    }
+
     public sealed record SourceRequest(string? Transport);
 
     /// <summary>Picks where the live ticks come from: "websocket" or "tcp" (TrueData's two streams). Admin only - it closes the open

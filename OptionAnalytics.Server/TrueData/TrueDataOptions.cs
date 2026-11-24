@@ -64,6 +64,13 @@ public sealed class TrueDataLiveOptions
     /// <summary>The folder the page's source choice (WebSocket / TCP) is kept in; filled from Storage:ScannerRunnerPath when empty.</summary>
     public string StatePath { get; set; } = "";
 
+    /// <summary>The index whose OPTIONS (ATM +- OptionStrikes, calls and puts) are streamed for the Tick Flow page's big option orders
+    /// ("NIFTY" / "BANKNIFTY", empty = none) - the page's choice (kept in a file) beats this first default. TrueData's trial allows
+    /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit; a second index's would not.</summary>
+    public string OptionsUnderlying { get; set; } = "";
+    public int OptionStrikes { get; set; } = 10;
+    public int MaxSymbols { get; set; } = 50;
+
     /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
     /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
     public List<TrueDataLiveInstrument> Instruments { get; set; } = new()
