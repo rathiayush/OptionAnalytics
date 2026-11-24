@@ -80,7 +80,9 @@ export default function TickFlowPage() {
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.tickFlow.timeframe', 1)
   const [showLots, setShowLots] = usePersistedState('optionanalytics.tickFlow.showLots', true)
   const [rowDelta, setRowDelta] = usePersistedState('optionanalytics.tickFlow.rowDelta', false)
+  // The smallest bubble, kept in the unit picked (lots or quantity) - each its own box, so switching does not change what the other shows.
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.minLots', 1)
+  const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.minQty', 1)
   const [mode, setMode] = usePersistedState('optionanalytics.tickFlow.mode', 'live')
   const [bubbleSize, setBubbleSize] = usePersistedState('optionanalytics.tickFlow.bubbleSize', 34)
   const days = useMemo(() => weekdayChoices(istToday(), 6), [])
@@ -145,13 +147,20 @@ export default function TickFlowPage() {
               <Segmented value={index} onChange={setUnderlying} options={INDICES} />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={[1, 3, 5, 15].map((v) => ({ value: v, label: `${v} min` }))} />
               <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [index]: v })} style={{ width: 120 }} options={ROW_OPTIONS} />
-              <Tooltip title="The smallest order drawn as a bubble, in lots. 1 = every order; raise it on a busy day to see only the larger ones.">
-                <span>Bubbles ≥ <InputNumber size="small" min={1} max={1000} value={minLots} onChange={(v) => setMinLots(v ?? 1)} style={{ width: 70 }} /> lots</span>
+              <Tooltip title="The smallest order drawn as a bubble, in the unit picked (lots or quantity). 1 = every order; raise it on a busy day to see only the larger ones.">
+                <span>
+                  Bubbles ≥ {showLots
+                    ? <InputNumber size="small" min={1} max={1000} value={minLots} onChange={(v) => setMinLots(v ?? 1)} style={{ width: 70 }} />
+                    : <InputNumber size="small" min={1} max={1_000_000} step={lotSize} value={minQty} onChange={(v) => setMinQty(v ?? 1)} style={{ width: 90 }} />}
+                  {showLots ? ' lots' : ' qty'}
+                </span>
               </Tooltip>
               <Tooltip title="The biggest bubble's size on the chart.">
                 <Select value={bubbleSize} onChange={setBubbleSize} style={{ width: 120 }} options={[{ value: 22, label: 'Small bubbles' }, { value: 34, label: 'Medium bubbles' }, { value: 52, label: 'Large bubbles' }]} />
               </Tooltip>
-              <Checkbox checked={showLots} onChange={(e) => setShowLots(e.target.checked)}>Lots</Checkbox>
+              <Tooltip title={`Show every size in lots (1 lot = ${lotSize} units) or as the quantity (units) itself - the footprint, delta, bubbles, sizes and the bubble filter all follow it.`}>
+                <Segmented value={showLots ? 'lots' : 'qty'} onChange={(v) => setShowLots(v === 'lots')} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Quantity' }]} />
+              </Tooltip>
               <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}>Delta per row</Checkbox>
               {replay && <Select value={replayDay} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
               {replay && <Button size="small" onClick={() => setReload((n) => n + 1)}>Reload</Button>}
@@ -219,14 +228,14 @@ export default function TickFlowPage() {
             <Statistic title={`${meta.symbol} last`} value={meta.lastPrice || '-'} />
             <Statistic title="Bid × Ask" value={meta.bid > 0 ? `${meta.bid} × ${meta.ask}` : '-'} />
             <Statistic title="Bid / ask size" value={meta.bid > 0 ? `${fmtQty(meta.bidQty, lotSize, showLots)} / ${fmtQty(meta.askQty, lotSize, showLots)}` : '-'} />
-            <Statistic title={`Cumulative delta${showLots ? ' (lots)' : ''}`} value={fmtQty(total, lotSize, showLots)} valueStyle={{ color: total >= 0 ? '#52c41a' : '#ff4d4f' }} />
+            <Statistic title={`Cumulative delta (${showLots ? 'lots' : 'qty'})`} value={fmtQty(total, lotSize, showLots)} valueStyle={{ color: total >= 0 ? '#52c41a' : '#ff4d4f' }} />
           </Space>
         )}
 
         <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
           {!day || day.bubbles.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : replay ? 'No trade in this day up to the clock.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
-            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={minLots} rMax={bubbleSize} height={narrow ? 380 : 560} />}
+            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={showLots ? minLots : minQty / (lotSize || 1)} rMax={bubbleSize} height={narrow ? 380 : 560} />}
         </Card>
 
         <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel: bars shown · Shift+wheel: row height · drag: move back</span>}>

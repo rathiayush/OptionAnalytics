@@ -270,7 +270,7 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
       {hover && (
         <div style={{ position: 'absolute', left: Math.min(hover.px + 14, width - 210), top: Math.max(4, hover.py - 70), background: 'rgba(20,24,34,0.95)', border: '1px solid #303030', borderRadius: 4, padding: '6px 8px', fontSize: 12, pointerEvents: 'none', whiteSpace: 'nowrap' }}>
           <div style={{ color: hover.b.buy ? '#26a69a' : '#ef5350', fontWeight: 600 }}>{hover.b.buy ? 'BOUGHT at the ask' : 'SOLD at the bid'}</div>
-          <div>{fmtQty(hover.b.qty, lotSize, true)} lots ({hover.b.qty.toLocaleString()}) @ {hover.b.price}</div>
+          <div>{showLots ? `${fmtQty(hover.b.qty, lotSize, true)} lots (${hover.b.qty.toLocaleString()} qty)` : `${hover.b.qty.toLocaleString()} qty (${fmtQty(hover.b.qty, lotSize, true)} lots)`} @ {hover.b.price}</div>
           <div style={{ color: '#8c8c8c' }}>{hhmmss(hover.b.ms, true)} · {hover.b.prints} print{hover.b.prints === 1 ? '' : 's'}</div>
         </div>
       )}

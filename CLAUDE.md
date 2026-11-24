@@ -1729,6 +1729,8 @@ All must pass before committing.
   (shown once moved back), double-click resets both; the footprint's Shift + wheel is its row height. COVERAGE (`coveragePct`, the "% of exchange volume" tag): the
   quantity booked against the exchange's own running volume (TTQ) since the first trade seen - 100% = every trade is in the footprint, less = trades the feed did not
   send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
+  LOTS OR QUANTITY (asked for - "an option to select quantity instead of lot"): the page's Lots / Quantity switch (`optionanalytics.tickFlow.showLots`) drives every size - footprint cells, delta strip, bubble labels and legend, bid / ask size,
+  cumulative delta, the bubble hover (`fmtQty`) - and the "Bubbles >=" box, kept per unit (`...minLots` / `...minQty`, so switching does not change what the other holds).
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,
