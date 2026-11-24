@@ -1729,6 +1729,10 @@ All must pass before committing.
   (shown once moved back), double-click resets both; the footprint's Shift + wheel is its row height. COVERAGE (`coveragePct`, the "% of exchange volume" tag): the
   quantity booked against the exchange's own running volume (TTQ) since the first trade seen - 100% = every trade is in the footprint, less = trades the feed did not
   send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
+  WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
+  count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. Found while testing the
+  trial account: auth.truedata.in/token logs in, but EVERY history.truedata.in call (getticks, getbars, getlastnticks) answered a NullReferenceException from TrueData's own
+  HistoryDataController - the trial's history was not provisioned (TrueData's to fix: replay depends on it); the sandbox socket was refused from the CI sandbox's network.
 - ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
   telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
   `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures
