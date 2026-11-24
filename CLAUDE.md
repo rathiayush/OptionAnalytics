@@ -860,20 +860,8 @@ All must pass before committing.
   behind: stopped at 09:21, now 09:31" tag once the last minute ended over `SPOT_STALE_MS` 2 min before the clock (never on a
   replayed day or outside the session) - a stalled feed was silent here. A read -
   it feeds no strategy or alert.
-- OI Replay's BIG OPTION TRADES card (asked for - "is there any way that we can identify big trades on option buy combining the data from
-  ATM +- 10 ... create a component"; `bigOptionTrades` - `BigOptionTradesCard.jsx`, the maths `bigOptionTrades.js`, section version 10 /
-  `SECTIONS_VERSION` '10', added once right after the trapped / squeeze zones): Dhan sends NO time & sales for options, only a 1-minute bar
-  (OHLC, volume, OI) per strike, so a "big trade" is a BIG MINUTE at a strike, never one print - the strike's volume that minute >=
-  `multiple` (4) x ITS OWN usual (the median of its last `history` 20 earlier bars with volume, none before `minHistory` 5) AND >= `minLots` (20);
-  only strikes within ATM +- N (default 10) of THAT minute's ATM (the spot's nearest strike). Read from the bar and the OI (`readOf`): who pushed
-  (the close's place in the range, else the move from the minute before) x OI change = long build-up (price up, OI up - buyers opened), short
-  build-up (writers), short covering, long unwinding, or just bought / sold with no OI reading; the bias for the INDEX (call bought / put written
-  bullish, put bought / call written bearish; a build-up counts 1, the others 0.5). COMBINED across the strikes: the last N minutes' money by
-  kind (calls bought / puts bought / calls written / puts written, rupees = premium x volume), a net lean ((bullish - bearish) / both, +-25% =
-  bullish / bearish, else mixed) and a SWEEP (the same type and direction at 3+ strikes within 3 minutes - one decision over the chain). Each
-  minute uses only the bars up to it - a cut at any clock = the whole day's up to it; live the forming minute is left out
-  (`tests/big-option-trades.test.mjs`). A big minute can be many small trades and a hedger looks like a buyer: a lead to check against the
-  OI, straddle and flow, not a signal - it feeds no strategy or alert.
+- OI Replay's Dhan-bar BIG OPTION TRADES card was REMOVED on request ("everything we need on the Tick Flow page only"): big option orders live on the Tick Flow page
+  from TrueData's ticks only (see there); a saved "Sections shown" or layout naming `bigOptionTrades` just drops it, `SECTIONS_VERSION` is '9' again.
 - THE FOOTPRINTS DO NOT TAKE THE WHEEL (asked about - "footprint chart ... I can not scroll on big screens"; the Order Flow page's footprint
   `OrderFlowCharts.jsx`, the Tick Flow footprint and bubble chart): the chart cancelled every wheel event, so on a big screen - where the chart
   fills the window - the page could not be scrolled with the pointer over it. A plain wheel now SCROLLS THE PAGE; Ctrl / Cmd + wheel (a
@@ -1797,7 +1785,7 @@ All must pass before committing.
   `tickReads.js`' `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
   before and the distance from the ATM. The page adds the strikes up over the last 5 - 60 min by kind (calls bought / puts bought / calls written / puts
   written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `tickReads.js`'s
-  `readOf` / `markSweeps` / `bigTradesSummary` (the page's OWN copy - TrueData and Dhan data are never mixed: nothing here imports OI Replay's Dhan-bar `bigOptionTrades.js`, nor the Order Flow page's code). Live only: a past day would need the tick history of ~42 option
+  `readOf` / `markSweeps` / `bigTradesSummary` (the page's OWN copy - TrueData and Dhan data are never mixed: nothing here imports Dhan data, nor the Order Flow page's code). Live only: a past day would need the tick history of ~42 option
   contracts (5 calls a second, flaky). NOT TESTED AGAINST THE LIVE SOCKET (the sandbox cannot reach it): the real trade message's LTQ / OI fields,
   whether option ticks come as often as the futures' (the history of options was not measured) and whether `addsymbol` / `removesymbol` mid-stream
   behave as the Python client's use implies - the status line ("N of M option symbols streaming · ticks · last tick") and the raw-message box show it.
