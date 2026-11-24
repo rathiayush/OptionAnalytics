@@ -1,10 +1,10 @@
 // OPTION LIQUIDITY MAP on the Tick Flow page (asked for - "add it on order flow tick because it was related to TrueData"): the strikes up the side, time along
 // the bottom, and in every strike-and-bucket cell the MONEY of the big option orders TrueData's ticks showed there, in FOUR colours - one per kind
-// (`kindOf` in bigOptionTrades.js): CALLS BOUGHT and PUTS WRITTEN are the bullish pair (cool: green, blue), PUTS BOUGHT and CALLS WRITTEN the bearish pair
+// (`kindOf` in tickReads.js): CALLS BOUGHT and PUTS WRITTEN are the bullish pair (cool: green, blue), PUTS BOUGHT and CALLS WRITTEN the bearish pair
 // (warm: red, orange). A cell takes the colour of the kind with most money in it, as deep as its total against the 95th percentile of the cells in view;
 // the futures price (TrueData's near future - the index itself is not on this feed) runs across it. Only orders up to the replay clock are passed in, so a
 // cut at any clock = the whole day's up to it. A read - it feeds no strategy or alert.
-import { kindOf } from './bigOptionTrades.js'
+import { kindOf } from './tickReads.js'
 
 export const TLM_COLORS = { ceBought: '#26a69a', peWritten: '#42a5f5', peBought: '#ef5350', ceWritten: '#ff9800' }
 export const TLM_LABELS = { ceBought: 'Calls bought (bullish)', peWritten: 'Puts written (bullish)', peBought: 'Puts bought (bearish)', ceWritten: 'Calls written (bearish)' }

@@ -1794,10 +1794,10 @@ All must pass before committing.
   at / through the bid = sold, inside the nearer half, then the tick rule; the packet's own quote is the next tick's "before"), HOW IT HIT THE BOOK
   (`TouchRatio` = its size over the size shown at the touch it took, `Through` = its price went past the touch - a sweep), `Ratio`, the OI change since
   the option's tick before (OI is in the trade message - with the side it is read as long build-up / short build-up / short covering / long unwinding by
-  OI Replay's `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
+  `tickReads.js`' `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
   before and the distance from the ATM. The page adds the strikes up over the last 5 - 60 min by kind (calls bought / puts bought / calls written / puts
-  written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `bigOptionTrades.js`'s
-  `markSweeps` / `bigTradesSummary` (OI Replay's own module - NOT the Order Flow page's). Live only: a past day would need the tick history of ~42 option
+  written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `tickReads.js`'s
+  `readOf` / `markSweeps` / `bigTradesSummary` (the page's OWN copy - TrueData and Dhan data are never mixed: nothing here imports OI Replay's Dhan-bar `bigOptionTrades.js`, nor the Order Flow page's code). Live only: a past day would need the tick history of ~42 option
   contracts (5 calls a second, flaky). NOT TESTED AGAINST THE LIVE SOCKET (the sandbox cannot reach it): the real trade message's LTQ / OI fields,
   whether option ticks come as often as the futures' (the history of options was not measured) and whether `addsymbol` / `removesymbol` mid-stream
   behave as the Python client's use implies - the status line ("N of M option symbols streaming · ticks · last tick") and the raw-message box show it.
