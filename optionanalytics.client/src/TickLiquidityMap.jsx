@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Select, Space, Tag, Typography } from 'antd'
+import { Checkbox, Segmented, Select, Space, Tag, Typography } from 'antd'
 import { usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
-import { TLM_COLORS, TLM_KINDS, TLM_LABELS, priceRowPosition, tickLiquidityDepth, tickLiquidityGrid } from './tickLiquidityMap.js'
+import { TLM_COLORS, TLM_KINDS, TLM_LABELS, filterMapOrders, priceRowPosition, tickLiquidityDepth, tickLiquidityGrid } from './tickLiquidityMap.js'
 
 const { Text } = Typography
 const AXIS_W = 58
@@ -19,8 +19,13 @@ function rgba(hex, a) { const n = parseInt(hex.slice(1), 16); return `rgba(${n >
  * (four colours), the futures price drawn across it. `orders` are the card's orders after its size filters (up to the replay clock); `priceBars` the futures'
  * 1-minute bars { time (ms), close }; `step` the strike step.
  */
-export function TickLiquidityMap({ orders, priceBars, step }) {
+export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
   const [tf, setTf] = usePersistedState('optionanalytics.tickFlow.liqMapTf', 3)
+  // The map's own filters: hedge positions only (deep out of the money), and buyers / sellers / both.
+  const [hedgeOnly, setHedgeOnly] = usePersistedState('optionanalytics.tickFlow.liqMapHedge', false)
+  const [hedgeSteps, setHedgeSteps] = usePersistedState('optionanalytics.tickFlow.liqMapHedgeSteps', 5)
+  const [side, setSide] = usePersistedState('optionanalytics.tickFlow.liqMapSide', 'both')
+  const orders = useMemo(() => filterMapOrders(allOrders, { hedgeOnly, hedgeSteps, side }), [allOrders, hedgeOnly, hedgeSteps, side])
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
   const [width, setWidth] = useState(0)
@@ -99,12 +104,14 @@ export function TickLiquidityMap({ orders, priceBars, step }) {
       <Space wrap size={[10, 6]}>
         <Text strong>Option liquidity map</Text>
         <span>Bucket <Select size="small" value={tf} onChange={setTf} style={{ width: 80 }} options={TFS.map((v) => ({ value: v, label: `${v} min` }))} /></span>
+        <Checkbox checked={hedgeOnly} onChange={(e) => setHedgeOnly(e.target.checked)}>Hedge positions (≥ <Select size="small" value={hedgeSteps} onChange={setHedgeSteps} style={{ width: 60 }} options={Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: i + 1 }))} onClick={(e) => e.stopPropagation()} /> strikes out of the money)</Checkbox>
+        <Segmented size="small" value={side} onChange={setSide} options={[{ value: 'both', label: 'Buyers + sellers' }, { value: 'buy', label: 'Buyers only' }, { value: 'sell', label: 'Sellers only' }]} aria-label="Map side" />
         {TLM_KINDS.map((k) => <Tag key={k} color={TLM_COLORS[k]} style={{ marginInlineEnd: 0 }}>{TLM_LABELS[k]}</Tag>)}
         <Tag style={{ marginInlineEnd: 0, color: '#fff', background: '#555' }}>━ Futures price</Tag>
       </Space>
       <div ref={wrapRef} style={{ position: 'relative', width: '100%' }}>
         {!grid.columns.length
-          ? <Text type="secondary">No big option order with a read yet - nothing to map.</Text>
+          ? <Text type="secondary">No big option order with a read yet - nothing to map (or the filters above leave none).</Text>
           : (
             <>
               <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} style={{ display: 'block' }} />
@@ -125,7 +132,7 @@ export function TickLiquidityMap({ orders, priceBars, step }) {
           Each row is a strike, each column a time bucket; a cell is where TrueData's option ticks showed a big order and takes the colour of the kind with the most
           money in it, deeper the more rupees against the busiest cells in view. Cool colours are the bullish pair (calls bought, puts written), warm the bearish pair
           (puts bought, calls written) - read from the side the quote gave and the OI change, so "written" needs an OI reading. The white line is the NEAR FUTURES
-          price (TrueData's feed has the futures, not the index). The size filters above apply. A lead, not a signal - it places nothing.
+          price (TrueData's feed has the futures, not the index). The size filters above apply, then this map's own: "Hedge positions" shows only the orders N or more strikes out of the money (the cheap protection options), and Buyers / Sellers keeps one side of the option. A lead, not a signal - it places nothing.
         </div>
       </FoldText>
     </Space>
