@@ -51,11 +51,14 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const [cheapBelow, setCheapBelow] = usePersistedState('optionanalytics.tickFlow.cheapBelow', 10)
   // WHO: both sides, buyers only (BUY) or sellers only (SELL).
   const [sideOnly, setSideOnly] = usePersistedState('optionanalytics.tickFlow.sideOnly', 'both')
+  // WHICH OPTION: both, calls only or puts only.
+  const [typeOnly, setTypeOnly] = usePersistedState('optionanalytics.tickFlow.typeOnly', 'both')
   const farOtmOn = hideFarOtm ? farOtmSteps : 0
   const cheapOn = hideCheap ? cheapBelow : 0
   const big = useMemo(() => sized.filter((o) => (!hideHedges || !isLikelyHedge(o, hedgeSteps))
     && !isFarOtm(o, farOtmOn) && !isCheap(o, cheapOn)
-    && (sideOnly === 'both' || (sideOnly === 'buy' ? o.side > 0 : o.side < 0))), [sized, hideHedges, hedgeSteps, farOtmOn, cheapOn, sideOnly])
+    && (typeOnly === 'both' || o.type === (typeOnly === 'calls' ? 'CE' : 'PE'))
+    && (sideOnly === 'both' || (sideOnly === 'buy' ? o.side > 0 : o.side < 0))), [sized, hideHedges, hedgeSteps, farOtmOn, cheapOn, sideOnly, typeOnly])
   const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback, hedgeSteps), [big, replay, clockMs, now, lookback, hedgeSteps])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
@@ -84,7 +87,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
     { title: 'Price', dataIndex: 'price', align: 'right', width: 76, render: (v, o) => <span>{v.toFixed(2)} <span style={{ color: o.movePct > 0 ? UP_COLOR : o.movePct < 0 ? DOWN_COLOR : undefined, fontSize: 11 }}>{o.movePct > 0 ? '+' : ''}{o.movePct.toFixed(1)}%</span></span> },
     { title: 'Hit the book', width: 150, render: (_, o) => <span style={{ fontWeight: o.through ? 600 : 400 }}>{hitText(o)}</span> },
     { title: 'OI Δ', dataIndex: 'oiChange', align: 'right', width: 90, render: (v, o) => (v == null ? '—' : `${v > 0 ? '+' : ''}${Math.round(v / (o.lotSize || 1)).toLocaleString('en-IN')} lots`) },
-    { title: 'Read', dataIndex: 'read', render: (v, o) => <span>{v}{isFarOtm(o, farOtmSteps) && <Tooltip title={`${Math.round(-itmStepsOf(o))} strikes out of the money - cheap tail / protection flow`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>FAR OTM</Tag></Tooltip>}{isLikelyHedge(o, hedgeSteps) && <Tooltip title={`${Math.round(Math.abs(o.atmDistance))} strikes in the money - trades like the index, mostly a hedge or stock replacement`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>HEDGE?</Tag></Tooltip>}</span> },
+    { title: 'Read', dataIndex: 'read', render: (v, o) => <span>{v}{isFarOtm(o, farOtmSteps) && <Tooltip title={`${Math.round(-itmStepsOf(o))} strikes out of the money - ${o.type === 'PE' ? 'a deep out-of-the-money put is mostly a protection (hedge) position' : 'cheap tail / lottery flow'}`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>{o.type === 'PE' ? 'HEDGE? far OTM put' : 'FAR OTM'}</Tag></Tooltip>}{isLikelyHedge(o, hedgeSteps) && <Tooltip title={`${Math.round(Math.abs(o.atmDistance))} strikes in the money - trades like the index, mostly a hedge or stock replacement`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>HEDGE?</Tag></Tooltip>}</span> },
     { title: 'Δ lots', width: 78, align: 'right', render: (_, o) => { const d = deltaLots(o); return d === 0 ? '—' : <span style={{ color: d > 0 ? UP_COLOR : DOWN_COLOR }}>{d > 0 ? '+' : ''}{Math.round(d).toLocaleString('en-IN')}</span> } },
     { title: 'Index', dataIndex: 'bias', width: 76, render: (b) => (b === 0 ? '—' : <span style={{ color: b > 0 ? UP_COLOR : DOWN_COLOR, fontWeight: Math.abs(b) >= 1 ? 600 : 400 }}>{b > 0 ? '▲' : '▼'} {Math.abs(b) >= 1 ? 'strong' : 'weak'}</span>) },
     { title: '₹', dataIndex: 'value', align: 'right', width: 84, render: (v) => rupees(v) },
@@ -103,6 +106,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
         </Tooltip>
         <span>ATM ± <Select size="small" value={state?.strikes ?? 10} disabled={!isAdmin || !state?.underlying} style={{ width: 70 }} options={STRIKE_CHOICES.map((v) => ({ value: v, label: v }))} onChange={(v) => put(state.underlying, v)} /></span>
         </>)}
+        <Segmented size="small" value={typeOnly} onChange={setTypeOnly} options={[{ value: 'both', label: 'Calls + puts' }, { value: 'calls', label: 'Calls only' }, { value: 'puts', label: 'Puts only' }]} aria-label="Option type" />
         <Segmented size="small" value={sideOnly} onChange={setSideOnly} options={[{ value: 'both', label: 'Buyers + sellers' }, { value: 'buy', label: 'Buyers only' }, { value: 'sell', label: 'Sellers only' }]} aria-label="Side" />
         <Segmented size="small" value={unit} onChange={setUnit} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Quantity' }]} aria-label="Size unit" />
         <Tooltip title={showLots ? 'At least this many lots in one tick (a lot = the contract\'s lot size).' : 'At least this QUANTITY (units) in one tick.'}>
