@@ -1812,6 +1812,13 @@ All must pass before committing.
   dropped, floor 30 lots / 3x usual, at most 20 000 - over it the BIGGEST kept). A day takes minutes the first time (70 contracts ~ 7 min on the trial; some
   contracts come back empty - counted as "without data"), then it is in memory (4 days). The page polls every 3 s while it builds (`POLL_HEADERS`), holds the
   whole day (`ordersOfDay`, uncapped) and cuts at the replay clock (`ordersUpTo`) - on the Tick Flow card (summary at the clock). The 20 Nov / 23 Nov trial days work; `OptionTickHistoryDaysTests.cs`, `tests/tick-big-orders.test.mjs`.
+  DELTA FLOW AND LIKELY HEDGES (asked for - "how professional systems deal with buy / sell on each side ... net delta flow ... deep in the money you put likely hedge
+  filter"; `tickReads.js` - `kindSign` / `deltaApprox` / `deltaLots` / `isLikelyHedge`, the card's "Net delta flow" and "Hide likely hedges"): direction for the INDEX is
+  the order's DELTA EXPOSURE, not its buy / sell - calls bought and puts written long, puts bought and calls written short - sized in futures-equivalent lots = lots x
+  |delta|, the delta APPROXIMATED FROM MONEYNESS (0.5 at the money, +0.12 a strike in the money, -0.12 out, held 0.05 - 0.97; this feed has no IV or time). An order
+  `HEDGE_STEPS` (3, picked 2 - 5 on the card, `optionanalytics.tickFlow.hedgeSteps`) or more strikes IN the money is a LIKELY HEDGE (it trades like the index; mostly a
+  hedge or stock replacement) - tagged "HEDGE?" in the table, counted in the summary, and left out of the lean, the delta flow, the map and the table by the "Hide
+  likely hedges" tick (`...hideHedges`, off by default). An order with no read (no side) has no delta. A lean, not intent (`tests/tick-big-orders.test.mjs`).
   THE OPTION LIQUIDITY MAP ON THE TICK FLOW PAGE (asked for - "add it on order flow tick because it was related to TrueData"; `TickLiquidityMap.jsx`, the maths
   `tickLiquidityMap.js`, inside the Big option orders card above its table): strikes x time (1 / 3 / 5 / 15 min buckets, the newest that fit at >= 6 px), each cell
   the MONEY of the card's big orders (its size filters applied, live or up to the replay clock) in the colour of the kind with most money in it - FOUR colours, one

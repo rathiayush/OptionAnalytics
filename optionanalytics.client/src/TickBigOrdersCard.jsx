@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { Alert, Checkbox, InputNumber, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
-import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText, ordersUpTo } from './tickBigOrders.js'
+import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText, ordersUpTo, deltaLots, isLikelyHedge } from './tickBigOrders.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
@@ -40,8 +40,12 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const { state, live: enabled, error, now, pick: put } = liveFeed
   const orders = useMemo(() => (replay ? ordersUpTo(dayFeed.orders, clockMs) : liveFeed.orders), [replay, dayFeed.orders, clockMs, liveFeed.orders])
 
-  const big = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
-  const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback), [big, replay, clockMs, now, lookback])
+  // LIKELY HEDGES: deep in-the-money orders (>= N strikes) trade like the index itself - tagged, and left out of the lean, the delta flow, the map and the table when asked.
+  const [hideHedges, setHideHedges] = usePersistedState('optionanalytics.tickFlow.hideHedges', false)
+  const [hedgeSteps, setHedgeSteps] = usePersistedState('optionanalytics.tickFlow.hedgeSteps', 3)
+  const sized = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
+  const big = useMemo(() => (hideHedges ? sized.filter((o) => !isLikelyHedge(o, hedgeSteps)) : sized), [sized, hideHedges, hedgeSteps])
+  const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback, hedgeSteps), [big, replay, clockMs, now, lookback, hedgeSteps])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
 
@@ -69,7 +73,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
     { title: 'Price', dataIndex: 'price', align: 'right', width: 76, render: (v, o) => <span>{v.toFixed(2)} <span style={{ color: o.movePct > 0 ? UP_COLOR : o.movePct < 0 ? DOWN_COLOR : undefined, fontSize: 11 }}>{o.movePct > 0 ? '+' : ''}{o.movePct.toFixed(1)}%</span></span> },
     { title: 'Hit the book', width: 150, render: (_, o) => <span style={{ fontWeight: o.through ? 600 : 400 }}>{hitText(o)}</span> },
     { title: 'OI Δ', dataIndex: 'oiChange', align: 'right', width: 90, render: (v, o) => (v == null ? '—' : `${v > 0 ? '+' : ''}${Math.round(v / (o.lotSize || 1)).toLocaleString('en-IN')} lots`) },
-    { title: 'Read', dataIndex: 'read' },
+    { title: 'Read', dataIndex: 'read', render: (v, o) => <span>{v}{isLikelyHedge(o, hedgeSteps) && <Tooltip title={`${Math.round(Math.abs(o.atmDistance))} strikes in the money - trades like the index, mostly a hedge or stock replacement`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>HEDGE?</Tag></Tooltip>}</span> },
+    { title: 'Δ lots', width: 78, align: 'right', render: (_, o) => { const d = deltaLots(o); return d === 0 ? '—' : <span style={{ color: d > 0 ? UP_COLOR : DOWN_COLOR }}>{d > 0 ? '+' : ''}{Math.round(d).toLocaleString('en-IN')}</span> } },
     { title: 'Index', dataIndex: 'bias', width: 76, render: (b) => (b === 0 ? '—' : <span style={{ color: b > 0 ? UP_COLOR : DOWN_COLOR, fontWeight: Math.abs(b) >= 1 ? 600 : 400 }}>{b > 0 ? '▲' : '▼'} {Math.abs(b) >= 1 ? 'strong' : 'weak'}</span>) },
     { title: '₹', dataIndex: 'value', align: 'right', width: 84, render: (v) => rupees(v) },
     { title: '', dataIndex: 'sweep', width: 70, render: (s) => (s ? <Tag color="gold" style={{ marginInlineEnd: 0 }}>SWEEP</Tag> : null) },
@@ -97,6 +102,9 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
           <span>≥ <InputNumber size="small" min={1} max={100} value={multiple} onChange={(v) => setMultiple(v ?? TICK_ORDER_DEFAULTS.multiple)} style={{ width: 64 }} /> × usual</span>
         </Tooltip>
         <span>Last <Select size="small" value={lookback} onChange={setLookback} style={{ width: 80 }} options={LOOKBACKS.map((m) => ({ value: m, label: `${m} min` }))} /></span>
+        <Tooltip title="A deep in-the-money option trades almost like the index itself, so a big order there is mostly a hedge or a stock replacement, not a fresh view. Tagged HEDGE? on the table; tick to leave them out of the lean, the delta flow, the map and the table.">
+          <Checkbox checked={hideHedges} onChange={(e) => setHideHedges(e.target.checked)}>Hide likely hedges (ITM ≥ <Select size="small" value={hedgeSteps} onChange={setHedgeSteps} style={{ width: 56 }} options={[2, 3, 4, 5].map((v) => ({ value: v, label: v }))} onClick={(e) => e.stopPropagation()} /> strikes)</Checkbox>
+        </Tooltip>
         <Checkbox checked={sweepsOnly} onChange={(e) => setSweepsOnly(e.target.checked)}>Sweeps only</Checkbox>
       </Space>
 
@@ -122,6 +130,13 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
             <Text type="secondary" style={{ fontSize: 11 }}>Big money, last {lookback} min</Text>
             <div style={{ color, fontSize: 18, fontWeight: 600, lineHeight: 1.2 }}>{word}{summary.count > 0 ? ` ${summary.net > 0 ? '+' : ''}${Math.round(summary.net * 100)}%` : ''}</div>
             <Text type="secondary" style={{ fontSize: 11 }}>{summary.count} order{summary.count === 1 ? '' : 's'}{summary.sweeps ? ` · ${summary.sweeps} in sweeps` : ''}</Text>
+          </div>
+        </Tooltip>
+        <Tooltip title={`The orders as exposure to the INDEX, in futures-equivalent lots: lots x delta (about, from how far in / out of the money - no IV on this feed), + for calls bought / puts written, - for puts bought / calls written. ${summary.hedges} of the ${summary.count} orders are deep in the money (likely hedges).`}>
+          <div>
+            <Text type="secondary" style={{ fontSize: 11 }}>Net delta flow, last {lookback} min</Text>
+            <div style={{ color: summary.netDeltaLots > 0 ? UP_COLOR : summary.netDeltaLots < 0 ? DOWN_COLOR : undefined, fontSize: 18, fontWeight: 600, lineHeight: 1.2 }}>{summary.netDeltaLots > 0 ? '+' : ''}{Math.round(summary.netDeltaLots).toLocaleString('en-IN')} lots</div>
+            <Text type="secondary" style={{ fontSize: 11 }}>futures-equivalent{summary.hedges ? ` · ${summary.hedges} likely hedge${summary.hedges === 1 ? '' : 's'}` : ''}</Text>
           </div>
         </Tooltip>
         {KINDS.map(([key, label, c]) => (

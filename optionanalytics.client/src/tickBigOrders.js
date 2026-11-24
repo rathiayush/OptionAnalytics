@@ -2,7 +2,7 @@
 // own quantity with the side from the quote before it, the size against the touch it hit, the option's own usual, the OI change since its tick
 // before). This module only reads them: the position (long build-up / short build-up / covering / unwinding) and the bias for the index
 // are OI Replay's `readOf`, the sweeps and the added-up summary its `markSweeps` / `bigTradesSummary` - the same words on both pages.
-import { bigTradesSummary, markSweeps, readOf } from './tickReads.js'
+import { bigTradesSummary, markSweeps, readOf, deltaLots, isLikelyHedge, itmSteps } from './tickReads.js'
 
 export const TICK_ORDER_DEFAULTS = { minLots: 30, multiple: 3, lookback: 15 }
 export const MAX_KEPT = 2000
@@ -54,4 +54,4 @@ export function hitText(o) {
   return '—'
 }
 
-export { bigTradesSummary }
+export { bigTradesSummary, deltaLots, isLikelyHedge, itmSteps }

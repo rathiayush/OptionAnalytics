@@ -89,3 +89,29 @@ test('a whole replayed day: oldest first, none dropped past the live cap, cut at
   assert.equal(ordersUpTo(day, t0 + 9_000).length, 10)
   assert.equal(ordersUpTo(day, null).length, 2500)
 })
+
+import { deltaLots, isLikelyHedge, itmSteps, deltaApprox } from '../src/tickReads.js'
+test('delta flow: bought call / written put long the index, the others short, sized by an approximate delta; deep ITM = likely hedge', () => {
+  const o = (type, read, atmDistance, lots = 100) => ({ type, read, atmDistance, lots })
+  assert.equal(itmSteps(o('CE', 'bought', -3)), 3)                       // a call 3 strikes below the ATM is 3 in the money
+  assert.equal(itmSteps(o('PE', 'bought', -3)), -3)                      // a put there is 3 out of the money
+  assert.equal(deltaApprox(o('CE', 'bought', 0)), 0.5)
+  assert.equal(deltaApprox(o('CE', 'bought', -10)), 0.97)                // held
+  assert.equal(deltaApprox(o('PE', 'bought', -10)), 0.05)
+  assert.equal(deltaLots(o('CE', 'bought', 0)), 50)                       // call bought: long
+  assert.equal(deltaLots(o('PE', 'short build-up', 0)), 50)              // put written: long
+  assert.equal(deltaLots(o('PE', 'bought', 0)), -50)                     // put bought: short
+  assert.equal(deltaLots(o('CE', 'short build-up', 0)), -50)             // call written: short
+  assert.equal(deltaLots({ ...o('CE', 'unclear', 0) }), 0)               // no read: no exposure
+  assert.equal(isLikelyHedge(o('CE', 'bought', -3)), true)
+  assert.equal(isLikelyHedge(o('CE', 'bought', -2)), false)
+  assert.equal(isLikelyHedge(o('CE', 'bought', -2), 2), true)
+  assert.equal(isLikelyHedge(o('PE', 'bought', -3)), false)              // OTM is never a hedge by this rule
+})
+test('the summary adds the delta flow and counts likely hedges', () => {
+  const t = Date.parse('2026-11-24T04:30:00Z')
+  const mk = (type, read, atmDistance) => ({ t, type, read, atmDistance, lots: 100, value: 1e6, bias: 1, qty: 6500, sweep: false })
+  const s = bigTradesSummary([mk('CE', 'bought', -4), mk('PE', 'bought', 0)], t, 15)
+  assert.equal(Math.round(s.netDeltaLots), Math.round(100 * 0.97 - 100 * 0.5))
+  assert.equal(s.hedges, 1)
+})
