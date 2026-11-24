@@ -4,7 +4,7 @@ import { barStats, diagonalImbalances, fmtQty, msOf } from './tickFlowMath.js'
 // The Tick Flow page's FOOTPRINT: bars side by side, each a ladder of price rows with the sellers (bid) on the left and the buyers
 // (ask) on the right, drawn on a canvas. Its own drawing - nothing shared with the Order Flow page. Cells are shaded by the row's
 // share of the bar's largest row, diagonal imbalances are outlined, the POC row is boxed, and under every bar its delta, cumulative
-// delta and volume. Wheel: how many bars show; Shift + wheel: row height; drag: move back in time; double-click: back to the latest and the default row height.
+// delta and volume. A plain wheel scrolls the PAGE (it used to be taken by the chart - on a big screen the page could not be scrolled); Ctrl + wheel / pinch: how many bars show; Shift + wheel: row height; a sideways swipe: back in time; drag: move back in time; double-click: back to the latest and the default row height.
 
 const COLORS = { buy: '#26a69a', sell: '#ef5350', text: '#d9d9d9', grid: '#1f2937', axis: '#8c8c8c', bg: '#0b1220', last: '#1668dc', poc: '#faad14' }
 const AXIS_W = 62
@@ -19,6 +19,8 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const [offset, setOffset] = useState(0) // bars hidden at the right (0 = the latest on screen)
   const drag = useRef(null)
   const visibleRef = useRef(14)
+  const widthRef = useRef(900)
+  const nRef = useRef(0)
 
   useEffect(() => {
     const el = wrap.current
@@ -33,6 +35,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const visible = picked ?? Math.max(4, Math.floor((width - AXIS_W) / 74))
   useEffect(() => { visibleRef.current = visible }, [visible])
   const n = bars.length
+  useEffect(() => { widthRef.current = width; nRef.current = n }, [width, n])
   const last = Math.max(0, n - offset)
   const first = Math.max(0, last - visible)
   const shown = useMemo(() => bars.slice(first, last), [bars, first, last])
@@ -154,9 +157,18 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   }, [shown, layout, width, height, visible, rowSize, lotSize, showLots, lastPrice, cvd, first, imbalanceRatio, rowDelta])
 
   const onWheel = (e) => {
-    e.preventDefault()
-    if (e.shiftKey) { setRowZoom((z) => Math.max(0.4, Math.min(3, z * (e.deltaY > 0 ? 0.87 : 1.15)))); return }
-    setPicked((p) => Math.max(3, Math.min(120, Math.round((p ?? visibleRef.current) * (e.deltaY > 0 ? 1.15 : 0.87)))))
+    if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault()
+      const colW = (widthRef.current - AXIS_W) / visibleRef.current
+      setOffset((o) => Math.max(0, Math.min(Math.max(0, nRef.current - 1), o - Math.round(e.deltaX / colW) || o)))
+      return
+    }
+    if (e.shiftKey) { e.preventDefault(); setRowZoom((z) => Math.max(0.4, Math.min(3, z * (e.deltaY > 0 ? 0.87 : 1.15)))); return }
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault()
+      setPicked((p) => Math.max(3, Math.min(120, Math.round((p ?? visibleRef.current) * (e.deltaY > 0 ? 1.15 : 0.87)))))
+    }
+    // otherwise the page scrolls
   }
   useEffect(() => {
     const el = canvas.current

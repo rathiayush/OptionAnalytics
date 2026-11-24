@@ -55,6 +55,23 @@ public sealed class TrueDataLiveOptions
     public string Host { get; set; } = "push.truedata.in";
     public int Port { get; set; } = 8086;
 
+    /// <summary>"websocket" (the default - JSON messages, wss://{Host}:{Port}) or "tcp" (TrueData's TCP API v2.3: binary TR / BA packets
+    /// with the last tick's volume and a sequence number, {TcpHost}:{TcpPort}). One connection per account either way.</summary>
+    public string Transport { get; set; } = "websocket";
+    public string TcpHost { get; set; } = "tcp.truedata.in";
+    public int TcpPort { get; set; } = 7070;
+
+    /// <summary>The folder the page's source choice (WebSocket / TCP) is kept in; filled from Storage:ScannerRunnerPath when empty.</summary>
+    public string StatePath { get; set; } = "";
+
+    /// <summary>The index whose OPTIONS (ATM +- OptionStrikes, calls and puts) are streamed for the Tick Flow page's big option orders
+    /// ("NIFTY" / "BANKNIFTY", empty = none) - the page's choice (kept in a file) beats this first default. TrueData's trial allows
+    /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit, both indices' (84) do not - so it is
+    /// ONE index, NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY").</summary>
+    public string OptionsUnderlying { get; set; } = "NIFTY";
+    public int OptionStrikes { get; set; } = 10;
+    public int MaxSymbols { get; set; } = 50;
+
     /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
     /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
     public List<TrueDataLiveInstrument> Instruments { get; set; } = new()

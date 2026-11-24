@@ -43,6 +43,9 @@ import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { TrapZonesCard } from './TrapZonesCard.jsx'
+import { BigOptionTradesCard } from './BigOptionTradesCard.jsx'
+import { useBigOptionOrders } from './useBigOptionOrders.js'
+import { bigEnough, orderMarkers } from './tickBigOrders.js'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
@@ -756,6 +759,7 @@ const SECTION_OPTIONS = [
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
   { value: 'optionCdvObvProfile', label: 'Option CDV / OBV profile (on spot)' },
   { value: 'trapZones', label: 'Trapped / squeeze zones' },
+  { value: 'bigOptionTrades', label: 'Big option trades (ATM ± 10)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -797,7 +801,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'bigOptionTrades', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -5795,6 +5799,25 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
     ? oiAbsorptionEvents({ spotBars: oneMinBars.slice(0, visibleCount), ceByStrike, peByStrike, step, timeframe: oiAbsorptionTf, asOfMs: isLive ? null : asOfMs, live: isLive })
     : EMPTY_ARRAY), [showOiAbsorption, result?.success, oneMinBars, visibleCount, ceByStrike, peByStrike, step, oiAbsorptionTf, isLive, asOfMs])
   const oiAbsorptionMarks = useMemo(() => (oiAbsorption.length ? absorptionMarkers(oiAbsorption, timeframe) : EMPTY_ARRAY), [oiAbsorption, timeframe])
+  // BIG OPTION ORDERS ON THE SPOT CHART (asked for - "i also want it on spot charts ... i should be able to define quantity"): the Tick Flow page's orders
+  // (TrueData's live ticks of the options ATM +- N of the index it streams - tickBigOrders.js, the server's OptionBigOrderWatch) as markers on the candles:
+  // a tick, off by default, and the size in LOTS or in QUANTITY (units - each unit keeps its own number). LIVE only (the server keeps today's orders in
+  // memory - nothing for a replayed day), never in the popup host, and only when the stream is on THIS index.
+  const [showBigOrders, setShowBigOrders] = usePersistedState('optionanalytics.oiReplay.bigOrdersOnSpot', false)
+  const [bigOrdersUnit, setBigOrdersUnit] = usePersistedState('optionanalytics.oiReplay.bigOrdersUnit', 'lots')
+  const [bigOrdersLots, setBigOrdersLots] = usePersistedState('optionanalytics.oiReplay.bigOrdersLots', 30)
+  const [bigOrdersQty, setBigOrdersQty] = usePersistedState('optionanalytics.oiReplay.bigOrdersQty', 1950)
+  const bigOrderFeed = useBigOptionOrders(showBigOrders && isLive && !popupOnly)
+  const bigOrdersOnThisIndex = bigOrderFeed.state?.underlying === underlying
+  const bigOrderMarks = useMemo(() => {
+    if (!showBigOrders || !isLive || !bigOrdersOnThisIndex) return EMPTY_ARRAY
+    const kept = bigEnough(bigOrderFeed.orders, bigOrdersUnit === 'qty' ? { minQty: bigOrdersQty, multiple: 0 } : { minLots: bigOrdersLots, multiple: 0 })
+    return orderMarkers(kept, timeframe, bigOrdersUnit)
+  }, [showBigOrders, isLive, bigOrdersOnThisIndex, bigOrderFeed.orders, bigOrdersUnit, bigOrdersLots, bigOrdersQty, timeframe])
+  const spotMarks = useMemo(
+    () => (bigOrderMarks.length ? [...oiAbsorptionMarks, ...bigOrderMarks].sort((a, b) => a.time - b.time) : oiAbsorptionMarks),
+    [oiAbsorptionMarks, bigOrderMarks],
+  )
   // The walls' labels: the strike, Δ since the open and S-R only (no OI bar, OI or IV) - shorter, so they cover less of
   // the candles. On by default; unticked shows the full labels. Remembered in this browser.
   const [wallLabelsShort, setWallLabelsShort] = usePersistedState(STORED_WALL_LABELS_SHORT, true)
@@ -6278,7 +6301,7 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
           height={spotChartHeight}
           extraHeight={spotFloating ? 0 : chartExtras[0]}
           profileBars={spotProfileBars}
-          markers={oiAbsorptionMarks}
+          markers={spotMarks}
         />
       </ChartErrorBoundary>
     )
@@ -6384,6 +6407,24 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
             size="small" value={oiAbsorptionTf} onChange={setOiAbsorptionTf} style={{ width: 96 }} aria-label="Absorption / exhaustion timeframe"
             options={ABSORPTION_TIMEFRAMES.map((m) => ({ value: m, label: `on ${m} min` }))}
           />
+        )}
+        <Tooltip title="Marks on the spot chart the big option orders of TrueData's LIVE ticks - the calls and puts ATM ± N of the index the Tick Flow page streams (an admin picks it there): a green arrow under the candle for a bullish order (call bought, put written ...), a red arrow over it for a bearish one, a ⚡ for a sweep across strikes. You set the size - in lots or in quantity (units). Live only.">
+          <Checkbox checked={showBigOrders} onChange={(e) => setShowBigOrders(e.target.checked)}>Big option orders (live ticks)</Checkbox>
+        </Tooltip>
+        {showBigOrders && (
+          <>
+            <Segmented size="small" value={bigOrdersUnit} onChange={setBigOrdersUnit} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Qty' }]} aria-label="Big option orders unit" />
+            {bigOrdersUnit === 'qty'
+              ? <InputNumber size="small" min={1} max={10_000_000} step={PAPER_TRADE_LOT_SIZE[underlying] ?? 1} value={bigOrdersQty} onChange={(v) => setBigOrdersQty(v ?? 1950)} style={{ width: 100 }} addonBefore="≥" aria-label="Big option order quantity" />
+              : <InputNumber size="small" min={1} max={100000} value={bigOrdersLots} onChange={(v) => setBigOrdersLots(v ?? 30)} style={{ width: 90 }} addonBefore="≥" addonAfter="lots" aria-label="Big option order lots" />}
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {!isLive ? 'live only'
+                : bigOrderFeed.state == null ? 'connecting…'
+                  : !bigOrderFeed.state.underlying ? 'no index streamed - pick one on the Tick Flow page'
+                    : !bigOrdersOnThisIndex ? `the tick stream is on ${bigOrderFeed.state.underlying}`
+                      : `${bigOrderMarks.length} mark${bigOrderMarks.length === 1 ? '' : 's'}`}
+            </Text>
+          </>
         )}
       </Space>
       {oiShiftAlerts && activeAlerts.length > 0 && (
@@ -7579,6 +7620,20 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   <TrapZonesCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
                     underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} isLive={isLive}
+                  />
+                </Card>
+              </LiveSection>
+              </DashboardCard>
+            )}
+            {/* BIG OPTION TRADES (BigOptionTradesCard.jsx, bigOptionTrades.js): the big minutes at the strikes within ATM +/- N, read
+                with the bar and the OI and added up across the strikes - sweeps, the money by kind, a net lean. */}
+            {visibleSections.includes('bigOptionTrades') && (
+              <DashboardCard key="bigOptionTrades" {...dash('bigOptionTrades')}>
+              <LiveSection version={sectionVersion}>
+                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Big option trades (ATM ± N strikes, calls and puts){isLive ? ' · live' : ''}</Space>}>
+                  <BigOptionTradesCard
+                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
+                    underlying={underlying} isLive={isLive}
                   />
                 </Card>
               </LiveSection>

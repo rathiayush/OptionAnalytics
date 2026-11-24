@@ -180,7 +180,9 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
   useEffect(() => {
     const el = canvas.current
     if (!el) return undefined
+    // A plain wheel scrolls the page; Ctrl + wheel (a pinch) zooms the time, Shift + wheel the price.
     const onWheel = (e) => {
+      if (!e.shiftKey && !e.ctrlKey && !e.metaKey) return
       e.preventDefault()
       const rect = el.getBoundingClientRect()
       const { w, h } = plotSize()

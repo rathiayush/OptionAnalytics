@@ -35,6 +35,9 @@ public sealed class TickBook
     private DateOnly? _day;
     private decimal _bid, _ask, _lastPrice, _lastQuoteBid, _lastQuoteAsk;
     private long _bidQty, _askQty, _lastSeq, _prints, _gaps, _booked, _ttqBase, _ttqLast;
+    // Moves with every change of the day (a trade, a quote, a new day): a snapshot asked for again at the same version is the one already built.
+    private long _version;
+    private (long Version, decimal Row, long MinQty, int MaxBubbles, int MaxQuotes, TickDay Day)? _snapshot;
     private bool _lastBuy = true;
     private DateTimeOffset? _lastTradeAt;
     private DateTimeOffset _lastQuoteAt;
@@ -55,6 +58,12 @@ public sealed class TickBook
         public long Buy, Sell;
         public int Prints;
         public readonly SortedDictionary<decimal, (long Buy, long Sell)> Levels = new();
+        // The minute as the page reads it, kept while the minute is unchanged (a snapshot rebuilt every row of every finished minute on
+        // every poll was most of the cost of a busy day's page load): its version moves with each trade into it.
+        public int Version;
+        public decimal CachedRow;
+        public int CachedVersion = -1;
+        public TickBar? Cached;
     }
 
     /// <summary>A best bid / ask update (a "bidask" message, or the quote in a trade's packet AFTER the trade was sided).</summary>
@@ -64,6 +73,7 @@ public sealed class TickBook
         lock (_lock)
         {
             Roll(time);
+            _version++;
             _bid = bid; _bidQty = bidQty; _ask = ask; _askQty = askQty;
             // The quote the NEXT trade is sided against (a crossed / locked one is no quote).
             if (ask > bid) (_lastQuoteBid, _lastQuoteAsk) = (bid, ask);
@@ -90,6 +100,7 @@ public sealed class TickBook
         lock (_lock)
         {
             Roll(time);
+            _version++;
             if (_lastSeq > 0 && seq > _lastSeq + 1) _gaps += seq - _lastSeq - 1;
             if (seq > 0) _lastSeq = seq;
 
@@ -136,6 +147,7 @@ public sealed class TickBook
         bar.Low = Math.Min(bar.Low, price);
         bar.Close = price;
         bar.Prints++;
+        bar.Version++;
         if (buy) bar.Buy += qty; else bar.Sell += qty;
         bar.Levels.TryGetValue(price, out var level);
         bar.Levels[price] = buy ? (level.Buy + qty, level.Sell) : (level.Buy, level.Sell + qty);
@@ -155,6 +167,7 @@ public sealed class TickBook
         if (_day == day) return;
         _day = day;
         _minutes.Clear(); _bubbles.Clear(); _quotes.Clear();
+        _version++; _snapshot = null;
         _prints = _gaps = _lastSeq = _booked = _ttqBase = _ttqLast = 0;
         _lastPrice = _lastQuoteBid = _lastQuoteAsk = 0;
     }
@@ -168,20 +181,32 @@ public sealed class TickBook
         TickQuotePoint[] quotes;
         TickMeta meta;
         var row = rowSize > 0 ? rowSize : TickSize;
+        var wantBubbles = Math.Max(1, maxBubbles);
+        var wantQuotes = Math.Max(1, maxQuotes);
         lock (_lock)
         {
-            bars = _minutes.Select(kv => ToBar(kv.Key, kv.Value, row)).ToList();
-            bubbles = _bubbles.Where(b => b.Qty >= minBubbleQty).TakeLast(Math.Max(1, maxBubbles)).ToArray();
-            quotes = _quotes.TakeLast(Math.Max(1, maxQuotes)).ToArray();
+            if (_snapshot is { } c && c.Version == _version && c.Row == row && c.MinQty == minBubbleQty && c.MaxBubbles == wantBubbles && c.MaxQuotes == wantQuotes) return c.Day;
+            bars = new List<TickBar>(_minutes.Count);
+            foreach (var kv in _minutes) bars.Add(ToBar(kv.Key, kv.Value, row));
+            // The newest bubbles that pass the filter: scanned from the end and stopped at the number asked for (a day holds up to 400 000).
+            var picked = new List<TickBubble>(Math.Min(wantBubbles, 1024));
+            for (var i = _bubbles.Count - 1; i >= 0 && picked.Count < wantBubbles; i--)
+                if (_bubbles[i].Qty >= minBubbleQty) picked.Add(_bubbles[i]);
+            picked.Reverse();
+            bubbles = picked.ToArray();
+            quotes = _quotes.Count <= wantQuotes ? _quotes.ToArray() : _quotes.GetRange(_quotes.Count - wantQuotes, wantQuotes).ToArray();
             meta = new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day, _booked, _ttqLast > 0 ? _ttqLast - _ttqBase : 0);
+            var day = new TickDay(meta, row, bars, bubbles, quotes);
+            _snapshot = (_version, row, minBubbleQty, wantBubbles, wantQuotes, day);
+            return day;
         }
-        return new TickDay(meta, row, bars, bubbles, quotes);
     }
 
     public TickMeta Meta() { lock (_lock) return new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day, _booked, _ttqLast > 0 ? _ttqLast - _ttqBase : 0); }
 
     private static TickBar ToBar(DateTimeOffset time, MinuteBar b, decimal row)
     {
+        if (b.Cached is { } cached && b.CachedVersion == b.Version && b.CachedRow == row) return cached;
         var grouped = new SortedDictionary<decimal, (long Buy, long Sell)>(Comparer<decimal>.Create((x, y) => y.CompareTo(x)));
         foreach (var (price, v) in b.Levels)
         {
@@ -189,6 +214,8 @@ public sealed class TickBook
             grouped.TryGetValue(key, out var g);
             grouped[key] = (g.Buy + v.Buy, g.Sell + v.Sell);
         }
-        return new TickBar(time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Prints, grouped.Select(kv => new TickLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToList());
+        var bar = new TickBar(time, b.Open, b.High, b.Low, b.Close, b.Buy, b.Sell, b.Prints, grouped.Select(kv => new TickLevel(kv.Key, kv.Value.Buy, kv.Value.Sell)).ToList());
+        b.Cached = bar; b.CachedRow = row; b.CachedVersion = b.Version;
+        return bar;
     }
 }

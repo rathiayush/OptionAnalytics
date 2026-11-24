@@ -860,6 +860,25 @@ All must pass before committing.
   behind: stopped at 09:21, now 09:31" tag once the last minute ended over `SPOT_STALE_MS` 2 min before the clock (never on a
   replayed day or outside the session) - a stalled feed was silent here. A read -
   it feeds no strategy or alert.
+- OI Replay's BIG OPTION TRADES card (asked for - "is there any way that we can identify big trades on option buy combining the data from
+  ATM +- 10 ... create a component"; `bigOptionTrades` - `BigOptionTradesCard.jsx`, the maths `bigOptionTrades.js`, section version 10 /
+  `SECTIONS_VERSION` '10', added once right after the trapped / squeeze zones): Dhan sends NO time & sales for options, only a 1-minute bar
+  (OHLC, volume, OI) per strike, so a "big trade" is a BIG MINUTE at a strike, never one print - the strike's volume that minute >=
+  `multiple` (4) x ITS OWN usual (the median of its last `history` 20 earlier bars with volume, none before `minHistory` 5) AND >= `minLots` (20);
+  only strikes within ATM +- N (default 10) of THAT minute's ATM (the spot's nearest strike). Read from the bar and the OI (`readOf`): who pushed
+  (the close's place in the range, else the move from the minute before) x OI change = long build-up (price up, OI up - buyers opened), short
+  build-up (writers), short covering, long unwinding, or just bought / sold with no OI reading; the bias for the INDEX (call bought / put written
+  bullish, put bought / call written bearish; a build-up counts 1, the others 0.5). COMBINED across the strikes: the last N minutes' money by
+  kind (calls bought / puts bought / calls written / puts written, rupees = premium x volume), a net lean ((bullish - bearish) / both, +-25% =
+  bullish / bearish, else mixed) and a SWEEP (the same type and direction at 3+ strikes within 3 minutes - one decision over the chain). Each
+  minute uses only the bars up to it - a cut at any clock = the whole day's up to it; live the forming minute is left out
+  (`tests/big-option-trades.test.mjs`). A big minute can be many small trades and a hedger looks like a buyer: a lead to check against the
+  OI, straddle and flow, not a signal - it feeds no strategy or alert.
+- THE FOOTPRINTS DO NOT TAKE THE WHEEL (asked about - "footprint chart ... I can not scroll on big screens"; the Order Flow page's footprint
+  `OrderFlowCharts.jsx`, the Tick Flow footprint and bubble chart): the chart cancelled every wheel event, so on a big screen - where the chart
+  fills the window - the page could not be scrolled with the pointer over it. A plain wheel now SCROLLS THE PAGE; Ctrl / Cmd + wheel (a
+  trackpad pinch too) = bar width / bars shown / time zoom, Shift + wheel (or the price axis, Order Flow) = row height / price zoom, a sideways
+  swipe = back in time. A new chart must not `preventDefault` a plain wheel.
 - OI Replay's paper trade panel (`paperStops.js`, `paperExit.js`): each position keeps the levels it was punched with (the
   panel's, or the keyboard ticket's) in its `levelLog`; a panel change (once it has settled a second - typing 25 passes
   through 2) reaches the OPEN positions of THAT index only, from the minute it is made (`withPaperLevelChange`): a minute is
@@ -1731,6 +1750,79 @@ All must pass before committing.
   send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
   LOTS OR QUANTITY (asked for - "an option to select quantity instead of lot"): the page's Lots / Quantity switch (`optionanalytics.tickFlow.showLots`) drives every size - footprint cells, delta strip, bubble labels and legend, bid / ask size,
   cumulative delta, the bubble hover (`fmtQty`) - and the "Bubbles >=" box, kept per unit (`...minLots` / `...minQty`, so switching does not change what the other holds).
+  THE TCP TRANSPORT (asked for - "load from tcp ... historical data as well live"; `TrueData:Live:Transport` "websocket" (default) or "tcp",
+  `TcpHost` tcp.truedata.in / `TcpPort` 7070 - TrueData's TCP API v2.3; `TrueDataTcpParser`, `TrueDataTcpTests.cs`): the live feed can read the
+  TCP stream instead of the WebSocket - "LOGIN user password", the same JSON `addsymbol` for the symbol ids, then fixed BINARY packets that
+  start with a two-letter code and end in "Z": TR trade (87 bytes - symbol id, time, SEQUENCE, LTP, LAST TICK VOLUME, ATP, day volume, OHL, prev
+  close, OI, turnover, best bid / ask), BA quote (27), L2 (139, skipped - NSE has level 1 only), market codes (PO PC CO CC CK CL FO FC DO DC). The
+  frames are the WebSocket parser's own records, so routing, `TickBook`, coverage and the page are SHARED; nothing else changes. Decoding follows
+  TrueData's own Python client (`truedata` 7.0.3): LITTLE-ENDIAN (the first packet's time checks it against the clock, big-endian is read as
+  such), the time an IST wall clock written as a Unix integer (one that only fits the clock as real UTC is read as UTC), float32 prices through
+  `DecimalConversion.FromSingle`. Text lines (welcome, login answer - taken after 300 ms with no line end - a refusal in words) and JSON replies
+  are mixed in the stream; bytes that make no sense are skipped up to the next packet and counted (`Skipped`), a text line needs a run of printable
+  bytes ending in a line end so binary garbage never waits for one. The TCP document gives the packet layouts but NOT the subscribe command (an
+  image with no content) - `addsymbol` as on the WebSocket is an ASSUMPTION; the page's raw-message box ("TR id ... seq ... ltq ...") shows what
+  arrives. NOT TESTED AGAINST TRUEDATA: the sandbox cannot open ports 7070 / 8086 (tested against a fake server on a loopback socket). TCP has NO
+  HISTORY: the TCP document's history is the same REST API (`auth.truedata.in` / `history.truedata.in`, 3 calls a second, 100 a minute, 6000 an
+  hour there) that replay already uses - history stays REST either way, and holds about one snapshot a second (NIFTY26NOVFUT, 20 Nov 2026: 0.40
+  ticks / s, never more than 4 in a second, volume complete), so ticks finer than that exist only live.
+  THE SOURCE IS PICKED ON THE PAGE (asked for - "once selected we will get data from there"): the controls row's "Live source: WebSocket / TCP"
+  (`PUT /api/tick-flow/source`, ADMIN ONLY - others see which is live; `TrueDataLiveFeed.SetTransport`): it closes the open connection (one login an
+  account) and reconnects through the one picked at once (state "switching"); the choice is kept in `tick-flow-source.txt` under
+  `Storage:ScannerRunnerPath` (`Live.StatePath`) and beats `Live:Transport`, which is only the first default. The status carries `transport`.
+  Replay is always REST history, whichever is picked.
+  BIG OPTION ORDERS ON THE TICK FLOW PAGE (asked for - "ignore dhan on live tick data we are using TrueData ... create big order punch trades from
+  option ... the best possible way with live tick data ... bind it here on same page"; `OptionBigOrders.cs` - `OptionBigOrderWatch`,
+  `TrueDataOptionChainSource`; the feed's option stream; client `TickBigOrdersCard.jsx`, `tickBigOrders.js`): the SAME TrueData login also streams the
+  OPTIONS ATM +- N (default 10, calls and puts) of ONE index the page picks ("Options of: Off / NIFTY / BANKNIFTY", `PUT /api/tick-flow/options`, ADMIN
+  ONLY, kept in `tick-flow-options.json` under `Live.StatePath`; `GET /api/tick-flow/options?since=` - the stream's state and the orders after a
+  sequence, a page timer with POLL_HEADERS) - the trial allows `Live:MaxSymbols` 50 symbols: the two futures and one index's 42 options fit, both
+  indices' 84 do not, so it is ONE index and NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY"; the cap is held, nearest the ATM first). THE CHAIN: `GET https://api.truedata.in/getOptionChain?user&password&symbol&expiry=yyyyMMdd&csv=true`
+  (TESTED against the trial account: "symbolid,symbol,series,isin,exchange,lotsize,strike,expiry,..." one row an option, names like NIFTY26120117350CE =
+  index + yyMMdd + strike + CE / PE, the symbol id given - so the ids are known before the subscribe reply; an expiry with no chain answers empty - a
+  date that is not an expiry, or one already past) - the nearest expiry that has one is found once a day by asking each day from today (not today after
+  15:30) that is the expiry weekday or the day before it (a holiday moves an expiry earlier), calls spaced 1.1 s; a failure backs off 30 s doubling to
+  10 min. THE WINDOW FOLLOWS THE ATM (`SyncOptionsAsync`, every 5 s in the session): centred on the options' OWN put-call parity (`ImpliedAtm` - the
+  strike where the call and the put cost the same among options that ticked in the last 2 min, the forward = strike + call - put) else the futures' price;
+  new strikes `addsymbol`, those more than N + 2 steps away `removesymbol` (the WebSocket's own messages - TrueData's Python client sends the same; the
+  TCP stream is ASSUMED to take them too); a new connection has only the futures, so everything is subscribed again (`UseConnection` / epoch); every
+  send goes through one gate (a socket allows one writer). WHAT AN ORDER IS: a TICK of an option - TrueData's snapshot about once a second - with the
+  quantity traded since the one before (several trades), NEVER a single print; when the day's volume rose by MORE than the tick's own last trade the RISE
+  is taken (`Bundled`, marked * on the page). Kept (loosely - `FloorLots` 10, `FloorRatio` 2; the page filters finer, default 30 lots and 3x) when it is
+  at least the floor in lots and, once the option has 5 ticks, that many times ITS OWN usual (the median of its last 50 ticks); a quantity of 1 on a
+  lot-sized contract is the day-high update, no trade. Each carries: the SIDE from the quote BEFORE it (`TickBook.Side` - at / through the ask = bought,
+  at / through the bid = sold, inside the nearer half, then the tick rule; the packet's own quote is the next tick's "before"), HOW IT HIT THE BOOK
+  (`TouchRatio` = its size over the size shown at the touch it took, `Through` = its price went past the touch - a sweep), `Ratio`, the OI change since
+  the option's tick before (OI is in the trade message - with the side it is read as long build-up / short build-up / short covering / long unwinding by
+  OI Replay's `readOf`, and the bias for the index: call bought / put written bullish, put bought / call written bearish), the premium's move from the tick
+  before and the distance from the ATM. The page adds the strikes up over the last 5 - 60 min by kind (calls bought / puts bought / calls written / puts
+  written, rupees = price x quantity), a net lean (+-25% = bullish / bearish) and SWEEPS (the same kind at 3+ strikes within 3 min) - `bigOptionTrades.js`'s
+  `markSweeps` / `bigTradesSummary` (OI Replay's own module - NOT the Order Flow page's). Live only: a past day would need the tick history of ~42 option
+  contracts (5 calls a second, flaky). NOT TESTED AGAINST THE LIVE SOCKET (the sandbox cannot reach it): the real trade message's LTQ / OI fields,
+  whether option ticks come as often as the futures' (the history of options was not measured) and whether `addsymbol` / `removesymbol` mid-stream
+  behave as the Python client's use implies - the status line ("N of M option symbols streaming · ticks · last tick") and the raw-message box show it.
+  A read - it feeds no strategy, alert or order. `OptionBigOrdersTests.cs`, `tests/tick-big-orders.test.mjs`; the card checked in a browser against a mocked API.
+  THE TICK PATH UNDER PRESSURE (asked for - "our code should handle high frequency pressure and should have good performance"): (1) THE INBOX - the receive
+  loop (WebSocket and TCP) only parses and QUEUES trade / quote frames (`EnqueueAsync`, a bounded `Channel` of `InboxCapacity` 200 000, one writer, ONE
+  reader - `ProcessInboxAsync` - applies them IN ORDER to the books and the big-order watch), so a reader holding a book's lock can never stop the socket being
+  read (TrueData's spec: a client that does not keep up fills the receive buffer and ticks are dropped); a full queue HOLDS the socket, never drops a tick
+  silently (`Backpressure` counts it); the status's `queue` gives depth, the deepest it reached, processed, lag now / worst (ms) and errors - a tick that throws is
+  counted and skipped, it never stops the stream. Control frames (login, symbols, errors) are still handled inline. (2) PER-TICK WORK - the raw-message box
+  samples trade / quote frames (one in 250 ms, text built only when kept - formatting every tick was the costliest thing in the loop), one receive buffer a
+  connection, the big-order watch pays for the median of an option's usual only for a CANDIDATE (lots >= floor), `Since` is a binary search, the tracked count a counter.
+  (3) SNAPSHOTS - `TickBook.Snapshot` is cached while nothing changed (`_version` moves with each trade / quote / new day; same version and question = the object
+  already built), a FINISHED minute's bar is kept by its own version (a page poll rebuilt every row of every minute), bubbles are scanned from the newest back and
+  stopped at the number asked for (a day holds 400 000). (4) THE PAGE - `markSweeps` looks only at the neighbours inside its window (it was every event against
+  every event on each poll), the state object is kept when the server's answer did not change. `TickPressureTests.cs` (150 000 ticks through the inbox in ~0.4 s,
+  in order, none lost, no gap; a full inbox holds the writer; 210 000 option ticks over 42 options in ~0.25 s; the snapshot cache), `tests/tick-big-orders.test.mjs`.
+  BIG OPTION ORDERS ON OI REPLAY'S SPOT CHART (asked for - "I also want it on spot charts ... I should be able to define quantity"): the spot card's
+  "Big option orders (live ticks)" tick (`optionanalytics.oiReplay.bigOrdersOnSpot`, off by default) with the size in LOTS or in QUANTITY (units - a Lots / Qty
+  switch, each keeping its own number: `...bigOrdersLots` 30, `...bigOrdersQty` 1950) draws the Tick Flow page's orders as markers on the candles
+  (`orderMarkers` in `tickBigOrders.js`, merged with the absorption marks and sorted): a green arrow under the candle for a bullish order (call bought / put
+  written ...), a red one over it for a bearish one, a grey dot for no direction, one marker a candle and direction - "CE 25000 B 80 L" for one order, "3× 190 L" for
+  several, a ⚡ for a sweep. Only the size decides here (no "x usual" test). LIVE only, only when the tick stream is on THIS index (the status text says which
+  index it is on, or that none is - an admin picks it on the Tick Flow page), never in the popup host. The Tick Flow card has the same Lots / Quantity choice
+  (its own switch - `bigMinQty`). One hook - `useBigOptionOrders` - polls the orders for both. Not drawn on the Profiles / Structure pages' spot charts.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,

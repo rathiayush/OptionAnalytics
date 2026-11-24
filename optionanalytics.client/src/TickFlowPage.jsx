@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Empty, InputNumber, Segmented, Select, Slider, Space, Statistic, Tag, Tooltip, Typography } from 'antd'
 import { PauseCircleOutlined, PlayCircleOutlined, StepBackwardOutlined } from '@ant-design/icons'
-import { NavBar, POLL_HEADERS, usePersistedState } from './shared.jsx'
+import { NavBar, POLL_HEADERS, useAuth, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
+import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
 import { aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
 
 const { Title, Text } = Typography
@@ -73,8 +74,14 @@ const SPEEDS = [1, 5, 10, 30, 60, 120, 300, 600].map((v) => ({ value: v, label: 
 const istToday = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10)
 const hhmmss = (ms) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', second: '2-digit' })
 
+// Where the live ticks come from - TrueData's WebSocket (JSON) or its TCP stream (binary packets). An admin picks; the server reconnects
+// through the one picked at once and keeps the choice. Replay is always TrueData's REST history.
+const SOURCES = [{ value: 'websocket', label: 'WebSocket' }, { value: 'tcp', label: 'TCP' }]
+
 export default function TickFlowPage() {
   const narrow = useNarrowScreen()
+  const isAdmin = useAuth()?.user?.role === 'Admin'
+  const [sourceError, setSourceError] = useState(null)
   const [underlying, setUnderlying] = usePersistedState('optionanalytics.tickFlow.underlying', 'NIFTY')
   const [rowSizes, setRowSizes] = usePersistedState('optionanalytics.tickFlow.rowSizes', DEFAULT_ROWS)
   const [timeframe, setTimeframe] = usePersistedState('optionanalytics.tickFlow.timeframe', 1)
@@ -147,6 +154,21 @@ export default function TickFlowPage() {
               <Segmented value={index} onChange={setUnderlying} options={INDICES} />
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={[1, 3, 5, 15].map((v) => ({ value: v, label: `${v} min` }))} />
               <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [index]: v })} style={{ width: 120 }} options={ROW_OPTIONS} />
+              <Tooltip title={`Where the live ticks come from: TrueData's WebSocket (JSON messages) or its TCP stream (binary packets with the last tick's volume and a sequence number). Once picked, the server reconnects through it and the data comes from there - one login an account, so the other is closed. ${isAdmin ? 'Kept across a restart.' : 'An admin picks it.'} Replay of a past day is always TrueData's tick history (REST).`}>
+                <span>
+                  Live source{' '}
+                  <Segmented size="small" value={status?.status?.transport ?? 'websocket'} disabled={!isAdmin || off || !status?.status}
+                    options={SOURCES}
+                    onChange={async (value) => {
+                      setSourceError(null)
+                      try {
+                        const r = await fetch('/api/tick-flow/source', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transport: value }) })
+                        if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`)
+                        setReload((n) => n + 1)
+                      } catch (e) { setSourceError(e.message) }
+                    }} />
+                </span>
+              </Tooltip>
               <Tooltip title="The smallest order drawn as a bubble, in the unit picked (lots or quantity). 1 = every order; raise it on a busy day to see only the larger ones.">
                 <span>
                   Bubbles ≥ {showLots
@@ -183,6 +205,7 @@ export default function TickFlowPage() {
 
         {off && <Alert type="info" showIcon message="The TrueData live feed is off" description={status?.note ?? 'Set TrueData:Live:Enabled and the TrueData login (TrueData__UserId / TrueData__Password) on the server.'} />}
         {!off && error && <Alert type="warning" showIcon message={error} />}
+        {sourceError && <Alert type="warning" showIcon closable onClose={() => setSourceError(null)} message={`The source was not changed: ${sourceError}`} />}
         {status?.status?.error && !off && <Alert type="warning" showIcon message={`TrueData: ${status.status.error}`} />}
 
         {!off && !replay && status?.status && (!stream || stream.trades === 0) && (
@@ -232,13 +255,17 @@ export default function TickFlowPage() {
           </Space>
         )}
 
-        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
+        <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel scrolls the page · Ctrl+wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
           {!day || day.bubbles.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : replay ? 'No trade in this day up to the clock.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
             : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={showLots ? minLots : minQty / (lotSize || 1)} rMax={bubbleSize} height={narrow ? 380 : 560} />}
         </Card>
 
-        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel: bars shown · Shift+wheel: row height · drag: move back</span>}>
+        <Card size="small" title="Big option orders - TrueData's live ticks of the options ATM ± N, read and added up">
+          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} />
+        </Card>
+
+        <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>
           {bars.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : 'No trade yet today.'} />
             : <TickFootprintChart bars={bars} cvd={cvd} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 520 : 680} rowDelta={rowDelta} />}

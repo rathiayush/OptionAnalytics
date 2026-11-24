@@ -947,7 +947,7 @@ export default function OrderFlowPage() {
 
         <Row gutter={[16, 16]}>
           <Col xs={24} xl={17}>
-            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy){rowDelta ? ' × Δ' : ''} · drag to move it anywhere · wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
+            <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows${estimated ? ' · estimated' : ''}`} extra={!narrow && <Text type="secondary" style={{ fontSize: 11 }}>bid (sell) × ask (buy){rowDelta ? ' × Δ' : ''} · drag to move it anywhere · wheel scrolls the page · Ctrl+wheel: bar width · Shift+wheel or price axis: row height · double-click: reset</Text>}>
               <PriceAlertsBar {...priceAlerts} lastPrice={meta?.lastPrice} live={!isReplay} />
               <ProfileAlertsBar {...profileAlerts} live={!isReplay} />
               <FootprintLegend
