@@ -58,10 +58,11 @@ export function hitText(o) {
 export { bigTradesSummary }
 
 /** The card's own filters (asked for - buyers / sellers / both, calls / puts / both, far out-of-the-money = hedge, a price under X): `type` 'both' | 'calls' | 'puts',
- *  `side` 'both' | 'buy' | 'sell' (the order's BUY / SELL), `hideFarOtm` N (>= N strikes out of the money left out; 0 = off), `cheapBelow` (a premium under it left out; 0 = off). */
-export function filterBigOrders(orders, { type = 'both', side = 'both', hideFarOtm = 0, cheapBelow = 0 } = {}) {
+ *  `side` 'both' | 'buy' | 'sell' (the order's BUY / SELL), `hideFarOtm` N (>= N strikes out of the money left out; 0 = off), `onlyFarOtm` N (ONLY those - the hedge positions; 0 = off), `cheapBelow` (a premium under it left out; 0 = off). */
+export function filterBigOrders(orders, { type = 'both', side = 'both', hideFarOtm = 0, onlyFarOtm = 0, cheapBelow = 0 } = {}) {
   return (orders ?? []).filter((o) => (type === 'both' || o.type === (type === 'calls' ? 'CE' : 'PE'))
     && (side === 'both' || (side === 'buy' ? o.side > 0 : o.side < 0))
     && !isHedgePosition(o, hideFarOtm)
+    && (!(onlyFarOtm > 0) || isHedgePosition(o, onlyFarOtm))
     && !(cheapBelow > 0 && o.price < cheapBelow))
 }
