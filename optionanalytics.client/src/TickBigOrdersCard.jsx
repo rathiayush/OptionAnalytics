@@ -2,7 +2,7 @@ import { useMemo } from 'react'
 import { Alert, Checkbox, InputNumber, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
-import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText, ordersUpTo, deltaLots, isLikelyHedge } from './tickBigOrders.js'
+import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText, ordersUpTo, deltaLots, isLikelyHedge, isFarOtm, isCheap, itmSteps as itmStepsOf } from './tickBigOrders.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
@@ -44,7 +44,18 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const [hideHedges, setHideHedges] = usePersistedState('optionanalytics.tickFlow.hideHedges', false)
   const [hedgeSteps, setHedgeSteps] = usePersistedState('optionanalytics.tickFlow.hedgeSteps', 3)
   const sized = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
-  const big = useMemo(() => (hideHedges ? sized.filter((o) => !isLikelyHedge(o, hedgeSteps)) : sized), [sized, hideHedges, hedgeSteps])
+  // FAR OUT-OF-THE-MONEY / CHEAP (asked for - "hedge is deep OUT of the money ... 1-10, or a price under something"): tail-protection flow, left out when ticked.
+  const [hideFarOtm, setHideFarOtm] = usePersistedState('optionanalytics.tickFlow.hideFarOtm', false)
+  const [farOtmSteps, setFarOtmSteps] = usePersistedState('optionanalytics.tickFlow.farOtmSteps', 5)
+  const [hideCheap, setHideCheap] = usePersistedState('optionanalytics.tickFlow.hideCheap', false)
+  const [cheapBelow, setCheapBelow] = usePersistedState('optionanalytics.tickFlow.cheapBelow', 10)
+  // WHO: both sides, buyers only (BUY) or sellers only (SELL).
+  const [sideOnly, setSideOnly] = usePersistedState('optionanalytics.tickFlow.sideOnly', 'both')
+  const farOtmOn = hideFarOtm ? farOtmSteps : 0
+  const cheapOn = hideCheap ? cheapBelow : 0
+  const big = useMemo(() => sized.filter((o) => (!hideHedges || !isLikelyHedge(o, hedgeSteps))
+    && !isFarOtm(o, farOtmOn) && !isCheap(o, cheapOn)
+    && (sideOnly === 'both' || (sideOnly === 'buy' ? o.side > 0 : o.side < 0))), [sized, hideHedges, hedgeSteps, farOtmOn, cheapOn, sideOnly])
   const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback, hedgeSteps), [big, replay, clockMs, now, lookback, hedgeSteps])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
@@ -73,7 +84,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
     { title: 'Price', dataIndex: 'price', align: 'right', width: 76, render: (v, o) => <span>{v.toFixed(2)} <span style={{ color: o.movePct > 0 ? UP_COLOR : o.movePct < 0 ? DOWN_COLOR : undefined, fontSize: 11 }}>{o.movePct > 0 ? '+' : ''}{o.movePct.toFixed(1)}%</span></span> },
     { title: 'Hit the book', width: 150, render: (_, o) => <span style={{ fontWeight: o.through ? 600 : 400 }}>{hitText(o)}</span> },
     { title: 'OI Δ', dataIndex: 'oiChange', align: 'right', width: 90, render: (v, o) => (v == null ? '—' : `${v > 0 ? '+' : ''}${Math.round(v / (o.lotSize || 1)).toLocaleString('en-IN')} lots`) },
-    { title: 'Read', dataIndex: 'read', render: (v, o) => <span>{v}{isLikelyHedge(o, hedgeSteps) && <Tooltip title={`${Math.round(Math.abs(o.atmDistance))} strikes in the money - trades like the index, mostly a hedge or stock replacement`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>HEDGE?</Tag></Tooltip>}</span> },
+    { title: 'Read', dataIndex: 'read', render: (v, o) => <span>{v}{isFarOtm(o, farOtmSteps) && <Tooltip title={`${Math.round(-itmStepsOf(o))} strikes out of the money - cheap tail / protection flow`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>FAR OTM</Tag></Tooltip>}{isLikelyHedge(o, hedgeSteps) && <Tooltip title={`${Math.round(Math.abs(o.atmDistance))} strikes in the money - trades like the index, mostly a hedge or stock replacement`}> <Tag color="default" style={{ marginInlineEnd: 0 }}>HEDGE?</Tag></Tooltip>}</span> },
     { title: 'Δ lots', width: 78, align: 'right', render: (_, o) => { const d = deltaLots(o); return d === 0 ? '—' : <span style={{ color: d > 0 ? UP_COLOR : DOWN_COLOR }}>{d > 0 ? '+' : ''}{Math.round(d).toLocaleString('en-IN')}</span> } },
     { title: 'Index', dataIndex: 'bias', width: 76, render: (b) => (b === 0 ? '—' : <span style={{ color: b > 0 ? UP_COLOR : DOWN_COLOR, fontWeight: Math.abs(b) >= 1 ? 600 : 400 }}>{b > 0 ? '▲' : '▼'} {Math.abs(b) >= 1 ? 'strong' : 'weak'}</span>) },
     { title: '₹', dataIndex: 'value', align: 'right', width: 84, render: (v) => rupees(v) },
@@ -84,14 +95,15 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
       <Space wrap size={[12, 6]}>
         {!replay && (<>
-        <Tooltip title={isAdmin ? 'The index whose options TrueData streams (the trial allows 50 symbols: the two futures and one index\'s ATM ± 10 fit). Kept across a restart.' : 'An admin picks the index.'}>
+        <Tooltip title={isAdmin ? 'The index whose options TrueData streams - NIFTY only for now (the trial allows 50 symbols: the two futures and one index\'s ATM ± 10 fit). Kept across a restart.' : 'An admin picks the index.'}>
           <span>Options of{' '}
             <Segmented size="small" value={state?.underlying || ''} disabled={!isAdmin} onChange={(v) => put(v, state?.strikes ?? 10)}
-              options={[{ value: '', label: 'Off' }, { value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }]} />
+              options={[{ value: '', label: 'Off' }, { value: 'NIFTY', label: 'NIFTY' }]} />
           </span>
         </Tooltip>
         <span>ATM ± <Select size="small" value={state?.strikes ?? 10} disabled={!isAdmin || !state?.underlying} style={{ width: 70 }} options={STRIKE_CHOICES.map((v) => ({ value: v, label: v }))} onChange={(v) => put(state.underlying, v)} /></span>
         </>)}
+        <Segmented size="small" value={sideOnly} onChange={setSideOnly} options={[{ value: 'both', label: 'Buyers + sellers' }, { value: 'buy', label: 'Buyers only' }, { value: 'sell', label: 'Sellers only' }]} aria-label="Side" />
         <Segmented size="small" value={unit} onChange={setUnit} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Quantity' }]} aria-label="Size unit" />
         <Tooltip title={showLots ? 'At least this many lots in one tick (a lot = the contract\'s lot size).' : 'At least this QUANTITY (units) in one tick.'}>
           {showLots
@@ -104,6 +116,12 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
         <span>Last <Select size="small" value={lookback} onChange={setLookback} style={{ width: 80 }} options={LOOKBACKS.map((m) => ({ value: m, label: `${m} min` }))} /></span>
         <Tooltip title="A deep in-the-money option trades almost like the index itself, so a big order there is mostly a hedge or a stock replacement, not a fresh view. Tagged HEDGE? on the table; tick to leave them out of the lean, the delta flow, the map and the table.">
           <Checkbox checked={hideHedges} onChange={(e) => setHideHedges(e.target.checked)}>Hide likely hedges (ITM ≥ <Select size="small" value={hedgeSteps} onChange={setHedgeSteps} style={{ width: 56 }} options={[2, 3, 4, 5].map((v) => ({ value: v, label: v }))} onClick={(e) => e.stopPropagation()} /> strikes)</Checkbox>
+        </Tooltip>
+        <Tooltip title="Deep OUT-of-the-money options are where protection (tail hedges) and lottery tickets trade - cheap, far from the money, little delta. Tick to leave them out of everything (lean, delta flow, map, table); the FAR OTM tag marks them on the table.">
+          <Checkbox checked={hideFarOtm} onChange={(e) => setHideFarOtm(e.target.checked)}>Hide far OTM (≥ <Select size="small" value={farOtmSteps} onChange={setFarOtmSteps} style={{ width: 60 }} options={Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: i + 1 }))} onClick={(e) => e.stopPropagation()} /> strikes out)</Checkbox>
+        </Tooltip>
+        <Tooltip title="Leave out orders whose premium is under this many rupees - the far strikes' cheap options, usually protection or a lottery ticket.">
+          <Checkbox checked={hideCheap} onChange={(e) => setHideCheap(e.target.checked)}>Hide price under ₹ <InputNumber size="small" min={0} max={5000} value={cheapBelow} onChange={(v) => setCheapBelow(v ?? 10)} style={{ width: 72 }} onClick={(e) => e.stopPropagation()} /></Checkbox>
         </Tooltip>
         <Checkbox checked={sweepsOnly} onChange={(e) => setSweepsOnly(e.target.checked)}>Sweeps only</Checkbox>
       </Space>

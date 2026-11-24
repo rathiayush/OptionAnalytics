@@ -44,6 +44,7 @@ public sealed class TickFlowController : ControllerBase
         if (_feed is null || _optionHistory is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
         var instrument = _feed.InstrumentFor(underlying);
         if (instrument is null) return NotFound(new { error = $"{underlying?.ToUpperInvariant()} is not streamed (TrueData:Live:Instruments)." });
+        if (!_feed.OptionsAllowed(underlying)) return NotFound(new { error = $"{underlying?.ToUpperInvariant()} options are not fetched (TrueData:Live:OptionUnderlyings - NIFTY only for now)." });
         var s = _optionHistory.Request(instrument, date, strikes);
         return Ok(new { state = s.State, done = s.Done, total = s.Total, failed = s.Failed, error = s.Error, expiry = s.Expiry, step = s.Step, events = s.Events });
     }
