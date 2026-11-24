@@ -69,6 +69,11 @@ public sealed class TrueDataLiveOptions
     /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit, both indices' (84) do not - so it is
     /// ONE index, NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY").</summary>
     public string OptionsUnderlying { get; set; } = "NIFTY";
+
+    /// <summary>FEATURE FLAG for the option tick processing (asked for - "also add a feature flag for true tick data handling"; environment variable
+    /// TrueData__Live__OptionTicks): ON by default. OFF = the option stream is never subscribed, no option tick is read or watched, the big option orders
+    /// (live and the replay's tick-history build) answer "off", and the futures' footprint is untouched.</summary>
+    public bool OptionTicks { get; set; } = true;
     public int OptionStrikes { get; set; } = 10;
     public int MaxSymbols { get; set; } = 50;
 

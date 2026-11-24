@@ -38,7 +38,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const [sweepsOnly, setSweepsOnly] = usePersistedState('optionanalytics.tickFlow.bigSweepsOnly', false)
   const liveFeed = useBigOptionOrders(!replay)
   const dayFeed = useBigOptionOrdersDay(index, replayDate, !!replay)
-  const { state, live: enabled, error, now, pick: put } = liveFeed
+  const { state, live: enabled, optionTicks, error, now, pick: put } = liveFeed
   const orders = useMemo(() => (replay ? ordersUpTo(dayFeed.orders, clockMs) : liveFeed.orders), [replay, dayFeed.orders, clockMs, liveFeed.orders])
 
   // WHO / WHICH / HEDGES (asked for): buyers or sellers, calls or puts, deep out-of-the-money = hedge position (N 1 - 10), a price under X rupees.
@@ -60,7 +60,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const notice = replay && dayFeed.error ? <Alert type="warning" showIcon message={`Big option orders: ${dayFeed.error}`} />
     : replay && dayFeed.answer?.state === 'failed' ? <Alert type="warning" showIcon message="The day's option ticks could not be built" description={dayFeed.answer.error} />
       : replay && !dayFeed.ready ? <Alert type="info" showIcon message={`Loading the day's option ticks from TrueData… ${dayFeed.answer?.done ?? 0} of ${dayFeed.answer?.total ?? '?'} contracts`} description="One history call per option (ATM ± 10 over the day's range) - a few minutes the first time; the day is kept on the server after." />
-        : !replay && !enabled ? <Alert type="info" showIcon message="The TrueData live feed is off" /> : null
+        : !replay && !enabled ? <Alert type="info" showIcon message="The TrueData live feed is off" />
+          : !replay && !optionTicks ? <Alert type="info" showIcon message="Option tick processing is switched off" description="The server's feature flag TrueData:Live:OptionTicks (environment variable TrueData__Live__OptionTicks) is false - no option ticks are subscribed or read. The futures footprint is not affected." /> : null
 
   const columns = [
     { title: 'Time', dataIndex: 't', width: 78, render: (t) => hhmmss(t) },

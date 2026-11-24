@@ -179,6 +179,28 @@ public sealed class OptionBigOrdersTests
         feed.BookFor("NIFTY")!.OnTrade(T0, 1, price, 65, price - 0.05m, 100, price, 100);
 
     [Fact]
+    public async Task WithTheOptionTicksFlagOff_NoOptionIsSubscribed_AndThePickIsRefused()
+    {
+        var feed = new TrueDataLiveFeed(Options.Create(new TrueDataOptions
+        {
+            Enabled = true, UserId = "u", Password = "p",
+            Live = new TrueDataLiveOptions
+            {
+                Enabled = true, OptionTicks = false, OptionsUnderlying = "NIFTY",
+                Instruments = new() { new() { Underlying = "NIFTY", Symbol = "NIFTY-I", LotSize = 65, TickSize = 0.05m } },
+            },
+        }), NullLogger<TrueDataLiveFeed>.Instance) { Clock = () => T0, ChainSource = new FakeChain() };
+        var sent = new List<string>();
+        feed.UseConnection(json => { sent.Add(json); return Task.CompletedTask; });
+        FuturesAt(feed, 25000m);
+        await feed.SyncOptionsAsync(T0, CancellationToken.None);
+        Assert.Empty(sent);
+        Assert.False(feed.OptionTicksOn);
+        Assert.Equal("", feed.OptionsSnapshot().Underlying);
+        Assert.False(feed.SetOptions("NIFTY", 10));
+    }
+
+    [Fact]
     public async Task TheFeedSubscribesAtmPlusMinusTenOfTheIndexPicked_AndFollowsTheAtmWithinTheCap()
     {
         var (feed, sent) = Feed();
