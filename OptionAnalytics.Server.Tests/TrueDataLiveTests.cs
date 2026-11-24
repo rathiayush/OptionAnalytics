@@ -55,45 +55,110 @@ public sealed class TrueDataLiveTests
         return feed;
     }
 
-    private static TrueDataTrade T(string id, int sec, decimal price, long qty, long total, long seq, decimal bid, decimal ask) =>
-        new(id, new DateTimeOffset(2026, 11, 24, 10, 0, sec, TimeSpan.FromMinutes(330)), price, qty, price, total, price, price, price, price, 0, "", seq, bid, 100, ask, 100);
-
-    private static readonly DateTimeOffset Session = new(2026, 11, 24, 10, 0, 0, TimeSpan.FromMinutes(330));
+    private static readonly DateTimeOffset T0 = new(2026, 11, 24, 10, 0, 0, TimeSpan.FromMinutes(330));
+    private static TickBook Book() => new("NIFTY", "NIFTY-I", 65, 0.05m);
 
     [Fact]
-    public void ATradeIsBookedWithItsOwnQuantityAndTheSideTheQuoteBeforeItGives_AndSequenceGapsAreCounted()
+    public void ATradeIsSidedByTheQuoteBeforeIt_NotTheQuoteInItsOwnPacket()
     {
-        var feed = Feed();
-        var at = Session;
-        feed.Clock = () => at;
-        // A quote before any trade is held back (no volume baseline yet); the first TRADE only sets the baseline.
-        feed.OnQuote(new TrueDataQuote("1", null, 24999m, 100, 25000m, 100), 1);
-        feed.OnTrade(T("1", 0, 25000m, 50, 1000, 10, 24999m, 25000m), 1);
-        at = Session.AddSeconds(1);
-        feed.OnQuote(new TrueDataQuote("1", null, 25000m, 150, 25000.5m, 75), 1);
-        at = Session.AddSeconds(2);
-        feed.OnTrade(T("1", 2, 25000.5m, 75, 1075, 11, 25000m, 25000.5m), 1);   // at the ask: a buy of exactly 75
-        at = Session.AddSeconds(3);
-        feed.OnTrade(T("1", 3, 25000m, 150, 1225, 14, 25000m, 25000.5m), 1);    // at the bid: a sell of exactly 150; 12 and 13 never arrived
+        var b = Book();
+        b.OnQuote(T0, 24999m, 100, 25000m, 100);
+        // The packet shows the book AFTER the trade (ask moved up to 25000.5); the trade at 25000 hit the ask of the quote before it.
+        b.OnTrade(T0.AddSeconds(1), 1, 25000m, 65, 25000m, 100, 25000.5m, 80);
+        // Now the quote is 25000 x 25000.5: a trade at 25000 is a sell at the bid.
+        b.OnTrade(T0.AddSeconds(2), 2, 25000m, 130, 25000m, 50, 25000.5m, 80);
 
-        var nifty = feed.Snapshot().Streams.Single(s => s.Underlying == "NIFTY");
-        Assert.Equal(3, nifty.Trades);
-        Assert.Equal(2, nifty.Quotes); // both received, the first held back from the engine
-        Assert.Equal(2, nifty.SequenceGaps);
-        Assert.Equal(1225, feed.EngineFor("NIFTY")!.LastKnownVolume);
+        var bar = b.Snapshot(1, 1, 100).Bars.Single();
+        Assert.Equal(65, bar.Buy);
+        Assert.Equal(130, bar.Sell);
+        Assert.Equal(195, bar.Buy + bar.Sell);
+    }
 
-        var bar = feed.EngineFor("NIFTY")!.Snapshot(0.05m, 1, 50).Bars.Single();
-        Assert.Equal(75, bar.Buy);
-        Assert.Equal(150, bar.Sell);
-        Assert.Equal(0, feed.Snapshot().Streams.Single(s => s.Underlying == "BANKNIFTY").Trades);
+    [Theory]
+    [InlineData(25000.5, 25000.0, 25000.5, true)]    // at the ask
+    [InlineData(25001.0, 25000.0, 25000.5, true)]    // through the ask
+    [InlineData(25000.0, 25000.0, 25000.5, false)]   // at the bid
+    [InlineData(24999.0, 25000.0, 25000.5, false)]   // through the bid
+    [InlineData(25000.3, 25000.0, 25001.0, false)]   // inside, nearer the bid
+    [InlineData(25000.8, 25000.0, 25001.0, true)]    // inside, nearer the ask
+    public void TheSideFollowsTheQuote(double price, double bid, double ask, bool buy) =>
+        Assert.Equal(buy, TickBook.Side((decimal)price, (decimal)bid, (decimal)ask, 0, !buy));
+
+    [Fact]
+    public void AtTheMiddleOrWithNoQuoteTheTickRuleThenTheLastSideDecide()
+    {
+        Assert.True(TickBook.Side(25000.5m, 25000m, 25001m, 25000m, false));   // middle, up from the last trade
+        Assert.False(TickBook.Side(25000.5m, 25000m, 25001m, 25001m, true));   // middle, down
+        Assert.False(TickBook.Side(25000.5m, 25000m, 25001m, 25000.5m, false)); // middle, unchanged: the last side
+        Assert.True(TickBook.Side(100m, 0, 0, 99m, false));                    // no quote: up-tick
+        Assert.False(TickBook.Side(100m, 101m, 100m, 101m, true));             // crossed quote never decides: down-tick
     }
 
     [Fact]
-    public void ATradeForASymbolNobodyAskedForIsIgnored()
+    public void PrintsAtOnePriceAndSideWithinASecondAreOneBubble_AndABigOrderIsABigBubble()
+    {
+        var b = Book();
+        b.OnQuote(T0, 24999m, 100, 25000m, 100);
+        b.OnTrade(T0, 1, 25000m, 65, 24999m, 100, 25000m, 100);
+        b.OnTrade(T0, 2, 25000m, 65, 24999m, 100, 25000m, 100);                       // same price, side, second: one bubble
+        b.OnTrade(T0.AddSeconds(5), 3, 25000m, 65 * 40, 24999m, 100, 25000m, 100);    // later: its own, and big
+        b.OnTrade(T0.AddSeconds(6), 4, 24999m, 65, 24999m, 100, 25000m, 100);         // a sell
+
+        var all = b.Snapshot(1, 1, 100).Bubbles;
+        Assert.Equal(new long[] { 130, 2600, 65 }, all.Select(x => x.Qty));
+        Assert.Equal(new[] { 2, 1, 1 }, all.Select(x => x.Prints));
+        Assert.Equal(new[] { true, true, false }, all.Select(x => x.Buy));
+        Assert.Single(b.Snapshot(1, 65 * 10, 100).Bubbles);   // only the big one passes a 10-lot minimum
+    }
+
+    [Fact]
+    public void TheFootprintGroupsPricesIntoRowsHighToLow_AndMinutesStayApart()
+    {
+        var b = Book();
+        b.OnQuote(T0, 24999.95m, 100, 25000m, 100);
+        b.OnTrade(T0, 1, 25000m, 10, 24999.95m, 100, 25000m, 100);                              // buy at 25000.00
+        b.OnTrade(T0.AddSeconds(1), 2, 25000.4m, 5, 24999.95m, 100, 25000m, 100);                // through the ask: buy
+        b.OnTrade(T0.AddSeconds(2), 3, 24999.95m, 7, 24999.95m, 100, 25000m, 100);              // at the bid: sell, row 24999
+        b.OnTrade(T0.AddMinutes(1), 4, 25000m, 3, 24999.95m, 100, 25000m, 100);                 // the next minute
+
+        var day = b.Snapshot(1, 1, 100);
+        Assert.Equal(2, day.Bars.Count);
+        var first = day.Bars[0];
+        Assert.Equal(new decimal[] { 25000m, 24999m }, first.Levels.Select(l => l.Price));
+        Assert.Equal((15L, 0L), (first.Levels[0].Buy, first.Levels[0].Sell));
+        Assert.Equal((0L, 7L), (first.Levels[1].Buy, first.Levels[1].Sell));
+        Assert.Equal((25000m, 25000.4m, 24999.95m, 24999.95m), (first.Open, first.High, first.Low, first.Close));
+    }
+
+    [Fact]
+    public void LostTicksAreCounted_ANewDayStartsEmpty_AndQuotesBuildTheTrail()
+    {
+        var b = Book();
+        b.OnTrade(T0, 10, 25000m, 5, 24999m, 1, 25000m, 1);
+        b.OnTrade(T0.AddSeconds(1), 13, 25000m, 5, 24999m, 1, 25000m, 1);   // 11 and 12 never arrived
+        Assert.Equal(2, b.Meta().SequenceGaps);
+        b.OnQuote(T0.AddSeconds(3), 24999.5m, 5, 25000m, 5);
+        Assert.True(b.Snapshot(1, 1, 100).Quotes.Count >= 2);
+
+        b.OnTrade(T0.AddDays(1), 1, 25100m, 5, 25099m, 1, 25100m, 1);
+        var meta = b.Meta();
+        Assert.Equal((1L, 0L), (meta.Prints, meta.SequenceGaps));
+        Assert.Single(b.Snapshot(1, 1, 100).Bars);
+    }
+
+    [Fact]
+    public void TheFeedRoutesATradeToItsIndexByTheIdTheSubscribeReplyGave_AndIgnoresOthers()
     {
         var feed = Feed();
-        feed.OnTrade(T("999", 1, 100m, 5, 5, 1, 99m, 101m), 1);
-        Assert.All(feed.Snapshot().Streams, s => Assert.Equal(0, s.Trades));
+        feed.Clock = () => T0;
+        feed.OnTrade(new TrueDataTrade("2", T0, 52000m, 30, 52000m, 100, 52000m, 52000m, 52000m, 52000m, 0, "", 7, 51999m, 10, 52000m, 10));
+        feed.OnTrade(new TrueDataTrade("999", T0, 1m, 30, 1m, 100, 1m, 1m, 1m, 1m, 0, "", 7, 1m, 10, 2m, 10));
+        feed.OnQuote(new TrueDataQuote("2", null, 51999m, 10, 52000m, 10));
+
+        var streams = feed.Snapshot().Streams;
+        Assert.Equal(1, streams.Single(x => x.Underlying == "BANKNIFTY").Trades);
+        Assert.Equal(1, streams.Single(x => x.Underlying == "BANKNIFTY").Quotes);
+        Assert.Equal(0, streams.Single(x => x.Underlying == "NIFTY").Trades);
     }
 
     [Theory]
