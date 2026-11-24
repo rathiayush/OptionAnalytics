@@ -1815,6 +1815,16 @@ All must pass before committing.
   stopped at the number asked for (a day holds 400 000). (4) THE PAGE - `markSweeps` looks only at the neighbours inside its window (it was every event against
   every event on each poll), the state object is kept when the server's answer did not change. `TickPressureTests.cs` (150 000 ticks through the inbox in ~0.4 s,
   in order, none lost, no gap; a full inbox holds the writer; 210 000 option ticks over 42 options in ~0.25 s; the snapshot cache), `tests/tick-big-orders.test.mjs`.
+  REPLAY OF BIG OPTION ORDERS (asked for - the "live only" note; `OptionTickHistoryDays`, `GET /api/tick-flow/options/day?underlying&date&strikes`,
+  `useBigOptionOrdersDay`): a PAST day (NIFTY / BANKNIFTY, the days TrueData keeps) is built ONCE on the server from TrueData's TICK HISTORY of the
+  options - the day's futures range (`TickHistoryDays`) gives the strikes (low - N steps to high + N steps), the nearest LISTED expiry's chain
+  (`OptionChains.FindNearestAsync`: TrueData's `getOptionChain` has NO header row and an expired expiry answers empty - so a day whose weekly has expired
+  uses the next listed one, said on the card), ONE whole-day history call per contract (1 a second, retried twice - TrueData answers some with a server
+  error that works seconds later), all ticks merged by time through one `OptionBigOrderWatch` (ATM from put-call parity every 30 s, orders outside ATM +- N
+  dropped, floor 30 lots / 3x usual, at most 20 000 - over it the BIGGEST kept). A day takes minutes the first time (70 contracts ~ 7 min on the trial; some
+  contracts come back empty - counted as "without data"), then it is in memory (4 days). The page polls every 3 s while it builds (`POLL_HEADERS`), holds the
+  whole day (`ordersOfDay`, uncapped) and cuts at the replay clock (`ordersUpTo`) - on the Tick Flow card (summary at the clock) and OI Replay's spot markers
+  (the minute shown counted whole). The 20 Nov / 23 Nov trial days work; `OptionTickHistoryDaysTests.cs`, `tests/tick-big-orders.test.mjs`.
   BIG OPTION ORDERS ON OI REPLAY'S SPOT CHART (asked for - "I also want it on spot charts ... I should be able to define quantity"): the spot card's
   "Big option orders (live ticks)" tick (`optionanalytics.oiReplay.bigOrdersOnSpot`, off by default) with the size in LOTS or in QUANTITY (units - a Lots / Qty
   switch, each keeping its own number: `...bigOrdersLots` 30, `...bigOrdersQty` 1950) draws the Tick Flow page's orders as markers on the candles

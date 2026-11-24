@@ -23,6 +23,8 @@ public sealed class TickHistoryDays
     private readonly ILogger<TickHistoryDays> _logger;
     private readonly ConcurrentDictionary<(string Underlying, DateOnly Day), (TickBook Book, DateTimeOffset At)> _days = new();
     private readonly SemaphoreSlim _building = new(1, 1);
+    /// <summary>The pause before an empty answer is asked once more (TrueData's history answers some calls with nothing or a server error that works a few seconds later).</summary>
+    internal TimeSpan RetryGap { get; set; } = TimeSpan.FromSeconds(3);
 
     public TickHistoryDays(IServiceProvider services, ILogger<TickHistoryDays> logger)
     {
@@ -59,16 +61,22 @@ public sealed class TickHistoryDays
             foreach (var symbol in new[] { contract, instrument.Symbol }.Distinct())
             {
                 symbolUsed = symbol;
-                try { csv = await _api.GetTicksWithBidAskAsync(symbol, day.ToDateTime(TimeOnly.FromTimeSpan(Open)), day.ToDateTime(TimeOnly.FromTimeSpan(Close)), cancellationToken); }
-                catch (OperationCanceledException) { throw; }
-                catch (Exception ex)
+                var failed = false;
+                for (var attempt = 1; attempt <= 3 && !csv.Contains(','); attempt++)
                 {
-                    _logger.LogWarning(ex, "TrueData ticks for {Symbol} on {Day} failed.", symbol, day);
-                    csv = "";
-                    if (symbol == instrument.Symbol || contract == instrument.Symbol) return new Result(null, $"TrueData {symbol}: {ex.Message}");
-                    continue;
+                    if (attempt > 1 && RetryGap > TimeSpan.Zero) await Task.Delay(RetryGap, cancellationToken);
+                    try { csv = await _api.GetTicksWithBidAskAsync(symbol, day.ToDateTime(TimeOnly.FromTimeSpan(Open)), day.ToDateTime(TimeOnly.FromTimeSpan(Close)), cancellationToken); }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "TrueData ticks for {Symbol} on {Day} failed (attempt {Attempt}).", symbol, day, attempt);
+                        csv = "";
+                        if (attempt == 3 && (symbol == instrument.Symbol || contract == instrument.Symbol)) return new Result(null, $"TrueData {symbol}: {ex.Message}");
+                        failed = true;
+                    }
                 }
                 if (csv.Contains(',')) break; // a CSV: ticks
+                if (failed) csv = "";
             }
             var parsed = TrueDataTickCsv.Parse(csv);
             var ticks = parsed.Ticks.Where(t => DateOnly.FromDateTime(t.Time.DateTime) == day && t.Time.TimeOfDay >= Open && t.Time.TimeOfDay <= Close).ToList();

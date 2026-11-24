@@ -18,6 +18,33 @@ public interface IOptionChainSource
     Task<IReadOnlyList<OptionContract>> GetAsync(string underlying, DateOnly expiry, CancellationToken token);
 }
 
+/// <summary>Finds the nearest option expiry that has a chain.</summary>
+public static class OptionChains
+{
+    /// <summary>Each day from <paramref name="from"/> (up to 40 days on) that is the expiry weekday or the day before it (a holiday moves an expiry earlier) is
+    /// asked of <paramref name="source"/> until one answers with contracts. Null when none does.</summary>
+    public static async Task<(DateOnly Expiry, IReadOnlyList<OptionContract> Contracts)?> FindNearestAsync(IOptionChainSource source, string underlying, DateOnly from, CancellationToken token)
+    {
+        for (var d = from; d <= from.AddDays(40); d = d.AddDays(1))
+        {
+            var rule = OptionAnalytics.Server.Services.ExpiryCalendar.OptionExpiryWeekday(underlying, d);
+            if (d.DayOfWeek != rule && d.AddDays(1).DayOfWeek != rule) continue;
+            var contracts = await source.GetAsync(underlying, d, token);
+            if (contracts.Count > 0) return (contracts[0].Expiry, contracts);   // the contracts say their own expiry
+        }
+        return null;
+    }
+
+    /// <summary>The strike step of a chain (the smallest gap between its strikes; 50 when it has one).</summary>
+    public static decimal StepOf(IEnumerable<OptionContract> contracts)
+    {
+        var strikes = contracts.Select(c => c.Strike).Distinct().OrderBy(k => k).ToList();
+        var step = decimal.MaxValue;
+        for (var i = 1; i < strikes.Count; i++) step = Math.Min(step, strikes[i] - strikes[i - 1]);
+        return step == decimal.MaxValue || step <= 0 ? 50 : step;
+    }
+}
+
 /// <summary>TrueData's getOptionChain (api.truedata.in): "symbolid,symbol,series,isin,exchange,lotsize,strike,expiry,..." one row an option,
 /// series CE / PE, expiry dd-MM-yyyy. The login is TrueData:UserId / Password; calls are spaced (their REST limit is a few a second).</summary>
 public sealed class TrueDataOptionChainSource : IOptionChainSource
@@ -51,12 +78,17 @@ public sealed class TrueDataOptionChainSource : IOptionChainSource
         var rows = new List<OptionContract>();
         if (string.IsNullOrWhiteSpace(csv)) return rows;
         var lines = csv.Replace("\r", "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
-        if (lines.Length < 2 || !lines[0].StartsWith("symbolid", StringComparison.OrdinalIgnoreCase)) return rows;
-        var header = lines[0].Split(',').Select(h => h.Trim().ToLowerInvariant()).ToList();
+        if (lines.Length == 0) return rows;
+        // getOptionChain's csv answer has NO header row (tested on the trial account: it starts with the first contract); getAllSymbols' has one. Without it
+        // the columns are the master's own order: symbolid, symbol, series, isin, exchange, lotsize, strike, expiry, ...
+        var headed = lines[0].StartsWith("symbolid", StringComparison.OrdinalIgnoreCase);
+        var header = headed
+            ? lines[0].Split(',').Select(h => h.Trim().ToLowerInvariant()).ToList()
+            : new List<string> { "symbolid", "symbol", "series", "isin", "exchange", "lotsize", "strike", "expiry" };
         int Col(string name) => header.IndexOf(name);
         int id = Col("symbolid"), sym = Col("symbol"), series = Col("series"), lot = Col("lotsize"), strike = Col("strike"), exp = Col("expiry");
         if (new[] { id, sym, series, strike, exp }.Any(c => c < 0)) return rows;
-        foreach (var line in lines.Skip(1))
+        foreach (var line in headed ? lines.Skip(1) : lines)
         {
             var f = line.Split(',');
             if (f.Length <= new[] { id, sym, series, strike, exp }.Max()) continue;
@@ -92,6 +124,8 @@ public sealed class TrueDataOptionChainSource : IOptionChainSource
 public sealed class OptionBigOrderWatch
 {
     public const int Capacity = 5000, History = 50, MinHistory = 5;
+    /// <summary>How many orders are kept (the newest) - the live watch keeps <see cref="Capacity"/>; a replayed day collects its own and keeps none here.</summary>
+    public int MaxEvents { get; set; } = Capacity;
     private static readonly TimeSpan Ist = TimeSpan.FromMinutes(330);
 
     private readonly object _lock = new();
@@ -206,7 +240,7 @@ public sealed class OptionBigOrderWatch
                         made = new BigOrderEvent(++_seq, time, s.Contract.Symbol, s.Contract.Strike, s.Contract.Call ? "CE" : "PE", qty, lots, t.Price, buy, t.Price * qty,
                             ratio, touchQty > 0 ? (decimal)qty / touchQty : 0, through, bundled, oiChange, move, distance, lotSize);
                         _events.Add(made);
-                        if (_events.Count > Capacity) _events.RemoveRange(0, _events.Count - Capacity);
+                        if (_events.Count > MaxEvents) _events.RemoveRange(0, _events.Count - MaxEvents);
                     }
                 }
                 s.LastBuy = buy;

@@ -31,6 +31,14 @@ export function addOrders(kept, incoming) {
   return markSweeps(all.length > MAX_KEPT ? all.slice(all.length - MAX_KEPT) : all)
 }
 
+/** A whole past day's events as orders, oldest first, sweeps marked - none dropped (the live list keeps the newest MAX_KEPT). */
+export function ordersOfDay(events) {
+  return markSweeps((events ?? []).map(toOrder).sort((a, b) => a.t - b.t || a.seq - b.seq))
+}
+
+/** The orders up to the replay clock (the second holding it counts). */
+export const ordersUpTo = (orders, clockMs) => (clockMs == null ? orders : orders.filter((o) => o.t <= clockMs + 999))
+
 /** The orders worth showing: at least `minLots` - or, when `minQty` is given, that many UNITS (the quantity the user defines) - and, when the option has
  *  a usual of its own (ratio 0 = not yet), `multiple` x it (`multiple` 0 = no such test: the size alone decides). */
 export function bigEnough(orders, { minLots = TICK_ORDER_DEFAULTS.minLots, minQty = null, multiple = TICK_ORDER_DEFAULTS.multiple } = {}) {

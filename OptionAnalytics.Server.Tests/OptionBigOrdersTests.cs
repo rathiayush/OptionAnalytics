@@ -41,6 +41,9 @@ public sealed class OptionBigOrdersTests
         Assert.Equal(2, rows.Count);                                   // the futures row (series XX) is not an option
         Assert.Equal(new OptionContract("303048142", "NIFTY26120117350CE", 17350m, true, new DateOnly(2026, 12, 1), 65), rows[0]);
         Assert.False(rows[1].Call);
+        // What getOptionChain really answers: no header row at all (as the trial account sent it).
+        var headerless = TrueDataOptionChainSource.ParseCsv("303048142,NIFTY26120117350CE,CE,,NSE,65,17350,01-12-2026,NIFTY26L617350,NIFTY26120117350CE\r\n303048143,NIFTY26120117350PE,PE,,NSE,65,17350,01-12-2026,NIFTY26X617350,NIFTY26120117350PE\r\n");
+        Assert.Equal(rows, headerless);
         Assert.Empty(TrueDataOptionChainSource.ParseCsv("{\"status\":\"No Record found\",\"Records\":\"\"}"));
         Assert.Empty(TrueDataOptionChainSource.ParseCsv(""));
     }
@@ -188,7 +191,7 @@ public sealed class OptionBigOrdersTests
         Assert.Contains("addsymbol", first);
         Assert.Equal(42, feed.OptionsSnapshot().Subscribed);   // 21 strikes x CE / PE
         Assert.Equal(25000m, feed.OptionsSnapshot().Atm);
-        Assert.Equal("2026-11-24", feed.OptionsSnapshot().Expiry);   // the first day asked (a Tuesday - the expiry weekday) that has a chain
+        Assert.Equal("2026-12-01", feed.OptionsSnapshot().Expiry);   // the contracts' own expiry (the fake answers the first day asked, a Tuesday, with the 1 Dec chain)
         Assert.Contains("NIFTY26120124500CE", first);   // ATM - 10 steps
         Assert.DoesNotContain("NIFTY26120124450CE", first);
 

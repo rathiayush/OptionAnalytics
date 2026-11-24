@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { POLL_HEADERS } from './shared.jsx'
-import { addOrders } from './tickBigOrders.js'
+import { addOrders, ordersOfDay } from './tickBigOrders.js'
 
 /**
  * The big option orders of TrueData's live option ticks (`GET /api/tick-flow/options?since=`): the stream's state, and the orders so far - the
@@ -55,4 +55,39 @@ export function useBigOptionOrders(enabled) {
   }, [])
 
   return { orders, state, live, error, now, pick }
+}
+
+/**
+ * The big option orders of a PAST day (`GET /api/tick-flow/options/day?underlying&date`): the server builds them once from TrueData's tick history of the
+ * options (one call a contract - a minute or several the first time) and keeps them; the page asks until it is ready (a page timer, POLL_HEADERS,
+ * every 3 s while loading) and then holds every order of the day (never capped - the replay cuts them at its clock). `enabled` false = nothing asked.
+ */
+export function useBigOptionOrdersDay(underlying, date, enabled, reload = 0) {
+  const [answer, setAnswer] = useState(null)
+  const [error, setError] = useState(null)
+  const [orders, setOrders] = useState([])
+
+  useEffect(() => {
+    setAnswer(null); setError(null); setOrders([])
+    if (!enabled || !underlying || !date) return undefined
+    let stop = false
+    let timer = null
+    const load = async () => {
+      try {
+        const r = await fetch(`/api/tick-flow/options/day?underlying=${encodeURIComponent(underlying)}&date=${date}`, { headers: POLL_HEADERS })
+        if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`)
+        const body = await r.json()
+        if (stop) return
+        setError(null)
+        setAnswer({ state: body.state, done: body.done, total: body.total, failed: body.failed, error: body.error, expiry: body.expiry })
+        if (body.state === 'ready') { setOrders(ordersOfDay(body.events)); return }
+        if (body.state === 'failed') return
+        timer = setTimeout(load, 3000)
+      } catch (e) { if (!stop) { setError(e.message); timer = setTimeout(load, 10000) } }
+    }
+    load()
+    return () => { stop = true; clearTimeout(timer) }
+  }, [underlying, date, enabled, reload])
+
+  return { orders, answer, error, ready: answer?.state === 'ready' }
 }
