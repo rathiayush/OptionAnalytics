@@ -3,6 +3,7 @@
 // before). This module only reads them: the position (long build-up / short build-up / covering / unwinding) and the bias for the index
 // are OI Replay's `readOf`, the sweeps and the added-up summary its `markSweeps` / `bigTradesSummary` - the same words on both pages.
 import { bigTradesSummary, markSweeps, readOf } from './tickReads.js'
+import { isHedgePosition } from './tickLiquidityMap.js'
 
 export const TICK_ORDER_DEFAULTS = { minLots: 30, multiple: 3, lookback: 15 }
 export const MAX_KEPT = 2000
@@ -55,3 +56,12 @@ export function hitText(o) {
 }
 
 export { bigTradesSummary }
+
+/** The card's own filters (asked for - buyers / sellers / both, calls / puts / both, far out-of-the-money = hedge, a price under X): `type` 'both' | 'calls' | 'puts',
+ *  `side` 'both' | 'buy' | 'sell' (the order's BUY / SELL), `hideFarOtm` N (>= N strikes out of the money left out; 0 = off), `cheapBelow` (a premium under it left out; 0 = off). */
+export function filterBigOrders(orders, { type = 'both', side = 'both', hideFarOtm = 0, cheapBelow = 0 } = {}) {
+  return (orders ?? []).filter((o) => (type === 'both' || o.type === (type === 'calls' ? 'CE' : 'PE'))
+    && (side === 'both' || (side === 'buy' ? o.side > 0 : o.side < 0))
+    && !isHedgePosition(o, hideFarOtm)
+    && !(cheapBelow > 0 && o.price < cheapBelow))
+}
