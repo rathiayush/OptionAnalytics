@@ -46,10 +46,13 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
   const list = useMemo(() => (bubbles ?? []).filter((b) => b.qty >= minLots * lotSize).map((b) => ({ ...b, ms: b.ms ?? msOf(b.time) })), [bubbles, minLots, lotSize])
   const quoteList = useMemo(() => (quotes ?? []).map((q) => ({ ...q, ms: q.ms ?? msOf(q.time) })), [quotes])
   const latest = Math.max(list.at(-1)?.ms ?? 0, quoteList.at(-1)?.ms ?? 0)
+  // The day's first reading: while everything fits in the window the chart STARTS FROM THE LEFT (first order at the left edge, the rest filling to the right).
+  const earliest = Math.min(list[0]?.ms ?? Infinity, quoteList[0]?.ms ?? Infinity)
 
   const view = useMemo(() => {
     if (!latest) return null
-    const t1 = tEnd ?? latest + PAD_MS
+    const fromLeft = tEnd == null && Number.isFinite(earliest) && latest + PAD_MS - earliest < spanMs
+    const t1 = tEnd ?? (fromLeft ? earliest - PAD_MS + spanMs : latest + PAD_MS)
     const t0 = t1 - spanMs
     const inView = list.filter((b) => b.ms >= t0 && b.ms <= t1)
     const qs = quoteList.filter((q) => q.ms >= t0 - 60_000 && q.ms <= t1)
@@ -62,7 +65,7 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
     if (!Number.isFinite(hi)) return { t0, t1, inView, qs, hi: null, lo: null, max }
     const pad = Math.max((hi - lo) * 0.12, 1)
     return { t0, t1, inView, qs, hi: hi + pad, lo: lo - pad, max }
-  }, [list, quoteList, latest, tEnd, spanMs, yRange])
+  }, [list, quoteList, latest, earliest, tEnd, spanMs, yRange])
   current.current = view
 
   useEffect(() => {
