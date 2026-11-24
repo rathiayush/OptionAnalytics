@@ -11,6 +11,19 @@ export const TLM_LABELS = { ceBought: 'Calls bought (bullish)', peWritten: 'Puts
 export const TLM_KINDS = ['ceBought', 'peWritten', 'peBought', 'ceWritten']
 const PERCENTILE = 0.95
 
+/** Strikes OUT of the money (positive = out; negative = in the money): a call above the ATM, a put below it. `atmDistance` = (strike - ATM) / step. */
+export const otmSteps = (o) => (o.type === 'CE' ? o.atmDistance : -o.atmDistance)
+
+/** A HEDGE POSITION on the map (asked for - "deep out of the money will be hedge position"): an order `steps` or more strikes out of the money - the
+ *  cheap protection / tail options. */
+export const isHedgePosition = (o, steps) => steps > 0 && otmSteps(o) >= steps
+
+/** The map's own filters: `hedgeOnly` keeps ONLY the hedge positions (>= `hedgeSteps` strikes OTM), `side` 'buy' / 'sell' keeps the buyers / the sellers
+ *  of the option (the order's BUY / SELL), 'both' all. */
+export function filterMapOrders(orders, { hedgeOnly = false, hedgeSteps = 5, side = 'both' } = {}) {
+  return (orders ?? []).filter((o) => (!hedgeOnly || isHedgePosition(o, hedgeSteps)) && (side === 'both' || (side === 'buy' ? o.side > 0 : o.side < 0)))
+}
+
 /** The strike step of a set of strikes (smallest gap), 50 when there is one. */
 export function strikeGap(strikes) {
   const s = [...new Set(strikes)].sort((a, b) => a - b)

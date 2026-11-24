@@ -47,3 +47,18 @@ test('a cut at a clock = the whole day up to it, and the price row position', ()
   assert.equal(strikeGap([100, 150, 250]), 50)
   assert.equal(priceRowPosition(125, [150, 100]), 0.5)
 })
+
+test('the map filters: hedge positions are the far out-of-the-money orders, and a side keeps buyers or sellers', async () => {
+  const { filterMapOrders, isHedgePosition, otmSteps } = await import('../src/tickLiquidityMap.js')
+  const o = (type, atmDistance, side) => ({ type, atmDistance, side })
+  assert.equal(otmSteps(o('CE', 6, 1)), 6)
+  assert.equal(otmSteps(o('PE', -6, 1)), 6)
+  assert.equal(otmSteps(o('PE', 6, 1)), -6)
+  const list = [o('CE', 6, 1), o('PE', -7, -1), o('CE', 1, 1), o('PE', 4, -1)]
+  assert.equal(isHedgePosition(list[0], 5), true)
+  assert.equal(isHedgePosition(list[2], 5), false)
+  assert.equal(filterMapOrders(list).length, 4)
+  assert.deepEqual(filterMapOrders(list, { hedgeOnly: true, hedgeSteps: 5 }), [list[0], list[1]])
+  assert.deepEqual(filterMapOrders(list, { hedgeOnly: true, hedgeSteps: 5, side: 'sell' }), [list[1]])
+  assert.deepEqual(filterMapOrders(list, { side: 'buy' }), [list[0], list[2]])
+})
