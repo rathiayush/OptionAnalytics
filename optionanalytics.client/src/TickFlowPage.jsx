@@ -132,6 +132,8 @@ export default function TickFlowPage() {
   const lotSize = meta?.lotSize ?? 1
   const bars = useMemo(() => aggregateTickBars(day?.bars ?? [], timeframe), [day?.bars, timeframe])
   const cvd = useMemo(() => cumulativeDelta(bars), [bars])
+  // The futures' 1-minute closes in ms - the price line across the option liquidity map.
+  const priceBars = useMemo(() => aggregateTickBars(day?.bars ?? [], 1).map((b) => ({ time: b.time, close: b.close })), [day?.bars])
   const stream = status?.status?.streams?.find((s) => s.underlying === index)
   const feedState = status?.status?.state ?? status?.state ?? 'unknown'
   const off = status && status.enabled === false
@@ -262,7 +264,7 @@ export default function TickFlowPage() {
         </Card>
 
         <Card size="small" title="Big option orders - TrueData's live ticks of the options ATM ± N, read and added up">
-          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} index={index} replayDate={replay ? replayDay : null} clockMs={replay ? clock : null} />
+          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} index={index} replayDate={replay ? replayDay : null} clockMs={replay ? clock : null} priceBars={priceBars} />
         </Card>
 
         <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>
