@@ -1,5 +1,5 @@
 // The Tick Flow page's OWN reading of big option orders (TrueData) - the position (long build-up / short build-up / covering / unwinding), the bias for the
-// index, the sweeps and the added-up summary. Written for this page alone: it shares nothing with OI Replay's Dhan-bar `bigOptionTrades.js` (TrueData and Dhan data
+// index, the sweeps and the added-up summary. Written for this page alone: it shares nothing with the Dhan-based pages (TrueData and Dhan data
 // are never mixed). Plain JS for the node tests.
 const MIN = 60_000
 const minuteOf = (t) => Math.floor(new Date(t).getTime() / MIN) * MIN

@@ -43,7 +43,6 @@ import { LoadProgressPanel } from './LoadProgressPanel.jsx'
 import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { TrapZonesCard } from './TrapZonesCard.jsx'
-import { BigOptionTradesCard } from './BigOptionTradesCard.jsx'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
@@ -757,7 +756,6 @@ const SECTION_OPTIONS = [
   { value: 'optionDeltaProfile', label: 'Option delta profile (on spot)' },
   { value: 'optionCdvObvProfile', label: 'Option CDV / OBV profile (on spot)' },
   { value: 'trapZones', label: 'Trapped / squeeze zones' },
-  { value: 'bigOptionTrades', label: 'Big option trades (ATM ± 10)' },
   { value: 'futuresDeltaProfile', label: 'Futures delta profile' },
 ]
 const ALL_SECTION_VALUES = SECTION_OPTIONS.map((o) => o.value)
@@ -799,7 +797,7 @@ function useViewportHeight() {
   return height
 }
 
-const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'bigOptionTrades', 'futuresDeltaProfile']
+const OI_REPLAY_CARD_IDS = ['topStats', 'marketRead', 'entryChecklist', 'dayOi', 'oiHeatmap', 'oiTotals', 'spotAndEntry', 'optionPremium', 'optionFlow', 'straddle', 'gex', 'gexSpot', 'dex', 'ladder', 'futures', 'optionDeltaProfile', 'optionCdvObvProfile', 'trapZones', 'futuresDeltaProfile']
 // The cards on the page whatever "Sections shown" says.
 const ALWAYS_SHOWN_CARDS = new Set(['spotAndEntry', 'ladder'])
 
@@ -7582,20 +7580,6 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
                   <TrapZonesCard
                     cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
                     underlying={underlying} date={result.date} expiryFlag={result.expiryFlag} isLive={isLive}
-                  />
-                </Card>
-              </LiveSection>
-              </DashboardCard>
-            )}
-            {/* BIG OPTION TRADES (BigOptionTradesCard.jsx, bigOptionTrades.js): the big minutes at the strikes within ATM +/- N, read
-                with the bar and the OI and added up across the strikes - sweeps, the money by kind, a net lean. */}
-            {visibleSections.includes('bigOptionTrades') && (
-              <DashboardCard key="bigOptionTrades" {...dash('bigOptionTrades')}>
-              <LiveSection version={sectionVersion}>
-                <Card size="small" title={<Space size={4}><CardDragHandle className="oa-dash-grip" />Big option trades (ATM ± N strikes, calls and puts){isLive ? ' · live' : ''}</Space>}>
-                  <BigOptionTradesCard
-                    cePoints={flowCePoints} pePoints={flowPePoints} spotBars={deltaSpotBars} asOfMs={asOfMs}
-                    underlying={underlying} isLive={isLive}
                   />
                 </Card>
               </LiveSection>
