@@ -39,5 +39,35 @@ public sealed class TrueDataOptions
     /// <summary>Rebuilt days kept in memory (they are re-fetched after a restart, never written to disk).</summary>
     public int MaxCachedDays { get; set; } = 6;
 
+    /// <summary>The LIVE tick-by-tick feed (TrueData's WebSocket, the "Tick Flow" page) - separate from the history
+    /// source above, and OFF by default: with Live.Enabled false no socket is opened.</summary>
+    public TrueDataLiveOptions Live { get; set; } = new();
+
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(UserId) && !string.IsNullOrWhiteSpace(Password);
+}
+
+/// <summary>TrueData:Live - the real-time WebSocket (wss://push.truedata.in:{Port}?user=&amp;password=). Sandbox = 8086,
+/// production = 8084. The user / password are TrueData:UserId / Password (environment variables or the git-ignored
+/// appsettings.Local.json - never a committed file).</summary>
+public sealed class TrueDataLiveOptions
+{
+    public bool Enabled { get; set; }
+    public string Host { get; set; } = "push.truedata.in";
+    public int Port { get; set; } = 8086;
+
+    /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
+    /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
+    public List<TrueDataLiveInstrument> Instruments { get; set; } = new()
+    {
+        new() { Underlying = "NIFTY", Symbol = "NIFTY-I", LotSize = 65, TickSize = 0.05m },
+        new() { Underlying = "BANKNIFTY", Symbol = "BANKNIFTY-I", LotSize = 30, TickSize = 0.20m },
+    };
+}
+
+public sealed class TrueDataLiveInstrument
+{
+    public string Underlying { get; set; } = "";
+    public string Symbol { get; set; } = "";
+    public int LotSize { get; set; } = 1;
+    public decimal TickSize { get; set; } = 0.05m;
 }

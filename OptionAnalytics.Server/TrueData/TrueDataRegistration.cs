@@ -9,7 +9,14 @@ public static class TrueDataRegistration
     {
         var section = configuration.GetSection(TrueDataOptions.SectionName);
         services.Configure<TrueDataOptions>(section);
-        if (section.Get<TrueDataOptions>()?.Enabled != true) return services;
+        var options = section.Get<TrueDataOptions>();
+        // The LIVE tick feed (the Tick Flow page) has its own switch: TrueData:Live:Enabled, with the login set.
+        if (options?.Live.Enabled == true && options.IsConfigured)
+        {
+            services.AddSingleton<TrueDataLiveFeed>();
+            services.AddHostedService(sp => sp.GetRequiredService<TrueDataLiveFeed>());
+        }
+        if (options?.Enabled != true) return services;
         services.AddSingleton<ITrueDataHistoryApi, TrueDataSdkHistoryApi>();
         services.AddSingleton<TrueDataOrderFlowSource>();
         return services;

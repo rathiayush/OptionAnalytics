@@ -1113,6 +1113,7 @@ const NAV_ITEMS = [
   { key: '/expired-backtest', label: 'Expired Backtest', icon: <ExperimentOutlined /> },
   { key: '/oi-replay', label: 'OI Replay', icon: <LineChartOutlined /> },
   { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
+  { key: '/tick-flow', label: 'Tick Flow', icon: <BarChartOutlined /> },
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
   { key: '/structure', label: 'Spot structure', icon: <ApartmentOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
