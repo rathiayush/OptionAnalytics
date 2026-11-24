@@ -51,7 +51,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
     }
 
     public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams);
-    public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
+    public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
     public TickBook? BookFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Book : null;
     public TrueDataLiveInstrument? InstrumentFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Instrument : null;
@@ -64,7 +64,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 _byUnderlying.Values.Select(s =>
                 {
                     var m = s.Book.Meta();
-                    return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
+                    return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.BookedVolume, m.ExchangeVolume, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
                 }).ToList());
     }
 
@@ -202,7 +202,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
     internal void OnTrade(TrueDataTrade t)
     {
         if (StreamOf(t.SymbolId) is not { } s) return;
-        s.Book.OnTrade(t.Time ?? Clock(), t.Sequence, t.Price, t.Quantity, t.Bid, t.BidQty, t.Ask, t.AskQty);
+        s.Book.OnTrade(t.Time ?? Clock(), t.Sequence, t.Price, t.Quantity, t.Bid, t.BidQty, t.Ask, t.AskQty, t.TotalVolume);
     }
 
     internal void OnQuote(TrueDataQuote q)

@@ -169,4 +169,46 @@ public sealed class TrueDataLiveTests
     [InlineData(2026, 11, 28, 10, 0, false)] // a Saturday
     public void ItConnectsOnlyInTheSessionWindow(int y, int mo, int d, int h, int mi, bool expected) =>
         Assert.Equal(expected, TrueDataLiveFeed.InWindow(new DateTimeOffset(y, mo, d, h, mi, 0, TimeSpan.FromMinutes(330))));
+
+    private static readonly TrueDataLiveInstrument Nifty = new() { Underlying = "NIFTY", Symbol = "NIFTY-I", LotSize = 65, TickSize = 0.05m };
+    private static TrueDataTick Tick(int sec, decimal ltp, long volume, decimal bid, decimal ask) => new(T0.AddSeconds(sec), ltp, volume, 0, bid, 100, ask, 100);
+
+    [Fact]
+    public void AReplayedDayFromARunningTotalBooksTheRiseAsTheTradeAndTheFirstTickIsOnlyTheBaseline()
+    {
+        var book = TickHistoryDays.Build(Nifty, new[]
+        {
+            Tick(0, 25000m, 5_000, 24999.95m, 25000m),   // baseline: the volume before it is not a trade
+            Tick(1, 25000m, 5_065, 24999.95m, 25000m),   // +65 at the ask: a buy
+            Tick(2, 24999.95m, 5_065, 24999.95m, 25000m), // no volume: a quote
+            Tick(3, 24999.95m, 5_195, 24999.95m, 25000m), // +130 at the bid: a sell
+        }, volumeWasPerTick: false);
+
+        var day = book.Snapshot(1, 1, 100);
+        Assert.Equal(65, day.Bars.Single().Buy);
+        Assert.Equal(130, day.Bars.Single().Sell);
+        Assert.Equal(2, day.Meta.Prints);
+        Assert.Equal(195, day.Meta.BookedVolume);
+        Assert.Equal(195, day.Meta.ExchangeVolume);   // every trade of the day's running volume is in the footprint: 100% coverage
+    }
+
+    [Fact]
+    public void AReplayedDayFromPerTickVolumesCountsTheFirstTickToo()
+    {
+        var book = TickHistoryDays.Build(Nifty, new[] { Tick(0, 25000m, 65, 24999.95m, 25000m), Tick(1, 24999.95m, 130, 24999.95m, 25000m) }, volumeWasPerTick: true);
+        // TrueDataTickCsv has already made the per-tick column a running total (65, then 130): the first tick is a trade of 65, the next of 65.
+        Assert.Equal((65L, 65L), (book.Snapshot(1, 1, 100).Bars.Single().Buy, book.Snapshot(1, 1, 100).Bars.Single().Sell));
+    }
+
+    [Fact]
+    public void CoverageComparesWhatWasBookedWithTheExchangesRunningVolume_SoALostTradeShowsAsAShortfall()
+    {
+        var b = Book();
+        b.OnTrade(T0, 1, 25000m, 65, 24999m, 1, 25000m, 1, totalVolume: 1_000);
+        b.OnTrade(T0.AddSeconds(1), 2, 25000m, 65, 24999m, 1, 25000m, 1, totalVolume: 1_065);
+        b.OnTrade(T0.AddSeconds(2), 4, 25000m, 65, 24999m, 1, 25000m, 1, totalVolume: 1_195); // a 65-lot trade (seq 3) never arrived
+        var m = b.Meta();
+        Assert.Equal(195, m.BookedVolume);
+        Assert.Equal(260, m.ExchangeVolume);
+    }
 }

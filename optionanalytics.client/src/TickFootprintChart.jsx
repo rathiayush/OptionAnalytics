@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { axisTicks, barStats, diagonalImbalances, fmtQty, msOf } from './tickFlowMath.js'
+import { barStats, diagonalImbalances, fmtQty, msOf } from './tickFlowMath.js'
 
 // The Tick Flow page's FOOTPRINT: bars side by side, each a ladder of price rows with the sellers (bid) on the left and the buyers
 // (ask) on the right, drawn on a canvas. Its own drawing - nothing shared with the Order Flow page. Cells are shaded by the row's
 // share of the bar's largest row, diagonal imbalances are outlined, the POC row is boxed, and under every bar its delta, cumulative
-// delta and volume. Wheel: how many bars show; drag: move back in time; double-click: back to the latest.
+// delta and volume. Wheel: how many bars show; Shift + wheel: row height; drag: move back in time; double-click: back to the latest and the default row height.
 
 const COLORS = { buy: '#26a69a', sell: '#ef5350', text: '#d9d9d9', grid: '#1f2937', axis: '#8c8c8c', bg: '#0b1220', last: '#1668dc', poc: '#faad14' }
 const AXIS_W = 62
@@ -15,6 +15,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const canvas = useRef(null)
   const [width, setWidth] = useState(900)
   const [picked, setPicked] = useState(null) // bars shown, once the wheel has set it
+  const [rowZoom, setRowZoom] = useState(1)   // Shift + wheel: taller or shorter rows
   const [offset, setOffset] = useState(0) // bars hidden at the right (0 = the latest on screen)
   const drag = useRef(null)
   const visibleRef = useRef(14)
@@ -41,15 +42,18 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
     let lo = Infinity
     for (const b of shown) { hi = Math.max(hi, b.high); lo = Math.min(lo, b.low) }
     if (!Number.isFinite(hi)) return null
-    const rows = Math.max(1, Math.round((hi - lo) / rowSize) + 1)
-    const top = hi + rowSize
+    // Everything is laid out on row boundaries (a bar's levels are row prices), so the grid, the labels and the cells agree.
+    const hiRow = Math.floor(hi / rowSize + 1e-9) * rowSize
+    const loRow = Math.floor(lo / rowSize + 1e-9) * rowSize
+    const rows = Math.max(1, Math.round((hiRow - loRow) / rowSize) + 1)
+    const top = hiRow + rowSize
     const plotH = maxHeight - STRIP_H - 18
-    const rowH = Math.max(4, Math.min(34, plotH / (rows + 2)))
-    return { hi, lo, top, rows, rowH, plotH, needed: Math.ceil(10 + (rows + 1) * rowH + 8 + STRIP_H) }
-  }, [shown, rowSize, maxHeight])
+    const rowH = Math.max(4, Math.min(70, Math.min(34, plotH / (rows + 2)) * rowZoom))
+    return { hi, lo, hiRow, loRow, top, rows, rowH, plotH, needed: Math.ceil(10 + (rows + 1) * rowH + 8 + STRIP_H) }
+  }, [shown, rowSize, maxHeight, rowZoom])
 
   // The canvas is as tall as its content (never past the height asked for): a few rows do not leave a screen of empty chart.
-  const wanted = layout ? Math.max(260, Math.min(maxHeight, layout.needed)) : maxHeight
+  const wanted = layout ? Math.max(260, Math.min(rowZoom > 1 ? 3000 : maxHeight, layout.needed)) : maxHeight
   const height = wanted
 
   useEffect(() => {
@@ -63,7 +67,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
     g.fillStyle = COLORS.bg
     g.fillRect(0, 0, width, height)
     if (!layout || shown.length === 0) return
-    const { top, rowH, plotH } = layout
+    const { top, rowH } = layout
     const plotW = width - AXIS_W
     const colW = plotW / Math.max(visible, shown.length)
     const y = (price) => 10 + ((top - price) / rowSize) * rowH
@@ -71,12 +75,15 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
     g.font = '11px sans-serif'
     g.textBaseline = 'middle'
     g.textAlign = 'left'
-    for (const t of axisTicks(layout.lo - rowSize, top, Math.max(4, Math.floor(plotH / 44)))) {
-      const yy = y(t) + rowH / 2
+    // A label on a row boundary, every few rows so the numbers never touch.
+    const every = Math.max(1, Math.ceil(14 / rowH))
+    for (let i = 0; i <= layout.rows; i += every) {
+      const price = Math.round((layout.hiRow - i * rowSize) * 1e4) / 1e4
+      const yy = y(price) + rowH / 2
       g.strokeStyle = COLORS.grid
       g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke()
       g.fillStyle = COLORS.axis
-      g.fillText(String(t), plotW + 6, yy)
+      g.fillText(String(price), plotW + 6, yy)
     }
     const cells = colW >= 58 && rowH >= 9
     const fontPx = Math.max(8, Math.min(12, Math.floor(rowH - 2), Math.floor(colW / 7)))
@@ -137,7 +144,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
       g.fillText(new Date(msOf(b.time)).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }), x0 + colW / 2, sy + 50)
     })
     // The last price.
-    if (lastPrice > 0 && lastPrice <= top && lastPrice >= layout.lo - rowSize) {
+    if (lastPrice > 0 && lastPrice < top + rowSize && lastPrice >= layout.loRow - rowSize) {
       const yy = y(Math.floor(lastPrice / rowSize) * rowSize) + rowH / 2
       g.strokeStyle = COLORS.last; g.setLineDash([4, 3])
       g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke(); g.setLineDash([])
@@ -148,6 +155,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
 
   const onWheel = (e) => {
     e.preventDefault()
+    if (e.shiftKey) { setRowZoom((z) => Math.max(0.4, Math.min(3, z * (e.deltaY > 0 ? 0.87 : 1.15)))); return }
     setPicked((p) => Math.max(3, Math.min(120, Math.round((p ?? visibleRef.current) * (e.deltaY > 0 ? 1.15 : 0.87)))))
   }
   useEffect(() => {
@@ -169,7 +177,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
           setOffset(Math.max(0, Math.min(Math.max(0, n - 1), drag.current.offset + moved)))
         }}
         onPointerUp={() => { drag.current = null }}
-        onDoubleClick={() => setOffset(0)}
+        onDoubleClick={() => { setOffset(0); setRowZoom(1) }}
       />
     </div>
   )

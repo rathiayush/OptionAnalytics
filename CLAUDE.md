@@ -1717,6 +1717,18 @@ All must pass before committing.
   bar, "Delta per row", as many bars as fit at ~74 px by default, wheel = bars shown, drag = back in time). `TrueDataLiveTests.cs`,
   `tests/tick-flow-math.test.mjs`; checked in a browser with a mocked API at 1400 and 390 px (NOT against the real feed - run it with the trial login). A read -
   no strategy, alert or order.
+  REPLAY AND ZOOM (asked for - "it should work on replay as well", "we should be able to zoom the bubble chart"): the page's Live / Replay switch. A replayed
+  day is `GET /api/tick-flow/{u}?date=` (a past day, rebuilt by `TickHistoryDays` from TrueData's TICK HISTORY - needs `TrueData:Enabled` as well as
+  `Live:Enabled`; the trial keeps today and the day before, a subscription longer - through the same `TickBook`: a rise in the running volume is a trade at the tick's
+  price, none a quote, a running total's first tick only the baseline; kept in memory, 6 days, never on disk), asked for ONCE with every order (up to 400 000) and the
+  whole quote trail, and cut at the replay clock on the page (`prepareTickDay` / `replayCut`: the finished minutes whole, the running minute built from its orders up
+  to the clock - `barFromBubbles`, so the footprint grows order by order - nothing after the clock; a cut at any clock = the whole day up to it,
+  `tests/tick-flow-math.test.mjs`). Play / Pause / Reset, 1 - 600x (market seconds per real second), a slider with the second shown (no handle tooltip). THE BUBBLE CHART
+  ZOOMS BOTH WAYS (`TickBubbleChart`): the wheel zooms the TIME around the pointer, Shift + wheel the PRICE around the pointer, a drag moves both, two fingers pinch
+  the time, + / - / price + / price - buttons, "Fit price" gives the price scale back to auto (shown once it was zoomed or moved), "Live" follows the newest order again
+  (shown once moved back), double-click resets both; the footprint's Shift + wheel is its row height. COVERAGE (`coveragePct`, the "% of exchange volume" tag): the
+  quantity booked against the exchange's own running volume (TTQ) since the first trade seen - 100% = every trade is in the footprint, less = trades the feed did not
+  send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
 - ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
   telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
   `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures

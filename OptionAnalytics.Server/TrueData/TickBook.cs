@@ -11,7 +11,7 @@ public sealed record TickLevel(decimal Price, long Buy, long Sell);
 public sealed record TickBar(DateTimeOffset Time, decimal Open, decimal High, decimal Low, decimal Close, long Buy, long Sell, int Prints, IReadOnlyList<TickLevel> Levels);
 public sealed record TickQuotePoint(DateTimeOffset Time, decimal Bid, long BidQty, decimal Ask, long AskQty);
 public sealed record TickMeta(string Underlying, string Symbol, int LotSize, decimal TickSize, decimal LastPrice, decimal Bid, long BidQty, decimal Ask, long AskQty,
-    long Prints, long SequenceGaps, DateTimeOffset? LastTradeAt, DateOnly? Day);
+    long Prints, long SequenceGaps, DateTimeOffset? LastTradeAt, DateOnly? Day, long BookedVolume = 0, long ExchangeVolume = 0);
 public sealed record TickDay(TickMeta Meta, decimal RowSize, IReadOnlyList<TickBar> Bars, IReadOnlyList<TickBubble> Bubbles, IReadOnlyList<TickQuotePoint> Quotes);
 
 /// <summary>
@@ -34,7 +34,7 @@ public sealed class TickBook
     private readonly List<TickQuotePoint> _quotes = new();
     private DateOnly? _day;
     private decimal _bid, _ask, _lastPrice, _lastQuoteBid, _lastQuoteAsk;
-    private long _bidQty, _askQty, _lastSeq, _prints, _gaps;
+    private long _bidQty, _askQty, _lastSeq, _prints, _gaps, _booked, _ttqBase, _ttqLast;
     private bool _lastBuy = true;
     private DateTimeOffset? _lastTradeAt;
     private DateTimeOffset _lastQuoteAt;
@@ -80,7 +80,7 @@ public sealed class TickBook
 
     /// <summary>A trade. <paramref name="time"/> the exchange's (second resolution) or the arrival when it has none; the
     /// packet's own quote is applied AFTER the trade is sided.</summary>
-    public void OnTrade(DateTimeOffset time, long seq, decimal price, long qty, decimal bid, long bidQty, decimal ask, long askQty)
+    public void OnTrade(DateTimeOffset time, long seq, decimal price, long qty, decimal bid, long bidQty, decimal ask, long askQty, long totalVolume = 0)
     {
         if (price <= 0 || qty <= 0) return;
         lock (_lock)
@@ -97,6 +97,9 @@ public sealed class TickBook
             _lastPrice = price;
             _lastTradeAt = time;
             _prints++;
+            _booked += qty;
+            // The exchange's own running volume against what was booked: how much of the day's trading this feed delivered.
+            if (totalVolume > 0) { if (_ttqLast == 0) _ttqBase = totalVolume - qty; _ttqLast = totalVolume; }
             Add(time, price, qty, buy);
         }
         // This packet's quote is the one before the next trade.
@@ -148,7 +151,7 @@ public sealed class TickBook
         if (_day == day) return;
         _day = day;
         _minutes.Clear(); _bubbles.Clear(); _quotes.Clear();
-        _prints = _gaps = _lastSeq = 0;
+        _prints = _gaps = _lastSeq = _booked = _ttqBase = _ttqLast = 0;
         _lastPrice = _lastQuoteBid = _lastQuoteAsk = 0;
     }
 
@@ -166,12 +169,12 @@ public sealed class TickBook
             bars = _minutes.Select(kv => ToBar(kv.Key, kv.Value, row)).ToList();
             bubbles = _bubbles.Where(b => b.Qty >= minBubbleQty).TakeLast(Math.Max(1, maxBubbles)).ToArray();
             quotes = _quotes.TakeLast(Math.Max(1, maxQuotes)).ToArray();
-            meta = new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day);
+            meta = new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day, _booked, _ttqLast > 0 ? _ttqLast - _ttqBase : 0);
         }
         return new TickDay(meta, row, bars, bubbles, quotes);
     }
 
-    public TickMeta Meta() { lock (_lock) return new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day); }
+    public TickMeta Meta() { lock (_lock) return new TickMeta(Underlying, Symbol, LotSize, TickSize, _lastPrice, _bid, _bidQty, _ask, _askQty, _prints, _gaps, _lastTradeAt, _day, _booked, _ttqLast > 0 ? _ttqLast - _ttqBase : 0); }
 
     private static TickBar ToBar(DateTimeOffset time, MinuteBar b, decimal row)
     {
