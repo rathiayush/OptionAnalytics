@@ -55,6 +55,12 @@ public sealed class TrueDataLiveOptions
     public string Host { get; set; } = "push.truedata.in";
     public int Port { get; set; } = 8086;
 
+    /// <summary>"websocket" (the default - JSON messages, wss://{Host}:{Port}) or "tcp" (TrueData's TCP API v2.3: binary TR / BA packets
+    /// with the last tick's volume and a sequence number, {TcpHost}:{TcpPort}). One connection per account either way.</summary>
+    public string Transport { get; set; } = "websocket";
+    public string TcpHost { get; set; } = "tcp.truedata.in";
+    public int TcpPort { get; set; } = 7070;
+
     /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
     /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
     public List<TrueDataLiveInstrument> Instruments { get; set; } = new()

@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -56,6 +57,8 @@ public sealed class TrueDataLiveFeed : BackgroundService
     public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames);
     public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
+    private bool IsTcp => string.Equals(_options.Live.Transport, "tcp", StringComparison.OrdinalIgnoreCase);
+
     public TickBook? BookFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Book : null;
     public TrueDataLiveInstrument? InstrumentFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Instrument : null;
 
@@ -63,7 +66,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
     {
         lock (_byUnderlying)
             return new Status(_state, _lastError, _connectedAt, _lastFrameAt, Interlocked.Read(ref _frames),
-                _options.Live.Port == 8084 ? "production (8084)" : $"sandbox ({_options.Live.Port})",
+                IsTcp ? $"TCP {_options.Live.TcpHost}:{_options.Live.TcpPort}" : _options.Live.Port == 8084 ? "WebSocket production (8084)" : $"WebSocket sandbox ({_options.Live.Port})",
                 _byUnderlying.Values.Select(s =>
                 {
                     var m = s.Book.Meta();
@@ -133,7 +136,9 @@ public sealed class TrueDataLiveFeed : BackgroundService
     }
 
     /// <summary>One connection until it ends. True when the server refused the login.</summary>
-    private async Task<bool> RunOnceAsync(CancellationToken token)
+    internal Task<bool> RunOnceAsync(CancellationToken token) => IsTcp ? RunTcpAsync(token) : RunWebSocketAsync(token);
+
+    private async Task<bool> RunWebSocketAsync(CancellationToken token)
     {
         _state = "connecting";
         var live = _options.Live;
@@ -148,37 +153,94 @@ public sealed class TrueDataLiveFeed : BackgroundService
         {
             var text = await ReceiveAsync(socket, buffer, token);
             if (text is null) break;
-            _lastFrameAt = DateTimeOffset.UtcNow;
-            Interlocked.Increment(ref _frames);
             var frame = TrueDataLiveParser.Parse(text);
-            Remember(text, frame.Kind);
-            switch (frame.Kind)
-            {
-                case "login" when !subscribed:
-                    _state = "connected";
-                    subscribed = true;
-                    var symbols = _byName.Keys.ToArray();
-                    await SendAsync(socket, JsonSerializer.Serialize(new { method = "addsymbol", symbols }), token);
-                    break;
-                case "error":
-                    _lastError = frame.Message;
-                    _logger.LogWarning("TrueData live feed refused: {Message}", frame.Message);
-                    if (!subscribed) { await CloseAsync(socket); return true; }
-                    break;
-                case "symbols":
-                    Register(frame.Symbols ?? Array.Empty<TrueDataSymbol>());
-                    _state = "streaming";
-                    break;
-                case "trade" when frame.Trade is { } trade:
-                    OnTrade(trade);
-                    break;
-                case "bidask" when frame.Quote is { } quote:
-                    OnQuote(quote);
-                    break;
-            }
+            var (nowSubscribed, refused) = await OnFrameAsync(frame, text, subscribed,
+                json => SendAsync(socket, json, token));
+            subscribed = nowSubscribed;
+            if (refused) { await CloseAsync(socket); return true; }
         }
         // A login the server answered with a close and no message (a second session) reads as refused.
         return !subscribed;
+    }
+
+    /// <summary>The TCP stream (tcp.truedata.in:7070, TCP API v2.3): "LOGIN user password", then the same JSON "addsymbol" for the symbol ids,
+    /// then the binary TR / BA packets (<see cref="TrueDataTcpParser"/>). The frames go through the same handling as the WebSocket's.</summary>
+    private async Task<bool> RunTcpAsync(CancellationToken token)
+    {
+        _state = "connecting";
+        var live = _options.Live;
+        using var client = new TcpClient { NoDelay = true };
+        client.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+        await client.ConnectAsync(live.TcpHost, live.TcpPort, token);
+        _connectedAt = DateTimeOffset.UtcNow;
+        _lastError = null;
+        var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"LOGIN {_options.UserId} {_options.Password}\r\n"), token);
+        var parser = new TrueDataTcpParser { Clock = Clock };
+        var buffer = new byte[64 * 1024];
+        var subscribed = false;
+        while (!token.IsCancellationRequested)
+        {
+            IReadOnlyList<TrueDataFrame> frames;
+            using var idle = CancellationTokenSource.CreateLinkedTokenSource(token);
+            // A text line with no line end (the login answer may have none) is taken after a short quiet.
+            if (parser.HasPendingText) idle.CancelAfter(300);
+            int n;
+            try { n = await stream.ReadAsync(buffer, idle.Token); }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested) { n = -1; }
+            if (n == 0) break;
+            frames = n < 0 ? parser.FlushText() : parser.Feed(buffer.AsSpan(0, n));
+            foreach (var frame in frames)
+            {
+                var (nowSubscribed, refused) = await OnFrameAsync(frame, Describe(frame), subscribed,
+                    json => stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\r\n"), token).AsTask());
+                subscribed = nowSubscribed;
+                if (refused) return true;
+            }
+        }
+        return !subscribed;
+    }
+
+    /// <summary>A frame as one short line for the page's raw-message box (a packet has no text of its own). No login in it.</summary>
+    internal static string Describe(TrueDataFrame f) => f.Kind switch
+    {
+        "trade" when f.Trade is { } t => $"TR id {t.SymbolId} seq {t.Sequence} {t.Time:HH:mm:ss} ltp {t.Price} ltq {t.Quantity} ttq {t.TotalVolume} bid {t.Bid} x {t.BidQty} ask {t.Ask} x {t.AskQty}",
+        "bidask" when f.Quote is { } q => $"BA id {q.SymbolId} {q.Time:HH:mm:ss} bid {q.Bid} x {q.BidQty} ask {q.Ask} x {q.AskQty}",
+        "status" => $"market message {f.Message}",
+        _ => f.Message ?? f.Kind,
+    };
+
+    /// <summary>One frame, whichever way it came: counts it, keeps it for the page, answers a login with the subscribe, routes a trade or
+    /// a quote. Returns whether the symbols are subscribed now and whether the server refused the login.</summary>
+    private async Task<(bool Subscribed, bool Refused)> OnFrameAsync(TrueDataFrame frame, string text, bool subscribed, Func<string, Task> send)
+    {
+        _lastFrameAt = DateTimeOffset.UtcNow;
+        Interlocked.Increment(ref _frames);
+        Remember(text, frame.Kind);
+        switch (frame.Kind)
+        {
+            case "login" when !subscribed:
+                _state = "connected";
+                await send(JsonSerializer.Serialize(new { method = "addsymbol", symbols = _byName.Keys.ToArray() }));
+                return (true, false);
+            case "error":
+                _lastError = frame.Message;
+                _logger.LogWarning("TrueData live feed refused: {Message}", frame.Message);
+                return (subscribed, !subscribed);
+            case "symbols":
+                Register(frame.Symbols ?? Array.Empty<TrueDataSymbol>());
+                _state = "streaming";
+                break;
+            case "trade" when frame.Trade is { } trade:
+                _state = "streaming";
+                OnTrade(trade);
+                break;
+            case "bidask" when frame.Quote is { } quote:
+                _state = "streaming";
+                OnQuote(quote);
+                break;
+        }
+        return (subscribed, false);
     }
 
     private static async Task CloseAsync(ClientWebSocket socket)

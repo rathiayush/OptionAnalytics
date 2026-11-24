@@ -1731,6 +1731,22 @@ All must pass before committing.
   send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
   LOTS OR QUANTITY (asked for - "an option to select quantity instead of lot"): the page's Lots / Quantity switch (`optionanalytics.tickFlow.showLots`) drives every size - footprint cells, delta strip, bubble labels and legend, bid / ask size,
   cumulative delta, the bubble hover (`fmtQty`) - and the "Bubbles >=" box, kept per unit (`...minLots` / `...minQty`, so switching does not change what the other holds).
+  THE TCP TRANSPORT (asked for - "load from tcp ... historical data as well live"; `TrueData:Live:Transport` "websocket" (default) or "tcp",
+  `TcpHost` tcp.truedata.in / `TcpPort` 7070 - TrueData's TCP API v2.3; `TrueDataTcpParser`, `TrueDataTcpTests.cs`): the live feed can read the
+  TCP stream instead of the WebSocket - "LOGIN user password", the same JSON `addsymbol` for the symbol ids, then fixed BINARY packets that
+  start with a two-letter code and end in "Z": TR trade (87 bytes - symbol id, time, SEQUENCE, LTP, LAST TICK VOLUME, ATP, day volume, OHL, prev
+  close, OI, turnover, best bid / ask), BA quote (27), L2 (139, skipped - NSE has level 1 only), market codes (PO PC CO CC CK CL FO FC DO DC). The
+  frames are the WebSocket parser's own records, so routing, `TickBook`, coverage and the page are SHARED; nothing else changes. Decoding follows
+  TrueData's own Python client (`truedata` 7.0.3): LITTLE-ENDIAN (the first packet's time checks it against the clock, big-endian is read as
+  such), the time an IST wall clock written as a Unix integer (one that only fits the clock as real UTC is read as UTC), float32 prices through
+  `DecimalConversion.FromSingle`. Text lines (welcome, login answer - taken after 300 ms with no line end - a refusal in words) and JSON replies
+  are mixed in the stream; bytes that make no sense are skipped up to the next packet and counted (`Skipped`), a text line needs a run of printable
+  bytes ending in a line end so binary garbage never waits for one. The TCP document gives the packet layouts but NOT the subscribe command (an
+  image with no content) - `addsymbol` as on the WebSocket is an ASSUMPTION; the page's raw-message box ("TR id ... seq ... ltq ...") shows what
+  arrives. NOT TESTED AGAINST TRUEDATA: the sandbox cannot open ports 7070 / 8086 (tested against a fake server on a loopback socket). TCP has NO
+  HISTORY: the TCP document's history is the same REST API (`auth.truedata.in` / `history.truedata.in`, 3 calls a second, 100 a minute, 6000 an
+  hour there) that replay already uses - history stays REST either way, and holds about one snapshot a second (NIFTY26NOVFUT, 20 Nov 2026: 0.40
+  ticks / s, never more than 4 in a second, volume complete), so ticks finer than that exist only live.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,
