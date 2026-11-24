@@ -44,8 +44,8 @@ import { OptionFlowCard } from './OptionFlowCard.jsx'
 import { FuturesDeltaProfileCard, OptionCdvObvProfileCard, OptionDeltaProfileCard } from './DeltaProfileCard.jsx'
 import { TrapZonesCard } from './TrapZonesCard.jsx'
 import { BigOptionTradesCard } from './BigOptionTradesCard.jsx'
-import { useBigOptionOrders } from './useBigOptionOrders.js'
-import { bigEnough, orderMarkers } from './tickBigOrders.js'
+import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
+import { bigEnough, orderMarkers, ordersUpTo } from './tickBigOrders.js'
 import { StraddleCard } from './StraddleCard.jsx'
 import { GexCard } from './GexCard.jsx'
 import { GexSpotCard } from './GexSpotCard.jsx'
@@ -5808,12 +5808,17 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
   const [bigOrdersLots, setBigOrdersLots] = usePersistedState('optionanalytics.oiReplay.bigOrdersLots', 30)
   const [bigOrdersQty, setBigOrdersQty] = usePersistedState('optionanalytics.oiReplay.bigOrdersQty', 1950)
   const bigOrderFeed = useBigOptionOrders(showBigOrders && isLive && !popupOnly)
+  // A REPLAYED day: the day's option tick history (TrueData - built once on the server, a few minutes the first time), the orders up to the replay clock.
+  const bigOrdersReplayDay = !isLive && !popupOnly && showBigOrders && (underlying === 'NIFTY' || underlying === 'BANKNIFTY') ? date : null
+  const bigOrderDay = useBigOptionOrdersDay(underlying, bigOrdersReplayDay, !!bigOrdersReplayDay)
   const bigOrdersOnThisIndex = bigOrderFeed.state?.underlying === underlying
   const bigOrderMarks = useMemo(() => {
-    if (!showBigOrders || !isLive || !bigOrdersOnThisIndex) return EMPTY_ARRAY
-    const kept = bigEnough(bigOrderFeed.orders, bigOrdersUnit === 'qty' ? { minQty: bigOrdersQty, multiple: 0 } : { minLots: bigOrdersLots, multiple: 0 })
+    if (!showBigOrders) return EMPTY_ARRAY
+    if (!isLive && !bigOrderDay.ready) return EMPTY_ARRAY
+    if (isLive && !bigOrdersOnThisIndex) return EMPTY_ARRAY
+    const kept = bigEnough(isLive ? bigOrderFeed.orders : ordersUpTo(bigOrderDay.orders, asOfMs == null ? 0 : asOfMs + 59_000), bigOrdersUnit === 'qty' ? { minQty: bigOrdersQty, multiple: 0 } : { minLots: bigOrdersLots, multiple: 0 })
     return orderMarkers(kept, timeframe, bigOrdersUnit)
-  }, [showBigOrders, isLive, bigOrdersOnThisIndex, bigOrderFeed.orders, bigOrdersUnit, bigOrdersLots, bigOrdersQty, timeframe])
+  }, [showBigOrders, isLive, bigOrdersOnThisIndex, bigOrderFeed.orders, bigOrderDay.ready, bigOrderDay.orders, asOfMs, bigOrdersUnit, bigOrdersLots, bigOrdersQty, timeframe])
   const spotMarks = useMemo(
     () => (bigOrderMarks.length ? [...oiAbsorptionMarks, ...bigOrderMarks].sort((a, b) => a.time - b.time) : oiAbsorptionMarks),
     [oiAbsorptionMarks, bigOrderMarks],
@@ -6408,8 +6413,8 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
             options={ABSORPTION_TIMEFRAMES.map((m) => ({ value: m, label: `on ${m} min` }))}
           />
         )}
-        <Tooltip title="Marks on the spot chart the big option orders of TrueData's LIVE ticks - the calls and puts ATM ± N of the index the Tick Flow page streams (an admin picks it there): a green arrow under the candle for a bullish order (call bought, put written ...), a red arrow over it for a bearish one, a ⚡ for a sweep across strikes. You set the size - in lots or in quantity (units). Live only.">
-          <Checkbox checked={showBigOrders} onChange={(e) => setShowBigOrders(e.target.checked)}>Big option orders (live ticks)</Checkbox>
+        <Tooltip title="Marks on the spot chart the big option orders of TrueData's LIVE ticks - the calls and puts ATM ± N of the index the Tick Flow page streams (an admin picks it there): a green arrow under the candle for a bullish order (call bought, put written ...), a red arrow over it for a bearish one, a ⚡ for a sweep across strikes. You set the size - in lots or in quantity (units). A replayed day (NIFTY / BANKNIFTY) is built from TrueData's tick history of the options - a few minutes the first time.">
+          <Checkbox checked={showBigOrders} onChange={(e) => setShowBigOrders(e.target.checked)}>Big option orders (tick data)</Checkbox>
         </Tooltip>
         {showBigOrders && (
           <>
@@ -6418,7 +6423,11 @@ export default function OiReplayPage({ popupOnly = false } = {}) {
               ? <InputNumber size="small" min={1} max={10_000_000} step={PAPER_TRADE_LOT_SIZE[underlying] ?? 1} value={bigOrdersQty} onChange={(v) => setBigOrdersQty(v ?? 1950)} style={{ width: 100 }} addonBefore="≥" aria-label="Big option order quantity" />
               : <InputNumber size="small" min={1} max={100000} value={bigOrdersLots} onChange={(v) => setBigOrdersLots(v ?? 30)} style={{ width: 90 }} addonBefore="≥" addonAfter="lots" aria-label="Big option order lots" />}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              {!isLive ? 'live only'
+              {!isLive ? (bigOrdersReplayDay == null ? 'NIFTY / BANKNIFTY only'
+                : bigOrderDay.error ? bigOrderDay.error
+                  : bigOrderDay.answer?.state === 'failed' ? bigOrderDay.answer.error
+                    : bigOrderDay.ready ? `${bigOrderMarks.length} mark${bigOrderMarks.length === 1 ? '' : 's'} (TrueData tick history${bigOrderDay.answer.failed ? `, ${bigOrderDay.answer.failed} contracts without data` : ''})`
+                      : `loading the day's option ticks… ${bigOrderDay.answer?.done ?? 0} of ${bigOrderDay.answer?.total ?? '?'} contracts`)
                 : bigOrderFeed.state == null ? 'connecting…'
                   : !bigOrderFeed.state.underlying ? 'no index streamed - pick one on the Tick Flow page'
                     : !bigOrdersOnThisIndex ? `the tick stream is on ${bigOrderFeed.state.underlying}`

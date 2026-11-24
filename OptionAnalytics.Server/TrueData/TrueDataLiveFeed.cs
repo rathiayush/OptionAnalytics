@@ -326,18 +326,11 @@ public sealed class TrueDataLiveFeed : BackgroundService
         var ist = now.ToOffset(IstClock.Offset);
         var today = IstClock.IstDate(now);
         var first = ist.TimeOfDay >= new TimeSpan(15, 30, 0) ? today.AddDays(1) : today;
-        for (var d = first; d <= first.AddDays(40); d = d.AddDays(1))
+        if (await OptionChains.FindNearestAsync(ChainSource, underlying, first, token) is { } found)
         {
-            var rule = ExpiryCalendar.OptionExpiryWeekday(underlying, d);
-            if (d.DayOfWeek != rule && d.AddDays(1).DayOfWeek != rule) continue;
-            var contracts = await ChainSource.GetAsync(underlying, d, token);
-            if (contracts.Count == 0) continue;
-            _chain = contracts.ToDictionary(c => c.SymbolId, StringComparer.Ordinal);
-            _chainExpiry = d; _chainDay = today;
-            var strikes = contracts.Select(c => c.Strike).Distinct().OrderBy(k => k).ToList();
-            var step = decimal.MaxValue;
-            for (var i = 1; i < strikes.Count; i++) step = Math.Min(step, strikes[i] - strikes[i - 1]);
-            _optStep = step == decimal.MaxValue || step <= 0 ? 50 : step;
+            _chain = found.Contracts.ToDictionary(c => c.SymbolId, StringComparer.Ordinal);
+            _chainExpiry = found.Expiry; _chainDay = today;
+            _optStep = OptionChains.StepOf(found.Contracts);
             _subscribedOptions.Clear();
             return;
         }

@@ -18,6 +18,7 @@ public static class TrueDataRegistration
                 if (string.IsNullOrWhiteSpace(o.Live.StatePath)) o.Live.StatePath = configuration["Storage:ScannerRunnerPath"] ?? "";
             });
             services.AddSingleton<TickHistoryDays>();
+            services.AddSingleton<OptionTickHistoryDays>();
             services.AddSingleton<TrueDataLiveFeed>();
             services.AddHostedService(sp => sp.GetRequiredService<TrueDataLiveFeed>());
         }

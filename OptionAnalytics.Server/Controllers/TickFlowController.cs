@@ -13,11 +13,13 @@ public sealed class TickFlowController : ControllerBase
 {
     private readonly TrueDataLiveFeed? _feed;
     private readonly TickHistoryDays? _history;
+    private readonly OptionTickHistoryDays? _optionHistory;
 
     public TickFlowController(IServiceProvider services)
     {
         _feed = services.GetService<TrueDataLiveFeed>();
         _history = services.GetService<TickHistoryDays>();
+        _optionHistory = services.GetService<OptionTickHistoryDays>();
     }
 
     [HttpGet("status")]
@@ -33,6 +35,18 @@ public sealed class TickFlowController : ControllerBase
         _feed is null
             ? Ok(new { enabled = false })
             : Ok(new { enabled = true, options = _feed.OptionsSnapshot(), events = _feed.Watch.Since(since, Math.Clamp(limit, 1, 5000)) });
+
+    /// <summary>The big option orders of a PAST day (replay), rebuilt from TrueData's tick history of the option contracts: the first ask starts the build in the
+    /// background (state "loading", contracts done of total - ask again), then "ready" with every order of the day (the page cuts them at its clock) or "failed" with why.</summary>
+    [HttpGet("options/day")]
+    public ActionResult OptionsDay([FromQuery] string underlying, [FromQuery] DateOnly date, [FromQuery] int strikes = 10)
+    {
+        if (_feed is null || _optionHistory is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        var instrument = _feed.InstrumentFor(underlying);
+        if (instrument is null) return NotFound(new { error = $"{underlying?.ToUpperInvariant()} is not streamed (TrueData:Live:Instruments)." });
+        var s = _optionHistory.Request(instrument, date, strikes);
+        return Ok(new { state = s.State, done = s.Done, total = s.Total, failed = s.Failed, error = s.Error, expiry = s.Expiry, step = s.Step, events = s.Events });
+    }
 
     public sealed record OptionsRequest(string? Underlying, int Strikes);
 

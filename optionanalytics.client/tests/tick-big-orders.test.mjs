@@ -102,3 +102,14 @@ test('a busy stream stays cheap: thousands of orders are swept and filtered in w
   assert.ok(big.length > 0)
   assert.ok(Date.now() - t < 1500, `took ${Date.now() - t} ms`)
 })
+
+import { ordersOfDay, ordersUpTo } from '../src/tickBigOrders.js'
+test('a whole replayed day: oldest first, none dropped past the live cap, cut at the clock', () => {
+  const t0 = Date.parse('2026-11-23T04:00:00Z')
+  const events = Array.from({ length: 2500 }, (_, i) => ({ seq: 2500 - i, time: new Date(t0 + (2499 - i) * 1000).toISOString(), strike: 25000, type: 'CE', buy: true, qty: 3000, lots: 46, price: 100, value: 3e5, ratio: 4, oiChange: 10, lotSize: 65, atmDistance: 0, movePct: 0, touchRatio: 1, through: false, bundled: false, symbol: 'X' }))
+  const day = ordersOfDay(events)
+  assert.equal(day.length, 2500)
+  assert.ok(day.every((o, i) => i === 0 || day[i - 1].t <= o.t))
+  assert.equal(ordersUpTo(day, t0 + 9_000).length, 10)
+  assert.equal(ordersUpTo(day, null).length, 2500)
+})
