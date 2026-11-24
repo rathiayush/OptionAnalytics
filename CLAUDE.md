@@ -1747,6 +1747,11 @@ All must pass before committing.
   HISTORY: the TCP document's history is the same REST API (`auth.truedata.in` / `history.truedata.in`, 3 calls a second, 100 a minute, 6000 an
   hour there) that replay already uses - history stays REST either way, and holds about one snapshot a second (NIFTY26NOVFUT, 20 Nov 2026: 0.40
   ticks / s, never more than 4 in a second, volume complete), so ticks finer than that exist only live.
+  THE SOURCE IS PICKED ON THE PAGE (asked for - "once selected we will get data from there"): the controls row's "Live source: WebSocket / TCP"
+  (`PUT /api/tick-flow/source`, ADMIN ONLY - others see which is live; `TrueDataLiveFeed.SetTransport`): it closes the open connection (one login an
+  account) and reconnects through the one picked at once (state "switching"); the choice is kept in `tick-flow-source.txt` under
+  `Storage:ScannerRunnerPath` (`Live.StatePath`) and beats `Live:Transport`, which is only the first default. The status carries `transport`.
+  Replay is always REST history, whichever is picked.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using OptionAnalytics.Server.Auth;
 using OptionAnalytics.Server.TrueData;
 
 namespace OptionAnalytics.Server.Controllers;
@@ -24,6 +25,20 @@ public sealed class TickFlowController : ControllerBase
         _feed is null
             ? Ok(new { enabled = false, state = "off", note = "TrueData:Live:Enabled is off or the TrueData login is not set (TrueData__UserId / TrueData__Password)." })
             : Ok(new { enabled = true, status = _feed.Snapshot() });
+
+    public sealed record SourceRequest(string? Transport);
+
+    /// <summary>Picks where the live ticks come from: "websocket" or "tcp" (TrueData's two streams). Admin only - it closes the open
+    /// connection and reconnects through the other; the choice is kept across a restart.</summary>
+    [HttpPut("source")]
+    [Microsoft.AspNetCore.Authorization.Authorize(Roles = AuthRoles.Admin)]
+    public ActionResult Source([FromBody] SourceRequest request)
+    {
+        if (_feed is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        return _feed.SetTransport(request.Transport)
+            ? Ok(new { transport = _feed.Transport })
+            : BadRequest(new { error = "transport must be \"websocket\" or \"tcp\"." });
+    }
 
     /// <param name="rowSize">Price points per footprint row (0 = the contract's tick).</param>
     /// <param name="minBubbleLots">The smallest bubble returned, in lots (1 = every print).</param>

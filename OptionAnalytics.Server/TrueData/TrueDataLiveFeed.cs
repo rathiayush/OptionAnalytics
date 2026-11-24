@@ -38,6 +38,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
     {
         _options = options.Value;
         _logger = logger;
+        _transport = LoadTransport();
         foreach (var i in _options.Live.Instruments.Where(i => i.Underlying.Length > 0 && i.Symbol.Length > 0))
         {
             var stream = new Stream(i, new TickBook(i.Underlying.ToUpperInvariant(), i.Symbol, i.LotSize, i.TickSize));
@@ -54,10 +55,43 @@ public sealed class TrueDataLiveFeed : BackgroundService
         public long Quotes;
     }
 
-    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames);
+    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames, string Transport);
     public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
-    private bool IsTcp => string.Equals(_options.Live.Transport, "tcp", StringComparison.OrdinalIgnoreCase);
+    private volatile string _transport = "websocket";
+    private CancellationTokenSource? _connection;
+    private bool IsTcp => _transport == "tcp";
+    public string Transport => _transport;
+
+    /// <summary>The source the page picked: "websocket" or "tcp". The connection open now is closed (TrueData allows one login an account)
+    /// and the feed reconnects through the new one at once; the choice is kept in a small file, so it holds through a restart. Returns false for any
+    /// other name.</summary>
+    public bool SetTransport(string? transport)
+    {
+        var t = transport?.Trim().ToLowerInvariant();
+        if (t is not ("websocket" or "tcp")) return false;
+        if (t == _transport) return true;
+        _transport = t;
+        _lastError = null;
+        SaveTransport(t);
+        try { _connection?.Cancel(); } catch (ObjectDisposedException) { }
+        return true;
+    }
+
+    private string? StateFile => string.IsNullOrWhiteSpace(_options.Live.StatePath) ? null : Path.Combine(_options.Live.StatePath, "tick-flow-source.txt");
+
+    private void SaveTransport(string t)
+    {
+        try { if (StateFile is { } f) { Directory.CreateDirectory(Path.GetDirectoryName(f)!); File.WriteAllText(f, t); } }
+        catch (Exception ex) { _logger.LogWarning("TrueData live feed: the chosen source was not saved: {Error}", ex.Message); }
+    }
+
+    private string LoadTransport()
+    {
+        try { if (StateFile is { } f && File.Exists(f) && File.ReadAllText(f).Trim().ToLowerInvariant() is ("websocket" or "tcp") and var t) return t; }
+        catch { }
+        return string.Equals(_options.Live.Transport, "tcp", StringComparison.OrdinalIgnoreCase) ? "tcp" : "websocket";
+    }
 
     public TickBook? BookFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Book : null;
     public TrueDataLiveInstrument? InstrumentFor(string underlying) => _byUnderlying.TryGetValue(underlying, out var s) ? s.Instrument : null;
@@ -71,7 +105,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 {
                     var m = s.Book.Meta();
                     return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.BookedVolume, m.ExchangeVolume, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
-                }).ToList(), RecentFramesCopy());
+                }).ToList(), RecentFramesCopy(), _transport);
     }
 
     private string[] RecentFramesCopy() { lock (_recent) return _recent.ToArray(); }
@@ -104,12 +138,21 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 continue;
             }
             var refused = false;
+            using var connection = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            _connection = connection;
             try
             {
-                refused = await RunOnceAsync(stoppingToken);
+                refused = await RunOnceAsync(connection.Token);
                 if (!refused) wait = TimeSpan.FromSeconds(5);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
+            catch (OperationCanceledException)
+            {
+                // The page picked another source: connect through it now (the old connection is closed, so the login is free).
+                _state = "switching";
+                wait = TimeSpan.Zero;
+                continue;
+            }
             catch (Exception ex)
             {
                 _lastError = ex.Message;

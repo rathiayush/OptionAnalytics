@@ -237,4 +237,34 @@ public sealed class TrueDataTcpTests
         await server;
         Assert.Equal("User Already Connected", feed.Snapshot().Error);
     }
+
+    [Fact]
+    public void TheSourcePickedOnThePageIsKeptAcrossARestart_AndNothingElseIsAccepted()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "tick-flow-source-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            TrueDataLiveFeed Make(string transport) => new(Options.Create(new TrueDataOptions
+            {
+                Enabled = true, UserId = "u", Password = "p",
+                Live = new TrueDataLiveOptions { Enabled = true, Transport = transport, StatePath = folder, Instruments = new() { new() { Underlying = "NIFTY", Symbol = "NIFTY-I" } } },
+            }), NullLogger<TrueDataLiveFeed>.Instance);
+
+            var feed = Make("websocket");
+            Assert.Equal("websocket", feed.Snapshot().Transport);
+            Assert.False(feed.SetTransport("udp"));
+            Assert.False(feed.SetTransport(null));
+            Assert.Equal("websocket", feed.Transport);
+
+            Assert.True(feed.SetTransport(" TCP "));
+            Assert.Equal("tcp", feed.Snapshot().Transport);
+            Assert.Contains("TCP", feed.Snapshot().Port);
+
+            // A restart: the configured default is websocket, the page's choice is what the file kept.
+            Assert.Equal("tcp", Make("websocket").Transport);
+            Assert.True(feed.SetTransport("websocket"));
+            Assert.Equal("websocket", Make("tcp").Transport);
+        }
+        finally { if (Directory.Exists(folder)) Directory.Delete(folder, true); }
+    }
 }

@@ -61,6 +61,9 @@ public sealed class TrueDataLiveOptions
     public string TcpHost { get; set; } = "tcp.truedata.in";
     public int TcpPort { get; set; } = 7070;
 
+    /// <summary>The folder the page's source choice (WebSocket / TCP) is kept in; filled from Storage:ScannerRunnerPath when empty.</summary>
+    public string StatePath { get; set; } = "";
+
     /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
     /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
     public List<TrueDataLiveInstrument> Instruments { get; set; } = new()
