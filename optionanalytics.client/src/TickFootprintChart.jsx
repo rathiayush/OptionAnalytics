@@ -9,8 +9,28 @@ import { barStats, diagonalImbalances, fmtQty, msOf } from './tickFlowMath.js'
 const COLORS = { buy: '#26a69a', sell: '#ef5350', text: '#d9d9d9', grid: '#1f2937', axis: '#8c8c8c', bg: '#0b1220', last: '#1668dc', poc: '#faad14' }
 const AXIS_W = 62
 const STRIP_H = 64
+const COT_H = 30
+const PROFILE_W = 96
+const TOOL = { vwap: '#e040fb', ua: '#8c8c8c', abs: '#faad14', exh: '#ff7a45', cot: '#40a9ff', iceberg: '#13c2c2', profile: '#4c6ef5', value: 'rgba(76,110,245,0.18)' }
 
-export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, lastPrice, height: maxHeight = 640, imbalanceRatio = 3, rowDelta = false }) {
+function pill(g, text, x, y, color, alpha = 1) {
+  g.save()
+  g.globalAlpha = alpha
+  g.font = 'bold 10px sans-serif'
+  g.textAlign = 'center'
+  g.textBaseline = 'middle'
+  const w = g.measureText(text).width + 8
+  g.fillStyle = 'rgba(11,18,32,0.88)'
+  g.fillRect(x - w / 2, y - 7, w, 14)
+  g.strokeStyle = color
+  g.lineWidth = 1
+  g.strokeRect(x - w / 2 + 0.5, y - 6.5, w - 1, 13)
+  g.fillStyle = color
+  g.fillText(text, x, y + 0.5)
+  g.restore()
+}
+
+export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, lastPrice, height: maxHeight = 640, imbalanceRatio = 3, rowDelta = false, tools = null }) {
   const wrap = useRef(null)
   const canvas = useRef(null)
   const [width, setWidth] = useState(900)
@@ -21,6 +41,10 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const visibleRef = useRef(14)
   const widthRef = useRef(900)
   const nRef = useRef(0)
+  const profW = tools?.profile ? Math.min(PROFILE_W, Math.round(width * 0.2)) : 0
+  const profWRef = useRef(0)
+  useEffect(() => { profWRef.current = profW }, [profW])
+  const stripH = STRIP_H + (tools?.cot ? COT_H : 0)
 
   useEffect(() => {
     const el = wrap.current
@@ -32,7 +56,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   }, [])
 
   // By default as many bars as fit at a readable width (~74 px each): a phone shows 4, a monitor 15+.
-  const visible = picked ?? Math.max(4, Math.floor((width - AXIS_W) / 74))
+  const visible = picked ?? Math.max(4, Math.floor((width - AXIS_W - profW) / 74))
   useEffect(() => { visibleRef.current = visible }, [visible])
   const n = bars.length
   useEffect(() => { widthRef.current = width; nRef.current = n }, [width, n])
@@ -50,10 +74,10 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
     const loRow = Math.floor(lo / rowSize + 1e-9) * rowSize
     const rows = Math.max(1, Math.round((hiRow - loRow) / rowSize) + 1)
     const top = hiRow + rowSize
-    const plotH = maxHeight - STRIP_H - 18
+    const plotH = maxHeight - stripH - 18
     const rowH = Math.max(4, Math.min(70, Math.min(34, plotH / (rows + 2)) * rowZoom))
-    return { hi, lo, hiRow, loRow, top, rows, rowH, plotH, needed: Math.ceil(10 + (rows + 1) * rowH + 8 + STRIP_H) }
-  }, [shown, rowSize, maxHeight, rowZoom])
+    return { hi, lo, hiRow, loRow, top, rows, rowH, plotH, needed: Math.ceil(10 + (rows + 1) * rowH + 8 + stripH) }
+  }, [shown, rowSize, maxHeight, rowZoom, stripH])
 
   // The canvas is as tall as its content (never past the height asked for): a few rows do not leave a screen of empty chart.
   const wanted = layout ? Math.max(260, Math.min(rowZoom > 1 ? 3000 : maxHeight, layout.needed)) : maxHeight
@@ -71,7 +95,8 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
     g.fillRect(0, 0, width, height)
     if (!layout || shown.length === 0) return
     const { top, rowH } = layout
-    const plotW = width - AXIS_W
+    const edge = width - AXIS_W
+    const plotW = edge - profW
     const colW = plotW / Math.max(visible, shown.length)
     const y = (price) => 10 + ((top - price) / rowSize) * rowH
     // Price axis + grid.
@@ -84,9 +109,9 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
       const price = Math.round((layout.hiRow - i * rowSize) * 1e4) / 1e4
       const yy = y(price) + rowH / 2
       g.strokeStyle = COLORS.grid
-      g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke()
+      g.beginPath(); g.moveTo(0, yy); g.lineTo(edge, yy); g.stroke()
       g.fillStyle = COLORS.axis
-      g.fillText(String(price), plotW + 6, yy)
+      g.fillText(String(price), edge + 6, yy)
     }
     const cells = colW >= 58 && rowH >= 9
     const fontPx = Math.max(8, Math.min(12, Math.floor(rowH - 2), Math.floor(colW / 7)))
@@ -133,8 +158,48 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
           }
         }
       }
+      // TOOLS on the bar: auctions, stacked imbalances, the COT read, absorption / exhaustion marks, icebergs.
+      if (tools) {
+        const gi = first + i
+        const topY = y(b.levels[0]?.price ?? b.high)
+        const botY = y(b.levels.at(-1)?.price ?? b.low) + rowH
+        if (tools.auction && colW >= 40) {
+          const au = tools.auction[gi]
+          g.font = 'bold 9px sans-serif'; g.textAlign = 'right'; g.textBaseline = 'middle'; g.fillStyle = TOOL.ua
+          if (au?.high) g.fillText(au.high === 'finished' ? 'FA' : 'UA', x0 + colW - 2, topY + rowH / 2)
+          if (au?.low) g.fillText(au.low === 'finished' ? 'FA' : 'UA', x0 + colW - 2, botY - rowH / 2)
+        }
+        if (tools.stacked) {
+          const st = tools.stacked[gi]
+          g.lineWidth = 3
+          for (const r of st?.sell ?? []) { g.strokeStyle = COLORS.sell; g.beginPath(); g.moveTo(left - 2, y(r.from)); g.lineTo(left - 2, y(r.to) + rowH); g.stroke() }
+          for (const r of st?.buy ?? []) { g.strokeStyle = COLORS.buy; g.beginPath(); g.moveTo(left + cellW * 2 + 1, y(r.from)); g.lineTo(left + cellW * 2 + 1, y(r.to) + rowH); g.stroke() }
+          g.lineWidth = 1
+        }
+        const marks = tools.marks?.get(gi) ?? []
+        for (const m of marks) {
+          const mark = m.status === 'confirmed' ? ' ✓' : m.status === 'failed' ? ' ✗' : ''
+          const color = m.kind === 'ABS' ? TOOL.abs : TOOL.exh
+          const text = `${m.kind} ${m.score}${mark}`
+          if (m.side > 0) pill(g, `▲ ${text}`, x0 + colW / 2, botY + 11, color, m.status === 'failed' ? 0.5 : 1)
+          else pill(g, `▼ ${text}`, x0 + colW / 2, topY - 11, color, m.status === 'failed' ? 0.5 : 1)
+        }
+        const cr = tools.cotRead?.[gi]
+        if (cr) pill(g, `COT ${cr.side > 0 ? '▲' : '▼'}`, x0 + colW / 2, cr.at === 'high' ? topY - 26 : botY + 26, TOOL.cot)
+        for (const ic of tools.iceBars?.get(gi) ?? []) {
+          const iy = y(Math.floor(ic.price / rowSize + 1e-9) * rowSize) + rowH / 2
+          pill(g, `ICE ${ic.buy ? 'B' : 'S'} ${Math.round(ic.lots)}L`, x0 + colW - 24, iy, TOOL.iceberg)
+        }
+      }
       // The strip under the bars: delta, cumulative delta, volume, time (fewer lines when the bar is narrow).
       const sy = 10 + (layout.rows + 1) * rowH + 8
+      if (tools?.cot) {
+        const c = tools.cot[first + i]
+        g.font = '10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'
+        const f = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${fmtQty(v, lotSize, showLots)}`)
+        g.fillStyle = c && c.high >= 0 ? COLORS.buy : COLORS.sell; g.fillText(`COT H ${f(c?.high)}`, x0 + colW / 2, sy + (colW < 58 ? 50 : 64))
+        g.fillStyle = c && c.low >= 0 ? COLORS.buy : COLORS.sell; g.fillText(`COT L ${f(c?.low)}`, x0 + colW / 2, sy + (colW < 58 ? 62 : 78))
+      }
       g.font = '11px sans-serif'
       g.textAlign = 'center'
       g.fillStyle = stats.delta >= 0 ? COLORS.buy : COLORS.sell
@@ -146,20 +211,63 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
       g.fillText(`Vol ${fmtQty(stats.total, lotSize, showLots)}`, x0 + colW / 2, sy + 36)
       g.fillText(new Date(msOf(b.time)).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' }), x0 + colW / 2, sy + 50)
     })
+    // TOOLS across the chart: the volume profile (right), POC / VAH / VAL lines, unfinished-auction lines, the VWAP.
+    if (tools?.profile?.rows?.length) {
+      const pr = tools.profile
+      const maxT = Math.max(1, ...pr.rows.map((r) => r.total))
+      g.fillStyle = TOOL.value
+      if (pr.vah != null && pr.val != null) g.fillRect(plotW, y(pr.vah), profW, y(pr.val) - y(pr.vah) + rowH)
+      for (const r of pr.rows) {
+        if (r.price > layout.hiRow + 1e-9 || r.price < layout.loRow - 1e-9) continue
+        const w = ((profW - 6) * r.total) / maxT
+        g.fillStyle = r.price === pr.poc ? COLORS.poc : TOOL.profile
+        g.globalAlpha = r.price === pr.poc ? 0.9 : 0.65
+        g.fillRect(plotW + 2, y(r.price) + 1, Math.max(1, w), rowH - 2)
+        g.globalAlpha = 1
+      }
+      g.font = '9px sans-serif'; g.textAlign = 'left'; g.textBaseline = 'middle'
+      for (const [price, label, color] of [[pr.poc, 'POC', COLORS.poc], [pr.vah, 'VAH', '#7c9cff'], [pr.val, 'VAL', '#7c9cff']]) {
+        if (price == null || price > layout.hiRow + 1e-9 || price < layout.loRow - 1e-9) continue
+        const yy = y(price) + rowH / 2
+        g.strokeStyle = color; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke(); g.setLineDash([])
+        g.fillStyle = color; g.fillText(label, plotW + 3, yy - 6)
+      }
+    }
+    for (const u of tools?.unfinished ?? []) {
+      const lastIdx = first + shown.length
+      if (u.index >= lastIdx || (u.until != null && u.until < first)) continue
+      const yy = y(u.price) + rowH / 2
+      const xa = Math.max(0, (u.index - first + 1) * colW)
+      const xb = u.until == null ? plotW : Math.min(plotW, (u.until - first) * colW)
+      if (xb <= xa) continue
+      g.strokeStyle = TOOL.ua; g.setLineDash([2, 3]); g.beginPath(); g.moveTo(xa, yy); g.lineTo(xb, yy); g.stroke(); g.setLineDash([])
+    }
+    if (tools?.vwap) {
+      g.strokeStyle = TOOL.vwap; g.lineWidth = 2; g.beginPath()
+      let pen = false
+      shown.forEach((_, i) => {
+        const v = tools.vwap[first + i]
+        if (v == null) { pen = false; return }
+        const px = i * colW + colW / 2
+        const py = y(v - rowSize / 2) + rowH / 2
+        if (!pen) { g.moveTo(px, py); pen = true } else g.lineTo(px, py)
+      })
+      g.stroke(); g.lineWidth = 1
+    }
     // The last price.
     if (lastPrice > 0 && lastPrice < top + rowSize && lastPrice >= layout.loRow - rowSize) {
       const yy = y(Math.floor(lastPrice / rowSize) * rowSize) + rowH / 2
       g.strokeStyle = COLORS.last; g.setLineDash([4, 3])
-      g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke(); g.setLineDash([])
-      g.fillStyle = COLORS.last; g.fillRect(plotW, yy - 9, AXIS_W, 18)
-      g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = '11px sans-serif'; g.fillText(String(lastPrice), plotW + 6, yy)
+      g.beginPath(); g.moveTo(0, yy); g.lineTo(edge, yy); g.stroke(); g.setLineDash([])
+      g.fillStyle = COLORS.last; g.fillRect(edge, yy - 9, AXIS_W, 18)
+      g.fillStyle = '#fff'; g.textAlign = 'left'; g.font = '11px sans-serif'; g.fillText(String(lastPrice), edge + 6, yy)
     }
-  }, [shown, layout, width, height, visible, rowSize, lotSize, showLots, lastPrice, cvd, first, imbalanceRatio, rowDelta])
+  }, [shown, layout, width, height, visible, rowSize, lotSize, showLots, lastPrice, cvd, first, imbalanceRatio, rowDelta, tools, profW])
 
   const onWheel = (e) => {
     if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       e.preventDefault()
-      const colW = (widthRef.current - AXIS_W) / visibleRef.current
+      const colW = (widthRef.current - AXIS_W - profWRef.current) / visibleRef.current
       setOffset((o) => Math.max(0, Math.min(Math.max(0, nRef.current - 1), o - Math.round(e.deltaX / colW) || o)))
       return
     }
@@ -184,7 +292,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
         onPointerDown={(e) => { drag.current = { x: e.clientX, offset }; e.currentTarget.setPointerCapture?.(e.pointerId) }}
         onPointerMove={(e) => {
           if (!drag.current) return
-          const colW = (width - AXIS_W) / visible
+          const colW = (width - AXIS_W - profW) / visible
           const moved = Math.round((e.clientX - drag.current.x) / colW)
           setOffset(Math.max(0, Math.min(Math.max(0, n - 1), drag.current.offset + moved)))
         }}
