@@ -195,6 +195,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
 
     private (string, int) LoadOptions()
     {
+        if (!_options.Live.OptionTicks) return ("", 1);
         var underlying = _options.Live.OptionsUnderlying?.Trim().ToUpperInvariant() ?? "";
         var strikes = _options.Live.OptionStrikes;
         try
@@ -210,10 +211,14 @@ public sealed class TrueDataLiveFeed : BackgroundService
         return (_byUnderlying.ContainsKey(underlying) ? underlying : "", Math.Clamp(strikes, 1, 15));
     }
 
+    /// <summary>The option tick processing feature flag (TrueData:Live:OptionTicks).</summary>
+    public bool OptionTicksOn => _options.Live.OptionTicks;
+
     /// <summary>The index whose options are watched ("" = none) and how many strikes each side of the ATM. Kept in a file. False for an index that is not streamed.</summary>
     public bool SetOptions(string? underlying, int strikes)
     {
         var u = underlying?.Trim().ToUpperInvariant() ?? "";
+        if (!_options.Live.OptionTicks && u.Length > 0) return false;
         if (u.Length > 0 && !_byUnderlying.ContainsKey(u)) return false;
         _optUnderlying = u;
         _optStrikes = Math.Clamp(strikes, 1, 15);
@@ -260,6 +265,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
     /// so everything is subscribed again. Internal for the tests.</summary>
     internal async Task SyncOptionsAsync(DateTimeOffset now, CancellationToken token)
     {
+        if (!_options.Live.OptionTicks) return;
         var send = _sender;
         if (send is null) return;
         if (_subscribedEpoch != _epoch) { _subscribedOptions.Clear(); _subscribedEpoch = _epoch; }

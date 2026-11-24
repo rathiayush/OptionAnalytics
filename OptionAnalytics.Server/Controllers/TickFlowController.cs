@@ -34,7 +34,7 @@ public sealed class TickFlowController : ControllerBase
     public ActionResult Options([FromQuery] long since = 0, [FromQuery] int limit = 1000) =>
         _feed is null
             ? Ok(new { enabled = false })
-            : Ok(new { enabled = true, options = _feed.OptionsSnapshot(), events = _feed.Watch.Since(since, Math.Clamp(limit, 1, 5000)) });
+            : Ok(new { enabled = true, optionTicks = _feed.OptionTicksOn, options = _feed.OptionsSnapshot(), events = _feed.Watch.Since(since, Math.Clamp(limit, 1, 5000)) });
 
     /// <summary>The big option orders of a PAST day (replay), rebuilt from TrueData's tick history of the option contracts: the first ask starts the build in the
     /// background (state "loading", contracts done of total - ask again), then "ready" with every order of the day (the page cuts them at its clock) or "failed" with why.</summary>
@@ -42,6 +42,7 @@ public sealed class TickFlowController : ControllerBase
     public ActionResult OptionsDay([FromQuery] string underlying, [FromQuery] DateOnly date, [FromQuery] int strikes = 10)
     {
         if (_feed is null || _optionHistory is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        if (!_feed.OptionTicksOn) return NotFound(new { error = "Option tick processing is off (TrueData:Live:OptionTicks)." });
         var instrument = _feed.InstrumentFor(underlying);
         if (instrument is null) return NotFound(new { error = $"{underlying?.ToUpperInvariant()} is not streamed (TrueData:Live:Instruments)." });
         var s = _optionHistory.Request(instrument, date, strikes);
@@ -57,6 +58,7 @@ public sealed class TickFlowController : ControllerBase
     public ActionResult SetOptions([FromBody] OptionsRequest request)
     {
         if (_feed is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        if (!_feed.OptionTicksOn) return BadRequest(new { error = "Option tick processing is off (TrueData:Live:OptionTicks)." });
         return _feed.SetOptions(request.Underlying, request.Strikes)
             ? Ok(new { options = _feed.OptionsSnapshot() })
             : BadRequest(new { error = "That index is not streamed (TrueData:Live:Instruments)." });

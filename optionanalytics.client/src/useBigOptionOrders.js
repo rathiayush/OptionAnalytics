@@ -12,6 +12,7 @@ export function useBigOptionOrders(enabled) {
   const [orders, setOrders] = useState([])
   const [state, setState] = useState(null)
   const [live, setLive] = useState(true)     // false = the TrueData live feed is off on the server
+  const [optionTicks, setOptionTicks] = useState(true)   // false = the option tick feature flag (TrueData:Live:OptionTicks) is off
   const [error, setError] = useState(null)
   const [now, setNow] = useState(0)
   const [reload, setReload] = useState(0)
@@ -27,6 +28,7 @@ export function useBigOptionOrders(enabled) {
         const body = await r.json()
         if (stop) return
         setLive(body.enabled !== false)
+        setOptionTicks(body.optionTicks !== false)
         setNow(Date.now())
         setError(null)
         const options = body.options ?? null
@@ -54,7 +56,7 @@ export function useBigOptionOrders(enabled) {
     } catch (e) { setError(e.message) }
   }, [])
 
-  return { orders, state, live, error, now, pick }
+  return { orders, state, live, optionTicks, error, now, pick }
 }
 
 /**
