@@ -83,6 +83,10 @@ public sealed class TickBook
     public void OnTrade(DateTimeOffset time, long seq, decimal price, long qty, decimal bid, long bidQty, decimal ask, long askQty, long totalVolume = 0)
     {
         if (price <= 0 || qty <= 0) return;
+        // A tick of quantity 1 on a lot-sized contract is no trade: TrueData's history carries them at the day's high / low (the O / H / L
+        // update - 9 in the first 5 minutes of a BANKNIFTY day, at prices outside the quote) and booked they would raise the bar's high and add a
+        // row that never traded. Only its quote is taken.
+        if (qty == 1 && LotSize > 1) { OnQuote(time, bid, bidQty, ask, askQty); return; }
         lock (_lock)
         {
             Roll(time);

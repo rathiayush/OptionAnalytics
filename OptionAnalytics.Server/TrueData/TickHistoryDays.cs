@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using Microsoft.Extensions.Options;
+using OptionAnalytics.Server.Services;
 
 namespace OptionAnalytics.Server.TrueData;
 
@@ -32,6 +34,15 @@ public sealed class TickHistoryDays
 
     public sealed record Result(TickBook? Book, string? Error);
 
+    /// <summary>The TrueData symbol of the futures contract trading on <paramref name="day"/>: the monthly expiry on or after it (the last
+    /// Tuesday - NSE's futures expire with the monthly options; a holiday move is not applied) as NIFTY26NOVFUT. TrueData's tick history
+    /// answers for a CONTRACT symbol only - the continuous "NIFTY-I" came back as a server error (tested on the trial account).</summary>
+    public static string ContractSymbol(string underlying, DateOnly day)
+    {
+        var expiry = ExpiryCalendar.NearestOptionExpiry(underlying, day, "MONTH") ?? day;
+        return $"{underlying.ToUpperInvariant()}{expiry.ToString("yy", CultureInfo.InvariantCulture)}{expiry.ToString("MMM", CultureInfo.InvariantCulture).ToUpperInvariant()}FUT";
+    }
+
     public async Task<Result> DayAsync(TrueDataLiveInstrument instrument, DateOnly day, CancellationToken cancellationToken)
     {
         if (_api is null) return new Result(null, "Replay needs TrueData's tick history: set TrueData:Enabled true (with the login) as well as TrueData:Live:Enabled.");
@@ -41,21 +52,31 @@ public sealed class TickHistoryDays
         try
         {
             if (_days.TryGetValue(key, out hit)) return new Result(hit.Book, null);
-            string csv;
-            try { csv = await _api.GetTicksWithBidAskAsync(instrument.Symbol, day.ToDateTime(TimeOnly.FromTimeSpan(Open)), day.ToDateTime(TimeOnly.FromTimeSpan(Close)), cancellationToken); }
-            catch (OperationCanceledException) { throw; }
-            catch (Exception ex)
+            // The contract of that day first; the configured symbol (the continuous one) only when TrueData has nothing for the contract.
+            var contract = ContractSymbol(instrument.Underlying, day);
+            string csv = "";
+            var symbolUsed = contract;
+            foreach (var symbol in new[] { contract, instrument.Symbol }.Distinct())
             {
-                _logger.LogWarning(ex, "TrueData ticks for {Symbol} on {Day} failed.", instrument.Symbol, day);
-                return new Result(null, $"TrueData {instrument.Symbol}: {ex.Message}");
+                symbolUsed = symbol;
+                try { csv = await _api.GetTicksWithBidAskAsync(symbol, day.ToDateTime(TimeOnly.FromTimeSpan(Open)), day.ToDateTime(TimeOnly.FromTimeSpan(Close)), cancellationToken); }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TrueData ticks for {Symbol} on {Day} failed.", symbol, day);
+                    csv = "";
+                    if (symbol == instrument.Symbol || contract == instrument.Symbol) return new Result(null, $"TrueData {symbol}: {ex.Message}");
+                    continue;
+                }
+                if (csv.Contains(',')) break; // a CSV: ticks
             }
             var parsed = TrueDataTickCsv.Parse(csv);
             var ticks = parsed.Ticks.Where(t => DateOnly.FromDateTime(t.Time.DateTime) == day && t.Time.TimeOfDay >= Open && t.Time.TimeOfDay <= Close).ToList();
-            if (ticks.Count == 0) return new Result(null, $"TrueData {instrument.Symbol}: {parsed.Error ?? "no ticks for that day (it keeps only the last few days)"}");
+            if (ticks.Count == 0) return new Result(null, $"TrueData {symbolUsed}: {parsed.Error ?? "no ticks for that day (it keeps only the last few days)"}");
             var book = Build(instrument, ticks, parsed.VolumeWasPerTick);
             _days[key] = (book, DateTimeOffset.UtcNow);
             while (_days.Count > MaxDays) _days.TryRemove(_days.OrderBy(kv => kv.Value.At).First().Key, out _);
-            _logger.LogInformation("Rebuilt {Symbol} {Day} for Tick Flow replay from {Ticks} TrueData ticks.", instrument.Symbol, day, ticks.Count);
+            _logger.LogInformation("Rebuilt {Symbol} {Day} for Tick Flow replay from {Ticks} TrueData ticks.", symbolUsed, day, ticks.Count);
             return new Result(book, null);
         }
         finally { _building.Release(); }

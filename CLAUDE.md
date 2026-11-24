@@ -1730,9 +1730,19 @@ All must pass before committing.
   quantity booked against the exchange's own running volume (TTQ) since the first trade seen - 100% = every trade is in the footprint, less = trades the feed did not
   send; it is how to tell whether TrueData's "tick" is every trade, so compare it (and the "N lost" sequence count) with the Order Flow page's Delta rules card.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
-  count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. Found while testing the
-  trial account: auth.truedata.in/token logs in, but EVERY history.truedata.in call (getticks, getbars, getlastnticks) answered a NullReferenceException from TrueData's own
-  HistoryDataController - the trial's history was not provisioned (TrueData's to fix: replay depends on it); the sandbox socket was refused from the CI sandbox's network.
+  count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
+  (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,
+  BANKNIFTY26NOVFUT, ...) and returns a server error / null for the continuous "NIFTY-I" / "BANKNIFTY-I" - so replay asks for the contract of that day (`TickHistoryDays.ContractSymbol` -
+  the monthly expiry on or after the day, `ExpiryCalendar.NearestOptionExpiry` "MONTH") and falls back to the configured symbol; calls back to back are also flaky (a null / 500 that
+  works a few seconds later - the history limit is "1 per second" in TrueData's error list), which is why the SDK wrapper retries once; (2) A TICK IS NOT A TRADE: a minute of
+  BANKNIFTY26NOVFUT held ~40 - 60 ticks (up to 4 in one second, ~218 of 300 seconds with one) of ~16 lots each - the history's `volume` is the quantity since the tick before, several
+  trades in one - but THE VOLUME IS COMPLETE: the summed tick quantities equal the exchange's 1-minute bar volume to the unit (100.0%, five minutes of five). So the footprint has
+  every unit of volume at the price / side of its tick, like Dhan's snapshots but a little finer and with the bid / ask SIZE at every tick; it is NOT a per-trade tape, and "exact
+  footprint" was an overclaim (the page's text says so now). The live "trade" message's LTQ is unverified; (3) tick history carries QUANTITY-1 ticks at the day's high / low (the
+  O / H / L update - 9 of 228 in 5 minutes, at prices outside the quote): `TickBook.OnTrade` takes only their quote on a lot-sized contract (booked they would raise a bar's high and
+  add a row that never traded); (4) the REST login works, the socket from the CI sandbox was refused (its network) and the real "trade" message format is still unseen; (5) a whole
+  past day through the real SDK and `TickHistoryDays`: BANKNIFTY 23 Nov = 375 minute bars, 5,689 prints, ~30,000 lots (an earlier note here said every history call failed - that was
+  the continuous symbol and the back-to-back calls, not the account).
 - ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
   telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
   `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures
