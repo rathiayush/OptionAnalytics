@@ -1824,6 +1824,9 @@ All must pass before committing.
   order's BUY / SELL) and two more filters that leave orders out of the lean, the delta flow, the map and the table - "Hide far OTM (>= N strikes out)", N 1 - 10
   (`isFarOtm`, `...hideFarOtm` / `...farOtmSteps`, default 5; tagged FAR OTM on the table) and "Hide price under ₹ X" (`isCheap`, `...hideCheap` / `...cheapBelow`,
   default 10) - beside the deep-in-the-money HEDGE? one, which stays. All in `tickReads.js`; TrueData only.
+  NIFTY OPTIONS ONLY FOR NOW (asked for - "only fetch NIFTY OI strikes, not BANKNIFTY ... to see how data is handled live"): `TrueData:Live:OptionUnderlyings`
+  (default "NIFTY"; `AllowsOptions`) - the live option stream (`SetOptions`, the saved choice), the replay (`GET options/day` answers 404) and the card's
+  "Options of" picker take NIFTY alone; the futures of both indices still stream. Set it to "NIFTY,BANKNIFTY" to open BANKNIFTY again.
   THE OPTION LIQUIDITY MAP ON THE TICK FLOW PAGE (asked for - "add it on order flow tick because it was related to TrueData"; `TickLiquidityMap.jsx`, the maths
   `tickLiquidityMap.js`, inside the Big option orders card above its table): strikes x time (1 / 3 / 5 / 15 min buckets, the newest that fit at >= 6 px), each cell
   the MONEY of the card's big orders (its size filters applied, live or up to the replay clock) in the colour of the kind with most money in it - FOUR colours, one

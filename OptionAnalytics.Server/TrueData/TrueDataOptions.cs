@@ -69,6 +69,14 @@ public sealed class TrueDataLiveOptions
     /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit, both indices' (84) do not - so it is
     /// ONE index, NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY").</summary>
     public string OptionsUnderlying { get; set; } = "NIFTY";
+
+    /// <summary>The indices whose OPTIONS may be streamed or replayed (comma separated; asked for - "for now only fetch NIFTY option strikes, not
+    /// BANKNIFTY ... to see how data is handled live"). The futures of every instrument still stream. Add BANKNIFTY here to open it up again.</summary>
+    public string OptionUnderlyings { get; set; } = "NIFTY";
+
+    public bool AllowsOptions(string? underlying) =>
+        !string.IsNullOrWhiteSpace(underlying)
+        && OptionUnderlyings.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Contains(underlying.Trim(), StringComparer.OrdinalIgnoreCase);
     public int OptionStrikes { get; set; } = 10;
     public int MaxSymbols { get; set; } = 50;
 

@@ -95,10 +95,10 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
     <Space direction="vertical" size={8} style={{ width: '100%' }}>
       <Space wrap size={[12, 6]}>
         {!replay && (<>
-        <Tooltip title={isAdmin ? 'The index whose options TrueData streams (the trial allows 50 symbols: the two futures and one index\'s ATM ± 10 fit). Kept across a restart.' : 'An admin picks the index.'}>
+        <Tooltip title={isAdmin ? 'The index whose options TrueData streams - NIFTY only for now (the trial allows 50 symbols: the two futures and one index\'s ATM ± 10 fit). Kept across a restart.' : 'An admin picks the index.'}>
           <span>Options of{' '}
             <Segmented size="small" value={state?.underlying || ''} disabled={!isAdmin} onChange={(v) => put(v, state?.strikes ?? 10)}
-              options={[{ value: '', label: 'Off' }, { value: 'NIFTY', label: 'NIFTY' }, { value: 'BANKNIFTY', label: 'BANKNIFTY' }]} />
+              options={[{ value: '', label: 'Off' }, { value: 'NIFTY', label: 'NIFTY' }]} />
           </span>
         </Tooltip>
         <span>ATM ± <Select size="small" value={state?.strikes ?? 10} disabled={!isAdmin || !state?.underlying} style={{ width: 70 }} options={STRIKE_CHOICES.map((v) => ({ value: v, label: v }))} onChange={(v) => put(state.underlying, v)} /></span>

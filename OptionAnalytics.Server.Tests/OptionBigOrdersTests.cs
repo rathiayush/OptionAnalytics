@@ -262,6 +262,16 @@ public sealed class OptionBigOrdersTests
     }
 
     [Fact]
+    public void OnlyNiftyOptionsAreFetchedForNow_BankNiftyIsRefused()
+    {
+        var (feed, _) = Feed();
+        Assert.True(feed.OptionsAllowed("nifty"));
+        Assert.False(feed.OptionsAllowed("BANKNIFTY"));
+        Assert.False(feed.SetOptions("BANKNIFTY", 10));
+        Assert.True(new TrueDataLiveOptions { OptionUnderlyings = "NIFTY, BANKNIFTY" }.AllowsOptions("BANKNIFTY"));
+    }
+
+    [Fact]
     public void WithNoChoiceMadeItIsNiftyAlone_BothIndicesOptionsDoNotFitUnderFiftySymbols()
     {
         var options = new TrueDataLiveOptions();
