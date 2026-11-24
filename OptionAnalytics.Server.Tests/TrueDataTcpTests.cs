@@ -202,8 +202,13 @@ public sealed class TrueDataTcpTests
         });
 
         var feed = Feed(port);
+        using var stop = new CancellationTokenSource();
+        var worker = feed.ProcessInboxAsync(stop.Token);        // the ticks are applied by the inbox's worker, not the socket's loop
         var refused = await feed.RunOnceAsync(CancellationToken.None);
         await server;
+        while (feed.QueueSnapshot().Depth > 0) await Task.Delay(5);
+        stop.Cancel();
+        await worker;
 
         Assert.False(refused);
         Assert.Equal("LOGIN u p", login!.Trim());

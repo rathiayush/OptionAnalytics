@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo } from 'react'
 import { Alert, Checkbox, InputNumber, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
-import { DOWN_COLOR, POLL_HEADERS, UP_COLOR, usePersistedState } from './shared.jsx'
+import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
-import { TICK_ORDER_DEFAULTS, addOrders, bigEnough, bigTradesSummary, hitText } from './tickBigOrders.js'
+import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, hitText } from './tickBigOrders.js'
+import { useBigOptionOrders } from './useBigOptionOrders.js'
 
 const { Text } = Typography
 const SHOWN = 50
@@ -21,58 +22,18 @@ const KINDS = [
 
 /**
  * The Tick Flow page's BIG OPTION ORDERS: TrueData's live ticks of the options ATM ± N of the index picked (the server subscribes and follows
- * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only; a page timer (POLL_HEADERS).
+ * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only. The size is set in lots or in
+ * QUANTITY (units) - the page's Lots / Quantity switch (`showLots`), each unit keeping its own number.
  */
-export function TickBigOrdersCard({ isAdmin, replay }) {
+export function TickBigOrdersCard({ isAdmin, replay, showLots = true }) {
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.bigMinLots', TICK_ORDER_DEFAULTS.minLots)
+  const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.bigMinQty', TICK_ORDER_DEFAULTS.minLots * 65)
   const [multiple, setMultiple] = usePersistedState('optionanalytics.tickFlow.bigMultiple', TICK_ORDER_DEFAULTS.multiple)
   const [lookback, setLookback] = usePersistedState('optionanalytics.tickFlow.bigLookback', TICK_ORDER_DEFAULTS.lookback)
   const [sweepsOnly, setSweepsOnly] = usePersistedState('optionanalytics.tickFlow.bigSweepsOnly', false)
-  const [orders, setOrders] = useState([])
-  const [state, setState] = useState(null)       // the server's option stream: index, expiry, ATM, subscribed, ticks, error
-  const [enabled, setEnabled] = useState(true)
-  const [now, setNow] = useState(0)
-  const [error, setError] = useState(null)
-  const [reload, setReload] = useState(0)
-  const since = useRef(0)
+  const { orders, state, live: enabled, error, now, pick: put } = useBigOptionOrders(!replay)
 
-  useEffect(() => {
-    if (replay) return undefined
-    let stop = false
-    const load = async () => {
-      try {
-        const r = await fetch(`/api/tick-flow/options?since=${since.current}`, { headers: POLL_HEADERS })
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        const body = await r.json()
-        if (stop) return
-        setEnabled(body.enabled !== false)
-        setState(body.options ?? null)
-        setNow(Date.now())
-        setError(null)
-        // The server restarted (its sequence began again): start over.
-        if (body.options && body.options.lastSeq < since.current) { since.current = 0; setOrders([]); return }
-        if (body.events?.length) {
-          since.current = body.events[body.events.length - 1].seq
-          setOrders((kept) => addOrders(kept, body.events))
-        }
-      } catch (e) { if (!stop) setError(e.message) }
-    }
-    load()
-    const timer = setInterval(load, 2000)
-    return () => { stop = true; clearInterval(timer) }
-  }, [replay, reload])
-
-  const put = async (underlying, strikes) => {
-    try {
-      const r = await fetch('/api/tick-flow/options', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ underlying, strikes }) })
-      if (!r.ok) throw new Error((await r.json().catch(() => null))?.error ?? `HTTP ${r.status}`)
-      since.current = 0
-      setOrders([])
-      setReload((n) => n + 1)
-    } catch (e) { setError(e.message) }
-  }
-
-  const big = useMemo(() => bigEnough(orders, { minLots, multiple }), [orders, minLots, multiple])
+  const big = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
   const summary = useMemo(() => bigTradesSummary(big, now || null, lookback), [big, now, lookback])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
@@ -93,7 +54,7 @@ export function TickBigOrdersCard({ isAdmin, replay }) {
       ),
     },
     { title: 'Order', width: 70, render: (_, o) => <span style={{ color: o.side > 0 ? UP_COLOR : DOWN_COLOR, fontWeight: 600 }}>{o.side > 0 ? 'BUY' : 'SELL'}</span> },
-    { title: 'Lots', dataIndex: 'lots', align: 'right', width: 64, render: (v, o) => <Tooltip title={o.bundled ? 'The day\'s volume rose by this in one tick - several trades bundled in it' : 'The tick\'s own last trade'}><span>{Math.round(v).toLocaleString('en-IN')}{o.bundled ? '*' : ''}</span></Tooltip> },
+    { title: showLots ? 'Lots' : 'Qty', dataIndex: 'lots', align: 'right', width: 74, render: (_, o) => <Tooltip title={o.bundled ? 'The day\'s volume rose by this in one tick - several trades bundled in it' : 'The tick\'s own last trade'}><span>{showLots ? Math.round(o.lots).toLocaleString('en-IN') : Math.round(o.qty).toLocaleString('en-IN')}{o.bundled ? '*' : ''}</span></Tooltip> },
     { title: '× usual', dataIndex: 'ratio', align: 'right', width: 70, render: (v) => (v > 0 ? `${v.toFixed(1)}×` : '—') },
     { title: 'Price', dataIndex: 'price', align: 'right', width: 76, render: (v, o) => <span>{v.toFixed(2)} <span style={{ color: o.movePct > 0 ? UP_COLOR : o.movePct < 0 ? DOWN_COLOR : undefined, fontSize: 11 }}>{o.movePct > 0 ? '+' : ''}{o.movePct.toFixed(1)}%</span></span> },
     { title: 'Hit the book', width: 150, render: (_, o) => <span style={{ fontWeight: o.through ? 600 : 400 }}>{hitText(o)}</span> },
@@ -114,8 +75,10 @@ export function TickBigOrdersCard({ isAdmin, replay }) {
           </span>
         </Tooltip>
         <span>ATM ± <Select size="small" value={state?.strikes ?? 10} disabled={!isAdmin || !state?.underlying} style={{ width: 70 }} options={STRIKE_CHOICES.map((v) => ({ value: v, label: v }))} onChange={(v) => put(state.underlying, v)} /></span>
-        <Tooltip title="At least this many lots in one tick (a lot = the contract's lot size).">
-          <span>≥ <InputNumber size="small" min={1} max={100000} value={minLots} onChange={(v) => setMinLots(v ?? TICK_ORDER_DEFAULTS.minLots)} style={{ width: 80 }} /> lots</span>
+        <Tooltip title={showLots ? 'At least this many lots in one tick (a lot = the contract\'s lot size). The page\'s Lots / Quantity switch changes the unit.' : 'At least this QUANTITY (units) in one tick - the page\'s Lots / Quantity switch is on Quantity.'}>
+          {showLots
+            ? <span>≥ <InputNumber size="small" min={1} max={100000} value={minLots} onChange={(v) => setMinLots(v ?? TICK_ORDER_DEFAULTS.minLots)} style={{ width: 80 }} /> lots</span>
+            : <span>≥ <InputNumber size="small" min={1} max={10_000_000} step={65} value={minQty} onChange={(v) => setMinQty(v ?? TICK_ORDER_DEFAULTS.minLots * 65)} style={{ width: 100 }} /> qty</span>}
         </Tooltip>
         <Tooltip title="And at least this many times the option's OWN usual tick (the median of its last 50) once it has one.">
           <span>≥ <InputNumber size="small" min={1} max={100} value={multiple} onChange={(v) => setMultiple(v ?? TICK_ORDER_DEFAULTS.multiple)} style={{ width: 64 }} /> × usual</span>
@@ -146,7 +109,7 @@ export function TickBigOrdersCard({ isAdmin, replay }) {
           <div key={key}>
             <Text type="secondary" style={{ fontSize: 11 }}>{label}</Text>
             <div style={{ color: summary.kinds[key].count ? c : undefined, fontSize: 15, fontWeight: 600, lineHeight: 1.2 }}>{rupees(summary.kinds[key].value)}</div>
-            <Text type="secondary" style={{ fontSize: 11 }}>{Math.round(summary.kinds[key].lots).toLocaleString('en-IN')} lots · {summary.kinds[key].count}</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>{showLots ? `${Math.round(summary.kinds[key].lots).toLocaleString('en-IN')} lots` : `${Math.round(summary.kinds[key].qty).toLocaleString('en-IN')} qty`} · {summary.kinds[key].count}</Text>
           </div>
         ))}
       </Space>

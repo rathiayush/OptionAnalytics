@@ -262,7 +262,7 @@ export default function TickFlowPage() {
         </Card>
 
         <Card size="small" title="Big option orders - TrueData's live ticks of the options ATM ± N, read and added up">
-          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} />
+          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} />
         </Card>
 
         <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>

@@ -1802,6 +1802,27 @@ All must pass before committing.
   whether option ticks come as often as the futures' (the history of options was not measured) and whether `addsymbol` / `removesymbol` mid-stream
   behave as the Python client's use implies - the status line ("N of M option symbols streaming · ticks · last tick") and the raw-message box show it.
   A read - it feeds no strategy, alert or order. `OptionBigOrdersTests.cs`, `tests/tick-big-orders.test.mjs`; the card checked in a browser against a mocked API.
+  THE TICK PATH UNDER PRESSURE (asked for - "our code should handle high frequency pressure and should have good performance"): (1) THE INBOX - the receive
+  loop (WebSocket and TCP) only parses and QUEUES trade / quote frames (`EnqueueAsync`, a bounded `Channel` of `InboxCapacity` 200 000, one writer, ONE
+  reader - `ProcessInboxAsync` - applies them IN ORDER to the books and the big-order watch), so a reader holding a book's lock can never stop the socket being
+  read (TrueData's spec: a client that does not keep up fills the receive buffer and ticks are dropped); a full queue HOLDS the socket, never drops a tick
+  silently (`Backpressure` counts it); the status's `queue` gives depth, the deepest it reached, processed, lag now / worst (ms) and errors - a tick that throws is
+  counted and skipped, it never stops the stream. Control frames (login, symbols, errors) are still handled inline. (2) PER-TICK WORK - the raw-message box
+  samples trade / quote frames (one in 250 ms, text built only when kept - formatting every tick was the costliest thing in the loop), one receive buffer a
+  connection, the big-order watch pays for the median of an option's usual only for a CANDIDATE (lots >= floor), `Since` is a binary search, the tracked count a counter.
+  (3) SNAPSHOTS - `TickBook.Snapshot` is cached while nothing changed (`_version` moves with each trade / quote / new day; same version and question = the object
+  already built), a FINISHED minute's bar is kept by its own version (a page poll rebuilt every row of every minute), bubbles are scanned from the newest back and
+  stopped at the number asked for (a day holds 400 000). (4) THE PAGE - `markSweeps` looks only at the neighbours inside its window (it was every event against
+  every event on each poll), the state object is kept when the server's answer did not change. `TickPressureTests.cs` (150 000 ticks through the inbox in ~0.4 s,
+  in order, none lost, no gap; a full inbox holds the writer; 210 000 option ticks over 42 options in ~0.25 s; the snapshot cache), `tests/tick-big-orders.test.mjs`.
+  BIG OPTION ORDERS ON OI REPLAY'S SPOT CHART (asked for - "I also want it on spot charts ... I should be able to define quantity"): the spot card's
+  "Big option orders (live ticks)" tick (`optionanalytics.oiReplay.bigOrdersOnSpot`, off by default) with the size in LOTS or in QUANTITY (units - a Lots / Qty
+  switch, each keeping its own number: `...bigOrdersLots` 30, `...bigOrdersQty` 1950) draws the Tick Flow page's orders as markers on the candles
+  (`orderMarkers` in `tickBigOrders.js`, merged with the absorption marks and sorted): a green arrow under the candle for a bullish order (call bought / put
+  written ...), a red one over it for a bearish one, a grey dot for no direction, one marker a candle and direction - "CE 25000 B 80 L" for one order, "3× 190 L" for
+  several, a ⚡ for a sweep. Only the size decides here (no "x usual" test). LIVE only, only when the tick stream is on THIS index (the status text says which
+  index it is on, or that none is - an admin picks it on the Tick Flow page), never in the popup host. The Tick Flow card has the same Lots / Quantity choice
+  (its own switch - `bigMinQty`). One hook - `useBigOptionOrders` - polls the orders for both. Not drawn on the Profiles / Structure pages' spot charts.
   WHEN NOTHING ARRIVES: `/api/tick-flow/status` carries the feed's state (off / outside hours / connecting / connected / streaming / reconnecting / refused), its last error, the message
   count and the newest 12 raw messages (`recentFrames`, heartbeats left out, no login in them); the page shows them in a copyable box while nothing has traded. TESTED AGAINST THE TRIAL ACCOUNT
   (the SDK `TrueData-DotNet` 1.4.7 - `TDHistory` for history, `TDWebSocket` for live - and raw REST, 23 Nov 2026): (1) tick history answers for a CONTRACT symbol (NIFTY26NOVFUT,

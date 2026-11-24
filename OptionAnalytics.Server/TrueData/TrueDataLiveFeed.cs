@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Net.Sockets;
+using System.Threading.Channels;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -57,7 +59,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
         public long Quotes;
     }
 
-    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames, string Transport, OptionsStatus Options);
+    public sealed record Status(string State, string? Error, DateTimeOffset? ConnectedAt, DateTimeOffset? LastFrameAt, long Frames, string Port, IReadOnlyList<StreamStatus> Streams, IReadOnlyList<string> RecentFrames, string Transport, OptionsStatus Options, QueueStatus Queue);
     public sealed record StreamStatus(string Underlying, string Symbol, long Trades, long Quotes, long SequenceGaps, long BookedVolume, long ExchangeVolume, decimal Bid, long BidQty, decimal Ask, long AskQty, decimal LastPrice, DateTimeOffset? LastTradeAt);
 
     private volatile string _transport = "websocket";
@@ -93,6 +95,69 @@ public sealed class TrueDataLiveFeed : BackgroundService
         try { if (StateFile is { } f && File.Exists(f) && File.ReadAllText(f).Trim().ToLowerInvariant() is ("websocket" or "tcp") and var t) return t; }
         catch { }
         return string.Equals(_options.Live.Transport, "tcp", StringComparison.OrdinalIgnoreCase) ? "tcp" : "websocket";
+    }
+
+    // ---- THE INBOX: the socket is read, the ticks are applied elsewhere ----
+    // A receive loop that also applied every tick (the books' locks, the page's snapshot readers) would stop reading the socket whenever
+    // a reader held a lock; TrueData's own spec warns that a client that does not keep up "could fill up the receive buffer ... leading to packet
+    // drops". So the receive loop only parses and queues (a bounded channel, one reader that applies them IN ORDER) - the depth, the longest it
+    // reached and the lag are in the status, and a full queue holds the socket (never drops a tick silently - `Backpressure` counts it).
+    private const int InboxCapacity = 200_000;
+    private readonly record struct Inbound(TrueDataFrame Frame, long Stamp);
+    private readonly Channel<Inbound> _inbox = Channel.CreateBounded<Inbound>(new BoundedChannelOptions(InboxCapacity)
+    { SingleReader = true, SingleWriter = true, FullMode = BoundedChannelFullMode.Wait });
+    private long _enqueued, _processed, _backpressure, _maxDepth, _applyErrors, _lastRemembered;
+    private double _lastLagMs, _maxLagMs;
+
+    public sealed record QueueStatus(long Depth, long MaxDepth, long Processed, long Backpressure, double LagMs, double MaxLagMs, long Errors);
+
+    public QueueStatus QueueSnapshot()
+    {
+        var processed = Interlocked.Read(ref _processed);
+        return new QueueStatus(Math.Max(0, Interlocked.Read(ref _enqueued) - processed), Interlocked.Read(ref _maxDepth), processed,
+            Interlocked.Read(ref _backpressure), Volatile.Read(ref _lastLagMs), Volatile.Read(ref _maxLagMs), Interlocked.Read(ref _applyErrors));
+    }
+
+    /// <summary>Queues a trade / quote frame for the worker (waits only when the queue is full).</summary>
+    internal async ValueTask EnqueueAsync(TrueDataFrame frame, CancellationToken token)
+    {
+        var item = new Inbound(frame, Stopwatch.GetTimestamp());
+        if (!_inbox.Writer.TryWrite(item))
+        {
+            Interlocked.Increment(ref _backpressure);
+            await _inbox.Writer.WriteAsync(item, token);
+        }
+        var depth = Interlocked.Increment(ref _enqueued) - Interlocked.Read(ref _processed);
+        if (depth > Volatile.Read(ref _maxDepth)) Interlocked.Exchange(ref _maxDepth, depth);
+    }
+
+    /// <summary>The single reader: applies the queued ticks in the order they arrived. A tick that throws is counted and skipped - it never stops the stream.</summary>
+    internal async Task ProcessInboxAsync(CancellationToken token)
+    {
+        var reader = _inbox.Reader;
+        try
+        {
+            while (await reader.WaitToReadAsync(token))
+            {
+                while (reader.TryRead(out var item))
+                {
+                    try
+                    {
+                        if (item.Frame.Trade is { } trade) OnTrade(trade);
+                        else if (item.Frame.Quote is { } quote) OnQuote(quote);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (Interlocked.Increment(ref _applyErrors) == 1) _logger.LogWarning("TrueData live feed: a tick was not applied: {Error}", ex.Message);
+                    }
+                    var lag = Stopwatch.GetElapsedTime(item.Stamp).TotalMilliseconds;
+                    Volatile.Write(ref _lastLagMs, lag);
+                    if (lag > Volatile.Read(ref _maxLagMs)) Volatile.Write(ref _maxLagMs, lag);
+                    Interlocked.Increment(ref _processed);
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
     }
 
     // ---- BIG OPTION ORDERS: the options' ticks (ATM +- N of the index picked on the page), watched for big orders ----
@@ -291,14 +356,23 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 {
                     var m = s.Book.Meta();
                     return new StreamStatus(m.Underlying, m.Symbol, m.Prints, s.Quotes, m.SequenceGaps, m.BookedVolume, m.ExchangeVolume, m.Bid, m.BidQty, m.Ask, m.AskQty, m.LastPrice, m.LastTradeAt);
-                }).ToList(), RecentFramesCopy(), _transport, OptionsSnapshot());
+                }).ToList(), RecentFramesCopy(), _transport, OptionsSnapshot(), QueueSnapshot());
     }
 
     private string[] RecentFramesCopy() { lock (_recent) return _recent.ToArray(); }
 
-    private void Remember(string text, string kind)
+    /// <summary>Keeps a message for the page's raw box. Trade / quote frames are SAMPLED (at most one in 250 ms - formatting every tick of a busy feed
+    /// was the most expensive thing the receive loop did); everything else is kept. <paramref name="text"/> null = made from the frame, only when kept.</summary>
+    private void Remember(TrueDataFrame frame, string? text)
     {
-        if (kind == "heartbeat") return;
+        if (frame.Kind == "heartbeat") return;
+        if (frame.Kind is "trade" or "bidask")
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (now - _lastRemembered < Stopwatch.Frequency / 4) return;
+            _lastRemembered = now;
+        }
+        text ??= Describe(frame);
         lock (_recent)
         {
             _recent.Enqueue(text.Length > 400 ? text[..400] + "…" : text);
@@ -314,6 +388,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             return;
         }
         using var background = MarketHours.BackgroundScope();
+        _ = Task.Run(() => ProcessInboxAsync(stoppingToken), stoppingToken);
         _ = Task.Run(() => OptionsLoopAsync(stoppingToken), stoppingToken);
         var wait = TimeSpan.FromSeconds(5);
         while (!stoppingToken.IsCancellationRequested)
@@ -379,14 +454,15 @@ public sealed class TrueDataLiveFeed : BackgroundService
         _connectedAt = DateTimeOffset.UtcNow;
         _lastError = null;
         var buffer = new byte[64 * 1024];
+        var rx = new MemoryStream();
         var subscribed = false;
         while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
         {
-            var text = await ReceiveAsync(socket, buffer, token);
+            var text = await ReceiveAsync(socket, buffer, rx, token);
             if (text is null) break;
             var frame = TrueDataLiveParser.Parse(text);
             var (nowSubscribed, refused) = await OnFrameAsync(frame, text, subscribed,
-                json => LockedSend(() => SendAsync(socket, json, token)));
+                json => LockedSend(() => SendAsync(socket, json, token)), token);
             subscribed = nowSubscribed;
             if (refused) { await CloseAsync(socket); return true; }
         }
@@ -423,8 +499,8 @@ public sealed class TrueDataLiveFeed : BackgroundService
             frames = n < 0 ? parser.FlushText() : parser.Feed(buffer.AsSpan(0, n));
             foreach (var frame in frames)
             {
-                var (nowSubscribed, refused) = await OnFrameAsync(frame, Describe(frame), subscribed,
-                    json => LockedSend(() => stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\r\n"), token).AsTask()));
+                var (nowSubscribed, refused) = await OnFrameAsync(frame, null, subscribed,
+                    json => LockedSend(() => stream.WriteAsync(Encoding.UTF8.GetBytes(json + "\r\n"), token).AsTask()), token);
                 subscribed = nowSubscribed;
                 if (refused) return true;
             }
@@ -443,11 +519,11 @@ public sealed class TrueDataLiveFeed : BackgroundService
 
     /// <summary>One frame, whichever way it came: counts it, keeps it for the page, answers a login with the subscribe, routes a trade or
     /// a quote. Returns whether the symbols are subscribed now and whether the server refused the login.</summary>
-    private async Task<(bool Subscribed, bool Refused)> OnFrameAsync(TrueDataFrame frame, string text, bool subscribed, Func<string, Task> send)
+    private async Task<(bool Subscribed, bool Refused)> OnFrameAsync(TrueDataFrame frame, string? text, bool subscribed, Func<string, Task> send, CancellationToken token)
     {
         _lastFrameAt = DateTimeOffset.UtcNow;
         Interlocked.Increment(ref _frames);
-        Remember(text, frame.Kind);
+        Remember(frame, text);
         switch (frame.Kind)
         {
             case "login" when !subscribed:
@@ -463,13 +539,10 @@ public sealed class TrueDataLiveFeed : BackgroundService
                 Register(frame.Symbols ?? Array.Empty<TrueDataSymbol>());
                 _state = "streaming";
                 break;
-            case "trade" when frame.Trade is { } trade:
+            case "trade" when frame.Trade is not null:
+            case "bidask" when frame.Quote is not null:
                 _state = "streaming";
-                OnTrade(trade);
-                break;
-            case "bidask" when frame.Quote is { } quote:
-                _state = "streaming";
-                OnQuote(quote);
+                await EnqueueAsync(frame, token);
                 break;
         }
         return (subscribed, false);
@@ -483,9 +556,9 @@ public sealed class TrueDataLiveFeed : BackgroundService
     private static async Task SendAsync(ClientWebSocket socket, string text, CancellationToken token) =>
         await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, token);
 
-    private static async Task<string?> ReceiveAsync(ClientWebSocket socket, byte[] buffer, CancellationToken token)
+    private static async Task<string?> ReceiveAsync(ClientWebSocket socket, byte[] buffer, MemoryStream ms, CancellationToken token)
     {
-        using var ms = new MemoryStream();
+        ms.SetLength(0);   // one buffer for the connection, not one per message
         while (true)
         {
             var result = await socket.ReceiveAsync(buffer, token);

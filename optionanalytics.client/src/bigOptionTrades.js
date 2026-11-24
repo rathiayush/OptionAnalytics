@@ -133,11 +133,20 @@ export function bigOptionTrades(cePoints, pePoints, spotBars, options = {}) {
 
 /** A SWEEP: the same type and direction (the bias's sign) at `strikes` or more different strikes within `minutes` of each other. */
 export function markSweeps(events, strikes = BIG_DEFAULTS.sweepStrikes, minutes = BIG_DEFAULTS.sweepMinutes) {
-  for (const e of events) {
-    if (e.bias === 0) continue
+  // Oldest first (they come so; a list that is not is read in order without being changed). Each event looks only at its neighbours within the
+  // window on either side - not at every event of the day, which a busy tick stream (thousands) made a square of work on every poll.
+  const sorted = events.every((e, i) => i === 0 || events[i - 1].t <= e.t) ? events : [...events].sort((a, b) => a.t - b.t)
+  const reach = (minutes - 1) * MIN
+  let from = 0
+  for (let i = 0; i < sorted.length; i++) {
+    const e = sorted[i]
+    if (e.bias === 0) { e.sweep = false; continue }
+    while (sorted[from].t < e.t - reach) from++
     const near = new Set()
-    for (const f of events) {
-      if (f.type === e.type && Math.sign(f.bias) === Math.sign(e.bias) && Math.abs(f.t - e.t) <= (minutes - 1) * MIN) near.add(f.strike)
+    const sign = Math.sign(e.bias)
+    for (let j = from; j < sorted.length && sorted[j].t <= e.t + reach; j++) {
+      const f = sorted[j]
+      if (f.type === e.type && Math.sign(f.bias) === sign) near.add(f.strike)
     }
     e.sweep = near.size >= strikes
   }
@@ -162,14 +171,14 @@ export function bigTradesSummary(events, nowMs, lookback = BIG_DEFAULTS.lookback
   const end = nowMs == null ? Infinity : minuteOf(nowMs)
   const from = end - (lookback - 1) * MIN
   const inside = (events ?? []).filter((e) => e.t >= from && e.t <= end)
-  const kinds = Object.fromEntries(KINDS.map((k) => [k, { value: 0, lots: 0, count: 0 }]))
+  const kinds = Object.fromEntries(KINDS.map((k) => [k, { value: 0, lots: 0, qty: 0, count: 0 }]))
   let bull = 0
   let bear = 0
   let biggest = null
   let sweeps = 0
   for (const e of inside) {
     const k = kindOf(e)
-    if (k) { kinds[k].value += e.value; kinds[k].lots += e.lots; kinds[k].count++ }
+    if (k) { kinds[k].value += e.value; kinds[k].lots += e.lots; kinds[k].qty += e.qty ?? 0; kinds[k].count++ }
     if (e.bias > 0) bull += e.value * e.bias
     else if (e.bias < 0) bear += e.value * -e.bias
     if (e.sweep) sweeps++

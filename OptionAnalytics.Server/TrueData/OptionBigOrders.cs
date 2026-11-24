@@ -98,6 +98,7 @@ public sealed class OptionBigOrderWatch
     private readonly Dictionary<string, State> _states = new(StringComparer.Ordinal);
     private readonly List<BigOrderEvent> _events = new();
     private long _seq, _ticks;
+    private int _stateCount;   // distinct options (an alias is a second key to the same state)
     private DateOnly? _day;
     private DateTimeOffset? _lastTickAt;
 
@@ -119,10 +120,19 @@ public sealed class OptionBigOrderWatch
 
     public void Track(OptionContract contract)
     {
-        lock (_lock) if (!_states.ContainsKey(contract.SymbolId)) _states[contract.SymbolId] = new State { Contract = contract };
+        lock (_lock)
+            if (!_states.ContainsKey(contract.SymbolId)) { _states[contract.SymbolId] = new State { Contract = contract }; _stateCount++; }
     }
 
-    public void Untrack(string symbolId) { lock (_lock) _states.Remove(symbolId); }
+    public void Untrack(string symbolId)
+    {
+        lock (_lock)
+        {
+            if (!_states.TryGetValue(symbolId, out var state)) return;
+            foreach (var key in _states.Where(kv => ReferenceEquals(kv.Value, state)).Select(kv => kv.Key).ToList()) _states.Remove(key);
+            _stateCount--;
+        }
+    }
 
     public bool Tracks(string symbolId) { lock (_lock) return _states.ContainsKey(symbolId); }
 
@@ -136,9 +146,9 @@ public sealed class OptionBigOrderWatch
         }
     }
 
-    public int TrackedCount { get { lock (_lock) return _states.Values.Distinct().Count(); } }
+    public int TrackedCount { get { lock (_lock) return _stateCount; } }
 
-    public void Clear() { lock (_lock) { _states.Clear(); _events.Clear(); _ticks = 0; _lastTickAt = null; } }
+    public void Clear() { lock (_lock) { _states.Clear(); _stateCount = 0; _events.Clear(); _ticks = 0; _lastTickAt = null; } }
 
     /// <summary>A best bid / ask update with no trade.</summary>
     public void OnQuote(string symbolId, decimal bid, long bidQty, decimal ask, long askQty)
@@ -174,25 +184,30 @@ public sealed class OptionBigOrderWatch
             {
                 var buy = TickBook.Side(t.Price, s.Bid, s.Ask, s.LastPrice, s.LastBuy);
                 var lots = (decimal)qty / lotSize;
-                decimal ratio = 0;
-                if (s.Recent.Count >= MinHistory)
+                // The cheap test first: most ticks are small, and only a candidate pays for the median of the option's usual.
+                if (lots >= FloorLots)
                 {
-                    var sorted = s.Recent.OrderBy(v => v).ToArray();
-                    var median = sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]) / 2.0;
-                    if (median > 0) ratio = (decimal)(qty / median);
-                }
-                if (lots >= FloorLots && (ratio == 0 || ratio >= FloorRatio))
-                {
-                    var quotes = s.Bid > 0 && s.Ask > s.Bid;
-                    var touchQty = buy ? s.AskQty : s.BidQty;
-                    var through = quotes && (buy ? t.Price > s.Ask : t.Price < s.Bid);
-                    long? oiChange = t.OpenInterest > 0 && s.LastOi > 0 ? t.OpenInterest - s.LastOi : null;
-                    var move = s.LastPrice > 0 ? (t.Price - s.LastPrice) / s.LastPrice * 100 : 0;
-                    var distance = Step > 0 && Atm > 0 ? (int)Math.Round((s.Contract.Strike - Atm) / Step) : 0;
-                    made = new BigOrderEvent(++_seq, time, s.Contract.Symbol, s.Contract.Strike, s.Contract.Call ? "CE" : "PE", qty, lots, t.Price, buy, t.Price * qty,
-                        ratio, touchQty > 0 ? (decimal)qty / touchQty : 0, through, bundled, oiChange, move, distance, lotSize);
-                    _events.Add(made);
-                    if (_events.Count > Capacity) _events.RemoveRange(0, _events.Count - Capacity);
+                    decimal ratio = 0;
+                    if (s.Recent.Count >= MinHistory)
+                    {
+                        var sorted = s.Recent.ToArray();
+                        Array.Sort(sorted);
+                        var median = sorted.Length % 2 == 1 ? sorted[sorted.Length / 2] : (sorted[sorted.Length / 2 - 1] + sorted[sorted.Length / 2]) / 2.0;
+                        if (median > 0) ratio = (decimal)(qty / median);
+                    }
+                    if (ratio == 0 || ratio >= FloorRatio)
+                    {
+                        var quotes = s.Bid > 0 && s.Ask > s.Bid;
+                        var touchQty = buy ? s.AskQty : s.BidQty;
+                        var through = quotes && (buy ? t.Price > s.Ask : t.Price < s.Bid);
+                        long? oiChange = t.OpenInterest > 0 && s.LastOi > 0 ? t.OpenInterest - s.LastOi : null;
+                        var move = s.LastPrice > 0 ? (t.Price - s.LastPrice) / s.LastPrice * 100 : 0;
+                        var distance = Step > 0 && Atm > 0 ? (int)Math.Round((s.Contract.Strike - Atm) / Step) : 0;
+                        made = new BigOrderEvent(++_seq, time, s.Contract.Symbol, s.Contract.Strike, s.Contract.Call ? "CE" : "PE", qty, lots, t.Price, buy, t.Price * qty,
+                            ratio, touchQty > 0 ? (decimal)qty / touchQty : 0, through, bundled, oiChange, move, distance, lotSize);
+                        _events.Add(made);
+                        if (_events.Count > Capacity) _events.RemoveRange(0, _events.Count - Capacity);
+                    }
                 }
                 s.LastBuy = buy;
                 if (qty > 0) { s.Recent.Enqueue(qty); while (s.Recent.Count > History) s.Recent.Dequeue(); }
@@ -212,16 +227,18 @@ public sealed class OptionBigOrderWatch
     {
         lock (_lock)
         {
-            var from = _events.FindIndex(e => e.Seq > seq);
-            if (from < 0) return Array.Empty<BigOrderEvent>();
-            var take = Math.Min(limit, _events.Count - from);
+            // Sequences only grow along the list: a binary search for the first one after `seq`, not a scan of every event on every poll.
+            int lo = 0, hi = _events.Count;
+            while (lo < hi) { var mid = (lo + hi) >> 1; if (_events[mid].Seq > seq) hi = mid; else lo = mid + 1; }
+            if (lo >= _events.Count) return Array.Empty<BigOrderEvent>();
+            var take = Math.Min(limit, _events.Count - lo);
             return _events.GetRange(_events.Count - take, take);
         }
     }
 
     public (long LastSeq, long Ticks, DateTimeOffset? LastTickAt, int Tracked) Meta()
     {
-        lock (_lock) return (_seq, _ticks, _lastTickAt, _states.Values.Distinct().Count());
+        lock (_lock) return (_seq, _ticks, _lastTickAt, _stateCount);
     }
 
     /// <summary>The ATM the options themselves show: the strike where the call and the put cost the same (put-call parity) among options
