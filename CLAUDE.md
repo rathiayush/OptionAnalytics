@@ -1823,7 +1823,7 @@ All must pass before committing.
   the money ... 1-10, or a price under something"): the card's "Buyers + sellers / Buyers only / Sellers only" switch (`optionanalytics.tickFlow.sideOnly`, by the
   order's BUY / SELL) and two more filters that leave orders out of the lean, the delta flow, the map and the table - "Hide far OTM (>= N strikes out)", N 1 - 10
   (`isFarOtm`, `...hideFarOtm` / `...farOtmSteps`, default 5; tagged FAR OTM on the table) and "Hide price under ₹ X" (`isCheap`, `...hideCheap` / `...cheapBelow`,
-  default 10) - beside the deep-in-the-money HEDGE? one, which stays. All in `tickReads.js`; TrueData only.
+  default 10) - beside the deep-in-the-money HEDGE? one, which stays. All in `tickReads.js`; TrueData only. Also a "Calls + puts / Calls only / Puts only" switch (`...typeOnly`), and a far OTM PUT is tagged "HEDGE? far OTM put" (a deep out-of-the-money put is mostly protection; a far OTM call stays "FAR OTM").
   NIFTY OPTIONS ONLY FOR NOW (asked for - "only fetch NIFTY OI strikes, not BANKNIFTY ... to see how data is handled live"): `TrueData:Live:OptionUnderlyings`
   (default "NIFTY"; `AllowsOptions`) - the live option stream (`SetOptions`, the saved choice), the replay (`GET options/day` answers 404) and the card's
   "Options of" picker take NIFTY alone; the futures of both indices still stream. Set it to "NIFTY,BANKNIFTY" to open BANKNIFTY again.
