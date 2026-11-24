@@ -28,6 +28,9 @@ public sealed class OptionTickHistoryDays
     private readonly ITrueDataHistoryApi? _api;
     private readonly TickHistoryDays _futures;
     private readonly ILogger<OptionTickHistoryDays> _logger;
+    /// <summary>The most strikes a replay asks for (asked for - "15 each side from the ATM, not 64 contracts"): 15 calls + 15 puts = 30 contracts.</summary>
+    public const int MaxStrikes = 15;
+
     private readonly ConcurrentDictionary<(string Underlying, DateOnly Day, int Strikes), Job> _jobs = new();
     /// <summary>Where the option chain comes from (TrueData's REST master; a test sets a fake).</summary>
     internal IOptionChainSource ChainSource { get; set; }
@@ -108,7 +111,11 @@ public sealed class OptionTickHistoryDays
         var step = OptionChains.StepOf(found.Value.Contracts);
         var from = Math.Floor((low - strikes * step) / step) * step;
         var to = Math.Ceiling((high + strikes * step) / step) * step;
-        var wanted = found.Value.Contracts.Where(c => c.Strike >= from && c.Strike <= to).OrderBy(c => Math.Abs(c.Strike - (low + high) / 2)).ToList();
+        // At most MaxStrikes strikes (calls and puts each) - the ones nearest the middle of the day's range - so a replay asks 30 contracts, not 60+.
+        var mid = (low + high) / 2;
+        var keep = found.Value.Contracts.Where(c => c.Strike >= from && c.Strike <= to).Select(c => c.Strike).Distinct()
+            .OrderBy(k => Math.Abs(k - mid)).Take(MaxStrikes).ToHashSet();
+        var wanted = found.Value.Contracts.Where(c => keep.Contains(c.Strike)).OrderBy(c => Math.Abs(c.Strike - mid)).ToList();
         job.Expiry = found.Value.Expiry.ToString("yyyy-MM-dd"); job.Step = step;
         job.Total = wanted.Count;
         if (wanted.Count == 0) { job.Error = "no option contract in the day's range"; job.State = "failed"; job.At = DateTimeOffset.UtcNow; return; }
@@ -125,7 +132,7 @@ public sealed class OptionTickHistoryDays
         }
         if (loaded.Count == 0) { job.Error = "TrueData had no option ticks for that day (it keeps only the last few days)"; job.State = "failed"; job.At = DateTimeOffset.UtcNow; return; }
 
-        job.Events = Detect(loaded, closeAt, step, strikes);
+        job.Events = Detect(loaded, closeAt, step, strikes, keep);
         job.State = "ready"; job.At = DateTimeOffset.UtcNow;
         _logger.LogInformation("Option ticks of {Underlying} {Day}: {Contracts} contracts ({Failed} without data), {Events} big orders.", instrument.Underlying, day, loaded.Count, job.Failed, job.Events.Count);
     }
@@ -151,7 +158,7 @@ public sealed class OptionTickHistoryDays
     /// <summary>The ticks of every contract in time order through one <see cref="OptionBigOrderWatch"/>; the ATM follows the options' own parity (else the futures'),
     /// and an order outside ATM +- <paramref name="strikes"/> of the ATM at its time is left out. Internal for the tests.</summary>
     internal static IReadOnlyList<BigOrderEvent> Detect(IReadOnlyList<(OptionContract Contract, IReadOnlyList<TrueDataTick> Ticks, bool PerTick)> loaded,
-        IReadOnlyDictionary<DateTimeOffset, decimal> futuresCloseByMinute, decimal step, int strikes)
+        IReadOnlyDictionary<DateTimeOffset, decimal> futuresCloseByMinute, decimal step, int strikes, ISet<decimal>? onlyStrikes = null)
     {
         var watch = new OptionBigOrderWatch { Step = step, MaxEvents = 1, FloorLots = ReplayFloorLots, FloorRatio = ReplayFloorRatio };
         var flat = new List<(DateTimeOffset Time, int Index, int Tick, long Traded)>();
@@ -188,7 +195,7 @@ public sealed class OptionTickHistoryDays
             if (traded > 0 && t.Ltp > 0)
             {
                 var made = watch.OnTrade(new TrueDataTrade(c.SymbolId, t.Time, t.Ltp, traded, t.Ltp, 0, 0, 0, 0, 0, t.OpenInterest, "", 0, t.Bid, t.BidQty, t.Ask, t.AskQty), t.Time);
-                if (made is not null && Math.Abs(made.AtmDistance) <= strikes && events.Count < HardCap) events.Add(made);
+                if (made is not null && Math.Abs(made.AtmDistance) <= strikes && (onlyStrikes is null || onlyStrikes.Contains(c.Strike)) && events.Count < HardCap) events.Add(made);
             }
             else if (t.Bid > 0 && t.Ask > 0) watch.OnQuote(c.SymbolId, t.Bid, t.BidQty, t.Ask, t.AskQty);
         }
