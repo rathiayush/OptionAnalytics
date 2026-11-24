@@ -211,4 +211,27 @@ public sealed class TrueDataLiveTests
         Assert.Equal(195, m.BookedVolume);
         Assert.Equal(260, m.ExchangeVolume);
     }
+
+    [Fact]
+    public void ATickOfQuantityOneIsNoTrade_ItOnlyCarriesItsQuote()
+    {
+        var b = Book();
+        b.OnQuote(T0, 24999m, 100, 25000m, 100);
+        b.OnTrade(T0, 1, 25000m, 65, 24999m, 100, 25000m, 100);
+        b.OnTrade(T0.AddSeconds(1), 2, 25020m, 1, 24999m, 100, 25000m, 100);   // the day's-high update TrueData sends at 1 unit
+        var day = b.Snapshot(1, 1, 100);
+        Assert.Equal(65, day.Bars.Single().Buy);
+        Assert.Equal(25000m, day.Bars.Single().High);          // the artifact did not make a 25020 high
+        Assert.Single(day.Bars.Single().Levels);
+        Assert.Equal(1, b.Meta().Prints);
+    }
+
+    [Theory]
+    [InlineData("NIFTY", 2026, 11, 23, "NIFTY26NOVFUT")]
+    [InlineData("NIFTY", 2026, 11, 24, "NIFTY26NOVFUT")]       // the expiry day itself: still that contract
+    [InlineData("NIFTY", 2026, 11, 25, "NIFTY26DECFUT")]
+    [InlineData("BANKNIFTY", 2026, 12, 1, "BANKNIFTY26DECFUT")]
+    [InlineData("banknifty", 2026, 12, 30, "BANKNIFTY27JANFUT")]
+    public void ReplayAsksForTheContractOfThatDay_NotTheContinuousSymbol(string underlying, int y, int m, int d, string expected) =>
+        Assert.Equal(expected, TickHistoryDays.ContractSymbol(underlying, new DateOnly(y, m, d)));
 }

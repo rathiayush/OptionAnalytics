@@ -162,13 +162,13 @@ export default function TickFlowPage() {
                 </Tooltip>
               )}
               {coverage != null && (
-                <Tooltip title="What the feed delivered against the exchange's own running volume since the first trade it saw. 100% = every trade is in the footprint; less = trades the feed did not send.">
+                <Tooltip title="What the feed delivered against the exchange's own running volume since the first trade it saw. 100% = all the volume is in the footprint; less = volume the feed did not send.">
                   <Tag color={coverage >= 99 ? 'green' : coverage >= 95 ? 'orange' : 'red'}>{coverage.toFixed(1)}% of exchange volume</Tag>
                 </Tooltip>
               )}
             </Space>
             <FoldText id="tickFlowIntro" summary="What this page is and is not"
-              text="Every trade arrives from TrueData with its own quantity and the best bid / ask, so the footprint is exact and a trade's side comes from the quote before it. The bubble chart draws every order where and when it traded: green bought at the ask, red sold at the bid, the size of the bubble following the size of the order (orders at one price within a second are one bubble). TrueData's NSE feed has only the best bid and ask - the grey band - not a deeper order book. The day lives in the server's memory, so a restart begins it again from the next tick. Nothing here places an order or feeds a strategy or alert." />
+              text="TrueData sends an update about every second or faster, each carrying the quantity traded since the one before and the best bid / ask with their sizes - every unit of the exchange's volume is in them (the coverage tag checks it), but one update can hold several trades, which then share one price and side (a tested minute: ~50 updates, ~16 lots each). A trade's side comes from the quote before it. The bubble chart draws each update where and when it traded: green bought at the ask, red sold at the bid, the size of the bubble following its quantity (updates at one price and side within a second are one bubble). TrueData's NSE feed has only the best bid and ask - the grey band - not a deeper order book. The day lives in the server's memory, so a restart begins it again from the next tick. Nothing here places an order or feeds a strategy or alert." />
           </Space>
         </Card>
 
