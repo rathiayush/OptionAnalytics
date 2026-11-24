@@ -6,7 +6,8 @@ import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
 import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
-import { aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
+import { absorptionExhaustion, auctionOf, barVwaps, cotOfBars, cotRead, icebergs, stackedImbalances, unfinishedAuctions, volumeProfile } from './tickFlowTools.js'
+import { MIN, aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, msOf, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
 
 const { Title, Text } = Typography
 
@@ -91,6 +92,7 @@ export default function TickFlowPage() {
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.minLots', 1)
   const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.minQty', 1)
   const [mode, setMode] = usePersistedState('optionanalytics.tickFlow.mode', 'live')
+  const [toolsOn, setToolsOn] = usePersistedState('optionanalytics.tickFlow.tools', { vwap: true, profile: true, auction: true, cot: true, absorption: true, stacked: true, iceberg: true })
   const [bubbleSize, setBubbleSize] = usePersistedState('optionanalytics.tickFlow.bubbleSize', 34)
   const days = useMemo(() => weekdayChoices(istToday(), 6), [])
   const [replayDay, setReplayDay] = useState(() => days[1] ?? days[0])
@@ -134,6 +136,42 @@ export default function TickFlowPage() {
   const cvd = useMemo(() => cumulativeDelta(bars), [bars])
   // The futures' 1-minute closes in ms - the price line across the option liquidity map.
   const priceBars = useMemo(() => aggregateTickBars(day?.bars ?? [], 1).map((b) => ({ time: b.time, close: b.close })), [day?.bars])
+  // THE FOOTPRINT TOOLS (this page's own maths - tickFlowTools.js): each from the bars up to the clock only, so a replay never looks ahead.
+  const tools = useMemo(() => {
+    if (!bars.length) return null
+    const on = toolsOn ?? {}
+    const span = timeframe * MIN
+    const out = {}
+    if (on.vwap) out.vwap = barVwaps(bars, rowSize)
+    if (on.profile) out.profile = volumeProfile(bars)
+    if (on.auction) { out.auction = bars.map(auctionOf); out.unfinished = unfinishedAuctions(bars) }
+    if (on.stacked) out.stacked = bars.map((b) => stackedImbalances(b.levels, rowSize))
+    if (on.cot) {
+      out.cot = cotOfBars(bars, day?.bubbles, span)
+      out.cotRead = bars.map((b, i) => cotRead(b, out.cot[i]))
+    }
+    if (on.absorption) {
+      out.marks = new Map()
+      for (const m of absorptionExhaustion(bars)) (out.marks.get(m.index) ?? out.marks.set(m.index, []).get(m.index)).push(m)
+    }
+    if (on.iceberg) {
+      out.icebergs = icebergs(day?.bubbles, day?.quotes, { lotSize })
+      out.iceBars = new Map()
+      for (const ic of out.icebergs) {
+        const k = bars.findIndex((b) => (b.ms ?? msOf(b.time)) <= ic.time && ic.time < (b.ms ?? msOf(b.time)) + span)
+        if (k >= 0) (out.iceBars.get(k) ?? out.iceBars.set(k, []).get(k)).push(ic)
+      }
+    }
+    return out
+  }, [bars, toolsOn, timeframe, rowSize, day?.bubbles, day?.quotes, lotSize])
+  const toolReads = useMemo(() => {
+    if (!tools) return []
+    const rows = []
+    for (const [i, list] of tools.marks ?? []) for (const m of list) rows.push({ ms: msOf(bars[i].time), text: `${m.kind} ${m.side > 0 ? 'bullish' : 'bearish'} · score ${m.score} · ${m.status} - ${m.text}` })
+    tools.cotRead?.forEach((c, i) => { if (c) rows.push({ ms: msOf(bars[i].time), text: `COT ${c.side > 0 ? 'bullish' : 'bearish'} (${c.at}) - ${c.text}` }) })
+    for (const ic of tools.icebergs ?? []) rows.push({ ms: ic.time, text: `Iceberg ${ic.buy ? 'BUYER' : 'SELLER'} at ${ic.price} · ${Math.round(ic.lots)} lots traded, ${ic.shown} shown at most · ${ic.refills} refills` })
+    return rows.sort((a, b) => b.ms - a.ms).slice(0, 12)
+  }, [tools, bars])
   const stream = status?.status?.streams?.find((s) => s.underlying === index)
   const feedState = status?.status?.state ?? status?.state ?? 'unknown'
   const off = status && status.enabled === false
@@ -186,6 +224,11 @@ export default function TickFlowPage() {
                 <Segmented value={showLots ? 'lots' : 'qty'} onChange={(v) => setShowLots(v === 'lots')} options={[{ value: 'lots', label: 'Lots' }, { value: 'qty', label: 'Quantity' }]} />
               </Tooltip>
               <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}>Delta per row</Checkbox>
+              <Tooltip title="Footprint tools, worked out on this page's own ticks (Level 1 - no book): VWAP, volume profile with POC / value area, finished / unfinished auctions, stacked imbalances, COT high / low and its read, scored absorption / exhaustion, icebergs inferred from best-quote refills.">
+                <Select mode="multiple" maxTagCount={0} maxTagPlaceholder={() => `Tools (${Object.values(toolsOn ?? {}).filter(Boolean).length})`} style={{ width: 130 }} value={Object.keys(toolsOn ?? {}).filter((k) => toolsOn[k])}
+                  onChange={(v) => setToolsOn(Object.fromEntries(['vwap', 'profile', 'auction', 'stacked', 'cot', 'absorption', 'iceberg'].map((k) => [k, v.includes(k)])))}
+                  options={[{ value: 'vwap', label: 'VWAP' }, { value: 'profile', label: 'Volume profile' }, { value: 'auction', label: 'Auctions (FA / UA)' }, { value: 'stacked', label: 'Stacked imbalances' }, { value: 'cot', label: 'COT high / low' }, { value: 'absorption', label: 'Absorption / exhaustion' }, { value: 'iceberg', label: 'Icebergs' }]} />
+              </Tooltip>
               {replay && <Select value={replayDay} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
               {replay && <Button size="small" onClick={() => setReload((n) => n + 1)}>Reload</Button>}
               <Tag color={feedState === 'streaming' ? 'green' : off ? 'default' : 'orange'}>TrueData: {off ? 'off' : feedState}</Tag>
@@ -270,7 +313,12 @@ export default function TickFlowPage() {
         <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>
           {bars.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : 'No trade yet today.'} />
-            : <TickFootprintChart bars={bars} cvd={cvd} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 520 : 680} rowDelta={rowDelta} />}
+            : <TickFootprintChart bars={bars} cvd={cvd} rowSize={rowSize} lotSize={lotSize} showLots={showLots} lastPrice={meta?.lastPrice} height={narrow ? 520 : 680} rowDelta={rowDelta} tools={tools} />}
+          {toolReads.length > 0 && (
+            <FoldText id="tickFlowToolReads" summary={`Latest reads: ${toolReads[0].text}`}>
+              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12 }}>{toolReads.map((r, i) => <li key={i}>{new Date(r.ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata' })} · {r.text}</li>)}</ul>
+            </FoldText>
+          )}
         </Card>
       </Space>
     </div>
