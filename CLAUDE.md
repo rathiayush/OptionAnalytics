@@ -1692,22 +1692,31 @@ All must pass before committing.
   server's disk, 3 asked of Dhan (the first time - kept on the server now)" - and the runs list says how many days a
   running job asked of Dhan. The OI break reads are worked out once a completed bucket (`completedBuckets` - the same
   results, `prepareDay` a little faster on 3 / 5 / 15-minute buckets).
-- The TICK FLOW page (`/tick-flow`, `TickFlowPage.jsx`; asked for - "a tick by tick order flow page with TrueData ... deep charts and the footprint,
-  NIFTY and BANKNIFTY first"): TrueData's REAL-TIME tick WebSocket (`TrueDataLiveFeed`, `TrueData:Live:Enabled` OFF by default AND the login set -
-  `TrueData__UserId` / `TrueData__Password` in the environment or the git-ignored appsettings.Local.json, NEVER a committed file; `Live:Port` 8086 sandbox /
-  8084 production, `Live:Instruments` the symbols with their lot / tick size - NIFTY-I 65 / 0.05, BANKNIFTY-I 30 / 0.20: NSE changes lot sizes, update them
-  there) into ITS OWN `OrderFlowEngine` per index - the Dhan engines and the Order Flow page are untouched. Spec v2.6: a "trade" message per trade carries
-  its OWN quantity (LTQ), the day's running volume (TTQ), a SEQUENCE number (gaps are counted - `sequenceGaps`, shown "N lost") and the best bid / ask in the
-  same packet; a "bidask" message when only the quote moved (`TrueDataLiveParser`, pure). Each becomes a `SpotTick` whose `LastTradedQty` is the volume
-  it adds, so a trade is read exactly (no several-trades-in-one-snapshot guess) and sided by the engine's rule against the quote BEFORE it. A quote before
-  the first trade is held back (it would make the first trade's whole day volume one print - the first TRADE sets the baseline). Connects only IST weekday
-  08:30 - 15:45 inside `MarketHours.BackgroundScope`; one connection per account, so a refusal ("User Already Connected", a wrong login) backs off 5 min, never a
-  loop; a drop backs off 5 s doubling to 2 min. Memory only (a restart starts the day again). NSE DEPTH IS LEVEL 1 ONLY on TrueData (BSE has 5): the "deep
-  chart" is the best bid / ask TRAIL on `DepthHeatmap` (one level a side, said on the card), not a 20 / 200-level book - that stays Dhan's, on the Order Flow
-  page. `GET /api/tick-flow/status` / `{underlying}` (the Order Flow snapshot's shape, so the charts are the Order Flow page's own `FootprintChart` /
-  `DepthHeatmap` / `CumulativeDeltaChart`) / `{underlying}/tape`, Admin / User (External denied by default), the page polls every 2 s with `POLL_HEADERS`.
-  `TrueDataLiveTests.cs`; checked in a browser with a mocked API (NOT against the real feed - run it with the trial login to compare TrueData's delta with
-  the Order Flow page's). A read - no strategy, alert or order.
+- The TICK FLOW page (`/tick-flow`, `TickFlowPage.jsx`; asked for - "a completely new order flow page, tick data so an actual footprint, do not mix
+  it with the existing code ... a deep chart where prices are shown with bubbles, a small order a small bubble, a big order a big bubble"): a page of its
+  OWN on TrueData's REAL-TIME tick WebSocket, NIFTY and BANKNIFTY near futures, and it SHARES NOTHING with the Order Flow page - not the engine, the chart
+  components or the maths (keep it that way). Server: `TrueDataLiveFeed` (`TrueData:Live:Enabled` OFF by default AND the login set - `TrueData__UserId` /
+  `TrueData__Password` in the environment or the git-ignored appsettings.Local.json, NEVER a committed file; `Live:Port` 8086 sandbox / 8084 production,
+  `Live:Instruments` the symbols with lot / tick size - NIFTY-I 65 / 0.05, BANKNIFTY-I 30 / 0.20: NSE changes lot sizes, update them there) reads spec v2.6's
+  "trade" message (the trade's OWN quantity LTQ, the day's volume, a SEQUENCE number - gaps counted, "N lost" - and the best bid / ask in the packet) and
+  "bidask" message (`TrueDataLiveParser`, pure) into a `TickBook` per index (`TickBook.cs`, NOT `OrderFlowEngine`): each print is added to its minute's
+  price level on the side the QUOTE BEFORE it gives (the last bid / ask sent before this message - a trade's own packet may already show the book after
+  it): at / through the ask = buy, at / through the bid = sell, inside the spread the nearer half, at the middle the tick rule then the last side; a crossed
+  or locked quote never decides (`TickBook.Side`). Prints at one price on one side within a second are ONE BUBBLE (a sweep of small prints reads as the one
+  order); the best bid / ask trail keeps a change at most once a second. Connects only IST weekday 08:30 - 15:45 inside `MarketHours.BackgroundScope`; one
+  connection per account, so a refusal ("User Already Connected", a wrong login) backs off 5 min, never a loop; a drop backs off 5 s doubling to 2 min. Memory
+  only (a restart starts the day again); a new IST day starts empty. NSE DEPTH IS LEVEL 1 ONLY on TrueData (BSE has 5): there is no deeper book to chart, the
+  grey band on the bubble chart is the best bid / ask. `GET /api/tick-flow/status` and `/{underlying}?rowSize&minBubbleLots&maxBubbles` (`TickDay`: minute bars
+  with their price levels grouped into rows, the bubbles, the quote trail), Admin / User (External denied by default); the page polls every 2 s with
+  `POLL_HEADERS`. Client, all its own: `tickFlowMath.js` (`aggregateTickBars` 1 / 3 / 5 / 15 min, `barStats`, `cumulativeDelta`, `diagonalImbalances` - buyers
+  at a row against the sellers one row below, sellers against the buyers one row above, 3:1; `bubbleRadius` - the AREA follows the order size, 3 - 34 px;
+  `bubbleScaleMax` - the 99th percentile in view, so one giant print does not shrink the rest to dots), `TickBubbleChart.jsx` (the "deep chart": price line,
+  bid / ask band, a bubble at every order - green bought at the ask / red sold at the bid, big ones labelled in lots, a size legend, hover = time / price /
+  side / lots / prints; wheel zooms the time, drag moves back, double-click = live; "Bubbles >= N lots" on the page) and `TickFootprintChart.jsx` (canvas
+  footprint: sellers x buyers per row shaded by the bar's biggest row, diagonal imbalances outlined, POC boxed, delta / cumulative delta / volume under each
+  bar, "Delta per row", as many bars as fit at ~74 px by default, wheel = bars shown, drag = back in time). `TrueDataLiveTests.cs`,
+  `tests/tick-flow-math.test.mjs`; checked in a browser with a mocked API at 1400 and 390 px (NOT against the real feed - run it with the trial login). A read -
+  no strategy, alert or order.
 - ICEBERG / BIG ORDER TELEGRAM IS THE SERVER'S (asked for - "iceberg order, big order should always receive messages on
   telegram, they should run server side"; `OrderFlowTelegramAlerts` - a hosted service, every 2 s in the trading session,
   `MarketHours.BackgroundScope`, no Dhan call - it reads the Order Flow engines' memory): for every index's near futures
