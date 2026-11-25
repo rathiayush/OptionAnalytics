@@ -30,6 +30,14 @@ public sealed class TickFlowController : ControllerBase
             ? Ok(new { enabled = false, state = "off", note = "TrueData:Live:Enabled is off or the TrueData login is not set (TrueData__UserId / TrueData__Password)." })
             : Ok(new { enabled = true, status = _feed.Snapshot() });
 
+    /// <summary>HOW OFTEN THE FEED REALLY SENDS: per stream (a futures contract's trades and quotes, the options') the messages applied today, the rate over the last
+    /// 10 s / 60 s, the busiest second, seconds with 1 / 2 / 3 / 4+ messages, the median gap and a verdict - tick by tick, or a snapshot about once a second.</summary>
+    [HttpGet("rate")]
+    public ActionResult Rate() =>
+        _feed is null
+            ? Ok(new { enabled = false })
+            : Ok(new { enabled = true, state = _feed.Snapshot().State, now = DateTimeOffset.UtcNow, rates = _feed.Rates.Snapshot(DateTimeOffset.UtcNow) });
+
     /// <summary>The big option orders watched from TrueData's live ticks (the Tick Flow page's card): the option stream's state (the index, the
     /// expiry, the ATM, how many options are subscribed against the symbol cap, the ticks seen, why not) and the orders after <paramref name="since"/>.</summary>
     [HttpGet("options")]

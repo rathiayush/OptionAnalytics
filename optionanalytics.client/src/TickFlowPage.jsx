@@ -6,6 +6,7 @@ import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
 import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
+import { TickFeedCheckCard } from './TickFeedCheckCard.jsx'
 import { TickFuturesDeltaChart } from './TickFuturesDeltaChart.jsx'
 import { TickProfileCard } from './TickProfileCard.jsx'
 import { futuresDeltaRows } from './tickDeltaProfile.js'
@@ -302,6 +303,12 @@ export default function TickFlowPage() {
             <Statistic title="Bid / ask size" value={meta.bid > 0 ? `${fmtQty(meta.bidQty, lotSize, showLots)} / ${fmtQty(meta.askQty, lotSize, showLots)}` : '-'} />
             <Statistic title={`Cumulative delta (${showLots ? 'lots' : 'qty'})`} value={fmtQty(total, lotSize, showLots)} valueStyle={{ color: total >= 0 ? '#52c41a' : '#ff4d4f' }} />
           </Space>
+        )}
+
+        {!replay && (
+          <Card size="small" title="Feed check - how often TrueData really sends">
+            <TickFeedCheckCard />
+          </Card>
         )}
 
         <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel scrolls the page · Ctrl+wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
