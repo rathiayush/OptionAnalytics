@@ -167,6 +167,35 @@ public sealed class OptionTickHistoryDaysTests
         Assert.Empty(api.Asked);
     }
 
+    [Fact]
+    public async Task APastNiftyDayBuiltOnceIsKeptOnDisk_AndReadBackWithNoTrueDataCall_NeverToday_NeverBankNifty()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "tickdays-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var disk = new TickDayDiskCache(root, NullLogger<TickDayDiskCache>.Instance);
+            var api = new FakeHistory();
+            var services = new ServiceCollection().AddSingleton<ITrueDataHistoryApi>(api).AddSingleton(disk).BuildServiceProvider();
+            var futures = new TickHistoryDays(services, NullLogger<TickHistoryDays>.Instance);
+            var opts = Options.Create(new TrueDataOptions { UserId = "u", Password = "p" });
+            var first = new OptionTickHistoryDays(services, futures, opts, NullLogger<OptionTickHistoryDays>.Instance) { ChainSource = new FakeChain(), CallGap = TimeSpan.Zero, RetryGap = TimeSpan.Zero };
+            var built = await Ready(first, 1);
+            Assert.Equal("ready", built.State);
+            Assert.True(File.Exists(disk.FileOf("options", "NIFTY", Day)));
+
+            // A fresh service (a restart) with a history that answers nothing: the day comes from the disk.
+            var offline = new ServiceCollection().AddSingleton<ITrueDataHistoryApi>(new EmptyHistory()).AddSingleton(disk).BuildServiceProvider();
+            var second = new OptionTickHistoryDays(offline, new TickHistoryDays(offline, NullLogger<TickHistoryDays>.Instance), opts, NullLogger<OptionTickHistoryDays>.Instance);
+            var again = second.Request(Nifty, Day, 1);
+            Assert.Equal("ready", again.State);
+            Assert.Equal(built.Events.Count, again.Events.Count);
+
+            Assert.False(disk.Write("options", "NIFTY", IstClock.Today(), new OptionTickHistoryDays.Saved(1, null, 50, new())));
+            Assert.False(disk.Write("options", "BANKNIFTY", Day, new OptionTickHistoryDays.Saved(1, null, 100, new())));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     private sealed class EmptyHistory : ITrueDataHistoryApi
     {
         public Task<string> GetTicksWithBidAskAsync(string symbol, DateTime fromIst, DateTime toIst, CancellationToken token) => Task.FromResult("No data exists for the requested symbol");

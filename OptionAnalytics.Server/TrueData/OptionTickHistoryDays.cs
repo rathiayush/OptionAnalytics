@@ -28,6 +28,7 @@ public sealed class OptionTickHistoryDays
     private readonly ITrueDataHistoryApi? _api;
     private readonly TickHistoryDays _futures;
     private readonly ILogger<OptionTickHistoryDays> _logger;
+    private readonly TickDayDiskCache? _disk;
     private readonly ConcurrentDictionary<(string Underlying, DateOnly Day, int Strikes), Job> _jobs = new();
     /// <summary>Where the option chain comes from (TrueData's REST master; a test sets a fake).</summary>
     internal IOptionChainSource ChainSource { get; set; }
@@ -39,11 +40,15 @@ public sealed class OptionTickHistoryDays
     {
         _api = services.GetService<ITrueDataHistoryApi>();
         _futures = futures;
+        _disk = services.GetService<TickDayDiskCache>();
         _logger = logger;
         ChainSource = new TrueDataOptionChainSource(options.Value);
     }
 
     public bool Available => _api is not null;
+
+    /// <summary>What a past day keeps on disk: the strikes it was built for, the expiry, the step and the big orders.</summary>
+    public sealed record Saved(int Strikes, string? Expiry, decimal Step, List<BigOrderEvent> Events);
 
     internal sealed class Job
     {
@@ -61,9 +66,16 @@ public sealed class OptionTickHistoryDays
     /// <summary>The day's state - and the start of its build the first time it is asked (in the background; ask again for progress).</summary>
     public Status Request(TrueDataLiveInstrument instrument, DateOnly day, int strikes)
     {
-        if (_api is null) return new Status("failed", 0, 0, 0, "Replay needs TrueData's tick history: set TrueData:Enabled true (with the login) as well as TrueData:Live:Enabled.", null, 0, Array.Empty<BigOrderEvent>());
         strikes = Math.Clamp(strikes, 1, 15);
         var key = (instrument.Underlying.ToUpperInvariant(), day, strikes);
+        if (!_jobs.ContainsKey(key) && day < IstClock.Today() && _disk?.Read<Saved>("options", instrument.Underlying, day) is { } saved && saved.Strikes >= strikes)
+        {
+            // A past day kept on disk (NIFTY): no TrueData call, no build.
+            var kept = new Job { State = "ready", Done = 1, Total = 1, Expiry = saved.Expiry, Step = saved.Step, Events = saved.Events.Where(e => Math.Abs(e.AtmDistance) <= strikes).ToList() };
+            _jobs[key] = kept; Trim();
+            return Snapshot(kept);
+        }
+        if (_api is null) return new Status("failed", 0, 0, 0, "Replay needs TrueData's tick history: set TrueData:Enabled true (with the login) as well as TrueData:Live:Enabled.", null, 0, Array.Empty<BigOrderEvent>());
         if (_jobs.TryGetValue(key, out var existing))
         {
             if (existing.State != "failed" || DateTimeOffset.UtcNow - existing.At < TimeSpan.FromSeconds(20)) return Snapshot(existing);
@@ -126,6 +138,7 @@ public sealed class OptionTickHistoryDays
         if (loaded.Count == 0) { job.Error = "TrueData had no option ticks for that day (it keeps only the last few days)"; job.State = "failed"; job.At = DateTimeOffset.UtcNow; return; }
 
         job.Events = Detect(loaded, closeAt, step, strikes);
+        _disk?.Write("options", instrument.Underlying, day, new Saved(strikes, job.Expiry, step, job.Events.ToList()));
         job.State = "ready"; job.At = DateTimeOffset.UtcNow;
         _logger.LogInformation("Option ticks of {Underlying} {Day}: {Contracts} contracts ({Failed} without data), {Events} big orders.", instrument.Underlying, day, loaded.Count, job.Failed, job.Events.Count);
     }

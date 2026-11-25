@@ -1846,6 +1846,27 @@ All must pass before committing.
   draws every bucket since the first order (a column is at least 3 px, the map scrolls sideways past that), and under it a DAY STRIP: each bucket's bullish money (calls bought + puts written) up and
   bearish (puts bought + calls written) down over every strike, with the running net as an amber line - the day's story in one band (hover = that bucket's totals). The big-money summary's "Over"
   choice adds "Whole day" (390 min). The orders table still lists the newest 50. Not checked in a browser.
+  THE PROFILE CARDS ARE CANDLE CHARTS NOW, WITH PREVIOUS DAYS (asked for - "remove this component, add these instead on spot chart and future chart with true data ... also add future delta and
+  cumulative delta charts ... load previous day data into these profiles, cache them, and tell me the storage"; NIFTY ONLY FOR NOW - "later can be extended with banknifty":
+  `TickDayDiskCache.Indices`, the one list to add BANKNIFTY to): the SVG `TickDeltaProfileCard` / `TickCdvObvProfileCard` and the `TickCumulativeCard` (three cumulative lines)
+  were REMOVED and replaced by `TickProfileCard` (`kind` options / cdv / futures) on `TickProfileChart` (canvas, this page's own, `tickDeltaProfile.js`'s maths): the candles of the
+  card's timeframe (1 / 3 / 5 / 15, standing from the left) and at the right the profile columns on the SAME price rows - VOLUME (grey, value area brighter, POC amber, POC / VAH /
+  VAL lines across the candles) and delta columns (green right / red left; B1 / B2 / S1 / S2 tags on the biggest buying / selling rows - `standouts`): OPTION DELTA PROFILE ON SPOT
+  = VOLUME, CE - PE OI (negative = puts written = bullish), NET CE - PE, TOTAL OI - NET; OPTION CDV / OBV PROFILE = VOLUME, CDV, OBV (side Net / CE / PE); FUTURES DELTA PROFILE
+  (its own card on the page, from the page's footprint bars) = VOLUME, DELTA in lots. The option cards sit in the big-orders card and read its filtered orders (the options are
+  laid on the futures' price rows, as before); the row size is a whole number of the page's footprint row (a finer day cannot be split). A new futures "Futures delta and
+  cumulative delta" card (`TickFuturesDeltaChart` - a histogram of each bucket's buy - sell in lots, the running sum as a yellow line on its own scale, 1 / 3 / 5 / 15 min). PREVIOUS DAY
+  (each card's tick, "Days" 1 - 5, "+ current day"; `usePastTickDays` - a tick, never a timer: the weekdays before the day shown walked ONE AT A TIME newest first, a 404 stepped
+  over, any other failure STOPS and says which day): the futures day from `GET /api/tick-flow/{u}/profile-day?date=` (the 1-minute footprint bars at a 1-point row, regrouped
+  by the page to its row size; the 404 for another index and 400 for today) and, for the option cards, `GET /api/tick-flow/options/day` polled until ready; the sessions are added
+  price by price (`optionProfilesOf` / `cdvObvProfilesOf` / `futuresRowsOf`), each option session's orders through the SAME size / x usual / who-which filters
+  (`refine`). CACHE (`TickDayDiskCache`, `{Live.StatePath}/tick-days/{futures|options}/{UNDERLYING}/{yyyy-MM-dd}.json.gz` - `Storage:ScannerRunnerPath`, already in
+  docker-compose and the Dockerfile): a PAST day built once is read back with NO TrueData call after a restart (the option build is minutes), never today, never another index;
+  an options file built for N strikes serves any fewer. STORAGE (an ESTIMATE, not measured on real data - a worst-case random day gzips to ~55 KB futures; the options file
+  is ~200 bytes an order, 20 000 orders at most ~0.5 MB gzipped, a typical day far fewer): about 0.1 - 0.6 MB a NIFTY day, ~25 - 150 MB a year of 250 sessions;
+  BANKNIFTY would double it. TrueData's tick history keeps only the last days (the trial: today and the day before) - a day it no longer has cannot be built, a day already on
+  disk stays. `TickDayDiskCacheTests.cs`, `OptionTickHistoryDaysTests.cs`, `tests/tick-delta-profile.test.mjs`. Not checked in a browser or against the real feed. A read - no
+  strategy, alert or order.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the

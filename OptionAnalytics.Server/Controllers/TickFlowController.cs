@@ -14,12 +14,14 @@ public sealed class TickFlowController : ControllerBase
     private readonly TrueDataLiveFeed? _feed;
     private readonly TickHistoryDays? _history;
     private readonly OptionTickHistoryDays? _optionHistory;
+    private readonly TickDayDiskCache? _disk;
 
     public TickFlowController(IServiceProvider services)
     {
         _feed = services.GetService<TrueDataLiveFeed>();
         _history = services.GetService<TickHistoryDays>();
         _optionHistory = services.GetService<OptionTickHistoryDays>();
+        _disk = services.GetService<TickDayDiskCache>();
     }
 
     [HttpGet("status")]
@@ -76,6 +78,31 @@ public sealed class TickFlowController : ControllerBase
         return _feed.SetTransport(request.Transport)
             ? Ok(new { transport = _feed.Transport })
             : BadRequest(new { error = "transport must be \"websocket\" or \"tcp\"." });
+    }
+
+    /// <summary>A past futures day as the profile cards read it: the 1-minute bars with their footprint rows at a 1-point row (the page regroups to its own
+    /// row size) and the contract's lot size. Kept on disk once built.</summary>
+    public sealed record FuturesProfileDay(int LotSize, decimal TickSize, IReadOnlyList<TickBar> Bars);
+
+    /// <summary>A PAST day's futures footprint for the delta profiles / the delta and cumulative delta chart (and the "previous day" loads of them): from the disk
+    /// when kept, else rebuilt from TrueData's tick history (<see cref="TickHistoryDays"/>) and kept. Past days only; NIFTY only for now.</summary>
+    [HttpGet("{underlying}/profile-day")]
+    public async Task<ActionResult<FuturesProfileDay>> ProfileDay(string underlying, [FromQuery] DateOnly date, CancellationToken cancellationToken = default)
+    {
+        if (_feed is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
+        if (!TickDayDiskCache.Keeps(underlying)) return NotFound(new { error = $"Past-day profiles are NIFTY only for now ({underlying.ToUpperInvariant()} later)." });
+        if (date >= IstClock.Today()) return BadRequest(new { error = "A past day only - today's profile is built from the live day." });
+        var kept = _disk?.Read<FuturesProfileDay>("futures", underlying, date);
+        if (kept is { Bars.Count: > 0 }) return kept;
+        var instrument = _feed.InstrumentFor(underlying);
+        if (instrument is null) return NotFound(new { error = $"{underlying.ToUpperInvariant()} is not streamed (TrueData:Live:Instruments)." });
+        if (_history is null) return NotFound(new { error = "Replay needs TrueData's tick history." });
+        var result = await _history.DayAsync(instrument, date, cancellationToken);
+        if (result.Book is null) return NotFound(new { error = result.Error });
+        var snapshot = result.Book.Snapshot(1, long.MaxValue, 1, 1);
+        var day = new FuturesProfileDay(result.Book.LotSize, instrument.TickSize, snapshot.Bars);
+        if (day.Bars.Count > 0) _disk?.Write("futures", underlying, date, day);
+        return day;
     }
 
     /// <param name="rowSize">Price points per footprint row (0 = the contract's tick).</param>
