@@ -234,4 +234,13 @@ public sealed class TrueDataLiveTests
     [InlineData("banknifty", 2026, 12, 30, "BANKNIFTY27JANFUT")]
     public void ReplayAsksForTheContractOfThatDay_NotTheContinuousSymbol(string underlying, int y, int m, int d, string expected) =>
         Assert.Equal(expected, TickHistoryDays.ContractSymbol(underlying, new DateOnly(y, m, d)));
+
+    [Theory]
+    [InlineData(1, 30)]
+    [InlineData(2, 60)]
+    [InlineData(3, 120)]
+    [InlineData(4, 300)]
+    [InlineData(40, 300)]
+    public void ARefusalIsRetriedAtFirstSoonThenSettlesAtFiveMinutes(int refusals, int seconds) =>
+        Assert.Equal(TimeSpan.FromSeconds(seconds), TrueDataLiveFeed.RefusalWait(refusals));
 }

@@ -390,6 +390,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
         _ = Task.Run(() => ProcessInboxAsync(stoppingToken), stoppingToken);
         _ = Task.Run(() => OptionsLoopAsync(stoppingToken), stoppingToken);
         var wait = TimeSpan.FromSeconds(5);
+        var refusals = 0;
         while (!stoppingToken.IsCancellationRequested)
         {
             if (!InWindow(DateTimeOffset.UtcNow))
@@ -404,7 +405,7 @@ public sealed class TrueDataLiveFeed : BackgroundService
             try
             {
                 refused = await RunOnceAsync(connection.Token);
-                if (!refused) wait = TimeSpan.FromSeconds(5);
+                if (!refused) { wait = TimeSpan.FromSeconds(5); refusals = 0; }
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { break; }
             catch (OperationCanceledException)
@@ -422,10 +423,16 @@ public sealed class TrueDataLiveFeed : BackgroundService
             UseConnection(null);
             _state = refused ? "refused" : "reconnecting";
             // A refusal (wrong login, a session already open elsewhere) is never retried quickly; a dropped connection backs off.
-            wait = refused ? TimeSpan.FromMinutes(5) : TimeSpan.FromSeconds(Math.Min(120, Math.Max(5, wait.TotalSeconds * 2)));
+            if (refused) refusals++;
+            wait = refused ? RefusalWait(refusals) : TimeSpan.FromSeconds(Math.Min(120, Math.Max(5, wait.TotalSeconds * 2)));
             await Delay(wait, stoppingToken);
         }
     }
+
+    /// <summary>How long to wait after the n-th refusal in a row: 30 s, 1 min, 2 min, then 5 min. A session of ours that ended without a close (a deploy, a drop) can
+    /// be held by TrueData for a minute or two, so the first retries are short; it never loops faster than every 30 s and settles at 5 min for a login really
+    /// in use elsewhere.</summary>
+    internal static TimeSpan RefusalWait(int refusals) => refusals switch { <= 1 => TimeSpan.FromSeconds(30), 2 => TimeSpan.FromMinutes(1), 3 => TimeSpan.FromMinutes(2), _ => TimeSpan.FromMinutes(5) };
 
     internal static bool InWindow(DateTimeOffset utc)
     {
@@ -449,6 +456,20 @@ public sealed class TrueDataLiveFeed : BackgroundService
         var live = _options.Live;
         var uri = new Uri($"wss://{live.Host}:{live.Port}?user={Uri.EscapeDataString(_options.UserId)}&password={Uri.EscapeDataString(_options.Password)}");
         using var socket = new ClientWebSocket();
+        try
+        {
+            return await RunSocketAsync(socket, uri, token);
+        }
+        finally
+        {
+            // ALWAYS say goodbye: a socket that is only disposed (a deploy, a source switch, a drop on our side) leaves TrueData holding the session, and the next
+            // login - ours, seconds later - is refused with "User Already Connected".
+            if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived) await CloseAsync(socket);
+        }
+    }
+
+    private async Task<bool> RunSocketAsync(ClientWebSocket socket, Uri uri, CancellationToken token)
+    {
         await socket.ConnectAsync(uri, token);
         _connectedAt = DateTimeOffset.UtcNow;
         _lastError = null;
@@ -549,7 +570,12 @@ public sealed class TrueDataLiveFeed : BackgroundService
 
     private static async Task CloseAsync(ClientWebSocket socket)
     {
-        try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None); } catch { }
+        try
+        {
+            using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", limit.Token);
+        }
+        catch { }
     }
 
     private static async Task SendAsync(ClientWebSocket socket, string text, CancellationToken token) =>
