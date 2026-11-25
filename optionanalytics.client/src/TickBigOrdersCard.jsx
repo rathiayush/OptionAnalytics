@@ -1,13 +1,11 @@
-import { useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import { Alert, Checkbox, InputNumber, Segmented, Select, Space, Table, Tag, Tooltip, Typography } from 'antd'
 import { DOWN_COLOR, UP_COLOR, usePersistedState } from './shared.jsx'
 import { FoldText } from './FoldText.jsx'
 import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, filterBigOrders, hitText, ordersUpTo } from './tickBigOrders.js'
 import { isHedgePosition, otmSteps } from './tickLiquidityMap.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
-import { TickCdvObvProfileCard } from './TickCdvObvProfileCard.jsx'
-import { TickCumulativeCard } from './TickCumulativeCard.jsx'
-import { TickDeltaProfileCard } from './TickDeltaProfileCard.jsx'
+import { TickProfileCard } from './TickProfileCard.jsx'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
 const { Text } = Typography
@@ -31,7 +29,7 @@ const KINDS = [
  * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only. The size is set in lots or in
  * QUANTITY (units) - the page's Lots / Quantity switch (`showLots`), each unit keeping its own number.
  */
-export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = true, index, replayDate, clockMs, priceBars, lotSize }) {
+export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = true, index, replayDate, clockMs, priceBars, dayBars, lotSize, pageRow }) {
   // The card has its own Lots / Quantity pick (starting from the page's switch), so the size filter is always right here beside "× usual".
   const [unit, setUnit] = usePersistedState('optionanalytics.tickFlow.bigUnit', pageShowLots ? 'lots' : 'qty')
   const showLots = unit === 'lots'
@@ -56,6 +54,9 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
   const sized = useMemo(() => bigEnough(orders, showLots ? { minLots, multiple } : { minQty, multiple }), [orders, showLots, minLots, minQty, multiple])
   const big = useMemo(() => filterBigOrders(sized, { type: typeOnly, side: sideOnly, hideFarOtm: hedgeMode === 'hide' ? farOtmSteps : 0, onlyFarOtm: hedgeMode === 'only' ? farOtmSteps : 0, cheapBelow: hideCheap ? cheapBelow : 0, oiChangedOnly: oiOnly }),
     [sized, typeOnly, sideOnly, hedgeMode, farOtmSteps, hideCheap, cheapBelow, oiOnly])
+  // The same size / × usual / who-which filters for ANOTHER day's orders (the profile cards' previous sessions).
+  const refine = useCallback((list) => filterBigOrders(bigEnough(list, showLots ? { minLots, multiple } : { minQty, multiple }), { type: typeOnly, side: sideOnly, hideFarOtm: hedgeMode === 'hide' ? farOtmSteps : 0, onlyFarOtm: hedgeMode === 'only' ? farOtmSteps : 0, cheapBelow: hideCheap ? cheapBelow : 0, oiChangedOnly: oiOnly }),
+    [showLots, minLots, minQty, multiple, typeOnly, sideOnly, hedgeMode, farOtmSteps, hideCheap, cheapBelow, oiOnly])
   const summary = useMemo(() => bigTradesSummary(big, replay ? clockMs ?? null : now || null, lookback), [big, replay, clockMs, now, lookback])
   const rows = useMemo(() => (sweepsOnly ? big.filter((o) => o.sweep) : big).slice(-SHOWN).reverse().map((o) => ({ ...o, key: o.seq })), [big, sweepsOnly])
   const [word, color] = lean[summary.lean]
@@ -160,9 +161,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
 
       <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
 
-      <TickDeltaProfileCard orders={big} priceBars={priceBars} index={index} />
-      <TickCdvObvProfileCard orders={big} priceBars={priceBars} index={index} />
-      <TickCumulativeCard orders={big} flowBars={priceBars} lotSize={lotSize} />
+      <TickProfileCard kind="options" index={index} orders={big} dayBars={dayBars} priceBars={priceBars} lotSize={lotSize} pageRow={pageRow} refine={refine} replayDate={replayDate} />
+      <TickProfileCard kind="cdv" index={index} orders={big} dayBars={dayBars} priceBars={priceBars} lotSize={lotSize} pageRow={pageRow} refine={refine} replayDate={replayDate} />
 
       <Table size="small" pagination={false} columns={columns} dataSource={rows} scroll={{ x: 'max-content' }}
         locale={{ emptyText: (replay || state?.underlying) ? (orders.length ? 'No order passes the filters' : replay ? 'No big option order up to the clock' : 'No big option order yet') : 'Pick an index above' }} />

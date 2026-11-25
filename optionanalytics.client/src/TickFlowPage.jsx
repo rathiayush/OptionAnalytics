@@ -6,6 +6,8 @@ import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
 import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
+import { TickFuturesDeltaChart } from './TickFuturesDeltaChart.jsx'
+import { TickProfileCard } from './TickProfileCard.jsx'
 import { futuresDeltaRows } from './tickDeltaProfile.js'
 import { absorptionExhaustion, auctionOf, barVwaps, cotOfBars, cotRead, icebergs, stackedImbalances, unfinishedAuctions, volumeProfile } from './tickFlowTools.js'
 import { MIN, aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, msOf, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
@@ -309,7 +311,15 @@ export default function TickFlowPage() {
         </Card>
 
         <Card size="small" title="Big option orders - TrueData's live ticks of the options ATM ± N, read and added up">
-          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} index={index} replayDate={replay ? replayDay : null} clockMs={replay ? clock : null} priceBars={priceBars} lotSize={lotSize} />
+          <TickBigOrdersCard isAdmin={isAdmin} replay={replay} showLots={showLots} index={index} replayDate={replay ? replayDay : null} clockMs={replay ? clock : null} priceBars={priceBars} dayBars={day?.bars} lotSize={lotSize} pageRow={rowSize} />
+        </Card>
+
+        <Card size="small" title="Futures delta profile - candles with the volume and delta by price">
+          <TickProfileCard kind="futures" index={index} orders={[]} dayBars={day?.bars} priceBars={priceBars} lotSize={lotSize} pageRow={rowSize} replayDate={replay ? replayDay : null} />
+        </Card>
+
+        <Card size="small" title="Futures delta and cumulative delta">
+          <TickFuturesDeltaChart dayBars={day?.bars} lotSize={lotSize} />
         </Card>
 
         <Card size="small" title={`Footprint · ${timeframe} min · ${rowSize} pt rows`} extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>sellers (bid) × buyers (ask) · outlined = 3:1 diagonal imbalance · boxed = POC · wheel scrolls the page · Ctrl+wheel: bars shown · Shift+wheel: row height · drag or swipe: move back</span>}>

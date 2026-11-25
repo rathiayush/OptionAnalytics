@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { futuresDeltaRows, optionProfiles, priceAt, readOf } from '../src/tickDeltaProfile.js'
+import { futuresDeltaRows, futuresRowsOf, optionProfiles, optionProfilesOf, priceAt, profileLevels, readOf, standouts } from '../src/tickDeltaProfile.js'
 
 const M = 60_000
 const bars = [{ time: 0, close: 24_003 }, { time: M, close: 24_012 }, { time: 2 * M, close: 24_026 }]
@@ -39,13 +39,37 @@ test('a cut at the clock is the whole day up to it', () => {
   assert.deepEqual(cut, upTo)
 })
 
-test('futures delta rows: buy - sell per price row, high to low', () => {
-  const r = futuresDeltaRows([{ levels: [{ price: 101, buy: 5, sell: 1 }, { price: 100, buy: 2, sell: 6 }] }, { levels: [{ price: 100, buy: 4, sell: 0 }] }])
-  assert.deepEqual(r.rows.map((x) => [x.price, x.delta]), [[101, 4], [100, 0]])
-  assert.equal(r.net, 4)
+test('futures rows: buy - sell per price row in LOTS, regrouped to the row size, high to low', () => {
+  const bars = [{ levels: [{ price: 101, buy: 500, sell: 100 }, { price: 100, buy: 200, sell: 600 }, { price: 99, buy: 100, sell: 0 }] }, { levels: [{ price: 100, buy: 400, sell: 0 }] }]
+  const r = futuresRowsOf([{ bars, lotSize: 100 }], 1)
+  assert.deepEqual(r.rows.map((x) => [x.price, x.delta, x.vol]), [[101, 4, 6], [100, 0, 12], [99, 1, 1]])
+  assert.equal(r.net, 5)
+  const two = futuresRowsOf([{ bars, lotSize: 100 }], 2)               // 101 and 100 share the 100 row, 99 is the 98 row
+  assert.deepEqual(two.rows.map((x) => [x.price, x.delta]), [[100, 4], [98, 1]])
 })
 
-import { cdvObvProfiles, cumulativeSeries } from '../src/tickDeltaProfile.js'
+test('sessions add up row by row: the day and the sessions before it, each with its own futures price', () => {
+  const day1 = { orders: [o(10, 'CE', 1, 10)], bars: [{ time: 0, close: 25012 }] }
+  const day2 = { orders: [o(10, 'CE', 1, 5), o(20, 'PE', 1, 2)], bars: [{ time: 0, close: 25014 }] }
+  const p = optionProfilesOf([day1, day2], 25)
+  assert.equal(p.rows.length, 1)
+  assert.equal(p.rows[0].price, 25000)
+  assert.equal(p.rows[0].vol, 17)
+  assert.equal(p.rows[0].net, 13)                                      // 10 + 5 call flow less 2 put flow
+  assert.equal(optionProfilesOf([day1], 25).rows[0].vol, 10)
+  assert.equal(cdvObvProfilesOf([day1, day2], 25, 'ce').rows[0].vol, 15)
+})
+
+test('profile levels: the POC and the 70% value area; standout rows by |value| on each side', () => {
+  const rows = [{ price: 104, vol: 5 }, { price: 103, vol: 40 }, { price: 102, vol: 100 }, { price: 101, vol: 30 }, { price: 100, vol: 5 }]
+  assert.deepEqual(profileLevels(rows), { poc: 102, vah: 103, val: 102 })
+  assert.deepEqual(profileLevels([]), { poc: null, vah: null, val: null })
+  const d = [{ price: 5, x: 9 }, { price: 4, x: 3 }, { price: 3, x: -7 }, { price: 2, x: -1 }]
+  assert.deepEqual(standouts(d, 'x'), { b1: 5, b2: 4, s1: 3, s2: 2 })
+  assert.deepEqual(standouts(d, 'x', true), { b1: 3, b2: 2, s1: 5, s2: 4 })   // the OI's CE - PE: negative is bullish
+})
+
+import { cdvObvProfiles, cdvObvProfilesOf } from '../src/tickDeltaProfile.js'
 
 test('CDV is the aggressor delta, OBV the premium move\'s sign x lots; net flips a put', () => {
   const orders = [
@@ -64,12 +88,9 @@ test('CDV is the aggressor delta, OBV the premium move\'s sign x lots; net flips
   assert.equal(cdvObvProfiles(orders, bars, 10, 'pe').obv, 4)
 })
 
-test('cumulative series: futures delta in lots, option net flow and OI (CE - PE) up to each minute\'s end, no look-ahead', () => {
-  const fb = [{ time: 0, buy: 750, sell: 150 }, { time: M, buy: 0, sell: 300 }, { time: 2 * M, buy: 75, sell: 0 }]
-  const orders = [o(10, 'CE', 1, 10, 75 * 2), o(M + 5, 'PE', -1, 3, 75 * 4), o(2 * M + 1, 'CE', -1, 5)]
-  const s = cumulativeSeries(orders, fb, 75)
-  assert.deepEqual(s.map((p) => p.fut), [8, 4, 5])
-  assert.deepEqual(s.map((p) => p.net), [10, 13, 8])      // call bought +10; put sold = +3; call sold -5
-  assert.deepEqual(s.map((p) => p.oi), [2, -2, -2])       // call OI +2 lots; put OI +4 lots = -4
-  assert.deepEqual(cumulativeSeries(orders.filter((x) => x.t < M), fb.slice(0, 1), 75), s.slice(0, 1))
+
+test('the footprint column\'s futures delta rows: buy - sell per price row in units, high to low', () => {
+  const r = futuresDeltaRows([{ levels: [{ price: 101, buy: 5, sell: 1 }, { price: 100, buy: 2, sell: 6 }] }, { levels: [{ price: 100, buy: 4, sell: 0 }] }])
+  assert.deepEqual(r.rows.map((x) => [x.price, x.delta]), [[101, 4], [100, 0]])
+  assert.equal(r.net, 4)
 })

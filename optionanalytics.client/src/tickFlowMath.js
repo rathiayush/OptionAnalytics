@@ -194,6 +194,18 @@ export function weekdayChoices(today, count = 6) {
   return out
 }
 
+/** The `count` weekdays BEFORE `date` (a yyyy-MM-dd), newest first - the sessions a "previous day" load walks back over (a holiday comes back as no data and is stepped over). */
+export function previousWeekdays(date, count) {
+  const out = []
+  const d = new Date(`${date}T00:00:00Z`)
+  while (out.length < count) {
+    d.setUTCDate(d.getUTCDate() - 1)
+    const dow = d.getUTCDay()
+    if (dow !== 0 && dow !== 6) out.push(d.toISOString().slice(0, 10))
+  }
+  return out
+}
+
 /** Exchange volume the feed delivered, as a percentage (null when the exchange's own total is not known). */
 export function coveragePct(booked, exchange) {
   return exchange > 0 ? Math.min(100, (booked / exchange) * 100) : null
