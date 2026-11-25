@@ -1711,7 +1711,7 @@ All must pass before committing.
   it): at / through the ask = buy, at / through the bid = sell, inside the spread the nearer half, at the middle the tick rule then the last side; a crossed
   or locked quote never decides (`TickBook.Side`). Prints at one price on one side within a second are ONE BUBBLE (a sweep of small prints reads as the one
   order); the best bid / ask trail keeps a change at most once a second. Connects only IST weekday 08:30 - 15:45 inside `MarketHours.BackgroundScope`; one
-  connection per account, so a refusal ("User Already Connected", a wrong login) backs off 5 min, never a loop; a drop backs off 5 s doubling to 2 min. Memory
+  connection per account, so a refusal ("User Already Connected", a wrong login) backs off 30 s, 1 min, 2 min, then 5 min (`RefusalWait` - a session of ours that ended without a close, a deploy or a drop, is held by TrueData for a minute or two, so the first retries are short; TrueData's own fix for a session held elsewhere is its force-logout URL `https://api.truedata.in/logoutRequest?user=..&password=..&port=..`, then wait about 5 min - the socket is now ALWAYS closed with a goodbye, `RunWebSocketAsync`'s finally), never a loop; a drop backs off 5 s doubling to 2 min. Memory
   only (a restart starts the day again); a new IST day starts empty. NSE DEPTH IS LEVEL 1 ONLY on TrueData (BSE has 5): there is no deeper book to chart, the
   grey band on the bubble chart is the best bid / ask. `GET /api/tick-flow/status` and `/{underlying}?rowSize&minBubbleLots&maxBubbles` (`TickDay`: minute bars
   with their price levels grouped into rows, the bubbles, the quote trail), Admin / User (External denied by default); the page polls every 2 s with
