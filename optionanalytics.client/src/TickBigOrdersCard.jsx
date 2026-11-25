@@ -5,6 +5,8 @@ import { FoldText } from './FoldText.jsx'
 import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, filterBigOrders, hitText, ordersUpTo } from './tickBigOrders.js'
 import { isHedgePosition, otmSteps } from './tickLiquidityMap.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
+import { TickCdvObvProfileCard } from './TickCdvObvProfileCard.jsx'
+import { TickCumulativeCard } from './TickCumulativeCard.jsx'
 import { TickDeltaProfileCard } from './TickDeltaProfileCard.jsx'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
@@ -28,7 +30,7 @@ const KINDS = [
  * the ATM), each big order read for its side, the book it hit, the OI it changed - and the strikes added up. Live only. The size is set in lots or in
  * QUANTITY (units) - the page's Lots / Quantity switch (`showLots`), each unit keeping its own number.
  */
-export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = true, index, replayDate, clockMs, priceBars }) {
+export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = true, index, replayDate, clockMs, priceBars, lotSize }) {
   // The card has its own Lots / Quantity pick (starting from the page's switch), so the size filter is always right here beside "× usual".
   const [unit, setUnit] = usePersistedState('optionanalytics.tickFlow.bigUnit', pageShowLots ? 'lots' : 'qty')
   const showLots = unit === 'lots'
@@ -158,6 +160,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
       <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
 
       <TickDeltaProfileCard orders={big} priceBars={priceBars} index={index} />
+      <TickCdvObvProfileCard orders={big} priceBars={priceBars} index={index} />
+      <TickCumulativeCard orders={big} flowBars={priceBars} lotSize={lotSize} />
 
       <Table size="small" pagination={false} columns={columns} dataSource={rows} scroll={{ x: 'max-content' }}
         locale={{ emptyText: (replay || state?.underlying) ? (orders.length ? 'No order passes the filters' : replay ? 'No big option order up to the clock' : 'No big option order yet') : 'Pick an index above' }} />
