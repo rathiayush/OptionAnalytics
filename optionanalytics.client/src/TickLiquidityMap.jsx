@@ -9,6 +9,9 @@ const AXIS_W = 58
 const AXIS_H = 22
 const ROW_H = 18
 const MIN_COL_W = 6
+const DAY_COL_W = 3         // the whole-day view: a column is at least this wide, the map scrolls sideways past it
+const STRIP_H = 70
+const BULL_KINDS = ['ceBought', 'peWritten']
 const TFS = [1, 3, 5, 15]
 const hhmm = (ms) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit' })
 const crore = (v) => (v >= 1e7 ? `₹${(v / 1e7).toFixed(2)} Cr` : `₹${(v / 1e5).toFixed(1)} L`)
@@ -25,6 +28,7 @@ export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
   const [hedgeOnly, setHedgeOnly] = usePersistedState('optionanalytics.tickFlow.liqMapHedge', false)
   const [hedgeSteps, setHedgeSteps] = usePersistedState('optionanalytics.tickFlow.liqMapHedgeSteps', 5)
   const [side, setSide] = usePersistedState('optionanalytics.tickFlow.liqMapSide', 'both')
+  const [view, setView] = usePersistedState('optionanalytics.tickFlow.liqMapView', 'day')   // 'day' = every bucket since the open, 'latest' = the newest that fit
   const orders = useMemo(() => filterMapOrders(allOrders, { hedgeOnly, hedgeSteps, side }), [allOrders, hedgeOnly, hedgeSteps, side])
   const wrapRef = useRef(null)
   const canvasRef = useRef(null)
@@ -41,24 +45,40 @@ export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
   }, [])
 
   const plotW = Math.max(0, width - AXIS_W)
-  const maxColumns = Math.max(1, Math.floor(plotW / MIN_COL_W))
+  const wholeDay = view !== 'latest'
+  const maxColumns = wholeDay ? Infinity : Math.max(1, Math.floor(plotW / MIN_COL_W))
   const grid = useMemo(() => tickLiquidityGrid({ orders, bucketMs: tf * 60_000, priceBars, maxColumns, step }), [orders, tf, priceBars, maxColumns, step])
-  const height = grid.rows.length * ROW_H + AXIS_H
-  const colW = grid.columns.length ? plotW / grid.columns.length : 0
+  const n = grid.columns.length
+  const colW = n ? (wholeDay ? Math.max(DAY_COL_W, plotW / n) : plotW / n) : 0
+  const innerW = colW * n
+  const canvasW = AXIS_W + innerW
+  const mapH = grid.rows.length * ROW_H + AXIS_H
+  const height = mapH + STRIP_H + 14
+  // Per bucket, all strikes: the bullish money (calls bought + puts written) and the bearish (puts bought + calls written).
+  const strip = useMemo(() => grid.columns.map((t) => {
+    let bull = 0
+    let bear = 0
+    for (const strike of grid.rows) {
+      const c = grid.cells.get(`${strike}|${t}`)
+      if (!c) continue
+      for (const k of TLM_KINDS) { if (BULL_KINDS.includes(k)) bull += c[k]; else bear += c[k] }
+    }
+    return { t, bull, bear }
+  }), [grid])
 
   useEffect(() => {
     const cv = canvasRef.current
-    if (!cv || !grid.columns.length || width <= 0) return
+    if (!cv || !grid.columns.length || canvasW <= AXIS_W) return
     const dpr = window.devicePixelRatio || 1
-    cv.width = Math.floor(width * dpr); cv.height = Math.floor(height * dpr)
-    cv.style.width = `${width}px`; cv.style.height = `${height}px`
+    cv.width = Math.floor(canvasW * dpr); cv.height = Math.floor(height * dpr)
+    cv.style.width = `${canvasW}px`; cv.style.height = `${height}px`
     const g = cv.getContext('2d')
     g.setTransform(dpr, 0, 0, dpr, 0, 0)
-    g.clearRect(0, 0, width, height)
+    g.clearRect(0, 0, canvasW, height)
     g.font = '11px sans-serif'; g.textBaseline = 'middle'
     grid.rows.forEach((strike, r) => {
       const y = r * ROW_H
-      if (r % 2 === 0) { g.fillStyle = 'rgba(255,255,255,0.03)'; g.fillRect(AXIS_W, y, plotW, ROW_H) }
+      if (r % 2 === 0) { g.fillStyle = 'rgba(255,255,255,0.03)'; g.fillRect(AXIS_W, y, innerW, ROW_H) }
       g.fillStyle = 'rgba(255,255,255,0.65)'; g.textAlign = 'right'
       g.fillText(String(strike), AXIS_W - 6, y + ROW_H / 2)
     })
@@ -78,7 +98,7 @@ export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
     const span = grid.columns.length * tf * 60_000
     const pts = grid.price.map((p) => {
       const pos = priceRowPosition(p.price, grid.rows)
-      return pos == null ? null : { x: AXIS_W + ((p.t - t0 + 30_000) / span) * plotW, y: pos * ROW_H + ROW_H / 2 }
+      return pos == null ? null : { x: AXIS_W + ((p.t - t0 + 30_000) / span) * innerW, y: pos * ROW_H + ROW_H / 2 }
     })
     for (const [w, color] of [[4.5, 'rgba(0,0,0,0.55)'], [2, '#ffffff']]) {
       g.strokeStyle = color; g.lineWidth = w; g.lineJoin = 'round'; g.beginPath()
@@ -86,16 +106,36 @@ export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
       for (const p of pts) { if (!p) { pen = false; continue } if (!pen) { g.moveTo(p.x, p.y); pen = true } else g.lineTo(p.x, p.y) }
       g.stroke()
     }
-  }, [grid, width, height, plotW, colW, tf])
+    // THE WHOLE DAY AT A GLANCE under the map: each bucket's bullish money up (green) and bearish down (red) over every strike, with the running net as a line.
+    const base = mapH + 14 + STRIP_H / 2
+    const half = STRIP_H / 2 - 4
+    const peak = Math.max(1, ...strip.map((s) => Math.max(s.bull, s.bear)))
+    g.fillStyle = 'rgba(255,255,255,0.65)'; g.textAlign = 'right'; g.fillText('Bull ▲', AXIS_W - 6, base - half / 2); g.fillText('Bear ▼', AXIS_W - 6, base + half / 2)
+    g.strokeStyle = 'rgba(255,255,255,0.25)'; g.beginPath(); g.moveTo(AXIS_W, base); g.lineTo(AXIS_W + innerW, base); g.stroke()
+    strip.forEach((s, c) => {
+      const x = AXIS_W + c * colW
+      const w = Math.max(1, colW - 1)
+      if (s.bull > 0) { g.fillStyle = TLM_COLORS.ceBought; const h = (s.bull / peak) * half; g.fillRect(x, base - h, w, h) }
+      if (s.bear > 0) { g.fillStyle = TLM_COLORS.peBought; const h = (s.bear / peak) * half; g.fillRect(x, base, w, h) }
+    })
+    let run = 0
+    const nets = strip.map((s) => (run += s.bull - s.bear))
+    const netPeak = Math.max(1, ...nets.map((v) => Math.abs(v)))
+    g.strokeStyle = '#faad14'; g.lineWidth = 1.6; g.beginPath()
+    nets.forEach((v, c) => { const x = AXIS_W + c * colW + colW / 2; const y = base - (v / netPeak) * half; if (c === 0) g.moveTo(x, y); else g.lineTo(x, y) })
+    g.stroke(); g.lineWidth = 1
+  }, [grid, canvasW, height, innerW, colW, tf, strip, mapH])
 
   const onMove = (e) => {
     if (!grid.columns.length) return
     const rect = e.currentTarget.getBoundingClientRect()
     const c = Math.floor((e.clientX - rect.left - AXIS_W) / colW)
     const r = Math.floor((e.clientY - rect.top) / ROW_H)
-    if (c < 0 || c >= grid.columns.length || r < 0 || r >= grid.rows.length) { setHover(null); return }
-    const strike = grid.rows[r]
+    if (c < 0 || c >= grid.columns.length || r < 0) { setHover(null); return }
     const t = grid.columns[c]
+    if (e.clientY - rect.top > mapH) { setHover({ t, strip: strip[c], x: e.clientX - rect.left, y: e.clientY - rect.top }); return }
+    if (r >= grid.rows.length) { setHover(null); return }
+    const strike = grid.rows[r]
     setHover({ strike, t, cell: grid.cells.get(`${strike}|${t}`) ?? null, x: e.clientX - rect.left, y: e.clientY - rect.top })
   }
 
@@ -104,24 +144,26 @@ export function TickLiquidityMap({ orders: allOrders, priceBars, step }) {
       <Space wrap size={[10, 6]}>
         <Text strong>Option liquidity map</Text>
         <span>Bucket <Select size="small" value={tf} onChange={setTf} style={{ width: 80 }} options={TFS.map((v) => ({ value: v, label: `${v} min` }))} /></span>
+        <Segmented size="small" value={view} onChange={setView} options={[{ value: 'day', label: 'Whole day' }, { value: 'latest', label: 'Latest only' }]} aria-label="Map range" />
         <Checkbox checked={hedgeOnly} onChange={(e) => setHedgeOnly(e.target.checked)}>Hedge positions (≥ <Select size="small" value={hedgeSteps} onChange={setHedgeSteps} style={{ width: 60 }} options={Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: i + 1 }))} onClick={(e) => e.stopPropagation()} /> strikes out of the money)</Checkbox>
         <Segmented size="small" value={side} onChange={setSide} options={[{ value: 'both', label: 'Buyers + sellers' }, { value: 'buy', label: 'Buyers only' }, { value: 'sell', label: 'Sellers only' }]} aria-label="Map side" />
         {TLM_KINDS.map((k) => <Tag key={k} color={TLM_COLORS[k]} style={{ marginInlineEnd: 0 }}>{TLM_LABELS[k]}</Tag>)}
         <Tag style={{ marginInlineEnd: 0, color: '#fff', background: '#555' }}>━ Futures price</Tag>
       </Space>
-      <div ref={wrapRef} style={{ position: 'relative', width: '100%' }}>
+      <div ref={wrapRef} style={{ position: 'relative', width: '100%', overflowX: 'auto' }}>
         {!grid.columns.length
           ? <Text type="secondary">No big option order with a read yet - nothing to map (or the filters above leave none).</Text>
           : (
             <>
               <canvas ref={canvasRef} onMouseMove={onMove} onMouseLeave={() => setHover(null)} style={{ display: 'block' }} />
               {hover && (
-                <div style={{ position: 'absolute', left: Math.min(hover.x + 12, Math.max(0, width - 220)), top: hover.y + 10, background: 'rgba(20,20,20,0.95)', border: '1px solid #444', borderRadius: 4, padding: '4px 8px', fontSize: 12, pointerEvents: 'none', zIndex: 5, whiteSpace: 'nowrap' }}>
-                  <div><b>{hover.strike}</b> · {hhmm(hover.t)}</div>
-                  {hover.cell
+                <div style={{ position: 'absolute', left: hover.x + 12, top: hover.y + 10, background: 'rgba(20,20,20,0.95)', border: '1px solid #444', borderRadius: 4, padding: '4px 8px', fontSize: 12, pointerEvents: 'none', zIndex: 5, whiteSpace: 'nowrap' }}>
+                  <div><b>{hover.strip ? 'All strikes' : hover.strike}</b> · {hhmm(hover.t)}</div>
+                  {hover.strip && <><div style={{ color: TLM_COLORS.ceBought }}>Bullish: {crore(hover.strip.bull)}</div><div style={{ color: TLM_COLORS.peBought }}>Bearish: {crore(hover.strip.bear)}</div></>}
+                  {!hover.strip && (hover.cell
                     ? TLM_KINDS.filter((k) => hover.cell[k] > 0).map((k) => <div key={k} style={{ color: TLM_COLORS[k] }}>{TLM_LABELS[k]}: {crore(hover.cell[k])}</div>)
-                    : <div style={{ opacity: 0.6 }}>no big order</div>}
-                  {hover.cell && <div style={{ opacity: 0.7 }}>{hover.cell.count} order{hover.cell.count === 1 ? '' : 's'}</div>}
+                    : <div style={{ opacity: 0.6 }}>no big order</div>)}
+                  {!hover.strip && hover.cell && <div style={{ opacity: 0.7 }}>{hover.cell.count} order{hover.cell.count === 1 ? '' : 's'}</div>}
                 </div>
               )}
             </>

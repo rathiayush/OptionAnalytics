@@ -1841,6 +1841,11 @@ All must pass before committing.
   futures' price row - CDV = the aggressor delta in lots (TrueData gives each order its side), OBV = each order's lots signed by whether the option's premium ROSE or FELL from its tick before
   (`movePct`; no move = 0), a put flipped in Net. The cumulative chart is three lines a futures minute up to its end: the futures' cumulative delta (lots), the options' net CE - PE flow and the OI CE - PE
   added (falling = puts written = bullish), no look-ahead (`tests/tick-delta-profile.test.mjs`). Big orders only; a read - no strategy, alert or order. Not checked in a browser or against the real feed.
+  THE MAP AND THE SUMMARY SHOW THE WHOLE DAY (asked for - "previous 15 min bucket I can no longer see, show data for the whole day continuously ... any better way to represent"): the option
+  liquidity map kept only the newest buckets that fit at 6 px, so the earlier ones scrolled off - its "Whole day / Latest only" switch (`optionanalytics.tickFlow.liqMapView`, whole day by default)
+  draws every bucket since the first order (a column is at least 3 px, the map scrolls sideways past that), and under it a DAY STRIP: each bucket's bullish money (calls bought + puts written) up and
+  bearish (puts bought + calls written) down over every strike, with the running net as an amber line - the day's story in one band (hover = that bucket's totals). The big-money summary's "Over"
+  choice adds "Whole day" (390 min). The orders table still lists the newest 50. Not checked in a browser.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the
