@@ -425,10 +425,14 @@ public sealed class OrderFlowService : BackgroundService
         return null;
     }
 
+    /// <summary>How often Dhan's packets really arrive, per stream (GET /api/order-flow/rate) - the same meter as the Tick Flow page's feed check, to set the two side by side.</summary>
+    public TickRateMeter Rates { get; } = new();
+
     // On the market feed consumer's worker: into the inbox, stamped when it came off the socket.
     internal void OnTick(SpotTick tick)
     {
-        if (!_bySecurityId.ContainsKey(tick.SecurityId)) return;
+        if (!_bySecurityId.TryGetValue(tick.SecurityId, out var tracked)) return;
+        Rates.Record($"{tracked.Underlying} futures market feed", tick.ReceivedAt ?? DateTimeOffset.UtcNow);
         _inbox.Enqueue(new FlowEvent(tick, null, tick.ReceivedAt ?? DateTimeOffset.UtcNow));
     }
 
@@ -438,6 +442,7 @@ public sealed class OrderFlowService : BackgroundService
         if (!_bySecurityId.ContainsKey(packet.SecurityId)) return;
         // The 20-level fallback alongside a 200-level book that is streaming again: the deeper one wins.
         if (packet.Depth < DhanDepthPacketParser.TwoHundredLevelCount && _fullDepth.IsStreaming(packet.SecurityId)) return;
+        Rates.Record($"{_bySecurityId[packet.SecurityId].Underlying} futures depth ({packet.Depth} levels)", DateTimeOffset.UtcNow);
         _inbox.Enqueue(new FlowEvent(null, packet, DateTimeOffset.UtcNow));
     }
 

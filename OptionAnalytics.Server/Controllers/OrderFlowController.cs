@@ -40,6 +40,11 @@ public sealed class OrderFlowController : ControllerBase
 
     /// <summary>A recorded day's delta by each candidate side rule, candle by candle (OrderFlowEngine.DeltaRules) - today when
     /// <paramref name="date"/> is omitted; empty for a day the server did not record.</summary>
+    /// <summary>HOW OFTEN DHAN'S FEED REALLY SENDS (asked for - to compare with TrueData's): per futures contract the market feed's packets and the depth packets - messages
+    /// today, the rate over 10 s / 60 s, the busiest second, seconds with 1 / 2 / 3 / 4+ messages, the median gap and a verdict. The same meter as /api/tick-flow/rate.</summary>
+    [HttpGet("rate")]
+    public ActionResult Rate() => Ok(new { enabled = true, state = "streaming", now = DateTimeOffset.UtcNow, rates = _orderFlow.Rates.Snapshot(DateTimeOffset.UtcNow) });
+
     [HttpGet("{underlying}/delta-rules")]
     public async Task<ActionResult<IReadOnlyList<OrderFlowRuleRow>>> DeltaRules(string underlying, [FromQuery] DateOnly? date, [FromQuery] DateOnly? expiry,
         [FromQuery] int timeframe = 3, CancellationToken cancellationToken = default)

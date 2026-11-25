@@ -6,7 +6,7 @@ import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
 import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
-import { TickFeedCheckCard } from './TickFeedCheckCard.jsx'
+import { FeedCheckCard } from './FeedCheckCard.jsx'
 import { TickFuturesDeltaChart } from './TickFuturesDeltaChart.jsx'
 import { TickProfileCard } from './TickProfileCard.jsx'
 import { futuresDeltaRows } from './tickDeltaProfile.js'
@@ -307,7 +307,7 @@ export default function TickFlowPage() {
 
         {!replay && (
           <Card size="small" title="Feed check - how often TrueData really sends">
-            <TickFeedCheckCard />
+            <FeedCheckCard url="/api/tick-flow/rate" source="TrueData" />
           </Card>
         )}
 

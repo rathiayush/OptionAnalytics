@@ -23,6 +23,7 @@ import { OrderFlowTelegramSettings } from './OrderFlowTelegramSettings.jsx'
 import { fetchPreviousSession, sessionVolumeProfile, tpoProfile, tpoRowFor } from './profiles.js'
 import { withBackfill } from './cvdBackfill.js'
 import { DeltaRulesCard } from './OrderFlowDeltaRules.jsx'
+import { FeedCheckCard } from './FeedCheckCard.jsx'
 import { TAPE_PRINTS, applyOrderFlowPush, mergePrints, orderFlowFromSnapshot, orderFlowPushGap, toColumn, withFineHeatmap } from './liveFeeds.js'
 import { FootprintChart, DepthHeatmap, CumulativeDeltaChart, BookLadder, formatVolume } from './OrderFlowCharts.jsx'
 import { OrderBookChartCard } from './OrderBookChartCard.jsx'
@@ -1056,6 +1057,12 @@ export default function OrderFlowPage() {
                   extra={shown.priorCount > 0 && <Tooltip title="The server started recording after the 09:15 open, so the minutes before it are estimated from Dhan's 1-minute candles (dimmed bars). Everything after is exact tick data."><Tag color="orange">09:15 → start estimated</Tag></Tooltip>}>
                   <CumulativeDeltaChart bars={shown.chartBars} dayKey={dayKey} lotSize={lotSize} showLots={showLots} height={narrow ? 200 : 260} />
                 </Card>
+
+                {!isReplay && (
+                  <Card size="small" title="Feed check - how often Dhan really sends (compare with the Tick Flow page's TrueData)">
+                    <FeedCheckCard url="/api/order-flow/rate" source="Dhan" />
+                  </Card>
+                )}
 
                 {!estimated && <DeltaRulesCard underlying={underlying} date={isReplay ? replayDate : null} expiryQuery={expiryQuery} timeframe={timeframe} />}
 

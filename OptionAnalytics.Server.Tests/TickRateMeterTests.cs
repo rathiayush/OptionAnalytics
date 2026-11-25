@@ -1,4 +1,4 @@
-using OptionAnalytics.Server.TrueData;
+using OptionAnalytics.Server.Services;
 using Xunit;
 
 namespace OptionAnalytics.Server.Tests;

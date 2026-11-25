@@ -1,4 +1,4 @@
-namespace OptionAnalytics.Server.TrueData;
+namespace OptionAnalytics.Server.Services;
 
 /// <summary>
 /// HOW OFTEN THE FEED ACTUALLY SENDS (asked for - "is TrueData really tick by tick?"): counts every trade / quote message the live feed applies, per stream

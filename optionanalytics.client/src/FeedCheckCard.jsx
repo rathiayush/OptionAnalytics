@@ -6,10 +6,10 @@ import { FoldText } from './FoldText.jsx'
 const { Text } = Typography
 const fix = (v, d = 2) => (v == null ? '-' : Number(v).toFixed(d))
 
-/** FEED CHECK: how often TrueData really sends (`GET /api/tick-flow/rate`, a page timer with POLL_HEADERS every 2 s) - per stream the messages today, the rate
+/** FEED CHECK: how often a feed really sends - TrueData's on the Tick Flow page (`GET /api/tick-flow/rate`), Dhan's on the Order Flow page (`GET /api/order-flow/rate`) - one card, one meter, so the two can be set side by side ( a page timer with POLL_HEADERS every 2 s) - per stream the messages today, the rate
  *  over the last 10 s / 60 s, the busiest second, how many seconds carried 1 / 2 / 3 / 4+ messages, the median gap and the server's verdict: tick by tick, or a
  *  snapshot about once a second. It answers "are we getting every trade?" with numbers. A read - nothing is placed. */
-export function TickFeedCheckCard() {
+export function FeedCheckCard({ url = '/api/tick-flow/rate', source = 'TrueData' }) {
   const [answer, setAnswer] = useState(null)
   const [error, setError] = useState(null)
   useEffect(() => {
@@ -17,7 +17,7 @@ export function TickFeedCheckCard() {
     let timer = null
     const load = async () => {
       try {
-        const r = await fetch('/api/tick-flow/rate', { headers: POLL_HEADERS })
+        const r = await fetch(url, { headers: POLL_HEADERS })
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         const body = await r.json()
         if (!stop) { setAnswer(body); setError(null) }
@@ -26,7 +26,7 @@ export function TickFeedCheckCard() {
     }
     load()
     return () => { stop = true; clearTimeout(timer) }
-  }, [])
+  }, [url])
 
   const rates = Array.isArray(answer?.rates) ? answer.rates : []
   const columns = [
@@ -43,14 +43,14 @@ export function TickFeedCheckCard() {
   return (
     <div>
       {error && <Alert type="warning" showIcon message={`Feed check: ${error}`} />}
-      {answer?.enabled === false && <Alert type="info" showIcon message="The TrueData live feed is off" />}
+      {answer?.enabled === false && <Alert type="info" showIcon message={`The ${source} live feed is off`} />}
       {answer?.enabled && <Text type="secondary" style={{ fontSize: 12 }}>Feed state: {answer.state}</Text>}
       <Table size="small" pagination={false} rowKey="key" columns={columns} dataSource={rates} scroll={{ x: 'max-content' }}
         expandable={{ expandedRowRender: (r) => <Text style={{ fontSize: 12 }}>{r.verdict}</Text>, defaultExpandAllRows: true, expandIcon: () => null }}
         locale={{ emptyText: 'No message yet - the feed counts from its first tick (market hours).' }} />
       <FoldText id="tickFeedCheck.how" className="oa-note" summary="How to read this">
         <div style={{ fontSize: 12 }}>
-          Every trade and quote message the server applies is counted by the second it ARRIVED. A feed that sends every trade shows seconds with several messages (the 2 / 3 / 4+ columns, many gaps under 100 ms); a snapshot feed shows almost every second with exactly one message and a median gap of a second or more. The verdict needs 60 messages. Nothing is placed or changed by reading it.
+          Every trade and quote message the server applies is counted by the second it ARRIVED. A feed that sends every trade shows seconds with several messages (the 2 / 3 / 4+ columns, many gaps under 100 ms); a snapshot feed shows almost every second with exactly one message and a median gap of a second or more. The verdict needs 60 messages. A stream that adds several instruments (the options: 42 contracts) shows bursts because contracts tick in the same instant - read a single contract's stream (a futures one) for the feed's own rhythm. Nothing is placed or changed by reading it.
         </div>
       </FoldText>
     </div>
