@@ -610,17 +610,22 @@ public sealed class TrueDataLiveFeed : BackgroundService
         lock (_byUnderlying) return _byId.TryGetValue(symbolId, out var s) ? s : null;
     }
 
+    /// <summary>How often messages really arrive, per stream (GET /api/tick-flow/rate).</summary>
+    public TickRateMeter Rates { get; } = new();
+
     internal void OnTrade(TrueDataTrade t)
     {
-        if (_watch.Tracks(t.SymbolId)) { _watch.OnTrade(t, t.Time ?? Clock()); return; }
+        if (_watch.Tracks(t.SymbolId)) { Rates.Record("options trades", DateTimeOffset.UtcNow); _watch.OnTrade(t, t.Time ?? Clock()); return; }
         if (StreamOf(t.SymbolId) is not { } s) return;
+        Rates.Record($"{s.Instrument.Underlying} futures trades", DateTimeOffset.UtcNow);
         s.Book.OnTrade(t.Time ?? Clock(), t.Sequence, t.Price, t.Quantity, t.Bid, t.BidQty, t.Ask, t.AskQty, t.TotalVolume);
     }
 
     internal void OnQuote(TrueDataQuote q)
     {
-        if (_watch.Tracks(q.SymbolId)) { _watch.OnQuote(q.SymbolId, q.Bid, q.BidQty, q.Ask, q.AskQty); return; }
+        if (_watch.Tracks(q.SymbolId)) { Rates.Record("options quotes", DateTimeOffset.UtcNow); _watch.OnQuote(q.SymbolId, q.Bid, q.BidQty, q.Ask, q.AskQty); return; }
         if (StreamOf(q.SymbolId) is not { } s) return;
+        Rates.Record($"{s.Instrument.Underlying} futures quotes", DateTimeOffset.UtcNow);
         Interlocked.Increment(ref s.Quotes);
         s.Book.OnQuote(q.Time ?? Clock(), q.Bid, q.BidQty, q.Ask, q.AskQty);
     }

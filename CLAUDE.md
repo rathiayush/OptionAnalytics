@@ -1867,6 +1867,15 @@ All must pass before committing.
   BANKNIFTY would double it. TrueData's tick history keeps only the last days (the trial: today and the day before) - a day it no longer has cannot be built, a day already on
   disk stays. `TickDayDiskCacheTests.cs`, `OptionTickHistoryDaysTests.cs`, `tests/tick-delta-profile.test.mjs`. Not checked in a browser or against the real feed. A read - no
   strategy, alert or order.
+  THE FEED CHECK (asked for - "is TrueData really tick by tick? create a page to check"; `TickRateMeter`, `GET /api/tick-flow/rate`, the "Feed check" card on the live Tick Flow page -
+  `TickFeedCheckCard`, a page timer with POLL_HEADERS, 2 s): every trade / quote message the feed applies is counted by the second it ARRIVED, per stream (a futures contract's
+  trades and quotes, the options' trades and quotes): messages today, the rate over 10 s / 60 s / the day, the busiest second, seconds with 1 / 2 / 3 / 4+ messages, the median gap,
+  the share within 100 ms of the one before, and a verdict (`VerdictOf`: bursts inside a second = tick by tick; almost every second exactly one message = snapshot-like; under 60
+  messages = not enough). MEASURED ON THE TRIAL ACCOUNT, TODAY (25 Nov 2026, 09:15 - 11:35 IST, NIFTY26DECFUT through TrueData's tick HISTORY - the live socket is unreachable from
+  the sandbox): 4,259 ticks in 140 min = 0.53 / s; of 4,146 seconds with a tick, 4,035 had exactly one, 110 two, 1 four; the median tick carried 325 units (5 lots) of volume, 2.7%
+  carried 1 unit; ticks are 1 - 2 s apart. That is a SNAPSHOT feed about once a second (as the NSE consolidated feed is), NOT a per-trade tape: every unit of volume is there, at the
+  price / side of its snapshot. The index ("NIFTY 50") history call answered a server error from TrueData (symbol name not accepted) - the index's own rate was not measured; TrueData's
+  homepage "up to 10 ticks per second" for NIFTY 50 is not shown for the futures. `TickRateMeterTests.cs`. Reading it changes nothing.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the
