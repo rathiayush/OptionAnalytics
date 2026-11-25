@@ -13,7 +13,8 @@ import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 const { Text } = Typography
 const SHOWN = 50
 const CRORE = 1e7
-const LOOKBACKS = [5, 15, 30, 60]
+const LOOKBACKS = [5, 15, 30, 60, 390]
+const lookbackText = (m) => (m >= 390 ? 'Whole day' : `${m} min`)
 const STRIKE_CHOICES = [3, 5, 8, 10, 12, 15]
 const hhmmss = (ms) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata' })
 const rupees = (v) => (!Number.isFinite(v) || v === 0 ? '₹0' : Math.abs(v) >= CRORE ? `₹${(v / CRORE).toFixed(2)} Cr` : `₹${(v / 1e5).toFixed(1)} L`)
@@ -113,7 +114,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
         <Tooltip title="And at least this many times the option's OWN usual tick (the median of its last 50) once it has one.">
           <span>≥ <InputNumber size="small" min={1} max={100} value={multiple} onChange={(v) => setMultiple(v ?? TICK_ORDER_DEFAULTS.multiple)} style={{ width: 64 }} /> × usual</span>
         </Tooltip>
-        <span>Last <Select size="small" value={lookback} onChange={setLookback} style={{ width: 80 }} options={LOOKBACKS.map((m) => ({ value: m, label: `${m} min` }))} /></span>
+        <span>Over <Select size="small" value={lookback} onChange={setLookback} style={{ width: 110 }} options={LOOKBACKS.map((m) => ({ value: m, label: lookbackText(m) }))} /></span>
         <Tooltip title="Deep OUT-of-the-money options are where protection (hedge positions) and lottery tickets trade - cheap, far from the money. Hide leaves them out of everything on the card (lean, map, table), Only shows just them; the table tags them HEDGE?.">
           <span>Hedge positions (deep OTM calls and puts) <Segmented size="small" value={hedgeMode} onChange={setHedgeMode} options={[{ value: 'all', label: 'All' }, { value: 'hide', label: 'Hide' }, { value: 'only', label: 'Only' }]} aria-label="Hedge positions" /> ≥ <Select size="small" value={farOtmSteps} onChange={setFarOtmSteps} style={{ width: 60 }} options={Array.from({ length: 10 }, (_, i) => ({ value: i + 1, label: i + 1 }))} /> strikes out</span>
         </Tooltip>
@@ -141,9 +142,9 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
       {!replay && state?.error && <Alert type="warning" showIcon message={`Option stream: ${state.error}`} />}
 
       <Space wrap size={[18, 6]} align="start">
-        <Tooltip title={`Money in the big orders of the last ${lookback} min by what they mean for the index: bullish ${rupees(summary.bullValue)} (calls bought, puts written) against bearish ${rupees(summary.bearValue)} (puts bought, calls written); a build-up counts in full, a covering / unwinding / no-OI read half.`}>
+        <Tooltip title={`Money in the big orders of ${lookback >= 390 ? 'the whole day' : `the last ${lookback} min`} by what they mean for the index: bullish ${rupees(summary.bullValue)} (calls bought, puts written) against bearish ${rupees(summary.bearValue)} (puts bought, calls written); a build-up counts in full, a covering / unwinding / no-OI read half.`}>
           <div>
-            <Text type="secondary" style={{ fontSize: 11 }}>Big money, last {lookback} min</Text>
+            <Text type="secondary" style={{ fontSize: 11 }}>Big money, {lookback >= 390 ? 'whole day' : `last ${lookback} min`}</Text>
             <div style={{ color, fontSize: 18, fontWeight: 600, lineHeight: 1.2 }}>{word}{summary.count > 0 ? ` ${summary.net > 0 ? '+' : ''}${Math.round(summary.net * 100)}%` : ''}</div>
             <Text type="secondary" style={{ fontSize: 11 }}>{summary.count} order{summary.count === 1 ? '' : 's'}{summary.sweeps ? ` · ${summary.sweeps} in sweeps` : ''}</Text>
           </div>
