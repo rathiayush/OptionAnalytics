@@ -1836,6 +1836,11 @@ All must pass before committing.
   column's net and read in the header. They are the BIG orders' profiles only (the server keeps orders over its floor and an order's OI change is the change since that option's previous
   tick), not every contract that traded. The FUTURES' DELTA PROFILE is a column beside the volume profile (buy - sell at every price row of the footprint's bars up to the clock, green
   right / red left, the net on top). `tests/tick-delta-profile.test.mjs`. A read - no strategy, alert or order. Not checked in a browser or against the real feed.
+  OPTION CDV / OBV PROFILE and the CUMULATIVE LINES (asked for - "option CDV / OBV profile, cumulative delta chart, OI CE - PE"; `cdvObvProfiles` / `cumulativeSeries` in `tickDeltaProfile.js`,
+  `TickCdvObvProfileCard.jsx`, `TickCumulativeCard.jsx`, under the option delta profiles; Side Net (CE - PE) / CE / PE, `optionanalytics.tickFlow.cdvObvSide`, the same row size): the big orders by the
+  futures' price row - CDV = the aggressor delta in lots (TrueData gives each order its side), OBV = each order's lots signed by whether the option's premium ROSE or FELL from its tick before
+  (`movePct`; no move = 0), a put flipped in Net. The cumulative chart is three lines a futures minute up to its end: the futures' cumulative delta (lots), the options' net CE - PE flow and the OI CE - PE
+  added (falling = puts written = bullish), no look-ahead (`tests/tick-delta-profile.test.mjs`). Big orders only; a read - no strategy, alert or order. Not checked in a browser or against the real feed.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the

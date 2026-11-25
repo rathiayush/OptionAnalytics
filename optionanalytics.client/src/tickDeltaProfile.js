@@ -61,3 +61,53 @@ export function futuresDeltaRows(bars) {
   const rows = [...map.values()].sort((a, b) => b.price - a.price).map((r) => ({ ...r, delta: r.buy - r.sell, total: r.buy + r.sell }))
   return { rows, net: rows.reduce((s, r) => s + r.delta, 0) }
 }
+
+// ---- Option CDV / OBV profile and the cumulative lines (asked for - "option CDV / OBV profile, cumulative delta chart, OI CE - PE") -------------------------
+
+/** The CDV and OBV profiles of the big option orders by futures price row, in lots. `side` 'net' (CE - PE, + bullish), 'ce' or 'pe' (that option's own).
+ *  CDV = the AGGRESSOR delta (TrueData gives each order its side: bought at the ask +, sold at the bid -). OBV = each order's lots signed by whether the option's
+ *  premium ROSE (+) or FELL (-) from its tick before (`movePct`; no move = 0), the On-Balance-Volume rule on the option's own ticks - so it needs no side. Returns
+ *  { rows (high to low: price, cdv, obv), cdv, obv, count }. A put's reading is flipped in 'net' (a put bought / a put whose premium rose is bearish). */
+export function cdvObvProfiles(orders, bars, rowSize, side = 'net') {
+  const row = rowSize > 0 ? rowSize : 1
+  const map = new Map()
+  let count = 0
+  for (const o of orders ?? []) {
+    if (side === 'ce' && o.type !== 'CE') continue
+    if (side === 'pe' && o.type !== 'PE') continue
+    const p = priceAt(bars, o.t)
+    if (p == null || !(o.lots > 0)) continue
+    const price = Math.floor(p / row + 1e-9) * row
+    const r = map.get(price) ?? { price, cdv: 0, obv: 0 }
+    const dir = side === 'net' && o.type === 'PE' ? -1 : 1
+    r.cdv += dir * o.side * o.lots
+    r.obv += dir * Math.sign(Number.isFinite(o.movePct) ? o.movePct : 0) * o.lots
+    map.set(price, r)
+    count++
+  }
+  const rows = [...map.values()].sort((a, b) => b.price - a.price)
+  return { rows, cdv: rows.reduce((s, r) => s + r.cdv, 0), obv: rows.reduce((s, r) => s + r.obv, 0), count }
+}
+
+/** The CUMULATIVE lines through the day, one point a futures minute (`bars` = { time, buy, sell } in units, `lotSize` the futures' lot): the futures' cumulative
+ *  delta (lots), the option NET flow (calls' + puts' flow as in the profile, cumulative lots) and the OI (CE - PE) (call OI added less put OI added, cumulative lots;
+ *  negative = puts written = bullish). Each point counts the orders up to the END of its minute. [{ ms, fut, net, oi }]. */
+export function cumulativeSeries(orders, bars, lotSize) {
+  const lot = Math.max(1, lotSize || 1)
+  const list = [...(orders ?? [])].sort((a, b) => a.t - b.t)
+  let k = 0
+  let fut = 0
+  let net = 0
+  let oi = 0
+  return (bars ?? []).map((b) => {
+    const ms = msOf(b.time)
+    fut += ((b.buy ?? 0) - (b.sell ?? 0)) / lot
+    while (k < list.length && list[k].t < ms + 60_000) {
+      const o = list[k++]
+      const sign = o.type === 'CE' ? 1 : -1
+      net += sign * o.side * (o.lots || 0)
+      if (Number.isFinite(o.oiChange)) oi += sign * (o.oiChange / Math.max(1, o.lotSize || 1))
+    }
+    return { ms, fut, net, oi }
+  })
+}
