@@ -6,6 +6,7 @@ import { FoldText } from './FoldText.jsx'
 import { TickFootprintChart } from './TickFootprintChart.jsx'
 import { TickBubbleChart } from './TickBubbleChart.jsx'
 import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
+import { futuresDeltaRows } from './tickDeltaProfile.js'
 import { absorptionExhaustion, auctionOf, barVwaps, cotOfBars, cotRead, icebergs, stackedImbalances, unfinishedAuctions, volumeProfile } from './tickFlowTools.js'
 import { MIN, aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, msOf, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
 
@@ -92,7 +93,7 @@ export default function TickFlowPage() {
   const [minLots, setMinLots] = usePersistedState('optionanalytics.tickFlow.minLots', 1)
   const [minQty, setMinQty] = usePersistedState('optionanalytics.tickFlow.minQty', 1)
   const [mode, setMode] = usePersistedState('optionanalytics.tickFlow.mode', 'live')
-  const [toolsOn, setToolsOn] = usePersistedState('optionanalytics.tickFlow.tools', { vwap: true, profile: true, auction: true, cot: true, absorption: true, stacked: true, iceberg: true })
+  const [toolsOn, setToolsOn] = usePersistedState('optionanalytics.tickFlow.tools', { vwap: true, profile: true, delta: true, auction: true, cot: true, absorption: true, stacked: true, iceberg: true })
   const [bubbleSize, setBubbleSize] = usePersistedState('optionanalytics.tickFlow.bubbleSize', 34)
   const days = useMemo(() => weekdayChoices(istToday(), 6), [])
   const [replayDay, setReplayDay] = useState(() => days[1] ?? days[0])
@@ -144,6 +145,7 @@ export default function TickFlowPage() {
     const out = {}
     if (on.vwap) out.vwap = barVwaps(bars, rowSize)
     if (on.profile) out.profile = volumeProfile(bars)
+    if (on.delta) out.delta = futuresDeltaRows(bars)
     if (on.auction) { out.auction = bars.map(auctionOf); out.unfinished = unfinishedAuctions(bars) }
     if (on.stacked) out.stacked = bars.map((b) => stackedImbalances(b.levels, rowSize))
     if (on.cot) {
@@ -226,8 +228,8 @@ export default function TickFlowPage() {
               <Checkbox checked={rowDelta} onChange={(e) => setRowDelta(e.target.checked)}>Delta per row</Checkbox>
               <Tooltip title="Footprint tools, worked out on this page's own ticks (Level 1 - no book): VWAP, volume profile with POC / value area, finished / unfinished auctions, stacked imbalances, COT high / low and its read, scored absorption / exhaustion, icebergs inferred from best-quote refills.">
                 <Select mode="multiple" maxTagCount={0} maxTagPlaceholder={() => `Tools (${Object.values(toolsOn ?? {}).filter(Boolean).length})`} style={{ width: 130 }} value={Object.keys(toolsOn ?? {}).filter((k) => toolsOn[k])}
-                  onChange={(v) => setToolsOn(Object.fromEntries(['vwap', 'profile', 'auction', 'stacked', 'cot', 'absorption', 'iceberg'].map((k) => [k, v.includes(k)])))}
-                  options={[{ value: 'vwap', label: 'VWAP' }, { value: 'profile', label: 'Volume profile' }, { value: 'auction', label: 'Auctions (FA / UA)' }, { value: 'stacked', label: 'Stacked imbalances' }, { value: 'cot', label: 'COT high / low' }, { value: 'absorption', label: 'Absorption / exhaustion' }, { value: 'iceberg', label: 'Icebergs' }]} />
+                  onChange={(v) => setToolsOn(Object.fromEntries(['vwap', 'profile', 'delta', 'auction', 'stacked', 'cot', 'absorption', 'iceberg'].map((k) => [k, v.includes(k)])))}
+                  options={[{ value: 'vwap', label: 'VWAP' }, { value: 'profile', label: 'Volume profile' }, { value: 'delta', label: 'Delta profile (futures)' }, { value: 'auction', label: 'Auctions (FA / UA)' }, { value: 'stacked', label: 'Stacked imbalances' }, { value: 'cot', label: 'COT high / low' }, { value: 'absorption', label: 'Absorption / exhaustion' }, { value: 'iceberg', label: 'Icebergs' }]} />
               </Tooltip>
               {replay && <Select value={replayDay} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
               {replay && <Button size="small" onClick={() => setReload((n) => n + 1)}>Reload</Button>}

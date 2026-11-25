@@ -5,6 +5,7 @@ import { FoldText } from './FoldText.jsx'
 import { TICK_ORDER_DEFAULTS, bigEnough, bigTradesSummary, filterBigOrders, hitText, ordersUpTo } from './tickBigOrders.js'
 import { isHedgePosition, otmSteps } from './tickLiquidityMap.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
+import { TickDeltaProfileCard } from './TickDeltaProfileCard.jsx'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
 
 const { Text } = Typography
@@ -155,6 +156,8 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
       </Space>
 
       <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
+
+      <TickDeltaProfileCard orders={big} priceBars={priceBars} index={index} />
 
       <Table size="small" pagination={false} columns={columns} dataSource={rows} scroll={{ x: 'max-content' }}
         locale={{ emptyText: (replay || state?.underlying) ? (orders.length ? 'No order passes the filters' : replay ? 'No big option order up to the clock' : 'No big option order yet') : 'Pick an index above' }} />
