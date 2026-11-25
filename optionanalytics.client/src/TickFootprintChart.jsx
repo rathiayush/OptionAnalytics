@@ -11,6 +11,7 @@ const AXIS_W = 62
 const STRIP_H = 64
 const COT_H = 30
 const PROFILE_W = 96
+const DELTA_W = 90
 const TOOL = { vwap: '#e040fb', ua: '#8c8c8c', abs: '#faad14', exh: '#ff7a45', cot: '#40a9ff', iceberg: '#13c2c2', profile: '#4c6ef5', value: 'rgba(76,110,245,0.18)' }
 
 function pill(g, text, x, y, color, alpha = 1) {
@@ -41,7 +42,9 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const visibleRef = useRef(14)
   const widthRef = useRef(900)
   const nRef = useRef(0)
-  const profW = tools?.profile ? Math.min(PROFILE_W, Math.round(width * 0.2)) : 0
+  const volW = tools?.profile ? Math.min(PROFILE_W, Math.round(width * 0.2)) : 0
+  const deltaW = tools?.delta ? Math.min(DELTA_W, Math.round(width * 0.16)) : 0
+  const profW = volW + deltaW
   const profWRef = useRef(0)
   useEffect(() => { profWRef.current = profW }, [profW])
   const stripH = STRIP_H + (tools?.cot ? COT_H : 0)
@@ -216,10 +219,10 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
       const pr = tools.profile
       const maxT = Math.max(1, ...pr.rows.map((r) => r.total))
       g.fillStyle = TOOL.value
-      if (pr.vah != null && pr.val != null) g.fillRect(plotW, y(pr.vah), profW, y(pr.val) - y(pr.vah) + rowH)
+      if (pr.vah != null && pr.val != null) g.fillRect(plotW, y(pr.vah), volW, y(pr.val) - y(pr.vah) + rowH)
       for (const r of pr.rows) {
         if (r.price > layout.hiRow + 1e-9 || r.price < layout.loRow - 1e-9) continue
-        const w = ((profW - 6) * r.total) / maxT
+        const w = ((volW - 6) * r.total) / maxT
         g.fillStyle = r.price === pr.poc ? COLORS.poc : TOOL.profile
         g.globalAlpha = r.price === pr.poc ? 0.9 : 0.65
         g.fillRect(plotW + 2, y(r.price) + 1, Math.max(1, w), rowH - 2)
@@ -232,6 +235,24 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
         g.strokeStyle = color; g.setLineDash([2, 4]); g.beginPath(); g.moveTo(0, yy); g.lineTo(plotW, yy); g.stroke(); g.setLineDash([])
         g.fillStyle = color; g.fillText(label, plotW + 3, yy - 6)
       }
+    }
+    if (tools?.delta?.rows?.length) {
+      // THE FUTURES' DELTA PROFILE: buy - sell at every price row, green right of its centre line / red left, scaled to the biggest row.
+      const dr = tools.delta
+      const x0d = plotW + volW
+      const mid = x0d + deltaW / 2
+      const maxD = Math.max(1, ...dr.rows.map((r) => Math.abs(r.delta)))
+      g.strokeStyle = COLORS.grid; g.beginPath(); g.moveTo(mid, 10); g.lineTo(mid, 10 + (layout.rows + 1) * rowH); g.stroke()
+      for (const r of dr.rows) {
+        if (r.price > layout.hiRow + 1e-9 || r.price < layout.loRow - 1e-9) continue
+        const w = (Math.abs(r.delta) / maxD) * (deltaW / 2 - 4)
+        g.fillStyle = r.delta >= 0 ? COLORS.buy : COLORS.sell
+        g.globalAlpha = 0.85
+        g.fillRect(r.delta >= 0 ? mid : mid - w, y(r.price) + 1, Math.max(1, w), rowH - 2)
+        g.globalAlpha = 1
+      }
+      g.font = '9px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillStyle = dr.net >= 0 ? COLORS.buy : COLORS.sell
+      g.fillText(`Δ ${dr.net >= 0 ? '+' : ''}${fmtQty(dr.net, lotSize, showLots)}`, mid, 6)
     }
     for (const u of tools?.unfinished ?? []) {
       const lastIdx = first + shown.length

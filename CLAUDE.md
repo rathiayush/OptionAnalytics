@@ -1827,6 +1827,15 @@ All must pass before committing.
   (pills with ✓ / ✗; pending / confirmed / failed by the later bars) and ICEBERGS inferred from LEVEL 1 only (the same price and side traded again and again while the best quote refills -
   `icebergs`; there is no book, so it is an inference, not the engine's detection). Each bar reads only the ticks up to the replay clock (`tests/tick-flow-tools.test.mjs`). A read -
   no strategy, alert or order. Not checked against the real feed or in a browser.
+  DELTA PROFILES ON THE TICK FLOW PAGE (asked for - "delta profile of OI CE - PE and net CE - PE and then total net on true tick data ... for futures data as well";
+  `tickDeltaProfile.js`, `TickDeltaProfileCard.jsx` inside the Big option orders card under the liquidity map, the footprint's "Delta profile (futures)" tool - this page's OWN maths,
+  nothing shared with OI Replay's delta profile): the card's big option orders (its filters applied, up to the replay clock) laid on the NEAR FUTURES' price rows (TrueData has no
+  index feed; `priceAt` = the close of the minute the order came in, rows 5 / 10 / 25 / 50 pt NIFTY, 10 / 20 / 50 / 100 BANKNIFTY, `optionanalytics.tickFlow.optProfileRows`) in three
+  columns: NET (CE - PE) = the option flow in lots (call bought / put sold +, call sold / put bought -; + bullish), OI (CE - PE) = the call OI added less the put OI added in lots
+  (negative = puts written = bullish, green), TOTAL (OI - Net) = the OI less the net scaled to the OI's size (biggest |OI| row over the biggest |net| row; negative = bullish) - with each
+  column's net and read in the header. They are the BIG orders' profiles only (the server keeps orders over its floor and an order's OI change is the change since that option's previous
+  tick), not every contract that traded. The FUTURES' DELTA PROFILE is a column beside the volume profile (buy - sell at every price row of the footprint's bars up to the clock, green
+  right / red left, the net on top). `tests/tick-delta-profile.test.mjs`. A read - no strategy, alert or order. Not checked in a browser or against the real feed.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the
