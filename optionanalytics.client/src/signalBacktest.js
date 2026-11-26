@@ -1391,6 +1391,34 @@ const X_AVG = { param: { label: '≥', unit: '× the average', default: 2, min: 
 const GREW = { param: { label: 'by ≥', unit: '% (last 2 min v 10)', default: 25, min: 0, max: 500, step: 5 } }
 const SHRANK = { param: { label: 'by ≥', unit: '% (last 2 min v 10)', default: 40, min: 0, max: 100, step: 5 } }
 const OF_VOL = { param: { label: 'by ≥', unit: '% of its volume', default: 0, min: 0, max: 100, step: 1 } }
+// Which touch of a wall a candle is: n[k] = 1, 2, 3 ... on the candle that CONFIRMS a touch (reached the wall, closed back
+// the right side of it), 0 elsewhere. A wall is the price the heatmap showed at the candle before, matched to an earlier one
+// within `tol` of the price; candles in a row at it are one touch. Worked out once a day view and kept.
+const TOUCH_READS = new WeakMap()
+function wallTouches(f, side, tol) {
+  let kept = TOUCH_READS.get(f.liq)
+  if (!kept) TOUCH_READS.set(f.liq, kept = new Map())
+  const key = `${side}|${tol}`
+  if (kept.has(key)) return kept.get(key)
+  const up = side === 'sup', c = f.fc, out = new Int8Array(c.length), walls = []
+  for (let k = 1; k < c.length; k++) {
+    const wl = f.liq[k - 1]?.[side]
+    if (!wl || !(c[k] > 0)) continue
+    const hit = up ? f.fl[k] <= wl.price * (1 + tol) && c[k] > wl.price : f.fh[k] >= wl.price * (1 - tol) && c[k] < wl.price
+    if (!hit) continue
+    let rec = walls.find((x) => Math.abs(x.price - wl.price) <= tol * wl.price)
+    if (!rec) walls.push(rec = { price: wl.price, count: 0, last: -9 })
+    if (rec.last !== k - 1) { rec.count++; out[k] = Math.min(rec.count, 100) }
+    rec.last = k
+  }
+  kept.set(key, out)
+  return out
+}
+const TOUCH_NO = {
+  label: 'Touch', unit: '', default: 0, min: 0, max: 3, step: 1, wide: true,
+  choices: [{ value: 0, label: '2nd or 3rd' }, { value: 2, label: '2nd only' }, { value: 3, label: '3rd only' }],
+  text: (v) => ({ 2: 'the 2nd touch', 3: 'the 3rd touch' }[Math.round(Number(v))] ?? 'the 2nd or 3rd touch'),
+}
 const FLOW_CONDITIONS = [
   {
     id: 'futDelta', group: 'OrderFlow', name: "Futures Δ (the candle's buy − sell)",
@@ -1529,6 +1557,11 @@ const FLOW_CONDITIONS = [
       opt('nearBid', 'A bid wall (support) close under the price', 'nearAsk', NEAR(0.1)), opt('nearAsk', 'An offer wall (resistance) close over the price', 'nearBid', NEAR(0.1)),
       opt('heldBid', 'Touched a bid wall, closed back above (support held)', 'heldAsk', NEAR(0.05)),
       opt('heldAsk', 'Touched an offer wall, closed back below (resistance held)', 'heldBid', NEAR(0.05)),
+      // THE 2nd / 3rd TOUCH OF THE SAME WALL (asked for - "liquidity heatmap has resistance or support, on 2 and 3 touch take
+      // entries"): each time a candle reaches the wall and closes back (rejected), counted per wall price - a candle after
+      // one clear of it starts a new touch, candles in a row are one.
+      opt('touchBid', 'Touched the same bid wall (support) again - the Nth time, closed back above', 'touchAsk', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO }),
+      opt('touchAsk', 'Touched the same offer wall (resistance) again - the Nth time, closed back below', 'touchBid', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO }),
       opt('brokeAsk', 'Broke above an offer wall (resistance gave way)', 'brokeBid', { ...W, ...OVER }),
       opt('brokeBid', 'Broke below a bid wall (support gave way)', 'brokeAsk', { ...W, ...OVER }),
       // Its size over the last 2 minutes against its 10-minute average (the liquidity map's "building" = 25% more,
@@ -1538,7 +1571,7 @@ const FLOW_CONDITIONS = [
       opt('bidBigger', 'The nearest bid wall bigger than the nearest offer wall', 'askBigger', LEAD),
       opt('askBigger', 'The nearest offer wall bigger than the nearest bid wall', 'bidBigger', LEAD),
     ],
-    test: (d, i, v, w, p) => {
+    test: (d, i, v, w, p, p2) => {
       const f = flowOf(d)
       if (!f) return false
       const at = (k, side) => (k >= 0 ? f.liq[k]?.[side] ?? null : null)
@@ -1560,6 +1593,11 @@ const FLOW_CONDITIONS = [
           if (hit < 0) return false
           const lv = at(hit - 1, up ? 'sup' : 'res').price
           return up ? c[i] > lv : c[i] < lv
+        }
+        case 'touchBid': case 'touchAsk': {
+          const n = wallTouches(f, v === 'touchBid' ? 'sup' : 'res', frac(p))
+          const ok = (t) => (p2 === 2 || p2 === 3 ? t === p2 : t === 2 || t === 3)
+          return anyIn(i, w, (k) => ok(n[k]))
         }
         case 'brokeAsk': return brokeLevel(c, (k) => at(k, 'res')?.price ?? null, i, w, true, p)
         case 'brokeBid': return brokeLevel(c, (k) => at(k, 'sup')?.price ?? null, i, w, false, p)
@@ -1608,6 +1646,63 @@ const FLOW_CONDITIONS = [
   },
 ]
 const FLOW_IDS = new Set(FLOW_CONDITIONS.map((c) => c.id))
+
+// THE OPTION CDV / OBV LINES (asked for - "cdv and obv started going down"): the running totals OI Replay's Option CDV & OBV
+// card draws - the options' bar-proxy delta (CDV) and price-direction volume (OBV) added up from 09:15 (`odm`, the minutes
+// the rule's CDV / OBV profile conditions read), a candle taking the total at its last minute - falling / rising over the
+// look-back by more than a tolerance of the line's range so far (as the futures CVD's). Side: Net (CE − PE) / CE / PE.
+const OPT_LINES = new WeakMap()
+function optionLines(d, side) {
+  if (!Array.isArray(d?.odm) || !d.odm.length) return null
+  let kept = OPT_LINES.get(d)
+  if (!kept) OPT_LINES.set(d, kept = new Map())
+  if (kept.has(side)) return kept.get(side)
+  const [a, b] = side === 1 ? [1, 0] : side === 2 ? [0, 1] : [1, -1]
+  const minutes = [...d.odm].sort((x, y) => x.t - y.t)
+  let cdv = 0, obv = 0
+  const cum = minutes.map((m) => { cdv += a * m.ce + b * m.pe; obv += a * m.ceObv + b * m.peObv; return { t: m.t, cdv, obv } })
+  const n = d.t.length, out = { cdv: new Array(n).fill(NaN), obv: new Array(n).fill(NaN) }
+  const span = (Number(d.tf) || 1) - 1
+  let at = -1
+  for (let k = 0; k < n; k++) {
+    const last = d.t[k] + span * 60_000
+    while (at + 1 < cum.length && cum[at + 1].t <= last) at++
+    if (at >= 0) { out.cdv[k] = cum[at].cdv; out.obv[k] = cum[at].obv }
+  }
+  kept.set(side, out)
+  return out
+}
+const OPT_SIDE = {
+  label: 'Side', unit: '', default: 0, min: 0, max: 2, step: 1, wide: true,
+  choices: [{ value: 0, label: 'Net (CE − PE)' }, { value: 1, label: 'CE' }, { value: 2, label: 'PE' }],
+  text: (v) => ['Net (CE − PE)', 'CE', 'PE'][Math.round(Number(v))] ?? 'Net (CE − PE)',
+}
+const OPT_FLOW_CONDITIONS = [
+  {
+    id: 'optFlow', group: 'OptionFlow', name: 'Option CDV / OBV lines (OI Replay\'s Option CDV & OBV card)',
+    options: [
+      opt('bothFalling', 'CDV and OBV both falling (started going down)', 'bothRising', { ...TOL, param2: OPT_SIDE }),
+      opt('bothRising', 'CDV and OBV both rising (started going up)', 'bothFalling', { ...TOL, param2: OPT_SIDE }),
+      opt('cdvFalling', 'CDV falling', 'cdvRising', { ...TOL, param2: OPT_SIDE }), opt('cdvRising', 'CDV rising', 'cdvFalling', { ...TOL, param2: OPT_SIDE }),
+      opt('obvFalling', 'OBV falling', 'obvRising', { ...TOL, param2: OPT_SIDE }), opt('obvRising', 'OBV rising', 'obvFalling', { ...TOL, param2: OPT_SIDE }),
+    ],
+    test: (d, i, v, w, p, p2) => {
+      const lines = optionLines(d, Math.round(Number(p2) || 0))
+      if (!lines) return false
+      const move = (series) => lineMove(series, i, w, p)
+      switch (v) {
+        case 'bothFalling': return move(lines.cdv) === -1 && move(lines.obv) === -1
+        case 'bothRising': return move(lines.cdv) === 1 && move(lines.obv) === 1
+        case 'cdvFalling': return move(lines.cdv) === -1
+        case 'cdvRising': return move(lines.cdv) === 1
+        case 'obvFalling': return move(lines.obv) === -1
+        case 'obvRising': return move(lines.obv) === 1
+        default: return false
+      }
+    },
+    show: (d, i) => { const l = optionLines(d, 0); return l && Number.isFinite(l.cdv[i]) ? `option CDV ${Math.round(l.cdv[i]).toLocaleString('en-IN')} · OBV ${Math.round(l.obv[i]).toLocaleString('en-IN')}` : 'option CDV / OBV —' },
+  },
+]
 const BOOK_IDS = new Set(['liqRead', 'liqWalls', 'liqLean'])
 const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, level: (d) => d.prevVp?.[key] })
 // A pivot point of the previous session's high / low / close (`pivotLevels`) - read on spot, fixed all day. Its mirror is
@@ -2219,6 +2314,7 @@ export const RULE_CONDITIONS = [
   ...OBV_CONDITIONS,
   ...OI_PROFILE_CONDITIONS,
   ...FUT_PROFILE_CONDITIONS,
+  ...OPT_FLOW_CONDITIONS,
   ...FLOW_CONDITIONS,
 ]
 // Lines saved while the volume profile levels were today's developing ones (POC / HVN / LVN): read as the previous

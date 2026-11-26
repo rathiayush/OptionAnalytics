@@ -77,6 +77,7 @@ const GROUP_TITLE = {
   ObvProfile: "Option OBV profile on spot (OI Replay's CDV / OBV profile card - the OBV column; Side: Net / CE / PE)",
   OiProfile: "OI profile on spot - Side: OI Net (CE − PE) / CE OI / PE OI (the option writer's view - negative = bullish)",
   FuturesProfile: "Futures delta profile (OI Replay's card - the footprint by price, read on the futures' price)",
+  OptionFlow: "Option CDV / OBV lines (OI Replay's Option CDV & OBV card - falling / rising; Side: Net / CE / PE)",
   OrderFlow: 'Futures order flow (the Order Flow page - Δ, cumulative Δ, liquidity heatmap)',
 }
 const CONDITION_OF = Object.fromEntries(RULE_CONDITIONS.map((c) => [c.id, c]))
