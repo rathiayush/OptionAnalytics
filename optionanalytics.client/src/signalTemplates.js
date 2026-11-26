@@ -38,14 +38,14 @@ const TODAY = { param3: 1, param4: 0 }
 /** The templates: { id, family, name, idea, rule: { tree, action, mirror }, settings: { timeframe, slPct, targetPct,
  *  trailGap?, trailStart?, timeStopMin? } }. */
 export const RULE_TEMPLATES = [
-  // THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - the "Direction, Area, Trigger" breakdown of a trading champion's setup:
+  // GIANLUCA BRUNI'S "TRIPLE SPRINT" - THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - the "Direction, Area, Trigger" breakdown of his setup:
   // previous session's VAH / VAL as the area, a 15-minute candle closing outside it on unusually LOW volume as the trigger,
   // entry at that close, stop at the breakout candle's low, a fixed 1:2 target; a ForexFactory write-up of the same setup adds
   // the close above the prior candle's high and volume under its 20-candle average). The public breakdowns are retail
   // summaries - his own interviews put half his results in position sizing / regime filters, which a backtest of the rule
   // alone does not have.
   {
-    id: 'vaLowVolBreakout', family: 'breakout', name: 'Value area low-volume breakout (VAH / VAL, 15 min, 1:2)',
+    id: 'vaLowVolBreakout', family: 'breakout', name: 'Bruni Triple Sprint - value area low-volume breakout (15 min, 1:2)',
     idea: 'Area: the previous session\'s value area (VAH / VAL). Trigger: a 15-minute candle CLOSES above the VAH (just broke out - within that candle) and above the candle before\'s high, on LOW volume - at most its average over the last 20 candles: the sellers have dried up, so the path of least resistance is up. Entry at that close; the stop is on SPOT at the breakout candle\'s low, the target on spot twice that risk (1:2); no premium SL / target. Mirror: a close below the VAL and the candle before\'s low on low volume, the stop at the candle\'s high. Volume is the near futures\' (else the index\'s) - a day with none gives no signal.',
     rule: { tree: ALL(L('valueArea', 'crossedAboveVah', { param: 0, windowMin: 15 }), L('candleBreak', 'aboveHigh', { param: 0 }), L('candleVol', 'low', { param: 1, param2: 20 })), action: 'buyCE', mirror: true },
     settings: { timeframe: 15, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 2 },

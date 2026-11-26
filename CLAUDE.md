@@ -1550,7 +1550,7 @@ All must pass before committing.
   default) and "prints ≥" how many (`param2`, 1 - 50); the mirror swaps the side, the numbers kept. Only RECORDED minutes: an
   estimated day / minute has none (its prints are made up from candles) and the server sends a day's latest 5 000 prints, so a
   day with that many has none known before its first (`prints[i]` null - the line does not hold there).
-  THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - a trading champion's "Direction, Area, Trigger" breakdown, "check the internet for
+  THE VALUE AREA LOW-VOLUME BREAKOUT - "Bruni Triple Sprint" (asked for - Gianluca Bruni's "Direction, Area, Trigger" breakdown; no source for the name's own rules was found online, "check the internet for
   more"; template `vaLowVolBreakout` in the Breakout family, `tests/signal-backtest-va-breakout.test.mjs`): 15-minute candles, the
   previous session's value area (`valueArea`'s new `crossedAboveVah` / `crossedBelowVal` - a candle CLOSED out of it in the look-back
   and is still out, each the other's mirror; the old `prevVah` / `prevVal` lines are untouched so saved rules mirror as they did), a
