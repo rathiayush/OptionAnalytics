@@ -416,7 +416,7 @@ public sealed class CdvUnderlyingState
             // Only a trade moves the total, so only a trade moves its bars (a tick without one carries an old trade time -
             // see CdvStrikeRuntime.ApplyPriceTick) - bar the very first one.
             var hasBars = _currentBar is not null || _closedBars.Count > 0;
-            closedAggregateBar = _cdvBackfillPending || (deltaVolume <= 0 && hasBars) ? null : UpdateBar_NoLock(tick.ExchangeTimestamp);
+            closedAggregateBar = _cdvBackfillPending || (deltaVolume <= 0 && hasBars) ? null : UpdateBar_NoLock(SpotUnderlyingState.FiledTime(tick));
         }
 
         if (closedIsCall is { } isCall) AtmBarClosed?.Invoke(isCall, closedBar);
@@ -503,6 +503,25 @@ public sealed class CdvUnderlyingState
 
     /// <summary>The rebuild did not happen (nothing came back) - live ticks draw the total again. A no-op once
     /// FinalizeCdvBackfill has run.</summary>
+    /// <summary>When the pending rebuild began, null when none is pending.</summary>
+    public DateTimeOffset? BackfillPendingSince
+    {
+        get { lock (_lock) return _cdvBackfillPending ? _cdvBackfillStartedAt : null; }
+    }
+
+    /// <summary>A rebuild still pending after `maxAge` (its Dhan calls hung or kept failing) is dropped so live ticks move
+    /// the totals and draw bars again - the totals stood still for hours behind a rebuild that never ended. True when it
+    /// was dropped.</summary>
+    public bool AbandonStalledBackfill(TimeSpan maxAge, DateTimeOffset now)
+    {
+        lock (_lock)
+        {
+            if (!_cdvBackfillPending || now - _cdvBackfillStartedAt < maxAge) return false;
+        }
+        AbandonCdvBackfill();
+        return true;
+    }
+
     public void AbandonCdvBackfill()
     {
         lock (_lock)
