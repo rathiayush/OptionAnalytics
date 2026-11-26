@@ -27,8 +27,15 @@ test('the 2nd and 3rd touch of the same bid wall fire; the 1st and the 4th do no
   assert.equal(touch(d, 'touchBid', 10, 3), true)    // the 2nd one within the look-back
 })
 
-test('the touch choice: only the 2nd, only the 3rd', () => {
+test('the touch choice: only the 2nd, only the 3rd, the 4th, the 5th, every touch', () => {
   const d = wallDay()
+  const five = wallDay([3, 8, 14, 20, 25])
+  assert.equal(touch(five, 'touchBid', 20, 1, 4), true)
+  assert.equal(touch(five, 'touchBid', 14, 1, 4), false)
+  assert.equal(touch(five, 'touchBid', 25, 1, 5), true)
+  assert.equal(touch(five, 'touchBid', 20, 1, 5), false)
+  assert.equal(touch(five, 'touchBid', 25, 1, 0), false)   // the default still 2nd / 3rd only
+  for (const [i, want] of [[3, true], [8, true], [9, false], [14, true], [20, true], [10, false]]) assert.equal(touch(d, 'touchBid', i, 1, 1), want, `every touch at ${i}`)
   assert.equal(touch(d, 'touchBid', 8, 1, 2), true)
   assert.equal(touch(d, 'touchBid', 14, 1, 2), false)
   assert.equal(touch(d, 'touchBid', 14, 1, 3), true)
@@ -80,4 +87,37 @@ test('the template: both lines, mirrored, every part a real condition', () => {
   walk(t.rule.tree)
   assert.deepEqual(lines.map((l) => `${l.id}:${l.value}`), ['optFlow:bothRising', 'liqWalls:touchBid'])
   assert.deepEqual(mirrorLines(lines).map((l) => `${l.id}:${l.value}`), ['optFlow:bothFalling', 'liqWalls:touchAsk'])
+})
+
+// THE HEATMAP'S COLOURS: the nearest wall is a weak one (3x); a red one (9x) sits further down. "Any wall" reads the weak one,
+// "Yellow or red" and "Red only" skip it for the hot one.
+function heatDay() {
+  const n = 12
+  const weak = { price: 25020, strength: 3, lots: 100, trend: 'holding' }, hot = { price: 25000, strength: 9, lots: 900, trend: 'holding' }
+  const fc = Array(n).fill(25025), fl = Array(n).fill(25022), fh = Array(n).fill(25030)
+  fl[5] = 25000; fc[5] = 25010   // dips through the weak wall to the red one and closes back above the red one
+  return { ok: true, flow: { fc, fl, fh, liq: Array.from({ length: n }, () => ({ sup: weak, res: null, sups: [weak, hot], ress: [] })) } }
+}
+const near = (d, v, i, w, p3, p = 0.01) => cond('liqWalls').test(d, i, v, w, p, 0, p3)
+
+test('the heatmap colour picks the nearest yellow / red wall, not the nearest wall', () => {
+  const d = heatDay()
+  assert.equal(near(d, 'nearBid', 0, 1, 0, 0.1), true)        // the weak wall at 25020 is near
+  assert.equal(near(d, 'nearBid', 0, 1, 8, 0.1), true)        // the red one at 25000 is within 0.1% too
+  assert.equal(near(d, 'nearBid', 0, 1, 8, 0.01), false)      // ... but not within 0.01%
+  assert.equal(near(d, 'heldBid', 5, 1, 8, 0.05), true)       // dipped to the red wall and closed back above it
+  assert.equal(near(d, 'brokeBid', 5, 1, 0, 0), true)         // through the weak wall: broken
+  assert.equal(near(d, 'brokeBid', 5, 1, 8, 0), false)        // the red wall held
+  const none = heatDay(); for (const x of none.flow.liq) x.sups = [x.sup]
+  assert.equal(near(none, 'nearBid', 0, 1, 4, 0.1), false)    // no wall as strong as yellow
+})
+
+test('the colour choice is a dropdown on every price-level wall option, any wall by default', () => {
+  for (const v of ['nearBid', 'nearAsk', 'heldBid', 'heldAsk', 'touchBid', 'touchAsk', 'brokeBid', 'brokeAsk']) {
+    const o = cond('liqWalls').options.find((x) => x.value === v)
+    assert.deepEqual(o.param3.choices.map((c) => c.value), [0, 4, 8], v)
+    assert.equal(o.param3.default, 0)
+  }
+  assert.equal(cleanLine({ id: 'liqWalls', value: 'heldBid', param3: 8 }).param3, 8)
+  assert.equal(mirrorLines([cleanLine({ id: 'liqWalls', value: 'heldBid', param3: 8 })])[0].param3, 8)
 })
