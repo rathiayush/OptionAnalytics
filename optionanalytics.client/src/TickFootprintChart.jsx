@@ -42,8 +42,11 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   const visibleRef = useRef(14)
   const widthRef = useRef(900)
   const nRef = useRef(0)
-  const volW = tools?.profile ? Math.min(PROFILE_W, Math.round(width * 0.2)) : 0
-  const deltaW = tools?.delta ? Math.min(DELTA_W, Math.round(width * 0.16)) : 0
+  // ON A PHONE (under 520 px) the volume / delta columns take a smaller share and the bars stand wider than the 4 a monitor's
+  // rule would squeeze in - the cells' numbers need ~58 px a bar.
+  const narrow = width < 520
+  const volW = tools?.profile ? Math.min(PROFILE_W, Math.round(width * (narrow ? 0.13 : 0.2))) : 0
+  const deltaW = tools?.delta ? Math.min(DELTA_W, Math.round(width * (narrow ? 0.1 : 0.16))) : 0
   const profW = volW + deltaW
   const profWRef = useRef(0)
   useEffect(() => { profWRef.current = profW }, [profW])
@@ -59,7 +62,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
   }, [])
 
   // By default as many bars as fit at a readable width (~74 px each): a phone shows 4, a monitor 15+.
-  const visible = picked ?? Math.max(4, Math.floor((width - AXIS_W - profW) / 74))
+  const visible = picked ?? Math.max(narrow ? 3 : 4, Math.floor((width - AXIS_W - profW) / (narrow ? 56 : 74)))
   useEffect(() => { visibleRef.current = visible }, [visible])
   const n = bars.length
   useEffect(() => { widthRef.current = width; nRef.current = n }, [width, n])
@@ -196,7 +199,8 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
       }
       // The strip under the bars: delta, cumulative delta, volume, time (fewer lines when the bar is narrow).
       const sy = 10 + (layout.rows + 1) * rowH + 8
-      if (tools?.cot) {
+      // The COT lines need ~58 px a bar - narrower, they ran into the next bar's.
+      if (tools?.cot && colW >= 58) {
         const c = tools.cot[first + i]
         g.font = '10px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'
         const f = (v) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${fmtQty(v, lotSize, showLots)}`)
@@ -318,6 +322,7 @@ export function TickFootprintChart({ bars, cvd, rowSize, lotSize, showLots, last
           setOffset(Math.max(0, Math.min(Math.max(0, n - 1), drag.current.offset + moved)))
         }}
         onPointerUp={() => { drag.current = null }}
+        onPointerCancel={() => { drag.current = null }}
         onDoubleClick={() => { setOffset(0); setRowZoom(1) }}
       />
     </div>

@@ -185,7 +185,7 @@ export default function TickFlowPage() {
   const coverage = coveragePct(mt?.bookedVolume ?? 0, mt?.exchangeVolume ?? 0)
 
   return (
-    <div style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px 120px' : '24px 16px 120px', overflowX: 'clip' }}>
+    <div className="oa-tick-page" style={{ maxWidth: 2600, margin: '0 auto', padding: narrow ? '16px 8px 120px' : '24px 16px 120px', overflowX: 'clip' }}>
       <Space direction="vertical" size={14} style={{ width: '100%' }}>
         <Space align="center" size={16} wrap>
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
@@ -297,9 +297,9 @@ export default function TickFlowPage() {
         )}
 
         {meta && (
-          <Space size={24} wrap>
+          <Space size={narrow ? [16, 4] : 24} wrap>
             <Statistic title={`${meta.symbol} last`} value={meta.lastPrice || '-'} />
-            <Statistic title="Bid × Ask" value={meta.bid > 0 ? `${meta.bid} × ${meta.ask}` : '-'} />
+            <Statistic title="Bid × Ask" value={meta.bid > 0 ? `${Number(meta.bid).toFixed(2)} × ${Number(meta.ask).toFixed(2)}` : '-'} />
             <Statistic title="Bid / ask size" value={meta.bid > 0 ? `${fmtQty(meta.bidQty, lotSize, showLots)} / ${fmtQty(meta.askQty, lotSize, showLots)}` : '-'} />
             <Statistic title={`Cumulative delta (${showLots ? 'lots' : 'qty'})`} value={fmtQty(total, lotSize, showLots)} valueStyle={{ color: total >= 0 ? '#52c41a' : '#ff4d4f' }} />
           </Space>
@@ -314,7 +314,7 @@ export default function TickFlowPage() {
         <Card size="small" title="Order bubbles - price through time, a bubble at every order" extra={!narrow && <span style={{ fontSize: 11, opacity: 0.65 }}>wheel scrolls the page · Ctrl+wheel: zoom time · Shift+wheel: zoom price · drag: move · pinch · double-click: reset · hover a bubble</span>}>
           {!day || day.bubbles.length === 0
             ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={loading ? 'Loading…' : off ? 'Turn the feed on to see the bubbles.' : replay ? 'No trade in this day up to the clock.' : 'No trade yet today - it starts with the first tick after the connection (market hours).'} />
-            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={showLots ? minLots : minQty / (lotSize || 1)} rMax={bubbleSize} height={narrow ? 380 : 560} />}
+            : <TickBubbleChart bubbles={day.bubbles} quotes={day.quotes} lastPrice={meta?.lastPrice} lotSize={lotSize} showLots={showLots} minLots={showLots ? minLots : minQty / (lotSize || 1)} rMax={narrow ? Math.round(bubbleSize / 2) : bubbleSize} height={narrow ? 380 : 560} />}
         </Card>
 
         <Card size="small" title="Big option orders - TrueData's live ticks of the options ATM ± N, read and added up">

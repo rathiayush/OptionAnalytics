@@ -20,6 +20,10 @@ const MAX_SPAN_MS = 8 * 3_600_000
 
 const hhmmss = (ms, seconds = false) => new Date(ms).toLocaleTimeString('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', ...(seconds ? { second: '2-digit' } : {}) })
 
+// A touch screen: one finger scrolling UP / DOWN moves the PAGE (the chart is one card of a long page - `touchAction: 'none'` trapped it),
+// sideways moves the time, two fingers pinch it; a tap reads the bubble under it.
+const COARSE = typeof window !== 'undefined' && Boolean(window.matchMedia?.('(pointer: coarse)')?.matches)
+
 export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots, height = 520, minLots = 1, rMax = 34 }) {
   const wrap = useRef(null)
   const canvas = useRef(null)
@@ -209,6 +213,20 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
     }
     const v = current.current
     drag.current = v ? { x: e.clientX, y: e.clientY, t1: v.t1, hi: v.hi, lo: v.lo } : null
+    if (e.pointerType === 'touch') {
+      const rect = e.currentTarget.getBoundingClientRect()
+      setHover(hitAt(e.clientX - rect.left, e.clientY - rect.top))
+    }
+  }
+
+  // The smallest bubble under (px, py), else none.
+  const hitAt = (px, py) => {
+    let best = null
+    for (const h of hits.current) {
+      const d = Math.hypot(px - h.cx, py - h.cy)
+      if (d <= h.r + 3 && (!best || h.r < best.r)) best = { ...h, px, py }
+    }
+    return best
   }
 
   const onMove = (e) => {
@@ -237,12 +255,7 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
     }
     const px = e.clientX - rect.left
     const py = e.clientY - rect.top
-    let best = null
-    for (const h of hits.current) {
-      const d = Math.hypot(px - h.cx, py - h.cy)
-      if (d <= h.r + 3 && (!best || h.r < best.r)) best = { ...h, px, py }
-    }
-    setHover(best)
+    setHover(hitAt(px, py))
   }
 
   const onUp = (e) => {
@@ -264,12 +277,12 @@ export function TickBubbleChart({ bubbles, quotes, lastPrice, lotSize, showLots,
         </Space>
       </div>
       <canvas
-        ref={canvas} style={{ width: '100%', height, display: 'block', cursor: 'crosshair', touchAction: 'none' }}
+        ref={canvas} style={{ width: '100%', height, display: 'block', cursor: 'crosshair', touchAction: COARSE ? 'pan-y' : 'none' }}
         onPointerDown={onDown}
         onPointerMove={onMove}
         onPointerUp={onUp}
         onPointerCancel={onUp}
-        onPointerLeave={() => setHover(null)}
+        onPointerLeave={(e) => { if (e.pointerType !== 'touch') setHover(null) }}
         onDoubleClick={() => { setTEnd(null); setYRange(null) }}
       />
       {hover && (

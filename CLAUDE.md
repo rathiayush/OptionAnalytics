@@ -1767,6 +1767,13 @@ All must pass before committing.
   bar, "Delta per row", as many bars as fit at ~74 px by default, wheel = bars shown, drag = back in time). `TrueDataLiveTests.cs`,
   `tests/tick-flow-math.test.mjs`; checked in a browser with a mocked API at 1400 and 390 px (NOT against the real feed - run it with the trial login). A read -
   no strategy, alert or order.
+  ON A PHONE (asked for - "make sure the Tick Flow page is mobile supportive"; checked in a browser at 375 / 768 / 1400 px against a mocked API, NOT against the
+  real feed): the page is never wider than the screen (`.oa-tick-page { overflow-x: clip }` in `index.css`); under 768 px the card titles WRAP (they were cut with an
+  ellipsis), cards are padded tighter, the big numbers smaller and inputs 16 px (iOS zooms in on a smaller one); the bid x ask is shown to 2 decimals; the bubble
+  chart's bubbles are HALF the size picked on a phone (a 34 px bubble filled a 335 px chart) and its `touchAction` is `pan-y` on a touch screen (`(pointer: coarse)` -
+  `none` trapped a finger on a 4 700 px page: one finger up / down scrolls the page, sideways moves the time, two fingers pinch, a TAP reads the bubble under it);
+  the footprint under 520 px gives the volume / delta columns a smaller share and stands 3 bars of ~56+ px (not 4 squeezed into 38), the COT lines only at >= 58 px
+  a bar (they ran into the next bar's), and a pointer cancel (the browser taking a vertical swipe to scroll the page) ends a drag. Wider than that nothing changed.
   REPLAY AND ZOOM (asked for - "it should work on replay as well", "we should be able to zoom the bubble chart"): the page's Live / Replay switch. A replayed
   day is `GET /api/tick-flow/{u}?date=` (a past day, rebuilt by `TickHistoryDays` from TrueData's TICK HISTORY - needs `TrueData:Enabled` as well as
   `Live:Enabled`; the trial keeps today and the day before, a subscription longer - through the same `TickBook`: a rise in the running volume is a trade at the tick's
