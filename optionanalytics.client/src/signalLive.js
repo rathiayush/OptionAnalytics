@@ -28,7 +28,7 @@ export function completedRun(run, nowMs) {
   return {
     ...run,
     spotCandlesOneMinute: cut(run?.spotCandlesOneMinute), futuresBars: cut(run?.futuresBars),
-    cePoints: cut(run?.cePoints), pePoints: cut(run?.pePoints), spotVwap: cut(run?.spotVwap),
+    cePoints: cut(run?.cePoints), pePoints: cut(run?.pePoints), spotVwap: cut(run?.spotVwap), spotVolume: cut(run?.spotVolume),
   }
 }
 

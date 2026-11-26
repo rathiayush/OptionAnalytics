@@ -122,3 +122,20 @@ test('SPOT volume: "Volume of: Index" reads the index\'s own volume, the default
   assert.equal(simulateDay(d, e).trades.length, 1)             // taken on the index's low volume
   assert.equal(simulateDay(day({ spot: BREAK(() => 25060), vol: lowVol }), e).trades.length, 0)   // futures low, no index volume: none
 })
+
+test('the run\'s spotVolume reaches the prepared day (the plain OHLC spot candles carry no volume of their own)', async () => {
+  const { prepareDay } = await import('../src/signalBacktest.js')
+  const { day: syntheticDay } = await import('./synthetic-day.mjs')
+  const { run } = syntheticDay()
+  const bare = prepareDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY' })
+  assert.ok(bare.spot.v.every((v) => v === 0))
+  const withVol = { ...run, optionExpiry: '2026-10-06', spotVolume: run.spotCandlesOneMinute.map((c, i) => ({ time: c.time, volume: 100 + i })) }
+  const d = prepareDay(withVol, { underlying: 'NIFTY' })
+  assert.equal(d.spot.v[0], 100); assert.equal(d.spot.v[5], 105)                          // each minute its own volume
+  const tf = timeframeView(d, 15)
+  assert.equal(tf.spot.v[0], d.spot.v.slice(0, 15).reduce((a, b) => a + b, 0))            // a 15-minute candle sums its minutes
+  // the live scan cuts it to the completed minutes with the rest
+  const { completedRun } = await import('../src/signalLive.js')
+  const cut = completedRun(withVol, Date.parse(withVol.spotCandlesOneMinute[9].time) + 30_000)
+  assert.equal(cut.spotVolume.length, 9)
+})
