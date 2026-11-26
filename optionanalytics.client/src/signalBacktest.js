@@ -1395,14 +1395,14 @@ const OF_VOL = { param: { label: 'by ≥', unit: '% of its volume', default: 0, 
 // the right side of it), 0 elsewhere. A wall is the price the heatmap showed at the candle before, matched to an earlier one
 // within `tol` of the price; candles in a row at it are one touch. Worked out once a day view and kept.
 const TOUCH_READS = new WeakMap()
-function wallTouches(f, side, tol) {
+function wallTouches(f, side, tol, minX = 0) {
   let kept = TOUCH_READS.get(f.liq)
   if (!kept) TOUCH_READS.set(f.liq, kept = new Map())
-  const key = `${side}|${tol}`
+  const key = `${side}|${tol}|${minX}`
   if (kept.has(key)) return kept.get(key)
   const up = side === 'sup', c = f.fc, out = new Int8Array(c.length), walls = []
   for (let k = 1; k < c.length; k++) {
-    const wl = f.liq[k - 1]?.[side]
+    const wl = wallPick(f, k - 1, side, minX)
     if (!wl || !(c[k] > 0)) continue
     const hit = up ? f.fl[k] <= wl.price * (1 + tol) && c[k] > wl.price : f.fh[k] >= wl.price * (1 - tol) && c[k] < wl.price
     if (!hit) continue
@@ -1413,6 +1413,20 @@ function wallTouches(f, side, tol) {
   }
   kept.set(key, out)
   return out
+}
+// THE HEATMAP'S COLOURS (asked for - "red and yellow areas ... add this signal as well so I can backtest"): which walls a wall
+// condition reads - any wall the liquidity map finds (3x the book's median row, there 60% of the last 10 minutes), or only
+// the nearest one as strong as the heatmap's YELLOW (>= 4x the median - WALL_RATIO) or RED (>= 8x) - each wall's `strength`.
+const WALL_HEAT = {
+  label: 'Heatmap colour', unit: '', default: 0, min: 0, max: 8, step: 1, wide: true,
+  choices: [{ value: 0, label: 'Any wall' }, { value: 4, label: 'Yellow or red (≥ 4× median)' }, { value: 8, label: 'Red only (≥ 8× median)' }],
+  text: (v) => ({ 4: 'a yellow / red wall', 8: 'a red wall' }[Math.round(Number(v))] ?? 'any wall'),
+}
+const wallPick = (f, k, side, minX) => {
+  const x = k >= 0 ? f.liq[k] : null
+  if (!x) return null
+  if (!(minX > 0)) return x[side] ?? null
+  return (x[`${side}s`] ?? []).find((w) => w && w.strength >= minX) ?? null
 }
 const TOUCH_NO = {
   label: 'Touch', unit: '', default: 0, min: 0, max: 3, step: 1, wide: true,
@@ -1554,16 +1568,16 @@ const FLOW_CONDITIONS = [
     // on the futures' own candles.
     id: 'liqWalls', group: 'OrderFlow', name: 'Liquidity heatmap: bid / offer walls',
     options: [
-      opt('nearBid', 'A bid wall (support) close under the price', 'nearAsk', NEAR(0.1)), opt('nearAsk', 'An offer wall (resistance) close over the price', 'nearBid', NEAR(0.1)),
-      opt('heldBid', 'Touched a bid wall, closed back above (support held)', 'heldAsk', NEAR(0.05)),
-      opt('heldAsk', 'Touched an offer wall, closed back below (resistance held)', 'heldBid', NEAR(0.05)),
+      opt('nearBid', 'A bid wall (support) close under the price', 'nearAsk', { ...NEAR(0.1), param3: WALL_HEAT }), opt('nearAsk', 'An offer wall (resistance) close over the price', 'nearBid', { ...NEAR(0.1), param3: WALL_HEAT }),
+      opt('heldBid', 'Touched a bid wall, closed back above (support held)', 'heldAsk', { ...NEAR(0.05), param3: WALL_HEAT }),
+      opt('heldAsk', 'Touched an offer wall, closed back below (resistance held)', 'heldBid', { ...NEAR(0.05), param3: WALL_HEAT }),
       // THE 2nd / 3rd TOUCH OF THE SAME WALL (asked for - "liquidity heatmap has resistance or support, on 2 and 3 touch take
       // entries"): each time a candle reaches the wall and closes back (rejected), counted per wall price - a candle after
       // one clear of it starts a new touch, candles in a row are one.
-      opt('touchBid', 'Touched the same bid wall (support) again - the Nth time, closed back above', 'touchAsk', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO }),
-      opt('touchAsk', 'Touched the same offer wall (resistance) again - the Nth time, closed back below', 'touchBid', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO }),
-      opt('brokeAsk', 'Broke above an offer wall (resistance gave way)', 'brokeBid', { ...W, ...OVER }),
-      opt('brokeBid', 'Broke below a bid wall (support gave way)', 'brokeAsk', { ...W, ...OVER }),
+      opt('touchBid', 'Touched the same bid wall (support) again - the Nth time, closed back above', 'touchAsk', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO, param3: WALL_HEAT }),
+      opt('touchAsk', 'Touched the same offer wall (resistance) again - the Nth time, closed back below', 'touchBid', { windowed: true, param: pctParam('within', 0.05, 2, 0.01), param2: TOUCH_NO, param3: WALL_HEAT }),
+      opt('brokeAsk', 'Broke above an offer wall (resistance gave way)', 'brokeBid', { ...W, ...OVER, param3: WALL_HEAT }),
+      opt('brokeBid', 'Broke below a bid wall (support gave way)', 'brokeAsk', { ...W, ...OVER, param3: WALL_HEAT }),
       // Its size over the last 2 minutes against its 10-minute average (the liquidity map's "building" = 25% more,
       // "pulling" = 40% less - the defaults).
       opt('bidBuilding', 'The nearest bid wall building (growing)', 'askBuilding', GREW), opt('askBuilding', 'The nearest offer wall building (growing)', 'bidBuilding', GREW),
@@ -1571,10 +1585,10 @@ const FLOW_CONDITIONS = [
       opt('bidBigger', 'The nearest bid wall bigger than the nearest offer wall', 'askBigger', LEAD),
       opt('askBigger', 'The nearest offer wall bigger than the nearest bid wall', 'bidBigger', LEAD),
     ],
-    test: (d, i, v, w, p, p2) => {
+    test: (d, i, v, w, p, p2, p3) => {
       const f = flowOf(d)
       if (!f) return false
-      const at = (k, side) => (k >= 0 ? f.liq[k]?.[side] ?? null : null)
+      const at = (k, side) => wallPick(f, k, side, Number(p3) || 0)
       const c = f.fc
       const x = f.liq[i]
       switch (v) {
@@ -1595,7 +1609,7 @@ const FLOW_CONDITIONS = [
           return up ? c[i] > lv : c[i] < lv
         }
         case 'touchBid': case 'touchAsk': {
-          const n = wallTouches(f, v === 'touchBid' ? 'sup' : 'res', frac(p))
+          const n = wallTouches(f, v === 'touchBid' ? 'sup' : 'res', frac(p), Number(p3) || 0)
           const ok = (t) => (p2 === 2 || p2 === 3 ? t === p2 : t === 2 || t === 3)
           return anyIn(i, w, (k) => ok(n[k]))
         }

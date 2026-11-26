@@ -151,7 +151,14 @@ function ConditionRow({ line, no, onChange, onRemove }) {
           onChange={(v) => onChange(editLine(line, { param2: v ?? o.param2.default }))} addonBefore={o.param2.label} addonAfter={o.param2.after ? o.param2.after(line.param2) : o.param2.unit}
         />
       )}
-      {o.param3 && (
+      {o.param3?.choices && (
+        // A pick from a list (the heatmap walls' colour: any wall / yellow or red / red only).
+        <Select
+          size="small" className={`oa-rule-strike${o.param3.wide ? ' oa-rule-strike--wide' : ''}`} prefix={o.param3.label} value={line.param3 ?? o.param3.default}
+          onChange={(v) => onChange(editLine(line, { param3: v }))} options={o.param3.choices} popupMatchSelectWidth={false} classNames={POPUP}
+        />
+      )}
+      {o.param3 && !o.param3.choices && (
         <InputNumber
           size="small" className="oa-rule-num oa-rule-num--wide" min={o.param3.min} max={o.param3.max} step={o.param3.step} value={line.param3}
           onChange={(v) => onChange(editLine(line, { param3: v ?? o.param3.default }))} addonBefore={o.param3.label} addonAfter={o.param3.unit}

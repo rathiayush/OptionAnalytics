@@ -1516,6 +1516,13 @@ All must pass before committing.
   starting points, not measured edges - the ranking says so. `tests/signal-templates.test.mjs` (every template whole - no
   condition dropped, its logic read, a side for the mirror, its levels in range; a row = that template's own report).
   CDV / OBV TURNING + THE 2nd / 3rd TOUCH OF A HEATMAP WALL (asked for - "cdv and obv started going down and our order flow liquidity heatmap has resistance or support, on 2 and 3 touch take entries"; `optFlow` group `OptionFlow`, `liqWalls`' `touchBid` / `touchAsk`, template `wallTouchCdvObv`): `optFlow` = OI Replay's Option CDV & OBV lines (the options' `odm` minutes added up from 09:15, a candle taking the total at its last minute; Side Net / CE / PE) both / either falling or rising over the look-back by more than the tolerance of their range so far; `touchBid` / `touchAsk` = the candle that CONFIRMS the Nth touch of the SAME wall (reached it within "within %", closed back the right side; walls matched by price, candles in a row one touch - `wallTouches`), Touch choice 2nd or 3rd (default) / 2nd only / 3rd only. The template is written bullish (rising + bid wall) with the Mirror (falling + offer wall); needs the order flow's book. `tests/signal-backtest-wall-touch.test.mjs`.
+  THE HEATMAP'S RED / YELLOW WALLS (asked for - "red and yellow areas ... add this signal as well so I can backtest"): every price-level option of
+  `liqWalls` (near, held, the 2nd / 3rd touch, broke) takes a "Heatmap colour" dropdown (`param3`, `WALL_HEAT`): Any wall (0, the default - as before:
+  the liquidity map's walls, 3x the book's median row there 60% of the last 10 minutes), Yellow or red (4 - a wall's `strength` >= 4x the median,
+  the heatmap's `WALL_RATIO` yellow) or Red only (8 - its red); it reads the NEAREST wall that strong (`wallPick` on `orderFlowMinutes`' new `sups`
+  / `ress` - the four nearest walls a side), skipping weaker ones nearer the price. The strength is the liquidity map's (its 10-minute window's
+  median), not the screen's - the heatmap colours by what is in view, so a level can be yellow on one zoom and not another. The page shows a
+  `param3` with `choices` as a dropdown. `tests/signal-backtest-wall-touch.test.mjs`.
   Σ 3 EXPIRIES (asked for - "in signal backtest also give this option ... data will be calculated based on three expiry";
   OI Replay's own - the "Σ 3 expiries" checkbox beside Strike, `optionanalytics.signalBacktest.sumExpiries`, the settings'
   `sumExpiries`, off by default): each day loads its current / next / monthly expiry (`GET summed-expiries`) and the bands of

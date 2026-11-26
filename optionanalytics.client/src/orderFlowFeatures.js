@@ -132,7 +132,9 @@ export function orderFlowMinutes(body, t, { asOfMs = null, book = true } = {}) {
       }
       liq[i] = {
         code: readCode(map.now), state: map.now?.state ?? null, text: map.now?.text ?? '', lean: map.lean,
-        sup: wallOf(map.support[0]), res: wallOf(map.resistance[0]), thinUp: thin('ask'), thinDown: thin('bid'),
+        sup: wallOf(map.support[0]), res: wallOf(map.resistance[0]),
+        // The nearest few walls a side (nearest first), so a condition can ask for the nearest HOT one - the heatmap's yellow / red.
+        sups: map.support.slice(0, 4).map(wallOf), ress: map.resistance.slice(0, 4).map(wallOf), thinUp: thin('ask'), thinDown: thin('bid'),
       }
     }
   }
