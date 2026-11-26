@@ -122,3 +122,18 @@ test('SPOT volume: "Volume of: Index" reads the index\'s own volume, the default
   assert.equal(simulateDay(d, e).trades.length, 1)             // taken on the index's low volume
   assert.equal(simulateDay(day({ spot: BREAK(() => 25060), vol: lowVol }), e).trades.length, 0)   // futures low, no index volume: none
 })
+
+test('a day with no volume on the source the rule reads is NAMED in the report (it never gives a signal there)', async () => {
+  const { backtestReport, dayOutcome } = await import('../src/signalBacktestJob.js')
+  const spotT = RULE_TEMPLATES.find((t) => t.id === 'vaLowVolBreakoutSpot')
+  const futT = RULE_TEMPLATES.find((t) => t.id === 'vaLowVolBreakout')
+  const eSpot = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), spotT))
+  const eFut = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), futT))
+  const d = day({ spot: BREAK(() => 25060), vol: lowVol })
+  d.hasSpotVolume = false; d.hasPriceVolume = true                       // the index sent no volume that day
+  const spotReport = backtestReport([dayOutcome(d.date, d, eSpot)], eSpot)
+  assert.deepEqual(spotReport.noVolume, [{ date: d.date, source: 'index' }])
+  assert.deepEqual(backtestReport([dayOutcome(d.date, d, eFut)], eFut).noVolume, [])      // the futures' volume is there
+  d.hasSpotVolume = true
+  assert.deepEqual(backtestReport([dayOutcome(d.date, d, eSpot)], eSpot).noVolume, [])
+})

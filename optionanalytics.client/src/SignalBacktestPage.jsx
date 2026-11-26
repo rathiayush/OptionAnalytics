@@ -719,6 +719,7 @@ export default function SignalBacktestPage() {
   const noPrev = report?.noPrev ?? []
   // Days run without the previous session's high / low / close (its volume profile's own bars), when the rule reads the pivots.
   const noPivots = report?.noPivots ?? []
+  const noVolume = report?.noVolume ?? []
   // Days whose option delta profile had fewer sessions before them than the rule reads.
   const noDeltaPast = report?.noDeltaPast ?? []
   // The futures order flow: days with none, days whose Δ was estimated (not recorded live) and - the heatmap read - days with no book.
@@ -1247,6 +1248,12 @@ export default function SignalBacktestPage() {
               <Alert
                 type="info" showIcon message={`No liquidity heatmap for ${noBook.length} day${noBook.length === 1 ? '' : 's'} - the rule's heatmap lines never hold on ${noBook.length === 1 ? 'it' : 'them'}`}
                 description={`${dayList(noBook)} - the book is kept only for the days the server recorded live (about a year, from when it began recording).`}
+              />
+            )}
+            {noVolume.length > 0 && (
+              <Alert
+                type="warning" showIcon message={`No volume on ${noVolume.length} day${noVolume.length === 1 ? '' : 's'} - the rule's candle-volume line never holds on ${noVolume.length === 1 ? 'it' : 'them'}, so it gives no signal`}
+                description={`${noVolume.map((o) => `${dayjs(o.date).format('D MMM YYYY')} (${o.source})`).join(' · ')} - the index's own volume exists from January 2026 on; use "Volume of: Futures" for older days, if Dhan still holds that contract.`}
               />
             )}
             {noPivots.length > 0 && (
