@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import {
-  BACKTEST_DEFAULTS, COST_SL_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, SPOT_STOP_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   deltaDaysNeeded, futuresDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
 import { FLOW_BOOK, FLOW_PROFILE } from './orderFlowFeatures.js'
@@ -42,6 +42,8 @@ const STORE = {
   tradeIn: 'optionanalytics.signalBacktest.tradeIn',
   levelsByIndex: 'optionanalytics.signalBacktest.levelsByIndex',
   costSl: 'optionanalytics.signalBacktest.costSl',
+  spotStop: 'optionanalytics.signalBacktest.spotStop',
+  spotRR: 'optionanalytics.signalBacktest.spotRR',
   range: 'optionanalytics.signalBacktest.range',
   moneyness: 'optionanalytics.signalBacktest.moneyness',
   slPct: 'optionanalytics.signalBacktest.slPct',
@@ -415,6 +417,10 @@ export default function SignalBacktestPage() {
   // COST SL once in profit ('' off, 'spot' / 'premium' - what "back at the entry" is read on).
   const [storedCostSl, setCostSl] = usePersistedState(STORE.costSl, BACKTEST_DEFAULTS.costSl)
   const costSl = COST_SL_CHOICES.includes(storedCostSl) ? storedCostSl : ''
+  // The STOP ON SPOT at the signal candle's low / high ('' off, 'candle') and its target, that many times the risk (0 none).
+  const [storedSpotStop, setSpotStop] = usePersistedState(STORE.spotStop, BACKTEST_DEFAULTS.spotStop)
+  const spotStop = SPOT_STOP_CHOICES.includes(storedSpotStop) ? storedSpotStop : ''
+  const [spotRR, setSpotRR] = usePersistedState(STORE.spotRR, BACKTEST_DEFAULTS.spotRR)
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   const [maxTradesPerDay, setMaxTradesPerDay] = usePersistedState(STORE.maxTradesPerDay, BACKTEST_DEFAULTS.maxTradesPerDay)
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
@@ -530,8 +536,8 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, costSl, costAfter, strategyName: strategyNameText, sumExpiries,
-  }), [index, tradeIn, costSl, costAfter, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
+    timeframe, expiryDay, costSl, costAfter, spotStop, spotRR, strategyName: strategyNameText, sumExpiries,
+  }), [index, tradeIn, costSl, costAfter, spotStop, spotRR, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay, strategyNameText, sumExpiries])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
@@ -574,7 +580,7 @@ export default function SignalBacktestPage() {
     if (s.from && s.to) setRange([s.from, s.to])
     setStoredRule(s.rule)
     // Its levels are the levels of ITS traded index.
-    setMoneyness(s.moneyness); setCostSl(s.costSl)
+    setMoneyness(s.moneyness); setCostSl(s.costSl); setSpotStop(s.spotStop); setSpotRR(s.spotRR)
     setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart, costAfter: s.costAfter })
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
@@ -971,6 +977,19 @@ export default function SignalBacktestPage() {
                         size="small" min={0} max={costSl === 'spot' ? 5000 : unitMax} value={costAfter} onChange={(v) => setCostAfter(v ?? 0)}
                         addonAfter={costSl === 'spot' ? 'spot pts' : unitText.trim()} style={{ width: 140 }} aria-label="Cost SL after"
                       />
+                    </Space>
+                  )}
+                </Space>
+              </Tooltip>
+              <Tooltip title="A stop on SPOT: out when the traded index's spot trades back through the signal candle's low (a bullish signal - its high for a bearish one), at the option's price that minute. With a target of N, also out when spot moves N times that risk past its level at the entry (2 = 1:2; 0 = no spot target). Works beside the premium SL / target / trail - whichever comes first.">
+                <Space size={4} wrap>
+                  <Checkbox checked={spotStop === 'candle'} onChange={(e) => setSpotStop(e.target.checked ? 'candle' : '')}>
+                    <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Spot stop at the signal candle</Text>
+                  </Checkbox>
+                  {spotStop === 'candle' && (
+                    <Space size={4}>
+                      <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>target 1 :</Text>
+                      <InputNumber size="small" min={0} max={10} step={0.5} value={spotRR} onChange={(v) => setSpotRR(v ?? 0)} style={{ width: 70 }} aria-label="Spot target risk multiple" />
                     </Space>
                   )}
                 </Space>

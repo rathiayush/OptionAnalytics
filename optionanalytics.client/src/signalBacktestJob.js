@@ -6,7 +6,7 @@
 // A run = its days' OUTCOMES put together: each day is replayed through the rule on its own (simulateDay - the days are
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
-  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, SPOT_STOP_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
   orderFlowNeeded, prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
 import { FLOW_BOOK, FLOW_NONE, FLOW_PROFILE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
@@ -225,6 +225,8 @@ export function cleanBacktestSettings(s = {}) {
     moneyness: Math.round(held(s?.moneyness, -4, 4, d.moneyness)),   // ATM, 1 - 4 in (+) / out of (-) the money
     costSl: COST_SL_CHOICES.includes(s?.costSl) ? s.costSl : d.costSl,
     costAfter: held(s?.costAfter, 0, 5000, d.costAfter),
+    spotStop: SPOT_STOP_CHOICES.includes(s?.spotStop) ? s.spotStop : d.spotStop,
+    spotRR: held(s?.spotRR, 0, 10, d.spotRR),
     slPct: held(s?.slPct, 0, max, d.slPct),
     targetPct: held(s?.targetPct, 0, max, d.targetPct),
     levelUnit,
@@ -421,9 +423,15 @@ export function reportHead(s, okDays) {
   const expiry = s.expiryDay === 'buy' || s.expiryDay === 'sell' ? ` · expiry day: ${s.expiryDay}` : s.expiryDay === 'skip' ? ' · expiry day: not traded' : ''
   const cost = s.costSl ? ` · cost SL (${s.costSl}${s.costAfter > 0 ? ` after +${s.costAfter}${s.costSl === 'spot' ? ' pts' : unit}` : ''})` : ''
   const strike = s.moneyness ? ` · ${Math.abs(s.moneyness)} ${s.moneyness > 0 ? 'ITM' : 'OTM'}` : ''
+  const spot = spotStopText(s)
   const rupee = (v) => `₹${Math.round(v).toLocaleString('en-IN')}`
   const limits = [s.maxDayLoss > 0 ? `day max loss ${rupee(s.maxDayLoss)}` : null, s.maxDayProfit > 0 ? `day max profit ${rupee(s.maxDayProfit)}` : null].filter(Boolean)
-  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''}${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+  return `${s.strategyName ? `${s.strategyName} · ` : ''}${s.underlying}${s.tradeIn ? ` signals → traded in ${s.tradeIn}` : ''} · ${okDays} day${okDays === 1 ? '' : 's'} · ${runRange(s.from, s.to)} · ${s.timeframe}m candles${s.sumExpiries ? ' · OI Σ 3 expiries' : ''}${strike} · SL ${level(s.slPct)} · target ${level(s.targetPct)}${trail}${spot}${cost}${expiry}${limits.length ? ` · ${limits.join(' · ')}` : ''} · ${chargesText(s)}`
+}
+
+// The spot stop / target in words (' · spot stop at the signal candle · target 1:2'), '' when off.
+export function spotStopText(s) {
+  return s?.spotStop === 'candle' ? ` · spot stop at the signal candle${s.spotRR > 0 ? ` · spot target 1:${s.spotRR}` : ''}` : ''
 }
 
 // The trailing stop in words (' · trail 10% after +5%'), '' when off.

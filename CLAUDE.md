@@ -1550,6 +1550,21 @@ All must pass before committing.
   default) and "prints ≥" how many (`param2`, 1 - 50); the mirror swaps the side, the numbers kept. Only RECORDED minutes: an
   estimated day / minute has none (its prints are made up from candles) and the server sends a day's latest 5 000 prints, so a
   day with that many has none known before its first (`prints[i]` null - the line does not hold there).
+  THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - a trading champion's "Direction, Area, Trigger" breakdown, "check the internet for
+  more"; template `vaLowVolBreakout` in the Breakout family, `tests/signal-backtest-va-breakout.test.mjs`): 15-minute candles, the
+  previous session's value area (`valueArea`'s new `crossedAboveVah` / `crossedBelowVal` - a candle CLOSED out of it in the look-back
+  and is still out, each the other's mirror; the old `prevVah` / `prevVal` lines are untouched so saved rules mirror as they did), a
+  close past the candle before's high / low (`candleBreak`, group Price) and LOW VOLUME (`candleVol`, group Price - the price series'
+  volume, the near futures' else the index's, of the candle under / at least X x the average of the day's last N candles before it,
+  20 by default, at least 3 needed; no side) - the "close above the prior candle's high, volume under its 20-period average" from a
+  ForexFactory write-up of the same setup. EXITS ON SPOT (`spotStop` 'candle' / '', `spotRR`, BACKTEST_DEFAULTS off, the page's "Spot
+  stop at the signal candle" + "target 1 : N", `optionanalytics.signalBacktest.spotStop` / `spotRR`, `cleanBacktestSettings` 0 - 10,
+  `spotStopText` in the report heading): `spotLevelsAt` - the signal candle's low (bullish) / high (bearish) on the TRADED index's spot
+  by time, the target N x that risk past the entry's spot; `simulateTrade`'s `spotLevels` - out when the 1-minute spot bar trades
+  through, at the option's close that minute (its open when spot opened through); the spot stop after the premium's own stops, the spot
+  target after the premium target. None when the entry is not past the stop. The template has no premium SL / target. The
+  champion's own interviews put much of his edge in risk sizing / regime filters - not in a rule backtest. A saved strategy's LIVE
+  ORDERS carry the premium SL / target only (the Trade settings' when 0); the spot exit reaches them as the strategy's exit event.
   Σ 3 EXPIRIES (asked for - "in signal backtest also give this option ... data will be calculated based on three expiry";
   OI Replay's own - the "Σ 3 expiries" checkbox beside Strike, `optionanalytics.signalBacktest.sumExpiries`, the settings'
   `sumExpiries`, off by default): each day loads its current / next / monthly expiry (`GET summed-expiries`) and the bands of

@@ -1765,6 +1765,15 @@ const OPT_FLOW_CONDITIONS = [
   },
 ]
 const BOOK_IDS = new Set(['liqRead', 'liqWalls', 'liqLean'])
+// The candle volume conditions' look-back: how many of the day's candles before it make the average (at least 3 needed).
+const VOL_CANDLES = { label: 'of last', unit: 'candles', default: 20, min: 3, max: 100, step: 1 }
+function volumeAverage(vol, i, n) {
+  if (!vol) return NaN
+  const want = Math.max(3, Math.round(Number(n) || VOL_CANDLES.default))
+  let s = 0, c = 0
+  for (let k = i - 1; k >= 0 && c < want; k--) if (vol[k] > 0) { s += vol[k]; c++ }
+  return c >= 3 ? s / c : NaN
+}
 const prevLevel = (id, name, short, key) => levelCondition({ id, group: 'PrevProfile', name, short: `prev ${short}`, level: (d) => d.prevVp?.[key] })
 // A pivot point of the previous session's high / low / close (`pivotLevels`) - read on spot, fixed all day. Its mirror is
 // the level on the other side (R1 <-> S1; P stays P).
@@ -2233,6 +2242,43 @@ export const RULE_CONDITIONS = [
     show: (d, i) => `spot ${fmtP(d.spot.c[i])}`,
   },
   {
+    // THE CANDLE'S VOLUME against the candles before it (asked for - the value area "low-volume breakout": a breakout candle on
+    // unusually LOW volume = the other side has dried up): the price series' volume (the near futures', else the index's own) of
+    // the candle against the average of the last N candles of the day before it (at least 3 - the day's first candles have
+    // none to read). LOW = under X times that average (1 = below its average), HIGH = at least X times. No side - the mirror keeps it.
+    id: 'candleVol', group: 'Price', name: 'Candle volume (vs the candles before it)',
+    options: [
+      opt('low', 'Low: below X × the average of the last N candles', 'low', { param: { label: '<', unit: '× average', default: 1, min: 0.1, max: 5, step: 0.1 }, param2: VOL_CANDLES }),
+      opt('high', 'High: at least X × the average of the last N candles', 'high', { param: { label: '≥', unit: '× average', default: 1.5, min: 0.1, max: 10, step: 0.1 }, param2: VOL_CANDLES }),
+    ],
+    test: (d, i, v, w, p, p2) => {
+      const vol = d.price?.v
+      const avg = volumeAverage(vol, i, p2)
+      if (!(avg > 0) || !(vol[i] > 0)) return false
+      return v === 'low' ? vol[i] < p * avg : v === 'high' ? vol[i] >= p * avg : false
+    },
+    show: (d, i) => {
+      const vol = d.price?.v, avg = volumeAverage(vol, i, VOL_CANDLES.default)
+      return vol?.[i] > 0 && avg > 0 ? `volume ${(vol[i] / avg).toFixed(2)}× its average` : 'volume —'
+    },
+  },
+  {
+    // THE CANDLE'S CLOSE against the candle before it (the value area breakout's "closes above VAH and the prior candle's high"):
+    // closed above its high / below its low, by ≥ % of that level - on spot.
+    id: 'candleBreak', group: 'Price', name: 'Candle close vs the candle before it',
+    options: [
+      opt('aboveHigh', "Closed above the candle before's high", 'belowLow', OVER),
+      opt('belowLow', "Closed below the candle before's low", 'aboveHigh', OVER),
+    ],
+    test: (d, i, v, w, p) => {
+      if (i < 1) return false
+      const c = d.spot.c[i], hi = d.spot.h[i - 1], lo = d.spot.l[i - 1]
+      if (!finite(c) || !finite(hi) || !finite(lo)) return false
+      return v === 'aboveHigh' ? c > hi && c - hi >= frac(p) * hi : v === 'belowLow' ? c < lo && lo - c >= frac(p) * lo : false
+    },
+    show: (d, i) => (i > 0 ? `before: ${fmtP(d.spot.l[i - 1])} - ${fmtP(d.spot.h[i - 1])}` : 'no candle before'),
+  },
+  {
     // RSI of the spot candles: above / below a level, or crossed it in the look-back (and still past it now).
     id: 'rsi', group: 'Indicators', name: 'RSI (spot candles)',
     options: [
@@ -2328,11 +2374,19 @@ export const RULE_CONDITIONS = [
   prevLevel('prevVal', "Previous day's VAL", 'VAL', 'val'),
   {
     id: 'valueArea', group: 'PrevProfile', name: "Previous day's value area",
-    options: [opt('aboveVah', 'Price above its VAH', 'belowVal', OVER), opt('inside', 'Price inside it'), opt('belowVal', 'Price below its VAL', 'aboveVah', OVER)],
+    options: [
+      opt('aboveVah', 'Price above its VAH', 'belowVal', OVER), opt('inside', 'Price inside it'), opt('belowVal', 'Price below its VAL', 'aboveVah', OVER),
+      // The BREAKOUT (asked for - the value area low-volume breakout): a candle CLOSED out of the value area in the look-back -
+      // above the VAH, the mirror below the VAL - and is still out now.
+      opt('crossedAboveVah', 'Closed above its VAH (broke out up)', 'crossedBelowVal', { ...W, ...OVER }),
+      opt('crossedBelowVal', 'Closed below its VAL (broke out down)', 'crossedAboveVah', { ...W, ...OVER }),
+    ],
     test: (d, i, v, w, p) => {
       const x = d.prevVp, c = d.spot.c[i]
       if (!x || x.vah == null || x.val == null) return false
       const by = (lv) => frac(p) * lv
+      if (v === 'crossedAboveVah') return crossed((k) => d.spot.c[k] - x.vah, i, w, true) && c - x.vah >= by(x.vah)
+      if (v === 'crossedBelowVal') return crossed((k) => d.spot.c[k] - x.val, i, w, false) && x.val - c >= by(x.val)
       return v === 'aboveVah' ? c > x.vah && c - x.vah >= by(x.vah) : v === 'belowVal' ? c < x.val && x.val - c >= by(x.val) : v === 'inside' ? c >= x.val && c <= x.vah : false
     },
     show: (d) => `prev VAL ${fmtP(d.prevVp?.val)} · VAH ${fmtP(d.prevVp?.vah)}`,
@@ -2968,6 +3022,13 @@ export const BACKTEST_DEFAULTS = {
   // ...and how far in profit a bar must CLOSE before it arms (asked for - "cost SL should happen after certain points,
   // otherwise it will enter and just exit"): spot points on 'spot', the premium in `levelUnit` on 'premium'; 0 = any profit.
   costAfter: 0,
+  // A STOP ON SPOT AT THE SIGNAL CANDLE (asked for - the "value area low-volume breakout": "stop-loss at the low of that breakout
+  // candle, take-profit a fixed 1:2 risk-to-reward"): 'candle' = out when the TRADED index's spot trades back to the signal
+  // candle's low (a bullish signal - its high for a bearish one); '' = off. `spotRR` > 0 = a target on spot that many times
+  // that risk past the entry's spot (2 = 1:2); 0 = none. Both read on the 1-minute spot bars, filled at the option's price
+  // that minute (its open when spot opened through), beside the premium SL / target / trail - whichever comes first.
+  spotStop: '',
+  spotRR: 0,
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
@@ -2975,6 +3036,8 @@ export const BACKTEST_DEFAULTS = {
 
 /** The Cost SL choices (`costSl`): off, read on spot, read on the premium. */
 export const COST_SL_CHOICES = ['', 'spot', 'premium']
+/** The spot stop choices (`spotStop`): off, at the signal candle's low / high. */
+export const SPOT_STOP_CHOICES = ['', 'candle']
 /** The strikes a trade can take (`moneyness`): ATM, 1 - 4 in the money (+), 1 - 4 out of it (-). */
 export const MONEYNESS_CHOICES = [0, 1, 2, 3, 4, -1, -2, -3, -4]
 
@@ -3051,7 +3114,7 @@ export function dayLevel(option, entry, amount, { realized = 0, qty, stt = 0, fl
  * level"): 'spot' / 'premium' - armed after a bar closed in profit by at least `costAfter` (spot points / the premium in
  * `levelUnit`; 0 = any profit), then out when spot is back at the entry's spot / at the entry premium.
  */
-export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '', costAfter = 0 }) {
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '', costAfter = 0, spotLevels = null }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
@@ -3075,6 +3138,11 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
   const costNeed = costSl === 'spot' ? Math.max(0, Number(costAfter) || 0) : size(costAfter)
   const inProfitBy = (move) => move > 0 && move >= costNeed - 1e-9
   let costArmed = false
+  // THE SPOT STOP / TARGET (`spotLevels` - { stop, target } on the traded index's spot, from simulateDay's `spotStop` /
+  // `spotRR`): spot through the stop = out, the target likewise - at the option's close that minute, its open when spot opened
+  // through.
+  const spotStopAt = Number.isFinite(spotLevels?.stop) ? spotLevels.stop : null
+  const spotTargetAt = Number.isFinite(spotLevels?.target) ? spotLevels.target : null
   let last = entry, exit = null, best = entry, trail = null
   for (let j = i + 1; j < d.n; j++) {
     const b = barAt(packed, j)
@@ -3095,8 +3163,16 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
       const spotOpenedBack = spotBack && (bullish ? d.spot.o[j] <= entrySpot : d.spot.o[j] >= entrySpot)
       if (stop != null && (short ? b.o >= stop : b.o <= stop)) exit = { j, price: b.o, reason: `${name} (opened through it)` }
       else if (stop != null && (short ? b.h >= stop : b.l <= stop)) exit = { j, price: stop, reason: name }
+      else if (spotStopAt != null && (bullish ? d.spot.l[j] <= spotStopAt : d.spot.h[j] >= spotStopAt)) {
+        const through = bullish ? d.spot.o[j] <= spotStopAt : d.spot.o[j] >= spotStopAt
+        exit = { j, price: through ? b.o : b.c, reason: `Spot stop (${spotStopAt.toFixed(2)} - the signal candle's ${bullish ? 'low' : 'high'})` }
+      }
       else if (spotBack) exit = { j, price: spotOpenedBack ? b.o : b.c, reason: `Cost SL (spot back at ${entrySpot.toFixed(2)})` }
       else if (take != null && (short ? b.l <= take : b.h >= take)) exit = { j, price: take, reason: takeName }
+      else if (spotTargetAt != null && (bullish ? d.spot.h[j] >= spotTargetAt : d.spot.l[j] <= spotTargetAt)) {
+        const through = bullish ? d.spot.o[j] >= spotTargetAt : d.spot.o[j] <= spotTargetAt
+        exit = { j, price: through ? b.o : b.c, reason: `Spot target (${spotTargetAt.toFixed(2)})` }
+      }
       // After the bar: in profit at its close - the cost stop is armed from the next bar.
       if (costOn && !costArmed && !exit) {
         costArmed = inProfitBy(costSl === 'spot' ? (bullish ? d.spot.c[j] - entrySpot : entrySpot - d.spot.c[j]) : (short ? entry - b.c : b.c - entry))
@@ -3112,7 +3188,7 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
   }
   if (!exit) exit = { j: d.n - 1, price: last, reason: 'Day end' }
   const points = short ? entry - exit.price : exit.price - entry
-  return { entryIndex: i, exitIndex: exit.j, entry, exit: exit.price, exitReason: exit.reason, points, stop: fixed, target, trail }
+  return { entryIndex: i, exitIndex: exit.j, entry, exit: exit.price, exitReason: exit.reason, points, stop: fixed, target, trail, spotStop: spotStopAt, spotTarget: spotTargetAt }
 }
 
 /**
@@ -3204,7 +3280,7 @@ export function simulateDay(d, settings = {}, { tradeDay = null } = {}) {
         continue
       }
     }
-    const trade = simulateTrade(td, j, option, { ...s, day })
+    const trade = simulateTrade(td, j, option, { ...s, day, spotLevels: spotLevelsAt(td, view.from ? d.t[view.from[sig.i]] : d.t[i], d.t[i], dir, j, s) })
     if (!trade) { row.skipped = `no premium for ${cross ? `${s.tradeIn} ` : ''}${option.strike} ${option.side}`; continue }
     row.taken = true
     count++
@@ -3226,6 +3302,27 @@ export function simulateDay(d, settings = {}, { tradeDay = null } = {}) {
     else if (s.maxDayProfit > 0 && realized >= s.maxDayProfit - 0.01) dayLimit = 'profit'
   }
   return { trades, signals, dayLimit, expirySkipped }
+}
+
+/** THE SPOT STOP / TARGET of a signal (`spotStop` 'candle', `spotRR`): the signal candle's low (a bullish signal) / high (a bearish
+ *  one) on the TRADED index's spot - its 1-minute bars from the candle's first minute `startMs` to its last `endMs` (by time,
+ *  so another index's day works the same) - and, with `spotRR` > 0, a target that many times the risk past the entry's spot
+ *  (minute `j`'s close). None when off, or when the entry is not past the stop (no risk to measure). */
+export function spotLevelsAt(td, startMs, endMs, dir, j, s) {
+  if (s.spotStop !== 'candle' || !td?.spot) return null
+  let hi = -Infinity, lo = Infinity
+  for (let m = 0; m < td.n; m++) {
+    if (td.t[m] < startMs || td.t[m] > endMs) continue
+    if (Number.isFinite(td.spot.h[m])) hi = Math.max(hi, td.spot.h[m])
+    if (Number.isFinite(td.spot.l[m])) lo = Math.min(lo, td.spot.l[m])
+  }
+  const stop = dir > 0 ? lo : hi
+  const entrySpot = td.spot.c[j]
+  if (!Number.isFinite(stop) || !Number.isFinite(entrySpot)) return null
+  const risk = dir > 0 ? entrySpot - stop : stop - entrySpot
+  if (!(risk > 0)) return null
+  const rr = Number(s.spotRR) || 0
+  return { stop, target: rr > 0 ? entrySpot + dir * rr * risk : null }
 }
 
 /** The whole run, day by day in date order: { trades, signals }. */
