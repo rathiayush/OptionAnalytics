@@ -27,6 +27,9 @@ export function useAuth() {
 // money, Contracts exposes the raw scrip-master/subscription diagnostic. Kept as one list so
 // NavBar's own filtering and App.jsx's route guards can never drift apart on which paths these are.
 export const ADMIN_ONLY_PATHS = ['/triggers', '/contracts', '/visitors', '/cache']
+// Pages shown only while the server has their feature on (featurePaths.js - the Tick Flow page with TrueData).
+import { featureOn } from './featurePaths.js'
+export { FEATURE_PATHS, featureOn } from './featurePaths.js'
 
 // SignalR's own withAutomaticReconnect(), with no argument, only retries at [0, 2, 10, 30] seconds
 // (~42s total) before giving up PERMANENTLY - the connection then sits closed until the page is
@@ -1113,6 +1116,7 @@ const NAV_ITEMS = [
   { key: '/expired-backtest', label: 'Expired Backtest', icon: <ExperimentOutlined /> },
   { key: '/oi-replay', label: 'OI Replay', icon: <LineChartOutlined /> },
   { key: '/order-flow', label: 'Order Flow', icon: <BarChartOutlined /> },
+  { key: '/tick-flow', label: 'Tick Flow', icon: <BarChartOutlined /> },
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
   { key: '/structure', label: 'Spot structure', icon: <ApartmentOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
@@ -1281,7 +1285,7 @@ export function NavBar() {
   const [collapsed, setCollapsed] = usePersistedState(STORED_SIDENAV_COLLAPSED, false)
   const isAdmin = auth?.user?.role === 'Admin'
   const systemInfo = useSystemInfo(isAdmin ? FEED_HEALTH_POLL_MS : null)
-  const items = isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))
+  const items = (isAdmin ? NAV_ITEMS : NAV_ITEMS.filter((item) => !ADMIN_ONLY_PATHS.includes(item.key))).filter((item) => featureOn(auth?.user, item.key))
 
   // Another page opens at its top - the router keeps the window's scroll, so on a phone a page opened from the ☰ menu
   // after a long one (OI Replay) opened scrolled to its bottom.

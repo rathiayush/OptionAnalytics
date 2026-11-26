@@ -9,7 +9,21 @@ public static class TrueDataRegistration
     {
         var section = configuration.GetSection(TrueDataOptions.SectionName);
         services.Configure<TrueDataOptions>(section);
-        if (section.Get<TrueDataOptions>()?.Enabled != true) return services;
+        var options = section.Get<TrueDataOptions>();
+        // The LIVE tick feed and the Tick Flow page: TrueData:Enabled (the master switch) with the login set - TickFlowOn.
+        if (options?.TickFlowOn == true)
+        {
+            services.PostConfigure<TrueDataOptions>(o =>
+            {
+                if (string.IsNullOrWhiteSpace(o.Live.StatePath)) o.Live.StatePath = configuration["Storage:ScannerRunnerPath"] ?? "";
+            });
+            services.AddSingleton<TickDayDiskCache>();
+            services.AddSingleton<TickHistoryDays>();
+            services.AddSingleton<OptionTickHistoryDays>();
+            services.AddSingleton<TrueDataLiveFeed>();
+            services.AddHostedService(sp => sp.GetRequiredService<TrueDataLiveFeed>());
+        }
+        if (options?.Enabled != true) return services;
         services.AddSingleton<ITrueDataHistoryApi, TrueDataSdkHistoryApi>();
         services.AddSingleton<TrueDataOrderFlowSource>();
         return services;

@@ -39,5 +39,62 @@ public sealed class TrueDataOptions
     /// <summary>Rebuilt days kept in memory (they are re-fetched after a restart, never written to disk).</summary>
     public int MaxCachedDays { get; set; } = 6;
 
+    /// <summary>The LIVE tick-by-tick feed (TrueData's WebSocket, the "Tick Flow" page) - runs with TrueData:Enabled (the master
+    /// switch) and the login set; Live.Enabled (ON by default) can turn the live feed alone off.</summary>
+    public TrueDataLiveOptions Live { get; set; } = new();
+
     public bool IsConfigured => Enabled && !string.IsNullOrWhiteSpace(UserId) && !string.IsNullOrWhiteSpace(Password);
+
+    /// <summary>THE ONE SWITCH for the Tick Flow page and its services (asked for - "driven by config: truedata true then services and
+    /// page will appear, else no"): TrueData:Enabled with the login set (and TrueData:Live:Enabled, ON by default, left on). Off = no
+    /// live feed, no tick history, no socket, the page and its menu entry hidden (`trueData` false in /api/auth/me).</summary>
+    public bool TickFlowOn => IsConfigured && Live.Enabled;
+}
+
+/// <summary>TrueData:Live - the real-time WebSocket (wss://push.truedata.in:{Port}?user=&amp;password=). Sandbox = 8086,
+/// production = 8084. The user / password are TrueData:UserId / Password (environment variables or the git-ignored
+/// appsettings.Local.json - never a committed file).</summary>
+public sealed class TrueDataLiveOptions
+{
+    public bool Enabled { get; set; } = true;
+    public string Host { get; set; } = "push.truedata.in";
+    public int Port { get; set; } = 8086;
+
+    /// <summary>"websocket" (the default - JSON messages, wss://{Host}:{Port}) or "tcp" (TrueData's TCP API v2.3: binary TR / BA packets
+    /// with the last tick's volume and a sequence number, {TcpHost}:{TcpPort}). One connection per account either way.</summary>
+    public string Transport { get; set; } = "websocket";
+    public string TcpHost { get; set; } = "tcp.truedata.in";
+    public int TcpPort { get; set; } = 7070;
+
+    /// <summary>The folder the page's source choice (WebSocket / TCP) is kept in; filled from Storage:ScannerRunnerPath when empty.</summary>
+    public string StatePath { get; set; } = "";
+
+    /// <summary>The index whose OPTIONS (ATM +- OptionStrikes, calls and puts) are streamed for the Tick Flow page's big option orders
+    /// ("NIFTY" / "BANKNIFTY", empty = none) - the page's choice (kept in a file) beats this first default. TrueData's trial allows
+    /// MaxSymbols (50) symbols at once: the two futures and 2 x (2 x 10 + 1) = 42 options of one index fit, both indices' (84) do not - so it is
+    /// ONE index, NIFTY by default (asked for - "if it does not fit under 50, only consider NIFTY").</summary>
+    public string OptionsUnderlying { get; set; } = "NIFTY";
+
+    /// <summary>FEATURE FLAG for the option tick processing (asked for - "also add a feature flag for true tick data handling"; environment variable
+    /// TrueData__Live__OptionTicks): ON by default. OFF = the option stream is never subscribed, no option tick is read or watched, the big option orders
+    /// (live and the replay's tick-history build) answer "off", and the futures' footprint is untouched.</summary>
+    public bool OptionTicks { get; set; } = true;
+    public int OptionStrikes { get; set; } = 10;
+    public int MaxSymbols { get; set; } = 50;
+
+    /// <summary>What is streamed - the continuous near futures by default (TrueData's "NIFTY-I" / "BANKNIFTY-I").
+    /// LotSize / TickSize are the contract's (NSE changes them; set them here when they change).</summary>
+    public List<TrueDataLiveInstrument> Instruments { get; set; } = new()
+    {
+        new() { Underlying = "NIFTY", Symbol = "NIFTY-I", LotSize = 65, TickSize = 0.05m },
+        new() { Underlying = "BANKNIFTY", Symbol = "BANKNIFTY-I", LotSize = 30, TickSize = 0.20m },
+    };
+}
+
+public sealed class TrueDataLiveInstrument
+{
+    public string Underlying { get; set; } = "";
+    public string Symbol { get; set; } = "";
+    public int LotSize { get; set; } = 1;
+    public decimal TickSize { get; set; } = 0.05m;
 }
