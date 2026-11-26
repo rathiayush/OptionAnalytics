@@ -56,6 +56,27 @@ export const RULE_TEMPLATES = [
     rule: { tree: ALL(L('valueArea', 'crossedAboveVah', { param: 0, windowMin: 15 }), L('candleBreak', 'aboveHigh', { param: 0 }), L('candleVol', 'low', { param: 1, param2: 20, param3: 1 })), action: 'buyCE', mirror: true },
     settings: { timeframe: 15, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 2 },
   },
+  // JJ SIMON'S FAIR VALUE THEORY, ON NSE TIME (asked for - his 1-minute NQ scalps: the reference price just before a session opens
+  // is "fair value"; price pushes away from it and comes back once momentum fades; entries on a DISPLACEMENT candle with a break
+  // of structure; stop at the displacement candle's far end, target 1.5R, no management). In Indian market hours: the windows are
+  // 09:15 - 10:45 (NY 9:30 - 11:00) and 14:00 - 15:00 (NY 2 - 3 pm) IST; fair value = the previous close before the morning open,
+  // the 13:59 close before the afternoon one. 1-minute candles on the index (SPOT), the option bought in the signal's direction;
+  // the stop is the displacement candle's low / high ON SPOT and the target 1.5 x that risk (spotStop / spotRR). Not taken from
+  // the video: its ATR risk tiers and fixed point stops (a 25 / 38 point NQ evaluation set-up) and the three-loss limit on
+  // reversions per session - the page has Max trades a day instead. News days (pre-news price / post-shock zone as fair value)
+  // are not built either. Unmeasured: Compare all on real days ranks it.
+  {
+    id: 'fairValueContinuation', family: 'breakout', name: 'JJ Simon fair value - continuation (opening push, 1 min, 1:1.5)',
+    idea: 'Fair value = the price before the session opens (the previous close for the 09:15 open, the 13:59 close for the 14:00 one). In the first 15 minutes of each window the market pushes away from it: when spot is at least 0.1% above fair value, a BULLISH displacement candle (body bigger than the last, closed past its high, little upper wick) also breaks the structure - closes over the highest high of the last 5 candles - buy the call; the stop on spot at the displacement candle\'s low, the target 1.5 times that risk, no other management. Mirror: below fair value, a bearish displacement closing under the last 5 candles\' low - the put. Entries from 09:16 to 14:55.',
+    rule: { tree: ALL(L('fairValue', 'awayAbove', { param: 0.1, param2: 3, param3: 0, windowMin: 1 }), L('displacement', 'bullish', { param: 25 }), L('structureBreak', 'bosUp', { param: 5 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 1, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 1.5, entryFrom: '09:16', lastEntry: '14:55' },
+  },
+  {
+    id: 'fairValueReversion', family: 'reversal', name: 'JJ Simon fair value - reversion (back to fair value, 1 min, 1:1.5)',
+    idea: 'After the push away loses momentum price comes back toward fair value. In either window (09:15 - 10:45 / 14:00 - 15:00 IST), when spot closed at least 0.2% ABOVE fair value (stretched) in the last 15 minutes and a BEARISH displacement candle closes under the lowest low of the last 10 candles (a market structure shift), buy the put - the stop on spot at the displacement candle\'s high, the target 1.5 times that risk. Mirror: stretched below fair value, a bullish displacement over the last 10 candles\' high - the call. Entries from 09:16 to 14:55 (the video\'s three-losses-per-session guardrail is not built - the page\'s Max trades a day limits it).',
+    rule: { tree: ALL(L('fairValue', 'awayAbove', { param: 0.2, param2: 0, param3: 0, windowMin: 15 }), L('displacement', 'bearish', { param: 25 }), L('structureBreak', 'bosDown', { param: 10 })), action: 'buyPE', mirror: true },
+    settings: { timeframe: 1, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 1.5, entryFrom: '09:16', lastEntry: '14:55' },
+  },
   {
     id: 'wallTouchCdvObv', family: 'book', name: 'CDV and OBV turning, 2nd / 3rd touch of a heatmap wall',
     idea: 'The options\' CDV and OBV lines both turn up (the flow has started going one way) while the futures\' liquidity heatmap shows a bid wall under the price - support - and price touches that same wall for the 2nd or 3rd time and closes back above it: the wall held twice already and the flow agrees, so the third try is taken. Mirror: CDV and OBV both falling, an offer wall (resistance) over the price touched the 2nd or 3rd time and rejected. A first touch is skipped on purpose; a 4th is not taken. Needs the order flow\'s book for the day.',
