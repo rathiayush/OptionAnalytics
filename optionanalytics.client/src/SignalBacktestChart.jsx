@@ -21,9 +21,10 @@ const STORE = {
   source: 'optionanalytics.signalBacktest.chartSource',
   timeframe: 'optionanalytics.signalBacktest.chartTimeframe',
   ema: 'optionanalytics.signalBacktest.chartEma',
+  flowSide: 'optionanalytics.signalBacktest.chartFlowSide',
 }
 const SHOW_OPTIONS = [
-  { value: 'vwap', label: 'VWAP' }, { value: 'ema', label: 'EMA' }, { value: 'rsi', label: 'RSI' }, { value: 'pivots', label: 'Pivots / CPR' },
+  { value: 'vwap', label: 'VWAP' }, { value: 'ema', label: 'EMA' }, { value: 'rsi', label: 'RSI' }, { value: 'pivots', label: 'Pivots / CPR' }, { value: 'flow', label: 'Option CDV / OBV' },
   { value: 'skipped', label: 'Signals not taken' },
 ]
 const EMA_COLORS = ['#40a9ff', '#ff85c0', '#95de64', '#ffc069']
@@ -31,6 +32,8 @@ const PIVOT_LINES = [
   ['r3', '#ff7875'], ['r2', '#ff7875'], ['r1', '#ff7875'], ['tc', '#d3adf7'], ['p', '#e6e6e6'], ['bc', '#d3adf7'], ['s1', '#5cdbd3'], ['s2', '#5cdbd3'], ['s3', '#5cdbd3'],
 ]
 const RSI_PANE = 120
+const FLOW_PANE = 130
+const FLOW_SIDES = [{ value: 'net', label: 'Net CE − PE' }, { value: 'ce', label: 'CE' }, { value: 'pe', label: 'PE' }]
 // A note tag wraps on a phone rather than running off the card.
 const NOTE_TAG = { margin: 0, whiteSpace: 'normal', height: 'auto' }
 const pad = (v) => String(v).padStart(2, '0')
@@ -46,11 +49,13 @@ function DayChart({ data, markers, show, rsiLevels, height }) {
     const el = ref.current
     if (!el || !data?.candles.length) return undefined
     const withRsi = show.has('rsi') && data.rsi?.points.length > 0
+    const withFlow = show.has('flow') && data.flow?.cdv.length > 0
     const chart = createZoomableChart(el, {
-      width: el.clientWidth, height: height + (withRsi ? RSI_PANE : 0),
+      width: el.clientWidth, height: height + (withRsi ? RSI_PANE : 0) + (withFlow ? FLOW_PANE : 0),
       layout: { background: { color: 'transparent' }, textColor: AXIS_COLOR, fontSize: 11, panes: { separatorColor: BORDER_COLOR } },
       grid: { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
       rightPriceScale: { borderColor: BORDER_COLOR },
+      leftPriceScale: { visible: false, borderColor: BORDER_COLOR },
       timeScale: { borderColor: BORDER_COLOR, timeVisible: true, secondsVisible: false, tickMarkFormatter: istTickMarkFormatter },
       localization: { timeFormatter: istTimeFormatter },
       crosshair: { mode: CrosshairMode.Normal },
@@ -78,6 +83,14 @@ function DayChart({ data, markers, show, rsiLevels, height }) {
       const r = line(data.rsi.points, '#b37feb', `RSI ${data.rsi.period}`, 1, { lastValueVisible: true, priceFormat: { type: 'price', precision: 1, minMove: 0.1 } })
       for (const level of rsiLevels.length ? rsiLevels : [30, 70]) r.createPriceLine({ price: level, color: '#ffffff55', lineWidth: 1, lineStyle: LineStyle.Dotted, axisLabelVisible: false, title: String(level) })
       chart.panes()[1]?.setHeight(RSI_PANE)
+    }
+    if (withFlow) {
+      // Two lines in one pane, each on its own scale (CDV's numbers are small, OBV's volume): CDV at the right, OBV at the left.
+      const pane = withRsi ? 2 : 1
+      line(data.flow.cdv, '#40a9ff', 'CDV', pane, { lastValueVisible: true })
+      line(data.flow.obv, '#faad14', 'OBV', pane, { lastValueVisible: true, priceScaleId: 'left' })
+      chart.priceScale('left', pane).applyOptions({ visible: true, borderColor: BORDER_COLOR })
+      chart.panes()[pane]?.setHeight(FLOW_PANE)
     }
     createSeriesMarkers(candles, markers.map((m) => ({ ...m, time: chartTime(m.time) })))
     chart.timeScale().fitContent()
@@ -125,6 +138,7 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDay
   // The chart's own timeframe (null = the run's) and its two EMAs (null = the rule's periods, else 9 / 21).
   const [storedTf, setChartTf] = usePersistedState(STORE.timeframe, null)
   const [storedEma, setStoredEma] = usePersistedState(STORE.ema, null)
+  const [flowSide, setFlowSide] = usePersistedState(STORE.flowSide, 'net')
   const used = useMemo(() => ruleIndicators(settings.rule), [settings.rule])
   // Until a tick is changed: VWAP and the signals not taken, and whatever indicators the rule reads.
   const showList = Array.isArray(storedShow) ? storedShow : ['vwap', 'skipped', ...(used.ema.length ? ['ema'] : []), ...(used.rsi ? ['rsi'] : []), ...(used.pivots ? ['pivots'] : [])]
@@ -176,8 +190,8 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDay
   const data = useMemo(() => {
     if (!chartDay) return null
     const [side, strike] = optionKey ? optionKey.split('|') : []
-    return dayChartData(chartDay, { timeframe: tf, source: source === 'signal' ? 'spot' : source, ema: emaKey.split('|').map(Number), rsi: rsiPeriod, option: optionKey ? { side, strike: Number(strike) } : null })
-  }, [chartDay, tf, source, emaKey, rsiPeriod, optionKey])
+    return dayChartData(chartDay, { timeframe: tf, source: source === 'signal' ? 'spot' : source, ema: emaKey.split('|').map(Number), rsi: rsiPeriod, option: optionKey ? { side, strike: Number(strike) } : null, flow: show.has('flow') ? flowSide : null })
+  }, [chartDay, tf, source, emaKey, rsiPeriod, optionKey, show, flowSide])
   // On an option's chart only its own trades are tagged.
   const tagged = useMemo(() => (source === 'option' && option ? trades.filter((t) => t.strike === option.strike && t.side === option.side.toUpperCase()) : trades), [source, option, trades])
   // The signals not taken: the day run again with the run's own settings (the same engine) - its trades are the report's.
@@ -247,6 +261,9 @@ export function BacktestDayChartCard({ report, settings, runKey, dayOf, tradeDay
           </Space>
           <Space size={8} wrap>
             <Checkbox.Group value={showList} onChange={(v) => setStoredShow(v)} options={SHOW_OPTIONS} style={{ fontSize: 12 }} />
+            {show.has('flow') && source !== 'option' && (
+              <Segmented size="small" value={FLOW_SIDES.some((o) => o.value === flowSide) ? flowSide : 'net'} onChange={setFlowSide} options={FLOW_SIDES} aria-label="Option CDV / OBV side" />
+            )}
             {show.has('ema') && (
               <Space size={4}>
                 {[0, 1].map((k) => (

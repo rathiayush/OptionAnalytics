@@ -48,7 +48,7 @@ export function ruleIndicators(rule) {
  * spot's (on the futures the EMAs and pivots, which sit at spot's prices, are left out; RSI has its own pane). 'option'
  * with `option` { side: 'ce' | 'pe', strike } draws that strike's premium (`premiumCandles`) with ITS OWN VWAP, EMAs and RSI.
  */
-export function dayChartData(day, { timeframe = 1, source = 'spot', ema = [], rsi = null, option = null } = {}) {
+export function dayChartData(day, { timeframe = 1, source = 'spot', ema = [], rsi = null, option = null, flow = null } = {}) {
   if (!day?.ok) return null
   const view = timeframeView(day, timeframe)
   const tf = view.tf ?? 1
@@ -79,7 +79,42 @@ export function dayChartData(day, { timeframe = 1, source = 'spot', ema = [], rs
     emas: futures ? [] : ema.map((period) => ({ period, points: line(emaSeries(view, period)) })),
     rsi: rsi ? { period: rsi, points: line(rsiSeries(view, rsi)) } : null,
     pivots: futures ? null : (day.pivots ?? null),
+    flow: flow ? optionFlowLines(day, times, tf, flow) : null,
   }
+}
+
+/**
+ * The OPTION CDV and OBV as two cumulative lines on the chart's candles (asked for - "add CDV and OBV, the two lines"): the
+ * day's `odm` (`optionDeltaMinutes` - the same minutes the rule's CDV / OBV profile conditions read: each option bar's
+ * bar-proxy delta, and its volume signed by whether its close rose or fell from the strike's bar before, both weighted by the
+ * strike's delta at that minute's spot) added up from the open. `side` 'net' = CE - PE (up = bullish), 'ce' / 'pe' = that side
+ * alone. A candle takes the running total at its LAST minute, so nothing after the candle's close is read. null when the day
+ * has no option minutes. `{ side, cdv: [{ time, value }], obv: [...] }`.
+ */
+export function optionFlowLines(day, times, tf, side = 'net') {
+  const odm = day?.odm
+  if (!Array.isArray(odm) || !odm.length) return null
+  const [wCe, wPe] = side === 'ce' ? [1, 0] : side === 'pe' ? [0, 1] : [1, -1]
+  const minutes = [...odm].sort((a, b) => a.t - b.t)
+  let cdv = 0
+  let obv = 0
+  const cum = minutes.map((m) => {
+    cdv += wCe * m.ce + wPe * m.pe
+    obv += wCe * m.ceObv + wPe * m.peObv
+    return { t: m.t, cdv, obv }
+  })
+  const out = { side, cdv: [], obv: [] }
+  for (const time of times) {
+    const last = time + (tf - 1) * MIN
+    let lo = 0
+    let hi = cum.length - 1
+    let at = -1
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (cum[mid].t <= last) { at = mid; lo = mid + 1 } else hi = mid - 1 }
+    if (at < 0) continue
+    out.cdv.push({ time, value: cum[at].cdv })
+    out.obv.push({ time, value: cum[at].obv })
+  }
+  return out
 }
 
 const rupee = (v) => `${v < 0 ? '−' : '+'}₹${Math.round(Math.abs(v)).toLocaleString('en-IN')}`
