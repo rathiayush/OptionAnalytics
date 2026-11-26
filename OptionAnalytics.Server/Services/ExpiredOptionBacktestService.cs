@@ -850,14 +850,26 @@ public sealed class ExpiredOptionBacktestService
             // to pace against) over a live Dhan call - see IRollingOptionDataSource's own doc
             // comment. AnyLiveCall below stays scoped to the DHAN path specifically: a Postgres read
             // needs none of BandFetchDelay's pacing, only an actual Dhan call does.
-            IRollingOptionDataSource source = useStoredData ? _storedRollingOption : _rollingOption;
+            // The stored database is only read when it is configured here; otherwise (or when it holds nothing for this
+            // segment) the Dhan data cache on disk is read, and Dhan asked only for the days not kept - "Use stored data"
+            // with no database used to leave every trade "No Data".
+            var storedFirst = useStoredData && _storedRollingOption.IsConfigured;
+            IRollingOptionDataSource source = storedFirst ? _storedRollingOption : _rollingOption;
+            var viaDhan = !storedFirst;
             // Every day of this segment already in the Dhan day cache: the read below makes no Dhan call, so no pacing.
-            var cachedOnDisk = !useStoredData && _rollingOption.IsFullyCached(underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1);
+            var cachedOnDisk = viaDhan && _rollingOption.IsFullyCached(underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1);
             var (segmentBars, segmentError) = await source.GetRollingOptionCandlesAsync(
                 underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
+            if (storedFirst && segmentBars.Count == 0)
+            {
+                viaDhan = true;
+                cachedOnDisk = _rollingOption.IsFullyCached(underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1);
+                (segmentBars, segmentError) = await _rollingOption.GetRollingOptionCandlesAsync(
+                    underlying, underlyingSecurityId, expiryFlag, segment.ExpiryCode, strikeToken, optionType, segment.From, segment.To, 1, cancellationToken);
+            }
             bars.AddRange(segmentBars);
             if (segmentError is not null) error = error is null ? segmentError : $"{error}; {segmentError}";
-            if (!useStoredData && !cachedOnDisk) anyLiveDhanCall = true;
+            if (viaDhan && !cachedOnDisk) anyLiveDhanCall = true;
         }
 
         return (bars, error, anyLiveDhanCall);
