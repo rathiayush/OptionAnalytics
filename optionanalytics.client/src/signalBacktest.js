@@ -35,7 +35,7 @@ import { optionTrailLevel, tighterStop } from './optionTrail.js'
 import { futuresDeltaSteps, oiNetSteps, optionDeltaAt, optionDeltaMinutes, optionDeltaSteps } from './deltaProfile.js'
 import { optionOiMinutes } from './oiProfile.js'
 import { PROFILE_ROWS, pastSessionsNeeded } from './profileZones.js'
-import { FLOW_BOOK, FLOW_DELTA, FLOW_NONE, FLOW_PROFILE, flowView } from './orderFlowFeatures.js'
+import { BIG_ORDER_FLOOR_LOTS, FLOW_BOOK, FLOW_DELTA, FLOW_NONE, FLOW_PROFILE, flowView } from './orderFlowFeatures.js'
 
 const MIN = 60_000
 const DAY = 24 * 60 * MIN
@@ -1660,6 +1660,52 @@ const FLOW_CONDITIONS = [
     show: (d, i) => { const x = flowOf(d)?.liq?.[i]; return x?.lean != null ? `book ${Math.round(x.lean * 100)}% bids near the price` : 'book —' },
   },
 ]
+// BIG ORDERS (asked for - "add big orders trade as well ... we should be able to specify the quantity"): the near futures'
+// prints of at least N lots (the Order Flow page's big-order dots - one Dhan packet's volume at its last price, its side by
+// the engine's rule), a candle holding the prints of its minutes; only on a day the server RECORDED (an estimated day has
+// none - its order flow lines never hold, the report lists it).
+const BIG_LOTS = { param: { label: 'size ≥', unit: 'lots a print', default: 100, min: BIG_ORDER_FLOOR_LOTS, max: 5000, step: 10 } }
+const BIG_COUNT = { label: 'prints ≥', unit: '', default: 1, min: 1, max: 50, step: 1 }
+FLOW_CONDITIONS.push({
+  id: 'bigOrder', group: 'OrderFlow', name: 'Big orders (futures prints ≥ N lots)',
+  options: [
+    opt('buy', 'Big BUY order(s) in the look-back', 'sell', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+    opt('sell', 'Big SELL order(s) in the look-back', 'buy', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+    opt('buyAhead', 'Big buys ahead of big sells (lots) in the look-back', 'sellAhead', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+    opt('sellAhead', 'Big sells ahead of big buys (lots) in the look-back', 'buyAhead', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+    opt('buyOnly', 'Big buys and NO big sell in the look-back', 'sellOnly', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+    opt('sellOnly', 'Big sells and NO big buy in the look-back', 'buyOnly', { ...W, ...BIG_LOTS, param2: BIG_COUNT }),
+  ],
+  // p = the size in lots a print must reach, p2 = how many such prints (of the side named) the look-back must hold.
+  test: (d, i, v, w, p, p2) => {
+    const f = flowOf(d)
+    if (!f?.prints) return false
+    const size = Math.max(BIG_ORDER_FLOOR_LOTS, Number(p) || BIG_LOTS.param.default), need = Math.max(1, Math.round(Number(p2) || 1))
+    let buys = 0, sells = 0, buyLots = 0, sellLots = 0, known = false
+    for (let k = i; k > i - w && k >= 0; k--) {
+      const list = f.prints[k]
+      if (!list) continue
+      known = true
+      for (const [lots, buy] of list) if (lots >= size) { if (buy) { buys++; buyLots += lots } else { sells++; sellLots += lots } }
+    }
+    if (!known) return false
+    switch (v) {
+      case 'buy': return buys >= need
+      case 'sell': return sells >= need
+      case 'buyAhead': return buys >= need && buyLots > sellLots
+      case 'sellAhead': return sells >= need && sellLots > buyLots
+      case 'buyOnly': return buys >= need && sells === 0
+      case 'sellOnly': return sells >= need && buys === 0
+      default: return false
+    }
+  },
+  show: (d, i) => {
+    const list = flowOf(d)?.prints?.[i]
+    if (!list) return 'big orders —'
+    const big = list.filter(([lots]) => lots >= 100)
+    return big.length ? `prints ≥ 100 lots: ${big.map(([l, b]) => `${b ? 'B' : 'S'} ${Math.round(l)}`).join(', ')}` : 'no print ≥ 100 lots'
+  },
+})
 const FLOW_IDS = new Set(FLOW_CONDITIONS.map((c) => c.id))
 
 // THE OPTION CDV / OBV LINES (asked for - "cdv and obv started going down"): the running totals OI Replay's Option CDV & OBV

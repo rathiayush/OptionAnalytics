@@ -33,12 +33,19 @@ export const FLOW_DELTA = 1
 export const FLOW_PROFILE = 2
 export const FLOW_BOOK = 3
 
-/** The Order Flow day asked for the backtest: no prints; with the book, the footprint and heatmap in the Order Flow page's
+/** BIG ORDERS (asked for - "add big orders trade as well ... we should be able to specify the quantity"): the day's prints
+ *  (`trades` - each packet's volume at its last price and side, the Order Flow page's big-order dots) of at least this many
+ *  lots come with every order flow day the backtest asks; a condition reads those at or over its own size. */
+export const BIG_ORDER_FLOOR_LOTS = 10
+/** The server returns a day's latest 5 000 prints of the size asked: a day with that many has none known before its first. */
+const PRINTS_CAP = 5000
+
+/** The Order Flow day asked for the backtest: the prints of BIG_ORDER_FLOOR_LOTS lots and more; with the book, the footprint and heatmap in the Order Flow page's
  *  default rows (NIFTY 1, BANKNIFTY / SENSEX 5 points - the liquidity map's rows), else one row a bar (the delta only). */
 export function orderFlowUrl(u, date, need = FLOW_DELTA) {
   const book = need >= FLOW_BOOK
   const rows = need >= FLOW_PROFILE
-  return `/api/order-flow/${u}/day/${date}?rowSize=${rows ? FETCH_ROWS[u] ?? 1 : 1000}&minTradeLots=100000&heatmapColumns=${book ? FLOW_HEATMAP_COLUMNS : 50}${rows ? '&backfillBars=true' : ''}`
+  return `/api/order-flow/${u}/day/${date}?rowSize=${rows ? FETCH_ROWS[u] ?? 1 : 1000}&minTradeLots=${BIG_ORDER_FLOOR_LOTS}&heatmapColumns=${book ? FLOW_HEATMAP_COLUMNS : 50}${rows ? '&backfillBars=true' : ''}`
 }
 
 // The liquidity map's read now, as a code the conditions name (the side it is bullish / bearish for in its name).
@@ -110,6 +117,22 @@ export function orderFlowMinutes(body, t, { asOfMs = null, book = true } = {}) {
     ? (body?.heatmap ?? []).map((c) => ({ t: msOf(c.time), bids: c.bids ?? [], asks: c.asks ?? [] }))
       .filter((c) => Number.isFinite(c.t) && (asOfMs == null || c.t <= asOfMs)).sort((a, b) => a.t - b.t)
     : []
+  // BIG ORDERS: each minute's prints [lots, buy (1 / 0), price], known at the minute's end - a recorded minute's only (an
+  // estimated day's / minute's prints are made up from its candles). `printsFrom` - the first minute prints are known for.
+  const prints = Array.from({ length: n }, () => [])
+  const trades = estimatedDay ? [] : (body?.trades ?? [])
+  const index = new Map()
+  for (let i = 0; i < n; i++) index.set(t[i], i)
+  let printsFrom = trades.length >= PRINTS_CAP ? Infinity : -Infinity
+  for (const tr of trades) {
+    const ms = minuteOf(msOf(tr.time))
+    if (trades.length >= PRINTS_CAP) printsFrom = Math.min(printsFrom, ms)
+    const i = index.get(ms)
+    if (i == null || !known(ms) || est[i] || !(tr.quantity > 0)) continue
+    prints[i].push([tr.quantity / lotSize, tr.buy ? 1 : 0, tr.price])
+  }
+  if (trades.length >= PRINTS_CAP) for (let i = 0; i < n; i++) if (t[i] < printsFrom) prints[i] = null
+
   const liq = new Array(n).fill(null)
   if (columns.length) {
     const windowMs = 10 * MIN
@@ -140,7 +163,7 @@ export function orderFlowMinutes(body, t, { asOfMs = null, book = true } = {}) {
   }
   return {
     source: body?.source ?? 'live', lotSize, rowSize, book: liq.some(Boolean), estimated,
-    delta, vol, cvd, fo, fh, fl, fc, est, liq, codes: liq.map((x) => new Set(x?.code ? [x.code] : [])),
+    delta, vol, cvd, fo, fh, fl, fc, est, liq, prints, codes: liq.map((x) => new Set(x?.code ? [x.code] : [])),
   }
 }
 
@@ -179,5 +202,12 @@ export function flowView(flow, first, last) {
   return {
     ...flow, delta: sumOf(flow.delta), vol: sumOf(flow.vol), cvd: Float64Array.from(last, (i) => flow.cvd[i]),
     fo, fh, fl, fc, est, liq: Array.from(last, (i) => flow.liq[i]), codes,
+    // A candle's prints - its minutes' (none known for any of them = null).
+    prints: flow.prints ? first.map((f0, k) => {
+      const out = []
+      let known = false
+      for (let i = f0; i <= last[k]; i++) if (flow.prints[i]) { known = true; out.push(...flow.prints[i]) }
+      return known ? out : null
+    }) : undefined,
   }
 }

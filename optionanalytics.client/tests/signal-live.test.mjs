@@ -385,7 +385,7 @@ test('the futures order flow live: today\'s read once a round for a strategy rea
   assert.equal(noon.code, 0)
   const flowAsks = noon.asked.filter((a) => a.path.startsWith('/api/order-flow/'))
   assert.equal(flowAsks.length, 1)
-  assert.match(flowAsks[0].search, /rowSize=1000&minTradeLots=100000&heatmapColumns=50/)
+  assert.match(flowAsks[0].search, /rowSize=1000&minTradeLots=10&heatmapColumns=50/)
   assert.equal(flowAsks[0].key, 'k-9')
   const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
   await attachOrderFlow(day, 'NIFTY', 1, { fetch: async () => ({ ok: true, status: 200, json: async () => FLOW_DAY }), asOfMs: at('12:00') })
