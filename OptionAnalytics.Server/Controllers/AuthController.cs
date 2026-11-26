@@ -25,13 +25,17 @@ public sealed class AuthController : ControllerBase
     private readonly VisitRecorder? _visits;
 
     private readonly AppEnvironment? _appEnvironment;
+    // trueData: the Tick Flow page and its services are on (TrueDataOptions.TickFlowOn) - the page and its menu entry show only then.
+    private readonly bool _trueData;
 
-    public AuthController(AuthService auth, ILogger<AuthController> logger, VisitRecorder? visits = null, AppEnvironment? appEnvironment = null)
+    public AuthController(AuthService auth, ILogger<AuthController> logger, VisitRecorder? visits = null, AppEnvironment? appEnvironment = null,
+        Microsoft.Extensions.Options.IOptions<OptionAnalytics.Server.TrueData.TrueDataOptions>? trueData = null)
     {
         _auth = auth;
         _logger = logger;
         _visits = visits;
         _appEnvironment = appEnvironment;
+        _trueData = trueData?.Value?.TickFlowOn == true;
     }
 
     public sealed record LoginRequest(string? Email, string? Password);
@@ -63,7 +67,7 @@ public sealed class AuthController : ControllerBase
 
         _logger.LogInformation("{Email} logged in as {Role}.", email, role);
         _visits?.Record(HttpContext, "login", account: email, role: role);
-        return Ok(new { email, role, isLocal = _appEnvironment?.LocalTools == true });
+        return Ok(new { email, role, isLocal = _appEnvironment?.LocalTools == true, trueData = _trueData });
     }
 
     [HttpPost("logout")]
@@ -94,6 +98,6 @@ public sealed class AuthController : ControllerBase
         if (User.Identity?.IsAuthenticated != true) return Unauthorized();
         // isLocal: the server runs on a developer's machine (Environment:LocalTools, which follows Environment:IsLocal) - the "Analyse with AI" buttons
         // are shown only then.
-        return Ok(new { email = User.Identity.Name, role = User.FindFirstValue(ClaimTypes.Role), isLocal = _appEnvironment?.LocalTools == true });
+        return Ok(new { email = User.Identity.Name, role = User.FindFirstValue(ClaimTypes.Role), isLocal = _appEnvironment?.LocalTools == true, trueData = _trueData });
     }
 }

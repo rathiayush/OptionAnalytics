@@ -10,6 +10,7 @@ import RollingStrikeDataPage from './RollingStrikeDataPage.jsx'
 import OiReplayPage from './OiReplayPage.jsx'
 import GlobalFloating from './GlobalFloating.jsx'
 import OrderFlowPage from './OrderFlowPage.jsx'
+import TickFlowPage from './TickFlowPage.jsx'
 import ProfilesPage from './ProfilesPage.jsx'
 import SpotStructurePage from './SpotStructurePage.jsx'
 import SignalBacktestPage from './SignalBacktestPage.jsx'
@@ -25,7 +26,7 @@ import CachePage from './CachePage.jsx'
 import { reportVisit, visitPage } from './visits.js'
 import { refreshTradeSettings } from './tradeDefaults.js'
 import { chartVwap } from './chartVwap.js'
-import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS, asList } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, CE_COLOR, PE_COLOR, ALERT_KIND_LABEL, RECONNECT_RETRY_POLICY, computeEma, fmtPrice, fmtIstTime, fmtIstDateTime, DirectionTag, NavBar, TIMEFRAME_OPTIONS, STORED_UNDERLYING, STORED_TIMEFRAME, STORED_SHOW_VWAP, usePersistedState, pickUnderlying, useExpirySelector, ExpirySelect, withExpiry, AuthContext, useAuth, syncSignalRGroups, joinAllSignalRGroups, useCardOrder, CardDragHandle, onLiveBatch, useFeedLag, FeedLagTag, FeedLagAlert, LiveSection, captureChartView, restoreChartView, useReloadOnNewDeploy, checkForNewDeploy, POLL_HEADERS, asList, featureOn } from './shared.jsx'
 import './App.css'
 import { loadPreferences, pausePreferenceSync } from './prefsSync.js'
 
@@ -1701,6 +1702,13 @@ function DashboardPage() {
 // NavBar hiding the link. The actual security boundary is server-side (TriggersController/
 // CdvController's own [Authorize(Roles = "Admin")]); this only stops a logged-in non-admin from
 // looking at a page that would otherwise just show empty tables and failed requests.
+// A page whose server feature is off (the Tick Flow page without TrueData) goes to the dashboard.
+function RequireFeature({ path, children }) {
+  const auth = useAuth()
+  if (!featureOn(auth?.user, path)) return <Navigate to="/" replace />
+  return children
+}
+
 function RequireAdmin({ children }) {
   const auth = useAuth()
   if (auth?.user?.role !== 'Admin') return <Navigate to="/" replace />
@@ -1822,6 +1830,7 @@ export default function App() {
         <Route path="/expired-backtest" element={<ExpiredBacktestPage />} />
         <Route path="/oi-replay" element={<OiReplayPage />} />
         <Route path="/order-flow" element={<OrderFlowPage />} />
+        <Route path="/tick-flow" element={<RequireFeature path="/tick-flow"><TickFlowPage /></RequireFeature>} />
         <Route path="/profiles" element={<ProfilesPage />} />
         <Route path="/structure" element={<SpotStructurePage />} />
         <Route path="/signal-backtest" element={<SignalBacktestPage />} />
