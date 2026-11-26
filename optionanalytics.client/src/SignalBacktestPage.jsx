@@ -1253,7 +1253,7 @@ export default function SignalBacktestPage() {
             {noVolume.length > 0 && (
               <Alert
                 type="warning" showIcon message={`No volume on ${noVolume.length} day${noVolume.length === 1 ? '' : 's'} - the rule's candle-volume line never holds on ${noVolume.length === 1 ? 'it' : 'them'}, so it gives no signal`}
-                description={`${noVolume.map((o) => `${dayjs(o.date).format('D MMM YYYY')} (${o.source})`).join(' · ')} - the index's own volume exists from January 2026 on; use "Volume of: Futures" for older days, if Dhan still holds that contract.`}
+                description={`${noVolume.map((o) => `${dayjs(o.date).format('D MMM YYYY')} (${o.source})`).join(' · ')} - the index volume Dhan sends starts around December 2025; use "Volume of: Futures" for older days, if Dhan still holds that contract.`}
               />
             )}
             {noPivots.length > 0 && (
