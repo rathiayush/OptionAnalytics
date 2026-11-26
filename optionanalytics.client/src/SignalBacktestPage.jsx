@@ -52,6 +52,8 @@ const STORE = {
   trailGap: 'optionanalytics.signalBacktest.trailGap',
   trailStart: 'optionanalytics.signalBacktest.trailStart',
   timeStopMin: 'optionanalytics.signalBacktest.timeStopMin',
+  entryFrom: 'optionanalytics.signalBacktest.entryFrom',
+  lastEntry: 'optionanalytics.signalBacktest.lastEntry',
   maxTradesPerDay: 'optionanalytics.signalBacktest.maxTradesPerDay',
   cooldownMin: 'optionanalytics.signalBacktest.cooldownMin',
   maxDayLoss: 'optionanalytics.signalBacktest.maxDayLoss',
@@ -422,6 +424,8 @@ export default function SignalBacktestPage() {
   const spotStop = SPOT_STOP_CHOICES.includes(storedSpotStop) ? storedSpotStop : ''
   const [spotRR, setSpotRR] = usePersistedState(STORE.spotRR, BACKTEST_DEFAULTS.spotRR)
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
+  const [entryFrom, setEntryFrom] = usePersistedState(STORE.entryFrom, BACKTEST_DEFAULTS.entryFrom)
+  const [lastEntry, setLastEntry] = usePersistedState(STORE.lastEntry, BACKTEST_DEFAULTS.lastEntry)
   const [maxTradesPerDay, setMaxTradesPerDay] = usePersistedState(STORE.maxTradesPerDay, BACKTEST_DEFAULTS.maxTradesPerDay)
   const [cooldownMin, setCooldownMin] = usePersistedState(STORE.cooldownMin, BACKTEST_DEFAULTS.cooldownMin)
   // The day's limits in rupees (0 = off): the day stops at its max loss / max profit.
@@ -536,8 +540,8 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, costSl, costAfter, spotStop, spotRR, strategyName: strategyNameText, sumExpiries,
-  }), [index, tradeIn, costSl, costAfter, spotStop, spotRR, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
+    timeframe, expiryDay, costSl, costAfter, spotStop, spotRR, entryFrom, lastEntry, strategyName: strategyNameText, sumExpiries,
+  }), [index, entryFrom, lastEntry, tradeIn, costSl, costAfter, spotStop, spotRR, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay, strategyNameText, sumExpiries])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
@@ -580,7 +584,7 @@ export default function SignalBacktestPage() {
     if (s.from && s.to) setRange([s.from, s.to])
     setStoredRule(s.rule)
     // Its levels are the levels of ITS traded index.
-    setMoneyness(s.moneyness); setCostSl(s.costSl); setSpotStop(s.spotStop); setSpotRR(s.spotRR)
+    setMoneyness(s.moneyness); setCostSl(s.costSl); setSpotStop(s.spotStop); setSpotRR(s.spotRR); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
     setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart, costAfter: s.costAfter })
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
@@ -599,12 +603,13 @@ export default function SignalBacktestPage() {
   const applyTemplate = (id, quiet = false) => {
     const tpl = templateById(id)
     if (!tpl) return
-    setUndoTemplate({ name: tpl.name, rule: storedRule, strategyName: strategyNameText, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin } })
+    setUndoTemplate({ name: tpl.name, rule: storedRule, strategyName: strategyNameText, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, spotStop, spotRR, entryFrom, lastEntry } })
     const s = withTemplate(pageSettings, tpl)
     setStoredRule(s.rule)
     setStrategyName(tpl.name)
     setTimeframe(s.timeframe); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit)
     setTrailGap(s.trailGap); setTrailStart(s.trailStart); setTimeStopMin(s.timeStopMin)
+    setSpotStop(s.spotStop); setSpotRR(s.spotRR); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
     if (!quiet) message.success(`"${tpl.name}" is on the page - its rule, timeframe and levels. Change anything, then Run.`)
   }
   const undoTemplateLoad = () => {
@@ -614,6 +619,7 @@ export default function SignalBacktestPage() {
     setStrategyName(nameBefore ?? '')
     setTimeframe(levels.timeframe); setSlPct(levels.slPct); setTargetPct(levels.targetPct); setLevelUnit(levels.levelUnit)
     setTrailGap(levels.trailGap); setTrailStart(levels.trailStart); setTimeStopMin(levels.timeStopMin)
+    setSpotStop(levels.spotStop); setSpotRR(levels.spotRR); setEntryFrom(levels.entryFrom); setLastEntry(levels.lastEntry)
     setUndoTemplate(null)
   }
   const phone = useMediaQuery('(max-width: 640px)')
@@ -1001,6 +1007,14 @@ export default function SignalBacktestPage() {
                 <Space size={4}>
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Max</Text><InputNumber size="small" min={1} max={20} value={maxTradesPerDay} onChange={(v) => setMaxTradesPerDay(v ?? BACKTEST_DEFAULTS.maxTradesPerDay)} style={{ width: 60 }} />
                   <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>a day · cooldown</Text><InputNumber size="small" min={0} max={120} value={cooldownMin} onChange={(v) => setCooldownMin(v ?? 0)} addonAfter="min" style={{ width: 100 }} />
+                </Space>
+              </Tooltip>
+              <Tooltip title="Signals are taken only between these times (IST, HH:MM; NSE trades 09:15 - 15:30). The default 09:30 - 14:45 skips the opening 15 minutes - set 09:16 to trade the opening push. Every trade is out by 15:10 anyway.">
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Entries</Text>
+                  <Input size="small" value={entryFrom} maxLength={5} onChange={(e) => setEntryFrom(e.target.value)} style={{ width: 62 }} aria-label="Entries from (HH:MM)" />
+                  <Text type="secondary" style={{ fontSize: 12 }}>to</Text>
+                  <Input size="small" value={lastEntry} maxLength={5} onChange={(e) => setLastEntry(e.target.value)} style={{ width: 62 }} aria-label="Entries until (HH:MM)" />
                 </Space>
               </Tooltip>
               <Tooltip title="The DAY's limits in rupees (0 = off): once the day's P&L - the trades closed today and the one open, net of the charges - reaches the max loss (or the max profit), the open trade exits right there and no more trades are taken that day (nor one with no room left for its own charges).">

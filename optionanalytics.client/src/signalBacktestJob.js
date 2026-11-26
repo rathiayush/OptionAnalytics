@@ -210,6 +210,7 @@ const held = (v, min, max, fallback) => {
  * maxDayProfit, timeframe, expiryDay, costSl, costAfter, strategyName }. The rule goes through its tree, as
  * the page always has it (a rule saved before the builder opens as its groups).
  */
+const CLOCK = /^([01]\d|2[0-3]):[0-5]\d$/
 export function cleanBacktestSettings(s = {}) {
   const d = BACKTEST_DEFAULTS
   const levelUnit = LEVEL_UNITS.includes(s?.levelUnit) ? s.levelUnit : d.levelUnit
@@ -235,6 +236,9 @@ export function cleanBacktestSettings(s = {}) {
     timeStopMin: held(s?.timeStopMin, 0, 360, d.timeStopMin),
     maxTradesPerDay: Math.round(held(s?.maxTradesPerDay, 1, 20, d.maxTradesPerDay)),
     cooldownMin: held(s?.cooldownMin, 0, 120, d.cooldownMin),
+    // The entry window (a signal outside it is skipped) - "09:30" - "14:45" by default; a fair-value strategy trades the opening push.
+    entryFrom: CLOCK.test(s?.entryFrom) ? s.entryFrom : d.entryFrom,
+    lastEntry: CLOCK.test(s?.lastEntry) ? s.lastEntry : d.lastEntry,
     lots: Math.round(held(s?.lots, 1, 100, d.lots)),
     charges: typeof s?.charges === 'boolean' ? s.charges : d.charges,
     sttPct: held(s?.sttPct, 0, 1, d.sttPct),

@@ -1766,6 +1766,43 @@ const OPT_FLOW_CONDITIONS = [
 ]
 const BOOK_IDS = new Set(['liqRead', 'liqWalls', 'liqLean'])
 // The candle volume conditions' look-back: how many of the day's candles before it make the average (at least 3 needed).
+// FAIR VALUE's windows (IST minutes of the day) and anchors - see the `fairValue` condition. The window chosen: 0 both,
+// 1 the morning (09:15 - 10:45), 2 the afternoon (14:00 - 15:00), 3 the first 15 minutes of each (the opening pushes).
+const FAIR_WINDOW = {
+  label: 'Window', unit: '', default: 0, min: 0, max: 3, step: 1, wide: true,
+  choices: [{ value: 0, label: 'Both: 09:15 - 10:45 and 14:00 - 15:00' }, { value: 1, label: 'Morning 09:15 - 10:45' }, { value: 2, label: 'Afternoon 14:00 - 15:00' }, { value: 3, label: 'First 15 min of each window' }],
+  text: (v) => ({ 1: 'the morning window', 2: 'the afternoon window', 3: 'the first 15 min of each window' }[Math.round(Number(v))] ?? 'both windows'),
+}
+const FAIR_ANCHOR = {
+  label: 'Morning fair value', unit: '', default: 0, min: 0, max: 1, step: 1, wide: true,
+  choices: [{ value: 0, label: "Previous session's close" }, { value: 1, label: "Today's 09:15 open" }],
+  text: (v) => (Math.round(Number(v)) === 1 ? "the day's open" : "the previous close"),
+}
+const BOS_CANDLES = { label: 'last', unit: 'candles', default: 10, min: 2, max: 60, step: 1 }
+/** The fair value at candle `i` (its anchor and window - 1 morning / 2 afternoon) or null outside the windows. */
+function fairValueAt(d, i, windowChoice, source) {
+  const win = Math.round(Number(windowChoice)) || 0
+  const src = Math.round(Number(source)) === 1 ? 1 : 0
+  const info = indicatorCache(d, `fair${src}`, () => {
+    const out = new Array(d.n).fill(null)
+    let before = NaN      // the close of the last candle that ended before 14:00
+    for (let k = 0; k < d.n; k++) {
+      const m = istMinute(d.t[k])                     // the candle's last minute
+      if (m < 14 * 60) before = d.spot.c[k]
+      if (m >= 9 * 60 + 15 && m < 10 * 60 + 45) {
+        const anchor = src === 0 && d.prevDay?.close > 0 ? d.prevDay.close : d.spot.o[0]
+        if (finite(anchor)) out[k] = { anchor, window: 1, first: m < 9 * 60 + 30 }
+      } else if (m >= 14 * 60 && m < 15 * 60 && finite(before)) out[k] = { anchor: before, window: 2, first: m < 14 * 60 + 15 }
+    }
+    return out
+  })
+  const f = info[i]
+  if (!f) return null
+  if (win === 1 && f.window !== 1) return null
+  if (win === 2 && f.window !== 2) return null
+  if (win === 3 && !f.first) return null
+  return f
+}
 // Which volume a candle's volume reads (0 = the price series': the near futures', else the index's; 1 = the INDEX's own - spot).
 const VOL_SOURCE = {
   label: 'Volume of', unit: '', default: 0, min: 0, max: 1, step: 1, wide: true,
@@ -2284,6 +2321,81 @@ export const RULE_CONDITIONS = [
       return v === 'aboveHigh' ? c > hi && c - hi >= frac(p) * hi : v === 'belowLow' ? c < lo && lo - c >= frac(p) * lo : false
     },
     show: (d, i) => (i > 0 ? `before: ${fmtP(d.spot.l[i - 1])} - ${fmtP(d.spot.h[i - 1])}` : 'no candle before'),
+  },
+  {
+    // FAIR VALUE (JJ Simon's fair pricing theory, on NSE time - asked for): the reference price just BEFORE a session opens
+    // is "fair value" and price moves away from it in the opening push and comes back once momentum fades. THE WINDOWS
+    // (NY 9:30 - 11:00 and 2:00 - 3:00 in Indian market hours): MORNING 09:15 - 10:45 and AFTERNOON 14:00 - 15:00 IST. THE
+    // ANCHOR: the morning window's = the previous session's close (the price before the open; today's 09:15 open when
+    // asked, or when no previous session is loaded), the afternoon's = the close of the last candle before 14:00. The
+    // condition is true while the candle's close is >= X% above / below it inside the window chosen.
+    id: 'fairValue', group: 'Price', name: 'Price away from fair value (session open reference)',
+    options: [
+      opt('awayAbove', 'Above fair value by ≥ X% (pushed up) - now or in the look-back', 'awayBelow', { windowed: true, param: pctParam('by ≥', 0.1, 5, 0.05), param2: FAIR_WINDOW, param3: FAIR_ANCHOR }),
+      opt('awayBelow', 'Below fair value by ≥ X% (pushed down) - now or in the look-back', 'awayAbove', { windowed: true, param: pctParam('by ≥', 0.1, 5, 0.05), param2: FAIR_WINDOW, param3: FAIR_ANCHOR }),
+    ],
+    // A REVERSION is read after the push has been pulled back by the candle that confirms it, so the look-back: it holds if
+    // ANY of the last N candles (1 = this one alone) closed that far from its fair value.
+    test: (d, i, v, w, p, p2, p3) => {
+      if (v !== 'awayAbove' && v !== 'awayBelow') return false
+      for (let k = Math.max(0, i - Math.max(1, w) + 1); k <= i; k++) {
+        const f = fairValueAt(d, k, p2, p3)
+        const c = d.spot.c[k]
+        if (!f || !finite(c)) continue
+        if (v === 'awayAbove' ? c >= f.anchor * (1 + frac(p)) : c <= f.anchor * (1 - frac(p))) return true
+      }
+      return false
+    },
+    show: (d, i) => {
+      const f = fairValueAt(d, i, 0, 0)
+      return f ? `fair value ${fmtP(f.anchor)} (${f.window === 2 ? 'afternoon' : 'morning'}) · price ${((d.spot.c[i] / f.anchor - 1) * 100).toFixed(2)}% from it` : 'outside the fair value windows'
+    },
+  },
+  {
+    // A DISPLACEMENT CANDLE (JJ Simon's entry confirmation): a strong impulse candle - the body larger than the candle before's,
+    // closing beyond the candle before's high (bullish) / low (bearish) and with little counter-wick (the wick against the
+    // move at most X% of the candle's range).
+    id: 'displacement', group: 'Price', name: 'Displacement candle (strong impulse)',
+    options: [
+      opt('bullish', 'Bullish: body over the last one, closed past its high, little upper wick', 'bearish', { param: pctParam('counter-wick ≤', 25, 100, 5) }),
+      opt('bearish', 'Bearish: body over the last one, closed past its low, little lower wick', 'bullish', { param: pctParam('counter-wick ≤', 25, 100, 5) }),
+    ],
+    test: (d, i, v, w, p) => {
+      if (i < 1) return false
+      const { o, h, l, c } = d.spot
+      if (![o[i], h[i], l[i], c[i], o[i - 1], h[i - 1], l[i - 1], c[i - 1]].every(finite)) return false
+      const range = h[i] - l[i]
+      if (!(range > 0)) return false
+      const body = Math.abs(c[i] - o[i]), before = Math.abs(c[i - 1] - o[i - 1])
+      if (!(body > before)) return false
+      const wick = v === 'bullish' ? h[i] - Math.max(o[i], c[i]) : Math.min(o[i], c[i]) - l[i]
+      if (wick > frac(p) * range) return false
+      return v === 'bullish' ? c[i] > o[i] && c[i] > h[i - 1] : v === 'bearish' ? c[i] < o[i] && c[i] < l[i - 1] : false
+    },
+    show: (d, i) => {
+      if (i < 1) return 'no candle before'
+      const range = d.spot.h[i] - d.spot.l[i]
+      return range > 0 ? `body ${(Math.abs(d.spot.c[i] - d.spot.o[i]) / range * 100).toFixed(0)}% of the range · last body ${fmtP(Math.abs(d.spot.c[i - 1] - d.spot.o[i - 1]))}` : 'no range'
+    },
+  },
+  {
+    // BREAK OF STRUCTURE: a close beyond the highest high / lowest low of the last N candles (the structure the market has
+    // just made) - the "BOS" / market structure shift of the setups.
+    id: 'structureBreak', group: 'Price', name: 'Break of structure (close past the last N candles)',
+    options: [
+      opt('bosUp', 'Closed above the highest high of the last N candles', 'bosDown', { param: BOS_CANDLES }),
+      opt('bosDown', 'Closed below the lowest low of the last N candles', 'bosUp', { param: BOS_CANDLES }),
+    ],
+    test: (d, i, v, w, p) => {
+      const n = Math.max(2, Math.round(p) || BOS_CANDLES.default)
+      if (i < n) return false
+      const c = d.spot.c[i]
+      if (!finite(c)) return false
+      let hi = -Infinity, lo = Infinity
+      for (let k = i - n; k < i; k++) { hi = Math.max(hi, d.spot.h[k]); lo = Math.min(lo, d.spot.l[k]) }
+      return v === 'bosUp' ? c > hi : v === 'bosDown' ? c < lo : false
+    },
+    show: (d, i) => (i >= BOS_CANDLES.default ? 'structure of the last ' + BOS_CANDLES.default + ' candles' : 'too few candles'),
   },
   {
     // RSI of the spot candles: above / below a level, or crossed it in the look-back (and still past it now).
