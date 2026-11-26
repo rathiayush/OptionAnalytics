@@ -48,6 +48,11 @@ export function findSuddenWalls({ strikes, oiAt, ms, spot, step, ...options }) {
   return out.sort((a, b) => b.add - a.add)
 }
 
+/** A sudden wall is alerted (pop-up, Telegram) only when the strike's OI is up by more than this in the window. */
+export const OI_ALERT_MIN_PCT = 0.2
+/** One Telegram message per wall per 30 minutes, whichever sender (the Order Flow page or the server's alert runner) reports it first. */
+export const suddenWallKey = (underlying, dayKey, w, nowMs) => `sudden-${underlying}-${dayKey}-${w.side}${w.strike}-${Math.floor(nowMs / (30 * MIN))}`
+
 const lakh = (v) => `${(v / 1e5).toFixed(1)}L`
 /** "PUT 22700 +1.6L in 5m (+5.3%, 4.2x its pace)" */
 export function suddenWallText(w, minutes = SUDDEN_OI.minutes) {

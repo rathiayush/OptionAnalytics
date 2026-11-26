@@ -132,6 +132,16 @@ All must pass before committing.
   "of:{U}", "of:{U}:{expiry}", "c:{U}:N1" and "u:{U}" (`ExternalAccess.MayJoin`); what used to go to every hub connection goes to
   `SpotHub.StaffGroup`, which it never joins. `ExternalAccess` answers 403 to every other API, hub and swagger for it, deny by
   default (`ExternalAccessTests.cs` checks every controller and that nothing is sent to Clients.All). Never widen it.
+- SUDDEN OI WALLS AND PRICE ALERTS ALSO RUN ON THE SERVER (asked for - "every signal should run on server side not frontend side ...
+  sometimes when we click on index then only message appear"): the Order Flow page's two page-only alerts now have a server twin in the
+  alert runner (`IndexScanner.checkSuddenWalls` / `checkPriceAlerts`, Telegram tagged [Server], no page open, for every index switched on,
+  `config.settings.telegram` not false). SUDDEN WALLS: `suddenOiWalls` on the runner's OI, a strike whose OI is up by more than
+  `OI_ALERT_MIN_PCT` (suddenOi.js, 20%), at most 3 a look, a wall again only after 30 minutes, keyed `suddenWallKey` - the page sends the
+  SAME key, so a wall reaches Telegram once whichever sees it first. PRICE ALERTS (a level on the futures, once): the page keeps its list
+  in localStorage and copies it to `config.priceAlerts` ({ NIFTY: [{ id, price, dir }] } - an admin's change; `PUT /api/scanner-runner/
+  config` allows the key), the runner fires it keyed `price-{id}` (the page's key too) and lists the ids in its status (`priceFired`), which
+  the page reads every 15 s and drops. What stays PAGE-ONLY: the OI absorption / exhaustion read (a drawing - it feeds no alert) and the
+  big OI shift near ATM box (a page display; the server's 🎯 already carries the ATM shift). `tests/scanner-runner-alerts.test.mjs`.
 - The OI totals S/R break and 🎯 high-probability alerts (`oiLevelBreaks.js`) run in TWO places with ONE step
   (`stepOiBreakAlerts`): the OI Replay page while it is open (pop-up, chime, voice) and the server alert runner for every enabled
   index with no page open (`IndexScanner.checkOiBreaks`, Telegram tagged [Server]). They are the APP'S alerts: Telegram
