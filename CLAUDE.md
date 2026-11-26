@@ -1489,7 +1489,7 @@ All must pass before committing.
   its own VWAP / EMAs / RSI and only its own trades tagged. The page's run has its days already; a BACKGROUND
   run's day (one finished before the chart existed too - its report has the trades) is loaded when it is picked, the page's
   loader (`loadDay` - the server's disk cache, kept for the tab's life), with Retry on a failure; a click, never polling.
-  `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
+  `tests/signal-backtest-chart.test.mjs`. OPTION CDV / OBV LINES ON THE DAY CHART (asked for - "add CDV and OBV, the two lines"; the "Option CDV / OBV" tick, `optionFlowLines` in `signalBacktestChart.js`, `dayChartData`'s `flow`, the side `optionanalytics.signalBacktest.chartFlowSide` Net CE - PE / CE / PE): the day's `odm` (the very minutes the rule's CDV / OBV profile conditions read) added up from the open, a candle taking the running total at its last minute (no look-ahead), drawn in a pane under the chart as two lines on their own scales - CDV (blue, right) and OBV (amber, left); not on an option's own chart; off by default, nothing is worked out unticked. `tests/signal-backtest-chart.test.mjs`. TEMPLATES (asked for - "be a non linear thinker ... create top 20 strategy and
   add it in dropdown ... i can modify"; `signalTemplates.js`): `RULE_TEMPLATES`, 29 rules from the page's own conditions in
   eight families (`TEMPLATE_FAMILIES` - profile clusters (asked for - "add top 5 strategy on this page now": `cluBuyersHold`, `cluRedBrokenFutures`,
   `cluThreeFlows`, `cluFailedBreak`, `cluOiFloorSellPut` - the CDV / OBV / OI clusters with a second flow; Compare all also puts the futures footprint on
