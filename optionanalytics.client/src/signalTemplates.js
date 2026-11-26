@@ -19,6 +19,7 @@ const nest = (g) => ({ group: g })
 export const TEMPLATE_FAMILIES = [
   { id: 'clusters', name: 'Profile clusters (CDV / OBV / OI / futures)' },
   { id: 'delta', name: 'Delta profile (yesterday\'s buy / sell rows)' },
+  { id: 'book', name: 'Liquidity heatmap (walls)' },
   { id: 'sequence', name: 'In order (THEN)' },
   { id: 'trend', name: 'Trend' },
   { id: 'reversal', name: 'Reversal' },
@@ -37,6 +38,12 @@ const TODAY = { param3: 1, param4: 0 }
 /** The templates: { id, family, name, idea, rule: { tree, action, mirror }, settings: { timeframe, slPct, targetPct,
  *  trailGap?, trailStart?, timeStopMin? } }. */
 export const RULE_TEMPLATES = [
+  {
+    id: 'wallTouchCdvObv', family: 'book', name: 'CDV and OBV turning, 2nd / 3rd touch of a heatmap wall',
+    idea: 'The options\' CDV and OBV lines both turn up (the flow has started going one way) while the futures\' liquidity heatmap shows a bid wall under the price - support - and price touches that same wall for the 2nd or 3rd time and closes back above it: the wall held twice already and the flow agrees, so the third try is taken. Mirror: CDV and OBV both falling, an offer wall (resistance) over the price touched the 2nd or 3rd time and rejected. A first touch is skipped on purpose; a 4th is not taken. Needs the order flow\'s book for the day.',
+    rule: { tree: ALL(L('optFlow', 'bothRising', { param: 10, windowMin: 10 }), L('liqWalls', 'touchBid', { param: 0.05, windowMin: 3 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 20, targetPct: 40, timeStopMin: 45 },
+  },
   // DELTA PROFILE: yesterday's option delta profile on spot (OI Replay's card) - its MOST BOUGHT row, where yesterday's
   // bullish option flow (calls bought / puts sold) piled up - a support its buyers have a position to defend - and its
   // MOST SOLD row, where the bearish flow did - resistance. Read four ways: the level holds, it breaks, a break of it fails,
