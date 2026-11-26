@@ -160,8 +160,15 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
 export function prepareDay(run, { underlying = null, prevProfile = null, minMinutes = 30, expiryChains = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
   const session = inSession
+  // The index's own minute volume: the run's `spotVolume` (the server sends it beside the plain OHLC candles - they carry no
+  // volume field of their own, so every index minute read 0 and a rule on the candle's volume never held), else a candle's own.
+  const spotVol = new Map()
+  for (const p of run?.spotVolume ?? []) {
+    const ms = minuteOf(msOf(p.time))
+    if (Number.isFinite(ms) && p.volume > 0) spotVol.set(ms, p.volume)
+  }
   const spotBars = (run?.spotCandlesOneMinute ?? [])
-    .map((b) => ({ t: minuteOf(msOf(b.time)), o: b.open, h: b.high, l: b.low, c: b.close, v: b.volume ?? 0 }))
+    .map((b) => { const t = minuteOf(msOf(b.time)); return { t, o: b.open, h: b.high, l: b.low, c: b.close, v: spotVol.get(t) ?? b.volume ?? 0 } })
     .filter((b) => Number.isFinite(b.t) && b.c > 0 && session(b.t))
     .sort((a, b) => a.t - b.t)
     .filter((b, i, all) => i === 0 || b.t !== all[i - 1].t)
