@@ -105,3 +105,20 @@ test('the spot levels: none off or with no risk; the settings held; the report s
   assert.equal(cleanBacktestSettings({ spotStop: 'candle', spotRR: 99 }).spotRR, 10)
   assert.match(reportHead(cleanBacktestSettings({ spotStop: 'candle', spotRR: 2, from: '2026-10-01', to: '2026-10-05' }), 3), /spot stop at the signal candle · spot target 1:2/)
 })
+
+test('SPOT volume: "Volume of: Index" reads the index\'s own volume, the default the futures\'', () => {
+  // The futures' volume is high on the breakout candle, the index's low: only the index reading calls it low.
+  const base = day({ spot: BREAK(() => 25060), vol: () => 1000 })
+  const idx = (i) => (i >= 90 && i < 105 ? 500 : 1000)
+  base.spot.v = Array.from({ length: base.n }, (_, i) => idx(i))
+  const v = timeframeView(base, 15)
+  const low = cond('candleVol')
+  assert.ok(!low.test(v, 6, 'low', 1, 1, 20, 0))              // futures: 1x average - not under it
+  assert.ok(low.test(v, 6, 'low', 1, 0.51, 20, 1))            // index: 0.5x
+  assert.ok(!low.test(v, 6, 'low', 1, 0.5, 20, 1))
+  const spotT = RULE_TEMPLATES.find((t) => t.id === 'vaLowVolBreakoutSpot')
+  const e = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), spotT))
+  const d = day({ spot: BREAK(() => 25060), vol: () => 1000 }); d.spot.v = base.spot.v
+  assert.equal(simulateDay(d, e).trades.length, 1)             // taken on the index's low volume
+  assert.equal(simulateDay(day({ spot: BREAK(() => 25060), vol: lowVol }), e).trades.length, 0)   // futures low, no index volume: none
+})

@@ -51,6 +51,12 @@ export const RULE_TEMPLATES = [
     settings: { timeframe: 15, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 2 },
   },
   {
+    id: 'vaLowVolBreakoutSpot', family: 'breakout', name: 'Bruni Triple Sprint - value area low-volume breakout, SPOT volume (15 min, 1:2)',
+    idea: 'The same setup as the futures-volume one, with the volume read on the INDEX itself (spot): the previous session\'s value area, a 15-minute candle that CLOSES above the VAH and above the candle before\'s high on LOW index volume - at most its average over the last 20 candles. Entry at that close; the stop on SPOT at the breakout candle\'s low, the target on spot twice that risk (1:2). Mirror: below the VAL and the candle before\'s low, the stop at its high. Needs the index\'s volume (Dhan sends it from January 2026) - a day with none gives no signal.',
+    rule: { tree: ALL(L('valueArea', 'crossedAboveVah', { param: 0, windowMin: 15 }), L('candleBreak', 'aboveHigh', { param: 0 }), L('candleVol', 'low', { param: 1, param2: 20, param3: 1 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 15, slPct: 0, targetPct: 0, spotStop: 'candle', spotRR: 2 },
+  },
+  {
     id: 'wallTouchCdvObv', family: 'book', name: 'CDV and OBV turning, 2nd / 3rd touch of a heatmap wall',
     idea: 'The options\' CDV and OBV lines both turn up (the flow has started going one way) while the futures\' liquidity heatmap shows a bid wall under the price - support - and price touches that same wall for the 2nd or 3rd time and closes back above it: the wall held twice already and the flow agrees, so the third try is taken. Mirror: CDV and OBV both falling, an offer wall (resistance) over the price touched the 2nd or 3rd time and rejected. A first touch is skipped on purpose; a 4th is not taken. Needs the order flow\'s book for the day.',
     rule: { tree: ALL(L('optFlow', 'bothRising', { param: 10, windowMin: 10 }), L('liqWalls', 'touchBid', { param: 0.05, windowMin: 3 })), action: 'buyCE', mirror: true },
