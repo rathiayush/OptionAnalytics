@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { emaSeries, premiumCandles, premiumEma, prepareDay, simulateDay, timeframeView } from '../src/signalBacktest.js'
-import { candleStart, dayChartData, dayOptions, defaultChartDay, defaultChartOption, ruleIndicators, skippedMarkers, tradeMarkers } from '../src/signalBacktestChart.js'
+import { candleStart, dayChartData, dayOptions, defaultChartDay, defaultChartOption, optionFlowLines, ruleIndicators, skippedMarkers, tradeMarkers } from '../src/signalBacktestChart.js'
 
 const MIN = 60_000
 const T915 = Date.parse('2026-10-05T09:15:00+05:30')
@@ -105,4 +105,30 @@ test('an option\'s chart: the strike\'s premium candles with its own VWAP / EMAs
   // Opened on the day's first trade's option, else the ATM call.
   assert.deepEqual(defaultChartOption(day, [{ side: 'PE', strike: 22800 }]), { side: 'pe', strike: 22800 })
   assert.deepEqual(defaultChartOption(day, []), { side: 'ce', strike })
+})
+
+test('the option CDV / OBV lines: the rule\'s own odm added up from the open, a candle takes its last minute, net = CE - PE', () => {
+  const { run } = syntheticDay()
+  const day = prepareDay(run, { underlying: 'NIFTY' })
+  assert.ok(day.odm.length > 0)
+  const net = dayChartData(day, { timeframe: 5, flow: 'net' }).flow
+  const ce = dayChartData(day, { timeframe: 5, flow: 'ce' }).flow
+  const pe = dayChartData(day, { timeframe: 5, flow: 'pe' }).flow
+  assert.ok(net.cdv.length > 0 && net.cdv.length === net.obv.length)
+  // Hand-worked at the first candle: the minutes up to its last one (09:19), CE less PE.
+  const upTo = (t) => day.odm.filter((m) => m.t <= t)
+  const sum = (list, key) => list.reduce((s, m) => s + m[key], 0)
+  const first = upTo(T915 + 4 * MIN)
+  assert.equal(net.cdv[0].time, T915)
+  assert.ok(Math.abs(net.cdv[0].value - (sum(first, 'ce') - sum(first, 'pe'))) < 1e-6)
+  assert.ok(Math.abs(net.obv[0].value - (sum(first, 'ceObv') - sum(first, 'peObv'))) < 1e-6)
+  // The sides add up to the net, at every candle.
+  net.cdv.forEach((p, k) => assert.ok(Math.abs(p.value - (ce.cdv[k].value - pe.cdv[k].value)) < 1e-6))
+  net.obv.forEach((p, k) => assert.ok(Math.abs(p.value - (ce.obv[k].value - pe.obv[k].value)) < 1e-6))
+  // No look-ahead: a day cut after the first candle's minutes gives the same first value.
+  const cut = { ...day, odm: day.odm.filter((m) => m.t <= T915 + 4 * MIN) }
+  assert.equal(dayChartData(cut, { timeframe: 5, flow: 'net' }).flow.cdv[0].value, net.cdv[0].value)
+  // Not asked for, not drawn; an option's own chart has none.
+  assert.equal(dayChartData(day, { timeframe: 5 }).flow, null)
+  assert.equal(optionFlowLines({ odm: [] }, [T915], 5), null)
 })
