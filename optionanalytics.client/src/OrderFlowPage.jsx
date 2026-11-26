@@ -11,6 +11,7 @@ import {
 import { aggregateBars, analyzeBars, cotRead, findWalls, replayView, replayRange, liquiditySignals, orderFlowBias, aggression, sweepSignals, pullStackSignals, autoBigLots, liquidityMap, heatmapFetchRow, rebucketColumns, rowsNest } from './orderFlowMath.js'
 import { TapeCard } from './OrderFlowTape.jsx'
 import { useDayOi } from './useDayOi.js'
+import { OI_ALERT_MIN_PCT, suddenWallKey } from './suddenOi.js'
 import { oiBiasParts, oiSummary, suddenOiWalls, vwapOf } from './oiContext.js'
 import { suddenWallText } from './suddenOi.js'
 import { chime, speak, telegram } from './alerts.js'
@@ -59,7 +60,6 @@ const REPLAY_TICK_MS = 200
 const REPLAY_HEATMAP_COLUMNS = 1500
 // A sudden OI wall is only ALERTED (chime / voice / popup / Telegram) when the strike's OI grew by more than this
 // share inside the window; smaller ones are still listed in Signals.
-const OI_ALERT_MIN_PCT = 0.2
 const IST_HHMMSS = new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' })
 
 // One SignalR connection for the page's lifetime; `group` (the live contract's, or none) follows the
@@ -663,7 +663,7 @@ export default function OrderFlowPage() {
       const fut = basis != null ? ` (futures ~${Math.round(w.strike + basis)})` : ''
       if (cfg.sound !== false) chime(w.side === 'PE')
       if (cfg.voice !== false) speak(`Sudden ${w.side === 'PE' ? 'put' : 'call'} wall ${w.strike}.`)
-      if (cfg.telegram !== false) telegram(`🧱 Sudden OI wall - ${underlying} ${suddenWallText(w)}${fut}: ${w.side === 'PE' ? 'support' : 'resistance'}`)
+      if (cfg.telegram !== false) telegram(`🧱 Sudden OI wall - ${underlying} ${suddenWallText(w)}${fut}: ${w.side === 'PE' ? 'support' : 'resistance'}`, suddenWallKey(underlying, new Date(nowMs).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }), w, nowMs))
       notification.open({
         key: `sudden-${w.side}${w.strike}-${nowMs}`, placement: 'topRight', duration: 12,
         message: <span style={{ color: w.side === 'PE' ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>🧱 Sudden {w.side === 'PE' ? 'PUT' : 'CALL'} OI wall {w.strike} · {w.side === 'PE' ? 'support' : 'resistance'}</span>,

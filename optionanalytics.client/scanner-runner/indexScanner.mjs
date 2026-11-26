@@ -7,7 +7,9 @@
 //
 // Everything outside (HTTP, Telegram, the clock) comes in through `io`, so the tests can drive a day through it.
 
-import { buildOiContext } from '../src/oiContext.js'
+import { buildOiContext, suddenOiWalls } from '../src/oiContext.js'
+import { OI_ALERT_MIN_PCT, suddenWallKey, suddenWallText } from '../src/suddenOi.js'
+import { alertsHit } from '../src/alerts.js'
 import { orderFlowFromSnapshot, applyOrderFlowPush, orderFlowPushGap, mergePrints, applyOiTicks, applyFuturesTicks, applySpotUpdate, expiryFlagOf, TAPE_PRINTS } from '../src/liveFeeds.js'
 import { newProfileWatch, profileAlertText, profileLevels, sendsProfileTelegram, sessionProfileOf, spotLevelsOf, spotProfileLevels, watchProfiles } from '../src/profileAlerts.js'
 import { tpoRowFor } from '../src/profiles.js'
@@ -48,6 +50,8 @@ export class IndexScanner {
     this.profileWatch = newProfileWatch()
     this.profileLevelsOf = { futures: [], spotOwn: [] }
     this.oiBreaks = { state: newOiBreakAlertState(), settingsSig: null, boundary: null, at: 0, sent: [] }
+    this.suddenSent = []   // { side, strike, t } - a wall is alerted again only after 30 minutes
+    this.priceFired = []   // ids of the page's price alerts this runner has fired
   }
 
   // ---- Configuration -------------------------------------------------------------------------------
@@ -228,6 +232,44 @@ export class IndexScanner {
     }
   }
 
+  // SUDDEN OI WALLS (the Order Flow page's alert, now also with no page open): a strike whose OI jumped by over OI_ALERT_MIN_PCT
+  // in the window - Telegram, tagged [Server], keyed like the page's so a message goes once. Not before the page's own 09:25.
+  async checkSuddenWalls(d, nowMs) {
+    const walls = suddenOiWalls(d.oi, nowMs)
+    this.suddenSent = this.suddenSent.filter((p) => p.t <= nowMs && nowMs - p.t < 30 * 60_000)
+    const fresh = walls.filter((w) => !this.suddenSent.some((p) => p.side === w.side && p.strike === w.strike))
+    if (!fresh.length) return
+    for (const w of fresh) this.suddenSent.push({ side: w.side, strike: w.strike, t: nowMs })
+    const cfg = this.settings()
+    const futures = d.prints.at(-1)?.price ?? d.view.meta?.lastPrice ?? null
+    const spot = d.oi?.spot?.at(-1)?.close ?? null
+    const basis = futures > 0 && spot > 0 ? Math.round(futures - spot) : null
+    for (const w of fresh.filter((x) => x.pct > OI_ALERT_MIN_PCT).slice(0, 3)) {
+      const fut = basis != null ? ` (futures ~${Math.round(w.strike + basis)})` : ''
+      const text = `🧱 Sudden OI wall - ${this.underlying} ${suddenWallText(w)}${fut}: ${w.side === 'PE' ? 'support' : 'resistance'}`
+      this.io.log(`${this.underlying}: ${text}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${text}`, suddenWallKey(this.underlying, this.date, w, nowMs))
+    }
+  }
+
+  // THE PAGE'S PRICE ALERTS (Order Flow - a level on the futures, once): the page copies its list to config.priceAlerts, the
+  // server watches it with no page open and sends the Telegram, keyed `price-{id}` like the page's, then reports the id fired
+  // (status) so the page drops it.
+  async checkPriceAlerts(d) {
+    const list = this.config.priceAlerts?.[this.underlying]
+    if (!Array.isArray(list) || !list.length) return
+    const last = d.prints.at(-1)?.price ?? d.view.meta?.lastPrice ?? null
+    const cfg = this.settings()
+    for (const a of alertsHit(list.filter((x) => x && x.id != null && x.price > 0), last)) {
+      if (this.priceFired.includes(a.id)) continue
+      this.priceFired.push(a.id)
+      const up = a.dir === 'above'
+      const text = `🔔 Price alert: ${this.underlying} futures ${up ? 'rose to' : 'fell to'} ${a.price} (now ${last.toFixed(1)})`
+      this.io.log(`${this.underlying}: ${text}`)
+      if (cfg.telegram !== false) await this.io.telegram(`${TAG} ${text}`, `price-${a.id}`)
+    }
+  }
+
   async evaluate() {
     const d = this.data
     if (!this.enabled || !d?.view || !d.oi) return
@@ -237,12 +279,15 @@ export class IndexScanner {
     if (!nowMs || istDate(nowMs) !== this.date) return
     await this.checkProfileLevels(d)
     await this.checkOiBreaks(d, nowMs)
+    await this.checkSuddenWalls(d, nowMs)
+    await this.checkPriceAlerts(d)
   }
 
   status() {
     const nowMs = this.clock()
     return {
       underlying: this.underlying, enabled: this.enabled, date: this.date, ready: !!this.data, error: this.error,
+      priceFired: this.priceFired,
       clockUtc: nowMs ? new Date(nowMs).toISOString() : null, contract: this.data?.view?.meta?.contractSymbol ?? null,
       profileAlerts: {
         futures: this.profileAlertsOn().futures && this.profileLevelsOf.futures.length > 0,

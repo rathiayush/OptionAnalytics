@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { readAlertSwitches } from './alertSwitches.js'
 import { Button, InputNumber, Space, Tag, Tooltip, Typography, notification } from 'antd'
 import { BellOutlined } from '@ant-design/icons'
-import { UP_COLOR, DOWN_COLOR } from './shared.jsx'
+import { UP_COLOR, DOWN_COLOR, POLL_HEADERS } from './shared.jsx'
 import { alertsHit, chime, speak, telegram, unlockAudio } from './alerts.js'
 
 const { Text } = Typography
@@ -17,6 +17,13 @@ const writeJson = (key, value) => {
   try { localStorage.setItem(key, JSON.stringify(value)) } catch { /* storage full / blocked */ }
 }
 
+// The list is copied to the server's alert runner (an admin's change; others get 403 and keep the page's own), which watches it
+// with no page open and sends the Telegram - keyed `price-{id}`, as the page's own message, so it goes once.
+const mirrorToServer = (all) => {
+  const priceAlerts = Object.fromEntries(Object.entries(all).map(([u, list]) => [u, (list ?? []).map(({ id, price, dir }) => ({ id, price, dir }))]))
+  fetch('/api/scanner-runner/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ priceAlerts }) }).catch(() => {})
+}
+
 /** Price alerts on the futures: kept per underlying across reloads, each fired ONCE - live only (a
  *  replay shows the lines but does not alert) - with a chime, the spoken words (when the scanner's
  *  voice is on), a notification and the server's Telegram chat (when the scanner's Telegram is on),
@@ -27,6 +34,7 @@ export function usePriceAlerts(underlying, lastPrice, live) {
   const save = (list) => setAll((prev) => {
     const next = { ...prev, [underlying]: list(prev[underlying] ?? []) }
     writeJson(ALERTS_KEY, next)
+    mirrorToServer(next)
     return next
   })
   const add = (price) => {
@@ -40,6 +48,26 @@ export function usePriceAlerts(underlying, lastPrice, live) {
   }
   const remove = (id) => save((list) => list.filter((a) => a.id !== id))
 
+  // The alerts the server's runner already fired (its Telegram is out): dropped here - once, from its status.
+  useEffect(() => {
+    let cancelled = false
+    const load = () => fetch('/api/scanner-runner/status', { headers: POLL_HEADERS }).then((r) => (r.ok ? r.json() : null)).then((st) => {
+      const fired = st?.status?.indices?.find?.((ix) => ix.underlying === underlying)?.priceFired
+      if (cancelled || !Array.isArray(fired) || !fired.length) return
+      setAll((prev) => {
+        const list = prev[underlying] ?? []
+        if (!list.some((a) => fired.includes(a.id))) return prev
+        const next = { ...prev, [underlying]: list.filter((a) => !fired.includes(a.id)) }
+        writeJson(ALERTS_KEY, next)
+        mirrorToServer(next)
+        return next
+      })
+    }).catch(() => {})
+    load()
+    const id = setInterval(load, 15_000)
+    return () => { cancelled = true; clearInterval(id) }
+  }, [underlying])
+
   const firing = useRef(new Set())
   useEffect(() => {
     if (!live) return
@@ -51,7 +79,7 @@ export function usePriceAlerts(underlying, lastPrice, live) {
       const up = a.dir === 'above'
       chime(up)
       if (cfg.voice !== false) speak(`Price alert. ${underlying} ${up ? 'above' : 'below'} ${a.price}.`)
-      if (cfg.telegram !== false) telegram(`🔔 Price alert: ${underlying} futures ${up ? 'rose to' : 'fell to'} ${a.price} (now ${lastPrice.toFixed(1)})`)
+      if (cfg.telegram !== false) telegram(`🔔 Price alert: ${underlying} futures ${up ? 'rose to' : 'fell to'} ${a.price} (now ${lastPrice.toFixed(1)})`, `price-${a.id}`)
       notification.open({
         key: `price-${a.id}`, placement: 'topRight', duration: 20,
         message: <span style={{ color: up ? UP_COLOR : DOWN_COLOR, fontWeight: 700 }}>🔔 {underlying} {up ? '▲ above' : '▼ below'} {a.price}</span>,

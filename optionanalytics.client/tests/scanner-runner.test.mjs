@@ -168,6 +168,6 @@ test('nothing is alerted before the engine has today\'s data, or for a switched-
   await runSpot(off, io, at(15), at(110))
   assert.deepEqual(io.telegrams, [])
   // The status the pages read: what the server covers - no strategy signals or trades any more.
-  assert.deepEqual(Object.keys(off.status()).sort(), ['clockUtc', 'contract', 'date', 'enabled', 'error', 'oiBreakAlerts', 'profileAlerts', 'ready', 'underlying'])
+  assert.deepEqual(Object.keys(off.status()).sort(), ['clockUtc', 'contract', 'date', 'enabled', 'error', 'oiBreakAlerts', 'priceFired', 'profileAlerts', 'ready', 'underlying'])
 })
 
