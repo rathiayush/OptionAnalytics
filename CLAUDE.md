@@ -1562,7 +1562,7 @@ All must pass before committing.
   `spotStopText` in the report heading): `spotLevelsAt` - the signal candle's low (bullish) / high (bearish) on the TRADED index's spot
   by time, the target N x that risk past the entry's spot; `simulateTrade`'s `spotLevels` - out when the 1-minute spot bar trades
   through, at the option's close that minute (its open when spot opened through); the spot stop after the premium's own stops, the spot
-  target after the premium target. None when the entry is not past the stop. The template has no premium SL / target. The
+  target after the premium target. None when the entry is not past the stop. The template has no premium SL / target. A SECOND, `vaLowVolBreakoutSpot`, reads the volume on the INDEX itself (asked for - "we do have volume on spot"): `candleVol`'s "Volume of" choice (`param3`, `VOL_SOURCE` - 0 futures else index, the default, so saved rules read as before; 1 the index's own, `d.spot.v`; a day with no index volume gives no signal). The
   champion's own interviews put much of his edge in risk sizing / regime filters - not in a rule backtest. A saved strategy's LIVE
   ORDERS carry the premium SL / target only (the Trade settings' when 0); the spot exit reaches them as the strategy's exit event.
   Σ 3 EXPIRIES (asked for - "in signal backtest also give this option ... data will be calculated based on three expiry";

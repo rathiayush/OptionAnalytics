@@ -326,7 +326,7 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
 
   return {
     ok: true, date, underlying: u, step, n, t, atm, oi, tot, atmOi, atmStrikes, breaks, hp, walls, gex, straddle, ceCum, peCum, netCum, oiTf,
-    spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c) },
+    spot: { o: spotBars.map((b) => b.o), h: spotBars.map((b) => b.h), l: spotBars.map((b) => b.l), c: spotBars.map((b) => b.c), v: spotBars.map((b) => b.v ?? 0) },
     price: { o: priceBars.map((b) => b.o), h: priceBars.map((b) => b.h), l: priceBars.map((b) => b.l), c: priceBars.map((b) => b.c), v: priceBars.map((b) => b.v) },
     priceSource: useFutures ? 'futures' : 'spot', vwap: Array.from(vwap), vwapSd: Array.from(vwapSd), spotVwap: Array.from(spotVwap),
     straddleWidth: read?.day?.width ?? null,
@@ -1766,6 +1766,13 @@ const OPT_FLOW_CONDITIONS = [
 ]
 const BOOK_IDS = new Set(['liqRead', 'liqWalls', 'liqLean'])
 // The candle volume conditions' look-back: how many of the day's candles before it make the average (at least 3 needed).
+// Which volume a candle's volume reads (0 = the price series': the near futures', else the index's; 1 = the INDEX's own - spot).
+const VOL_SOURCE = {
+  label: 'Volume of', unit: '', default: 0, min: 0, max: 1, step: 1, wide: true,
+  choices: [{ value: 0, label: 'Futures (else index)' }, { value: 1, label: 'Index (spot)' }],
+  text: (v) => (Math.round(Number(v)) === 1 ? 'the index\'s own volume' : 'the futures\' volume'),
+}
+const volumeOf = (d, source) => (Math.round(Number(source)) === 1 ? d.spot?.v : d.price?.v)
 const VOL_CANDLES = { label: 'of last', unit: 'candles', default: 20, min: 3, max: 100, step: 1 }
 function volumeAverage(vol, i, n) {
   if (!vol) return NaN
@@ -2248,17 +2255,17 @@ export const RULE_CONDITIONS = [
     // none to read). LOW = under X times that average (1 = below its average), HIGH = at least X times. No side - the mirror keeps it.
     id: 'candleVol', group: 'Price', name: 'Candle volume (vs the candles before it)',
     options: [
-      opt('low', 'Low: below X × the average of the last N candles', 'low', { param: { label: '<', unit: '× average', default: 1, min: 0.1, max: 5, step: 0.1 }, param2: VOL_CANDLES }),
-      opt('high', 'High: at least X × the average of the last N candles', 'high', { param: { label: '≥', unit: '× average', default: 1.5, min: 0.1, max: 10, step: 0.1 }, param2: VOL_CANDLES }),
+      opt('low', 'Low: below X × the average of the last N candles', 'low', { param: { label: '<', unit: '× average', default: 1, min: 0.1, max: 5, step: 0.1 }, param2: VOL_CANDLES, param3: VOL_SOURCE }),
+      opt('high', 'High: at least X × the average of the last N candles', 'high', { param: { label: '≥', unit: '× average', default: 1.5, min: 0.1, max: 10, step: 0.1 }, param2: VOL_CANDLES, param3: VOL_SOURCE }),
     ],
-    test: (d, i, v, w, p, p2) => {
-      const vol = d.price?.v
+    test: (d, i, v, w, p, p2, p3) => {
+      const vol = volumeOf(d, p3)
       const avg = volumeAverage(vol, i, p2)
       if (!(avg > 0) || !(vol[i] > 0)) return false
       return v === 'low' ? vol[i] < p * avg : v === 'high' ? vol[i] >= p * avg : false
     },
     show: (d, i) => {
-      const vol = d.price?.v, avg = volumeAverage(vol, i, VOL_CANDLES.default)
+      const vol = volumeOf(d, 0), avg = volumeAverage(vol, i, VOL_CANDLES.default)
       return vol?.[i] > 0 && avg > 0 ? `volume ${(vol[i] / avg).toFixed(2)}× its average` : 'volume —'
     },
   },
