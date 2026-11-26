@@ -1655,6 +1655,11 @@ All must pass before committing.
   yesterday's profile is asked once an index a day. The live day equals the backtest of that day up to the clock
   (`tests/signal-live.test.mjs` - read before, during and after each trade; the loop against a fake server: events
   once, the report after the close, nothing outside the session, a failing day backed off).
+  A CANDLE STILL FORMING GIVES NO ENTRY (asked about - "while day is running it shows many trades while at the end of day it shows less"):
+  on a 3 / 5 / 15-minute strategy the last candle of the live day is partial, its signal can vanish when it completes, but the
+  entry had already been kept (history, Telegram, a live order). `simulateDay`'s `asOfMs` (the live scan passes the clock) skips
+  a signal whose candle's last minute has not ended; exits are still managed on the 1-minute bars (`tests/signal-live.test.mjs`:
+  at every minute the live entries are the whole day's, none from a forming candle). Rows already kept stay in the History.
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

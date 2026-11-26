@@ -402,3 +402,25 @@ test('the futures order flow live: today\'s read once a round for a strategy rea
   const plain = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY] })
   assert.ok(!plain.asked.some((a) => a.path.startsWith('/api/order-flow/')))
 })
+
+test('on a 5 / 15-minute timeframe a candle still forming gives no entry - live trades are the whole day\'s whose candle has ended', () => {
+  for (const tf of [5, 15]) {
+    const engine = { ...ENGINE, timeframe: tf }
+    const whole = simulateDay(full, engine).trades
+    assert.ok(whole.length > 0, `tf ${tf}`)
+    const seen = new Set()
+    for (let m = at('09:20'); m <= at('14:20'); m += MIN) {
+      const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: m })
+      if (!day.ok) continue
+      const live = liveDayEvents(day, engine, { name: 'x', nowMs: m })
+      for (const t of live.trades) {
+        // An entry is only ever one the whole day has too (same strategy, entry time and premium) - never a forming candle's.
+        const w = whole.find((f) => f.entryTime === t.entryTime && f.strategy === t.strategy)
+        assert.ok(w, `tf ${tf} ${new Date(m).toISOString()}: entry ${new Date(t.entryTime).toISOString()} is not in the whole day`)
+        assert.equal(t.entry, w.entry)
+        seen.add(`${t.strategy}|${t.entryTime}`)
+      }
+    }
+    assert.equal(seen.size, whole.length, `tf ${tf}: every real trade is found live`)
+  }
+})
