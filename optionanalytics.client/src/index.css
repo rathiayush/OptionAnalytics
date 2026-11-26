@@ -310,3 +310,16 @@ body {
   /* !important: antd's own (CSS-in-JS) input rules are more specific. */
   .oa-of-page input, .oa-of-page textarea { font-size: 16px !important; }
 }
+
+/* The Tick Flow page (TickFlowPage.jsx) on a phone: card titles wrap instead of being cut with an ellipsis, the cards are padded
+   tighter, the big numbers smaller, and inputs are 16 px (iOS zooms in on a smaller one when tapped and stays zoomed). */
+.oa-tick-page { overflow-x: clip; }
+@media (max-width: 768px) {
+  .oa-tick-page .ant-card-head { padding: 0 10px; }
+  .oa-tick-page .ant-card-head-title { white-space: normal; padding: 8px 0; line-height: 1.35; }
+  .oa-tick-page .ant-card-extra { padding: 8px 0; }
+  .oa-tick-page .ant-card-body { padding: 10px 8px; }
+  .oa-tick-page .ant-statistic-content { font-size: 18px; }
+  .oa-tick-page .ant-statistic-title { font-size: 12px; margin-bottom: 0; }
+  .oa-tick-page input, .oa-tick-page textarea { font-size: 16px !important; }
+}
