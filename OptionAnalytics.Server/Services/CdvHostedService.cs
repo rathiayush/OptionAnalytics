@@ -679,6 +679,7 @@ public sealed class CdvHostedService : BackgroundService
         }
 
         _tickSubscription ??= _feedClient.AddTickConsumer("CDV", OnTick);
+        _ = Task.Run(() => WatchStalledBackfillAsync(stoppingToken), stoppingToken);
 
         // One loop rather than a startup phase and then a steady phase, because they want the same
         // thing: recenter, and come back SOON if anything is still missing.
@@ -707,6 +708,28 @@ public sealed class CdvHostedService : BackgroundService
             {
                 break;
             }
+        }
+    }
+
+    private static readonly TimeSpan StalledBackfillAge = TimeSpan.FromMinutes(6);
+
+    /// <summary>Every 30 s in market hours: a CDV rebuild pending for over StalledBackfillAge is dropped (its Dhan calls hung
+    /// or kept failing), so the live ticks move the totals and draw bars again instead of leaving them frozen. No Dhan call.</summary>
+    private async Task WatchStalledBackfillAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                if (!MarketHours.IsOpenNow) continue;
+                foreach (var state in _byExpiry.Values)
+                    if (state.AbandonStalledBackfill(StalledBackfillAge, DateTimeOffset.UtcNow))
+                        _logger.LogWarning("CDV: the rebuild of {Underlying} {Expiry} was still pending after {Minutes} min - dropped, live ticks draw the total again.",
+                            state.Underlying, state.Expiry, StalledBackfillAge.TotalMinutes);
+            }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex) { _logger.LogDebug(ex, "CDV stalled-rebuild watch failed"); }
         }
     }
 
