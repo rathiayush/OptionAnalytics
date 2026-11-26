@@ -1430,8 +1430,9 @@ const wallPick = (f, k, side, minX) => {
 }
 const TOUCH_NO = {
   label: 'Touch', unit: '', default: 0, min: 0, max: 3, step: 1, wide: true,
-  choices: [{ value: 0, label: '2nd or 3rd' }, { value: 2, label: '2nd only' }, { value: 3, label: '3rd only' }],
-  text: (v) => ({ 2: 'the 2nd touch', 3: 'the 3rd touch' }[Math.round(Number(v))] ?? 'the 2nd or 3rd touch'),
+  // "Every touch" (asked for - "add option of every time as well"): the 1st, 2nd, 3rd ... each one.
+  choices: [{ value: 0, label: '2nd or 3rd' }, { value: 2, label: '2nd only' }, { value: 3, label: '3rd only' }, { value: 1, label: 'Every touch' }],
+  text: (v) => ({ 1: 'every touch', 2: 'the 2nd touch', 3: 'the 3rd touch' }[Math.round(Number(v))] ?? 'the 2nd or 3rd touch'),
 }
 const FLOW_CONDITIONS = [
   {
@@ -1610,7 +1611,7 @@ const FLOW_CONDITIONS = [
         }
         case 'touchBid': case 'touchAsk': {
           const n = wallTouches(f, v === 'touchBid' ? 'sup' : 'res', frac(p), Number(p3) || 0)
-          const ok = (t) => (p2 === 2 || p2 === 3 ? t === p2 : t === 2 || t === 3)
+          const ok = (t) => (p2 === 1 ? t >= 1 : p2 === 2 || p2 === 3 ? t === p2 : t === 2 || t === 3)
           return anyIn(i, w, (k) => ok(n[k]))
         }
         case 'brokeAsk': return brokeLevel(c, (k) => at(k, 'res')?.price ?? null, i, w, true, p)

@@ -27,8 +27,9 @@ test('the 2nd and 3rd touch of the same bid wall fire; the 1st and the 4th do no
   assert.equal(touch(d, 'touchBid', 10, 3), true)    // the 2nd one within the look-back
 })
 
-test('the touch choice: only the 2nd, only the 3rd', () => {
+test('the touch choice: only the 2nd, only the 3rd, every touch', () => {
   const d = wallDay()
+  for (const [i, want] of [[3, true], [8, true], [9, false], [14, true], [20, true], [10, false]]) assert.equal(touch(d, 'touchBid', i, 1, 1), want, `every touch at ${i}`)
   assert.equal(touch(d, 'touchBid', 8, 1, 2), true)
   assert.equal(touch(d, 'touchBid', 14, 1, 2), false)
   assert.equal(touch(d, 'touchBid', 14, 1, 3), true)
