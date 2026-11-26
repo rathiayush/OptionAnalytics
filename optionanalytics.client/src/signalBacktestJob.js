@@ -296,7 +296,7 @@ export function dayOutcome(date, day, engine, tradeDay = null) {
   if (engine.tradeIn && !tradeDay?.ok) return { date, ok: false, reason: `${engine.tradeIn}: ${tradeDay?.reason ?? 'not loaded'}`, trades: [], signals: { rule: 0, mirror: 0 } }
   const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay })
   return {
-    date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
+    date, ok: true, prev: Boolean(day.prevVp), pivots: Boolean(day.pivots), spotVolume: Boolean(day.hasSpotVolume), priceVolume: Boolean(day.hasPriceVolume), expiry: Boolean(day.isExpiry), expirySkipped: Boolean(expirySkipped),
     // How many sessions before the day the option delta profile had (null: none asked for).
     deltaPast: Array.isArray(day.odmPast) ? day.odmPast.length : null,
     // The futures order flow (null: not asked for): 'none' (the server had none), else where it came from ('live' =
@@ -348,6 +348,13 @@ export function backtestReport(outcomes, settings) {
   ]
   const readsPrev = rule.lines.some((l) => GROUP_OF[l.id] === 'PrevProfile')
   const readsPivots = rule.lines.some((l) => GROUP_OF[l.id] === 'Pivots')
+  // A rule reading a candle's volume (`candleVol`): the days its volume source had none (the index's own before January 2026).
+  const volLines = rule.lines.filter((l) => l.id === 'candleVol')
+  const readsSpotVol = volLines.some((l) => Math.round(Number(l.param3)) === 1)
+  const readsPriceVol = volLines.some((l) => Math.round(Number(l.param3)) !== 1)
+  const noVolume = volLines.length
+    ? okDays.filter((o) => (readsSpotVol && o.spotVolume === false) || (readsPriceVol && o.priceVolume === false)).map((o) => ({ date: o.date, source: readsSpotVol && o.spotVolume === false ? 'index' : 'price series' }))
+    : []
   const deltaNeed = deltaDaysNeeded(rule)
   const flowNeed = orderFlowNeeded(rule)
   // A day outcome kept before the order flow (an older background run) has no `flow` - not listed.
@@ -355,6 +362,7 @@ export function backtestReport(outcomes, settings) {
   return {
     trades, rows, all, dayRows, lines, okDays: okDays.length, sides,
     failed: days.filter((o) => !o.ok).map((o) => ({ date: o.date, reason: o.reason })),
+    noVolume,
     noPrev: readsPrev ? okDays.filter((o) => !o.prev).map((o) => o.date) : [],
     // A day outcome kept before the pivot points (an older background run) has no `pivots` - not listed as without them.
     noPivots: readsPivots ? okDays.filter((o) => o.pivots === false).map((o) => o.date) : [],

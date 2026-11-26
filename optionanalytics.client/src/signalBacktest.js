@@ -339,7 +339,9 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     straddleWidth: read?.day?.width ?? null,
     ib: ibDone == null ? null : { high: ibHigh, low: ibLow, done: ibDone },
     prevVp: previousProfile(prevProfile, date),
-    prevDay, pivots: pivotLevels(prevDay),
+    // Whether the index / the price series (futures, else the index) had any volume today: a rule reading a candle's volume never holds without it.
+    hasSpotVolume: spotBars.some((b) => b.v > 0), hasPriceVolume: priceBars.some((b) => b.v > 0),
+        prevDay, pivots: pivotLevels(prevDay),
     ce: packBars(ceLegs, t), pe: packBars(peLegs, t), ceVol: packVolumes(ceLegs, t), peVol: packVolumes(peLegs, t),
     expiry, isExpiry: expiry === date,
     odm: optionDeltaMinutes(run?.cePoints, run?.pePoints, spotBars.map((b) => ({ time: b.t, open: b.o, high: b.h, low: b.l, close: b.c }))),
