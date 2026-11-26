@@ -113,7 +113,7 @@ export function tradeRow(t, day, engine, { tradeDay = null, open = false } = {})
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
 export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null } = {}) {
-  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay })
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay, asOfMs: complete ? null : nowMs })
   const isOpen = (t) => !complete && t.exitReason === 'Day end'
   const events = []
   for (const t of trades) {

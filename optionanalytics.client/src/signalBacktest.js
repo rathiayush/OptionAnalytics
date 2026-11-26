@@ -3215,7 +3215,7 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * exitReason, points, gross, charges, net, holdMin }`; every signal
  * `{ strategy, time, dir, why, taken, skipped }`.
  */
-export function simulateDay(d, settings = {}, { tradeDay = null } = {}) {
+export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null } = {}) {
   const s = { ...BACKTEST_DEFAULTS, ...settings }
   const from = clockMinute(s.entryFrom) ?? 9 * 60 + 30
   const lastEntry = clockMinute(s.lastEntry) ?? 14 * 60 + 45
@@ -3257,7 +3257,16 @@ export function simulateDay(d, settings = {}, { tradeDay = null } = {}) {
   // or the day is not traded.
   const expiryMode = td?.isExpiry && EXPIRY_MODES.has(s.expiryDay) ? s.expiryDay : null
   const expirySkipped = Boolean(td?.isExpiry) && s.expiryDay === 'skip'
+  // LIVE (`asOfMs`, the clock): a candle of the timeframe still forming is not a candle yet - its signal can vanish when it
+  // completes - so only a candle whose last minute has ended counts (the trades are still managed on the 1-minute bars).
+  const candleDone = (k) => {
+    if (asOfMs == null || !view.at) return true
+    const last = d.t[view.at[k]]
+    const endMin = SESSION_FIRST + (Math.floor((istMinute(last) - SESSION_FIRST) / view.tf) + 1) * view.tf
+    return last + (endMin - istMinute(last)) * MIN <= asOfMs
+  }
   for (const sig of ruleSignals(view, s.rule, { openAt })) {
+    if (!candleDone(sig.i)) continue
     const i = minuteOfSignal(sig.i)
     const { dir, mode: ruleMode } = ACTION[sig.action]
     const mode = expiryMode ?? ruleMode
