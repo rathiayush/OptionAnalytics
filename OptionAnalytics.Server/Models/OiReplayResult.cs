@@ -141,6 +141,12 @@ public sealed record OiReplayResult(
     /// <summary>The session VWAP's volume-weighted standard deviation at SpotVwap's points (VwapCalculator.ComputeSdSeries) - the page's VWAP +/- 2 sd bands.</summary>
     public IReadOnlyList<ObvPoint> SpotVwapSd { get; init; } = Array.Empty<ObvPoint>();
 
+    /// <summary>The spot's own 1-minute VOLUME (the index volume Dhan sends from January 2026 on), one point per bar that
+    /// carried any - SpotCandlesOneMinute is a plain OHLC `Candle` and has no volume field, so without this the Signal
+    /// backtest read every index minute as volume 0 (a rule on the candle's volume - the "Triple Sprint" low-volume
+    /// breakout on spot volume - never held). Empty when the spot carried no volume.</summary>
+    public IReadOnlyList<VolumePoint> SpotVolume { get; init; } = Array.Empty<VolumePoint>();
+
     /// <summary>Set when today's spot is NOT the whole day from Dhan - Dhan refused or sent nothing, and the live
     /// feed's own bars are shown instead (from when the server's feed started). Says why, for the page to show.</summary>
     public string? SpotNote { get; init; }
@@ -182,3 +188,6 @@ public sealed record OiReplayExpiryBand(
     public static OiReplayExpiryBand Failed(string underlying, DateOnly date, string expiryFlag, int expiryCode, string error) =>
         new(false, error, underlying, date, expiryFlag, expiryCode, expiryCode == 1 ? "MONTH" : "N2", Array.Empty<OiReplayPoint>(), Array.Empty<OiReplayPoint>());
 }
+
+/// <summary>One minute's traded volume (a bar's start time and its volume).</summary>
+public readonly record struct VolumePoint(DateTimeOffset Time, long Volume);

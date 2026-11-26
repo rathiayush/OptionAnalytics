@@ -393,6 +393,7 @@ public sealed class OiReplayService
         {
             SpotVwap = VwapCalculator.ComputeSeries(spotBarsRaw),
             SpotVwapSd = VwapCalculator.ComputeSdSeries(spotBarsRaw),
+            SpotVolume = spotBarsRaw.Where(b => b.Volume > 0).Select(b => new VolumePoint(b.Time, b.Volume)).ToList(),
             SpotNote = spotNote,
         };
     }
