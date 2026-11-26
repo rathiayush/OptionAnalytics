@@ -84,7 +84,7 @@ test('a rule with the futures delta profile asks the order flow by price and the
   assert.equal(orderFlowNeeded(rule([{ id: 'futDelta', value: 'buyers' }])), FLOW_DELTA)
   assert.equal(futuresDaysNeeded(rule([{ id: 'fdpPoc', value: 'above' }])), 0)
   assert.equal(futuresDaysNeeded(rule([{ id: 'fdpPoc', value: 'above', param3: 3, param4: 1 }])), 3)
-  assert.match(orderFlowUrl('NIFTY', '2026-10-05', FLOW_PROFILE), /rowSize=1&minTradeLots=100000&heatmapColumns=50&backfillBars=true$/)
+  assert.match(orderFlowUrl('NIFTY', '2026-10-05', FLOW_PROFILE), /rowSize=1&minTradeLots=10&heatmapColumns=50&backfillBars=true$/)
   const d = prepareDay(RUN, { underlying: 'NIFTY' })
   const t0 = d.t[0]
   const body = { source: 'live', meta: { lotSize: 75 }, rowSize: 1, bars: [0, 1, 2].map((k) => ({ time: new Date(t0 + k * MIN).toISOString(), open: 1, high: 2, low: 1, close: 2, buy: 75, sell: 0, levels: [{ price: 25000, buy: 75, sell: 0 }] })) }

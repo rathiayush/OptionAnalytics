@@ -1533,6 +1533,16 @@ All must pass before committing.
   / `ress` - the four nearest walls a side), skipping weaker ones nearer the price. The strength is the liquidity map's (its 10-minute window's
   median), not the screen's - the heatmap colours by what is in view, so a level can be yellow on one zoom and not another. The page shows a
   `param3` with `choices` as a dropdown. `tests/signal-backtest-wall-touch.test.mjs`.
+  BIG ORDERS (asked for - "add big orders trade as well ... we should be able to specify the quantity"; `bigOrder` in the
+  OrderFlow group, `tests/signal-backtest-big-orders.test.mjs`): the near futures' PRINTS of at least N lots (the Order Flow
+  page's big-order dots - one Dhan packet's volume at its last price, its side by the engine's rule): every order flow day the
+  backtest asks now carries the prints of `BIG_ORDER_FLOOR_LOTS` (10) lots and more (`orderFlowUrl`'s `minTradeLots`), laid on
+  the minutes known at each minute's END (`orderFlowMinutes`' `prints` - [lots, buy, price]; a candle holds its minutes' -
+  `flowView`). Options: big BUY / SELL order(s), big buys / sells AHEAD (more lots than the other side), big buys / sells and
+  NONE of the other side - in the look-back; "size ≥" lots a print (`param`, 10 - 5000, default 100 - the server's Telegram
+  default) and "prints ≥" how many (`param2`, 1 - 50); the mirror swaps the side, the numbers kept. Only RECORDED minutes: an
+  estimated day / minute has none (its prints are made up from candles) and the server sends a day's latest 5 000 prints, so a
+  day with that many has none known before its first (`prints[i]` null - the line does not hold there).
   Σ 3 EXPIRIES (asked for - "in signal backtest also give this option ... data will be calculated based on three expiry";
   OI Replay's own - the "Σ 3 expiries" checkbox beside Strike, `optionanalytics.signalBacktest.sumExpiries`, the settings'
   `sumExpiries`, off by default): each day loads its current / next / monthly expiry (`GET summed-expiries`) and the bands of
