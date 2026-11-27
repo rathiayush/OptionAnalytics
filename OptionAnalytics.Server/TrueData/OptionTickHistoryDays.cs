@@ -48,7 +48,7 @@ public sealed class OptionTickHistoryDays
     public bool Available => _api is not null;
 
     /// <summary>What a past day keeps on disk: the strikes it was built for, the expiry, the step and the big orders.</summary>
-    public sealed record Saved(int Strikes, string? Expiry, decimal Step, List<BigOrderEvent> Events);
+    public sealed record Saved(int Strikes, string? Expiry, decimal Step, List<BigOrderEvent> Events, List<OptionFlowMinute>? Flow = null);
 
     internal sealed class Job
     {
@@ -57,21 +57,23 @@ public sealed class OptionTickHistoryDays
         public string? Error, Expiry;
         public decimal Step;
         public IReadOnlyList<BigOrderEvent> Events = Array.Empty<BigOrderEvent>();
+        /// <summary>Every option's trading by minute (the Option CDV / OBV of a replayed day) - null on a day kept on disk before it existed.</summary>
+        public IReadOnlyList<OptionFlowMinute>? Flow;
         public DateTimeOffset At = DateTimeOffset.UtcNow;
     }
 
     /// <summary>State: "loading" (Done of Total contracts), "ready" (Events) or "failed" (Error).</summary>
-    public sealed record Status(string State, int Done, int Total, int Failed, string? Error, string? Expiry, decimal Step, IReadOnlyList<BigOrderEvent> Events);
+    public sealed record Status(string State, int Done, int Total, int Failed, string? Error, string? Expiry, decimal Step, IReadOnlyList<BigOrderEvent> Events, IReadOnlyList<OptionFlowMinute>? Flow = null);
 
     /// <summary>The day's state - and the start of its build the first time it is asked (in the background; ask again for progress).</summary>
     public Status Request(TrueDataLiveInstrument instrument, DateOnly day, int strikes)
     {
         strikes = Math.Clamp(strikes, 1, 15);
         var key = (instrument.Underlying.ToUpperInvariant(), day, strikes);
-        if (!_jobs.ContainsKey(key) && day < IstClock.Today() && _disk?.Read<Saved>("options", instrument.Underlying, day) is { } saved && saved.Strikes >= strikes)
+        if (!_jobs.ContainsKey(key) && day < IstClock.Today() && _disk?.Read<Saved>("options", instrument.Underlying, day) is { Flow: not null } saved && saved.Strikes >= strikes)
         {
             // A past day kept on disk (NIFTY): no TrueData call, no build.
-            var kept = new Job { State = "ready", Done = 1, Total = 1, Expiry = saved.Expiry, Step = saved.Step, Events = saved.Events.Where(e => Math.Abs(e.AtmDistance) <= strikes).ToList() };
+            var kept = new Job { State = "ready", Done = 1, Total = 1, Expiry = saved.Expiry, Step = saved.Step, Events = saved.Events.Where(e => Math.Abs(e.AtmDistance) <= strikes).ToList(), Flow = saved.Flow };
             _jobs[key] = kept; Trim();
             return Snapshot(kept);
         }
@@ -96,7 +98,7 @@ public sealed class OptionTickHistoryDays
         return Snapshot(job);
     }
 
-    private static Status Snapshot(Job j) => new(j.State, j.Done, Math.Max(0, j.Total), j.Failed, j.Error, j.Expiry, j.Step, j.State == "ready" ? j.Events : Array.Empty<BigOrderEvent>());
+    private static Status Snapshot(Job j) => new(j.State, j.Done, Math.Max(0, j.Total), j.Failed, j.Error, j.Expiry, j.Step, j.State == "ready" ? j.Events : Array.Empty<BigOrderEvent>(), j.State == "ready" ? j.Flow : null);
 
     private void Trim()
     {
@@ -137,8 +139,9 @@ public sealed class OptionTickHistoryDays
         }
         if (loaded.Count == 0) { job.Error = "TrueData had no option ticks for that day (it keeps only the last few days)"; job.State = "failed"; job.At = DateTimeOffset.UtcNow; return; }
 
-        job.Events = Detect(loaded, closeAt, step, strikes);
-        _disk?.Write("options", instrument.Underlying, day, new Saved(strikes, job.Expiry, step, job.Events.ToList()));
+        var built = DetectWithFlow(loaded, closeAt, step, strikes);
+        job.Events = built.Events; job.Flow = built.Flow;
+        _disk?.Write("options", instrument.Underlying, day, new Saved(strikes, job.Expiry, step, job.Events.ToList(), job.Flow.ToList()));
         job.State = "ready"; job.At = DateTimeOffset.UtcNow;
         _logger.LogInformation("Option ticks of {Underlying} {Day}: {Contracts} contracts ({Failed} without data), {Events} big orders.", instrument.Underlying, day, loaded.Count, job.Failed, job.Events.Count);
     }
@@ -164,6 +167,12 @@ public sealed class OptionTickHistoryDays
     /// <summary>The ticks of every contract in time order through one <see cref="OptionBigOrderWatch"/>; the ATM follows the options' own parity (else the futures'),
     /// and an order outside ATM +- <paramref name="strikes"/> of the ATM at its time is left out. Internal for the tests.</summary>
     internal static IReadOnlyList<BigOrderEvent> Detect(IReadOnlyList<(OptionContract Contract, IReadOnlyList<TrueDataTick> Ticks, bool PerTick)> loaded,
+        IReadOnlyDictionary<DateTimeOffset, decimal> futuresCloseByMinute, decimal step, int strikes) =>
+        DetectWithFlow(loaded, futuresCloseByMinute, step, strikes).Events;
+
+    /// <summary>The same pass, with every option's minute-by-minute flow (<see cref="OptionBigOrderWatch.FlowSince"/>) of the strikes asked for - the Tick Flow
+    /// page's Option CDV / OBV on a replayed day. The flow is the whole range the day's contracts were loaded for (the live card's window follows the ATM).</summary>
+    internal static (IReadOnlyList<BigOrderEvent> Events, IReadOnlyList<OptionFlowMinute> Flow) DetectWithFlow(IReadOnlyList<(OptionContract Contract, IReadOnlyList<TrueDataTick> Ticks, bool PerTick)> loaded,
         IReadOnlyDictionary<DateTimeOffset, decimal> futuresCloseByMinute, decimal step, int strikes)
     {
         var watch = new OptionBigOrderWatch { Step = step, MaxEvents = 1, FloorLots = ReplayFloorLots, FloorRatio = ReplayFloorRatio };
@@ -207,7 +216,7 @@ public sealed class OptionTickHistoryDays
         }
         // A day over the cap keeps its BIGGEST orders (the first ones only would end the day at 11:00), oldest first.
         if (events.Count > MaxEvents) events = events.OrderByDescending(e => e.Value).Take(MaxEvents).OrderBy(e => e.Time).ThenBy(e => e.Seq).ToList();
-        return events;
+        return (events, watch.FlowSince(0));
     }
     private const int HardCap = 200_000;
 }

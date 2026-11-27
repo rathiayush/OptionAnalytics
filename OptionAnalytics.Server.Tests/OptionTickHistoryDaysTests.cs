@@ -130,6 +130,21 @@ public sealed class OptionTickHistoryDaysTests
     }
 
     [Fact]
+    public async Task ADaysFlowCarriesEveryOptionsMinutes_ForTheReplayedCdvAndObv()
+    {
+        var (days, _, _) = Make();
+        var s = await Ready(days, 1);
+        Assert.NotNull(s.Flow);
+        // Every contract asked has its minutes; the 40-lot buy at the ask (09:30, 25950 CE) is bought quantity in that minute, not in the big-order list alone.
+        var minute = new DateTimeOffset(2026, 11, 23, 9, 30, 0, TimeSpan.FromMinutes(330)).ToUnixTimeMilliseconds();
+        var buy = Assert.Single(s.Flow!, f => f.Symbol == "NIFTY26120125950CE" && f.T == minute);
+        Assert.True(buy.Buy >= 40 * Lot);
+        Assert.Equal("CE", buy.Type);
+        Assert.Contains(s.Flow!, f => f.Type == "PE");
+        Assert.All(s.Flow!, f => Assert.Equal(Lot, f.LotSize));
+    }
+
+    [Fact]
     public async Task ABuiltDayIsAskedOfTrueDataOnce_AFailedCallIsTriedAgain_AndAContractWithNoDataIsCounted()
     {
         var (days, api, chain) = Make();

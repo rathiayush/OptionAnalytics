@@ -51,3 +51,13 @@ test('merging replaces the minute the server repeats and keeps the rest', () => 
   assert.equal(merged[1].buy, 9 * 65)
   assert.equal(mergeFlowRows(a, []), a)
 })
+
+test('a replayed day is cut at the clock: only the minutes completed by it, each bucket the same as the whole day\'s', () => {
+  const rows = []
+  for (let k = 0; k < 10; k += 1) rows.push(row(k, 'C1', 'CE', k + 1, 0, 100 + k, 101 + k), row(k, 'P1', 'PE', 0, k + 1, 100, 99))
+  const whole = optionFlowLines(optionFlowBuckets(rows, 3))
+  const cut = optionFlowLines(optionFlowBuckets(rows, 3, { upToMs: T0 + 6 * MIN }))
+  assert.equal(cut.cdv.ce.length, 2)                                        // minutes 0 - 5 = two whole 3-minute buckets
+  assert.deepEqual(cut.cdv.ce, whole.cdv.ce.slice(0, 2))
+  assert.deepEqual(cut.obv.pe, whole.obv.pe.slice(0, 2))
+})
