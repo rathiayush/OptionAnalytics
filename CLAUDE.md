@@ -1665,11 +1665,11 @@ All must pass before committing.
   another, only trade if there is not any open trade ... same direction do not add up"; "live profit running with the current price of
   options"; "trade given at 9:34 but EOD does not show it ... continue to show with a not taken tag"; `liveGroupEvents` in `signalLive.js`, the loop
   in `signal-live.mjs`, `tests/signal-live-group.test.mjs`, `SignalStrategyStoreTests.cs`): the strategies on the same TRADED index (`tradeIn`, else
-  the index) are read together - their trades are taken in the order of their ENTRY TIME and one is taken only when none of the others' (any
-  direction) is open then (an open trade lasts until its exit, a running one to the end; an entry at the minute another exits is skipped, as inside
+  the index) are read together - their trades are taken in the order of their ENTRY TIME and one is taken only when none of the others' IN THE SAME DIRECTION (bullish = a
+  bought call / a sold put, bearish = the other two - an OPPOSITE signal is taken, as asked) is open then (an open trade lasts until its exit, a running one to the end; an entry at the minute another exits is skipped, as inside
   one strategy): the one that signalled first keeps the trade, another's signal inside it is NOT TAKEN (`simulateDay`'s `blocked` intervals,
   `blockedBy`; the signal is not kept for later) and that strategy's later trades are worked out again without it. A 'skipped' event keeps it in the
-  History as a row tagged "not taken" (nothing to Telegram, no live order - SignalLiveOrders follows entry / exit only). An OPEN trade is marked to
+  History as a row tagged "not taken" ("another strategy's bullish / bearish trade is open (name)"; nothing to Telegram, no live order - SignalLiveOrders follows entry / exit only). An OPEN trade is marked to
   the option's CURRENT price every round (kind 'mark': `SignalStrategyStore.MarkOpenTrades` puts its exit price, points and net - "running" - over
   the open row, keeps no event, sends nothing; the list's Today line adds "(₹X running)" and the not-taken count - `SignalStrategyToday`'s
   `OpenNet` / `NotTaken`). THE END-OF-DAY REPORT NO LONGER DELETES what was shown live (`RecordDayAsync` used to replace every row of the day with
@@ -1685,6 +1685,16 @@ All must pass before committing.
   max trades, day limits, another strategy's trade) - it is managed to its own exit like any trade, the trade carries `pinned: true`, and in
   `liveGroupEvents` it is a fact that only blocks the others. So a live row always gets its exit and the end-of-day read keeps it. The "not taken
   at the end of the day" rows above stay as the safety net (`tests/signal-live-group.test.mjs`).
+  SPEED OF THE LIVE SCAN, 50 STRATEGIES (asked for - "50 strategies that we need to identify every minute, ultra fast so no trade is missed"):
+  measured, the engine is not the slow part (a day prepared once an index ~0.15 s, 50 strategies read together ~50 ms on the test day - held by a
+  test under 5 s); what cost minutes was the loop around it, now fixed: every index is loaded AT ONCE (`loadIndex` in `Promise.all` - one slow index
+  held the rest), the strategies' events / day reports go to the server `mapLimit` 8 at a time (it was one round trip after another), and the rounds
+  are ON THE CLOCK (`nextRoundAt`: the minute after the one the round belonged to + `SETTLE_MS` 3 s; a round that overran starts the next at once - it
+  used to sleep out the minute after it, so an entry was seen 1 - 2 minutes late and past the "seen late" limits). A round over 5 s logs how long it
+  took. The rules read COMPLETED candles, so the data changes once a minute: a pass every second would re-read the same minute (Dhan's feed is a
+  snapshot about once a second) - the scan reads each minute right after it closes and every pass re-reads the whole day, so a missed pass loses
+  nothing (entries are kept by key). Not done: an incremental day (prepare only the new minute) and moving the engine to .NET - the engine has to stay
+  the backtest's own code (`tests/signal-live.test.mjs` holds live = backtest), and a C# port could not be compiled or tested here.
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

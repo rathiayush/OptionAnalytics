@@ -22,6 +22,20 @@ export const LIVE_MIN_MINUTES = 5
 export const liveRunUrl = (u, date) => `${runUrl(u, date)}&forceLive=true`
 
 const msOf = (p) => (p?.ms != null ? p.ms : Date.parse(p?.time))
+/** Settle time after a minute closes before it is read (its last ticks and bars reach the server's memory). */
+export const SETTLE_MS = 3_000
+/** When the next round starts: the minute after the one the round BELONGED to (`startedAt`), `settleMs` past its end - so a round that overran
+ *  starts the next at once (never waits a whole extra minute, which used to push a signal's entry past the "late" limits). */
+export const nextRoundAt = (startedAt, settleMs = SETTLE_MS) => Math.floor(startedAt / MIN_MS) * MIN_MS + MIN_MS + settleMs
+/** `fn` over `list`, at most `limit` at a time, in the order given (results in order). */
+export async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length)
+  let next = 0
+  const worker = async () => { for (;;) { const k = next++; if (k >= list.length) return; out[k] = await fn(list[k], k) } }
+  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, worker))
+  return out
+}
+
 /** The run with only the minutes COMPLETED at `nowMs` (a 1-minute point is stamped at its start). */
 export function completedRun(run, nowMs) {
   const cut = (list) => (Array.isArray(list) ? list.filter((p) => { const t = msOf(p); return Number.isFinite(t) && t + MIN_MS <= nowMs }) : list)
@@ -173,7 +187,7 @@ export function pinnedEntries(sentKeys, date) {
  * SEVERAL SAVED STRATEGIES ON ONE TRADED INDEX, ONE TRADE AT A TIME (asked for - "there are many live strategies ... if they are
  * the same direction do not trade another, only trade if there is not any open trade"; "same direction do not add up"): each
  * entry `{ name, day, engine, tradeDay }` is a strategy's own day; their trades are taken in the order of their ENTRY TIME and a
- * trade is taken only when none of the others' (any direction) is open then - an open trade lasts until its exit (a running one
+ * trade is taken only when none of the others' (in the same direction) is open then - an open trade lasts until its exit (a running one
  * until the end), an entry at the minute another exits is skipped as inside one strategy. The one that signalled first keeps
  * the trade; another's signal inside it is NOT TAKEN (`blocked` on `simulateDay` - `notTaken`, a "not taken" row) and that
  * strategy's later trades are worked out again without it (its cooldown, max trades and day limits as if it had not traded).
@@ -191,11 +205,11 @@ export function liveGroupEvents(entries, { complete = false, nowMs = null } = {}
     if (pick < 0) break
     const r = results[pick], t = r.trades[done[pick]]
     // A PINNED trade was shown already - a fact, never re-read away: it only blocks the others.
-    if (!t.pinned && confirmed.some((c) => c.idx !== pick && t.entryTime >= c.from && t.entryTime <= c.to)) {
-      results[pick] = run(entries[pick], confirmed.filter((c) => c.idx !== pick).map(({ from, to, by }) => ({ from, to, by })))
+    if (!t.pinned && confirmed.some((c) => c.idx !== pick && c.dir === t.dir && t.entryTime >= c.from && t.entryTime <= c.to)) {
+      results[pick] = run(entries[pick], confirmed.filter((c) => c.idx !== pick).map(({ from, to, by, dir }) => ({ from, to, by, dir })))
       continue
     }
-    confirmed.push({ from: t.entryTime, to: r.open.includes(t) ? Infinity : t.exitTime, by: entries[pick].name, idx: pick })
+    confirmed.push({ from: t.entryTime, to: r.open.includes(t) ? Infinity : t.exitTime, by: entries[pick].name, idx: pick, dir: t.dir })
     done[pick]++
   }
   return results

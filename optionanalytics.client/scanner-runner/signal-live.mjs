@@ -13,7 +13,7 @@
 
 import { attachDeltaPast, attachOrderFlow, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
 import { deltaDaysNeeded, futuresDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
-import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveGroupEvents, liveRunUrl, pinnedEntries, prepareLiveDay } from '../src/signalLive.js'
+import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveGroupEvents, liveRunUrl, mapLimit, nextRoundAt, pinnedEntries, prepareLiveDay, SETTLE_MS } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -82,6 +82,7 @@ async function deltaPast(u, date, count) {
 }
 
 async function round(nowMs) {
+  const startedAt = Date.now()
   const ist = istClock(nowMs)
   if (ist.weekday === 0 || ist.weekday === 6 || ist.minute < LIVE_FROM_MINUTE || ist.minute > LIVE_UNTIL_MINUTE) return
   const cfg = await api('/api/signal-strategies/live')
@@ -111,8 +112,10 @@ async function round(nowMs) {
   for (const s of list) futNeed.set(s.clean.underlying, Math.max(futNeed.get(s.clean.underlying) ?? 0, futuresDaysNeeded(s.clean.rule)))
   const days = new Map()
   const summedDays = new Map()
-  for (const u of wanted) {
-    if ((backoff.get(u)?.until ?? 0) > nowMs) continue
+  // Every index at once (each its own run, profile, flow and expiries) - one after another a slow index held the rest, and 50 strategies
+  // waited for it.
+  const loadIndex = async (u) => {
+    if ((backoff.get(u)?.until ?? 0) > nowMs) return
     try {
       const [run, prev] = await Promise.all([api(liveRunUrl(u, date)), prevProfile(u, date)])
       if (!run?.success) throw new Error(run?.error ?? 'no data for today')
@@ -163,6 +166,7 @@ async function round(nowMs) {
       failed(u, err.message)
     }
   }
+  await Promise.all([...wanted].map(loadIndex))
   // The strategies ready to be read (their days and data in), grouped by the index they TRADE: one trade open at a time across
   // the group (liveGroupEvents - another strategy's signal while one is open is "not taken").
   const ready = new Map()
@@ -189,9 +193,8 @@ async function round(nowMs) {
       console.error(`${group.map((g) => g.s.name).join(', ')}: ${err.message}`)
       continue
     }
-    for (let i = 0; i < group.length; i++) {
-      const { s, u, day } = group[i]
-      const result = results[i]
+    // The strategies' events and day reports go to the server side by side (8 at a time) - 50 of them one by one was 50 round trips in a row.
+    await mapLimit(group.map((g, i) => ({ ...g, result: results[i] })), 8, async ({ s, u, day, result }) => {
       try {
         const sent = new Set(s.sent ?? [])
         // A 'mark' (a trade's running P&L) is sent every round - the server only updates the row; the rest once, by key.
@@ -203,17 +206,21 @@ async function round(nowMs) {
       } catch (err) {
         console.error(`${s.name} (${u}): ${err.message}`)
       }
-    }
+    })
   }
+  const took = Date.now() - startedAt
+  if (took > 5_000) console.log(`live scan round: ${list.length} strateg${list.length === 1 ? 'y' : 'ies'} in ${(took / 1000).toFixed(1)} s`)
 }
 
 async function main() {
   console.log('Saved strategies live scan started.')
   for (;;) {
+    const startedAt = Date.now()
     try { await round(now()) } catch (err) { console.error(`round: ${err.message}`) }
     if (ONCE) return
-    // Each minute, a few seconds after it completes (its bars settled on the server).
-    await sleep(MIN_MS - (Date.now() % MIN_MS) + 5_000)
+    // Each minute, a few seconds after it completes (its bars settled on the server) - on the clock whatever the last round took: one that
+    // overran starts the next at once instead of waiting out another minute (a missed minute made entries "late").
+    await sleep(Math.max(0, nextRoundAt(startedAt, SETTLE_MS) - Date.now()))
   }
 }
 

@@ -48,7 +48,7 @@ test('alone, each strategy trades its own signal - together the second one\'s si
   assert.equal(b.notTaken, 1)
   const skip = b.events.find((e) => e.kind === 'skipped')
   assert.equal(skip.row.status, 'not taken')
-  assert.match(skip.row.exitReason, /another strategy's trade is open \(A\)/)
+  assert.match(skip.row.exitReason, /another strategy's bullish trade is open \(A\)/)
   assert.equal(skip.row.entryTime, '09:45')
   assert.equal(b.events.filter((e) => e.kind === 'entry').length, 0)
   assert.match(dayReportText('B', d, { ...b, tradeIn: '' }), /1 signal not taken - another strategy's trade was open/)
@@ -123,4 +123,46 @@ test('a pinned trade is not skipped by the limits and blocks the other strategie
   ])
   assert.ok(a.trades.some((t) => t.entryTime === shown))                         // pinned, though 1 trade a day was used by the 09:30 one
   assert.equal(b.trades.length, 0)                                                 // B's 09:45 signal falls inside a trade that is open
+})
+
+// ---- the SAME direction only: an opposite signal is taken (asked for) ------------------------------------------------------------
+test('the block is by DIRECTION: a bought put (bearish) is taken while another strategy\'s bought call (bullish) is open - and a sold put (bullish) is not', () => {
+  const buyPut = (more) => strategy('P', { entryFrom: '09:45', timeStopMin: 60, ...more })
+  const withAction = (s, action) => ({ ...s, engine: { ...s.engine, rule: { ...s.engine.rule, action } } })
+  const [a, p] = group([A(), withAction(buyPut(), 'buyPE')])
+  assert.equal(a.trades.length, 1)
+  assert.equal(p.trades.length, 1); assert.equal(p.trades[0].side, 'PE')          // bearish while A's bullish call is open: taken
+  assert.equal(p.notTaken, 0)
+  const [, sp] = group([A(), withAction(buyPut(), 'sellPE')])                       // a SOLD put is bullish too - the same direction as A's call
+  assert.equal(sp.trades.length, 0)
+  assert.equal(sp.notTaken, 1)
+  assert.match(sp.events.find((e) => e.kind === 'skipped').row.exitReason, /bullish trade is open \(A\)/)
+})
+
+// ---- ultra fast, no minute missed -----------------------------------------------------------------------------------------------
+import { mapLimit, nextRoundAt, SETTLE_MS } from '../src/signalLive.js'
+
+test('rounds are on the clock: the next starts the minute after the one the round belonged to, at once when a round overran', () => {
+  const m = Date.parse('2026-10-05T10:00:00+05:30')
+  assert.equal(nextRoundAt(m + 3_000), m + 60_000 + SETTLE_MS)                    // started 10:00:03 -> 10:01:03
+  assert.equal(nextRoundAt(m + 59_000), m + 60_000 + SETTLE_MS)                   // a round started late in its minute still ends at the next one's slot
+  // A round that began at 10:00:03 and took 75 s ends at 10:01:18, after the 10:01:03 slot: the wait is zero, not another minute.
+  assert.ok(Math.max(0, nextRoundAt(m + 3_000) - (m + 78_000)) === 0)
+})
+
+test('mapLimit runs at most N at a time and keeps the order of the results', async () => {
+  let running = 0, peak = 0
+  const out = await mapLimit(Array.from({ length: 20 }, (_, k) => k), 8, async (k) => { running++; peak = Math.max(peak, running); await new Promise((r) => setTimeout(r, 5)); running--; return k * 2 })
+  assert.deepEqual(out, Array.from({ length: 20 }, (_, k) => k * 2))
+  assert.ok(peak <= 8 && peak > 1)
+  assert.deepEqual(await mapLimit([], 8, async () => 1), [])
+})
+
+test('50 strategies on one index are read well inside a minute (the engine is not the slow part)', () => {
+  const d = day()
+  const t0 = performance.now()
+  const results = liveGroupEvents(Array.from({ length: 50 }, (_, k) => ({ ...(k % 2 ? A() : B()), name: `S${k}`, day: d })))
+  assert.equal(results.length, 50)
+  assert.ok(performance.now() - t0 < 5_000, `took ${Math.round(performance.now() - t0)} ms`)
+  assert.ok(results.reduce((n, r) => n + r.trades.length, 0) >= 1)
 })

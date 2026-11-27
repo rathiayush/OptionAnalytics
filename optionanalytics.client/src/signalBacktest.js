@@ -3334,8 +3334,8 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * max profit") and every later signal is skipped. Returns `{ trades, signals, dayLimit, expirySkipped }` (dayLimit 'loss' | 'profit' | null) - every trade `{ date,
  * strategy ('rule' | 'mirror'), dir, why, side, strike, action, expiryDay, overridden, entryTime, exitTime, entry, exit,
  * exitReason, points, gross, charges, net, holdMin }`; every signal
- * `{ strategy, time, dir, why, taken, skipped }`. `blocked` - the intervals `{ from, to, by }` (ms) in which another strategy's
- * trade is open: a signal inside one is skipped (`blockedBy`). `pinned` - entries `{ side, time }` ALREADY SHOWN by the live scan: each stays a
+ * `{ strategy, time, dir, why, taken, skipped }`. `blocked` - the intervals `{ from, to, by, dir }` (ms) in which another strategy's
+ * trade of the SAME direction is open: a signal inside one is skipped (`blockedBy`). `pinned` - entries `{ side, time }` ALREADY SHOWN by the live scan: each stays a
  * trade (its signal is put back on its candle when the revised data no longer gives it, and none of the day's limits skip it) and is
  * managed to its exit like any other.
  */
@@ -3421,8 +3421,8 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null, 
     if (!forced && i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
     // ANOTHER STRATEGY'S TRADE IS OPEN (`blocked` - [{ from, to, by }] ms, the live scan's other strategies on the same traded index:
     // "if there is a trade open do not trade another - same direction do not add up"): not taken, and the signal is not kept for later.
-    const other = forced ? null : blocked?.find((b) => d.t[i] >= b.from && d.t[i] <= b.to)
-    if (other) { row.skipped = `another strategy's trade is open (${other.by})`; row.blockedBy = other.by; continue }
+    const other = forced ? null : blocked?.find((b) => b.dir === dir && d.t[i] >= b.from && d.t[i] <= b.to)
+    if (other) { row.skipped = `another strategy's ${dir > 0 ? 'bullish' : 'bearish'} trade is open (${other.by})`; row.blockedBy = other.by; continue }
     if (!forced && count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
     if (!forced && dayLimit) { row.skipped = `the day's max ${dayLimit} reached`; continue }
     const j = tradeAt(i)
