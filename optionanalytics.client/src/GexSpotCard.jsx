@@ -27,7 +27,7 @@ const LADDER_STRIKES_EACH = 3
 
 /** The spot candles, a step line for each GEX level as it stood at each candle, the regime strip at the bottom and -
  *  `ladder` given - the GEX ladder at the clock beside the candles. `onHover(price | null)`. */
-function GexSpotChart({ candles, series, shown, regimeOn, ladder, share, dayKey, onHover, height: givenHeight = 420 }) {
+function GexSpotChart({ candles, series, shown, regimeOn, ladder, share, net, dayKey, onHover, height: givenHeight = 420 }) {
   const height = useFitHeight(givenHeight)
   const heightRef = useRef(height)
   const containerRef = useRef(null)
@@ -120,13 +120,13 @@ function GexSpotChart({ candles, series, shown, regimeOn, ladder, share, dayKey,
     for (const l of GEX_SPOT_LINES) linesRef.current[l.key]?.applyOptions({ title: captions ? l.short : '' })
   }, [captions])
   useEffect(() => {
-    ladderRef.current?.setLadder(ladder, share)
+    ladderRef.current?.setLadder(ladder, share, net)
     const range = ladder?.step > 0 ? { low: ladder.spot - LADDER_STRIKES_EACH * ladder.step, high: ladder.spot + LADDER_STRIKES_EACH * ladder.step } : null
     const old = rangeRef.current
     rangeRef.current = range
     if ((old?.low !== range?.low || old?.high !== range?.high) && !userControlRef.current) chartRef.current?.priceScale('right').applyOptions({ autoScale: true })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [ladder, share])
+  }, [ladder, share, net])
   return <div ref={containerRef} style={{ width: '100%', height }} />
 }
 
@@ -158,6 +158,7 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
   const [savedShown, setShown] = usePersistedState('optionanalytics.oiReplay.gexSpotLines', GEX_SPOT_KEYS)
   const [regimeOn, setRegimeOn] = usePersistedState('optionanalytics.oiReplay.gexSpotRegime', true)
   const [ladderOn, setLadderOn] = usePersistedState('optionanalytics.oiReplay.gexSpotLadder', true)
+  const [netOn, setNetOn] = usePersistedState('optionanalytics.oiReplay.gexSpotLadderNet', false)
   const [hover, setHover] = useState(null)
   const narrow = useMediaQuery('(max-width: 768px)')
   const tf = GEX_SPOT_TIMEFRAMES.includes(timeframe) ? timeframe : 5
@@ -197,6 +198,11 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
         <Tooltip title="Every strike's GEX at the clock beside the candles: puts left, calls right, green = dealers long gamma there, red = short; the walls, max gamma and spot marked, the flip across.">
           <Checkbox checked={ladderOn} onChange={(e) => setLadderOn(e.target.checked)}>GEX ladder</Checkbox>
         </Tooltip>
+        {ladderOn && (
+          <Tooltip title="Net GEX by strike: each strike's call + put GEX added together - one bar, green right (dealers long gamma there - sticky) / red left (short gamma - accelerator), its ₹ Cr at the end.">
+            <Checkbox checked={netOn} onChange={(e) => setNetOn(e.target.checked)}>Net GEX by strike</Checkbox>
+          </Tooltip>
+        )}
       </Space>
       {now ? (
         <>
@@ -224,7 +230,7 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
       )}
       {ladder && (
         <div style={{ fontSize: 11, margin: '4px 0', display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <span>Ladder at {istHhmm(ladder.time)}: puts left · calls right (₹ Cr per 1% move)</span>
+          <span>Ladder at {istHhmm(ladder.time)}: {netOn ? 'net (calls + puts) a strike - short γ left · long γ right' : 'puts left · calls right'} (₹ Cr per 1% move)</span>
           <span><span style={{ color: UP_COLOR }}>■</span> dealers long gamma</span>
           <span><span style={{ color: DOWN_COLOR }}>■</span> dealers short gamma</span>
           <span><Tag color="green" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>CW</Tag> <Tag color="red" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>PW</Tag> <Tag color="purple" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>MG</Tag> <Tag color="blue" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>+G</Tag> <Tag color="orange" style={{ margin: 0, fontSize: 10, lineHeight: '14px', padding: '0 3px' }}>−G</Tag> outlined</span>
@@ -232,7 +238,7 @@ export function GexSpotCard({ days, spotBars, asOfMs, dayKey, isLive }) {
         </div>
       )}
       <GexSpotChart
-        candles={candles} series={series} shown={shown} regimeOn={regimeOn} ladder={ladder}
+        candles={candles} series={series} shown={shown} regimeOn={regimeOn} ladder={ladder} net={netOn}
         share={narrow ? GEX_LADDER_SHARE_NARROW : GEX_LADDER_SHARE} dayKey={`${dayKey}-${tf}-${ladderOn ? 'l' : ''}`} onHover={setHover}
       />
       {ladder && (
