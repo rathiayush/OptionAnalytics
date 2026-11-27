@@ -24,7 +24,7 @@ namespace OptionAnalytics.Server.Services;
 public sealed class SignalBacktestJobService : BackgroundService
 {
     /// <summary>Runs kept - past it the oldest finished ones go (their reports with them).</summary>
-    public const int MaxJobs = 60;
+    public const int MaxJobs = 500;   // was 60: a run over the cap deleted the oldest finished run AND its report - older runs vanished from the list (a report is a small JSON; only a Feature finder's dataset CSV is big)
     /// <summary>Runs one account may have waiting or running.</summary>
     public const int MaxWaitingPerOwner = 20;
     /// <summary>Starts a run gets: one cut off by a restart this many times is failed, not started again.</summary>

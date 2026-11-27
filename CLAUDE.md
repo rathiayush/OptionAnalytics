@@ -1606,7 +1606,7 @@ All must pass before committing.
   tried ONCE more at the end - never a loop - and the report written as JSON (`reportReplacer` keeps an Infinity profit
   factor). Each run is a file under `{Storage:ScannerRunnerPath}/signal-backtests/` (`{id}.json` - settings, state,
   progress; `{id}.result.json` - the report): the queue and the reports survive a restart / deploy, a run the restart cut
-  off is queued again (failed after `MaxAttempts` 3 starts); `MaxJobs` 60 kept (the oldest finished go first), 20 waiting
+  off is queued again (failed after `MaxAttempts` 3 starts); `MaxJobs` 500 kept (the oldest finished go first - it was 60, and a 61st run deleted the oldest one's report: "older background runs cannot be seen"), 20 waiting
   an account. Telegram when a run ends (on by default in the dialog - `optionanalytics.signalBacktest.bgTelegram`). The
   page's "Background runs" card lists them (the days with their years - `runRange`, the run's name and the report's
   heading carry them too; state, day k of n, the result so far / its numbers; a page TIMER with
