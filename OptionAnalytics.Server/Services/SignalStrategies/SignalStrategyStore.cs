@@ -320,16 +320,17 @@ public sealed class SignalStrategyStore
             // a live ORDER may follow it, so it is never relabelled "not taken"): a row that closed live stays exactly as it closed, with its P&L
             // - it was taken; one still open (no exit seen) is "unconfirmed" - kept in view, with no P&L, in no count. A signal that was NOT TAKEN
             // (another trade open) stays as it was.
-            foreach (var r in existing.Where(r => r.GetValueOrDefault("date") == date && !finalKeys.Contains(r.GetValueOrDefault("key") ?? "")))
+            // (only a KEYED row came from a live event - a report's own rows without one are replaced, as a retried report is)
+            foreach (var r in existing.Where(r => r.GetValueOrDefault("date") == date && r.GetValueOrDefault("key") is { Length: > 0 } k && !finalKeys.Contains(k)))
             {
-                var row = r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase);
-                if (string.Equals(row.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase))
+                var live = r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase);
+                if (string.Equals(live.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase))
                 {
-                    row["status"] = Unconfirmed;
-                    row["exitReason"] = "shown live; no end-of-day numbers for it";
-                    foreach (var c in new[] { "exitTime", "exit", "points", "gross", "charges", "net" }) row[c] = "";
+                    live["status"] = Unconfirmed;
+                    live["exitReason"] = "shown live; no end-of-day numbers for it";
+                    foreach (var c in new[] { "exitTime", "exit", "points", "gross", "charges", "net" }) live[c] = "";
                 }
-                keptTrades.Add(row);
+                keptTrades.Add(live);
             }
             CsvTable.Write(HistoryPath(id, "trades"), TradeColumns, keptTrades.OrderBy(r => r["date"], StringComparer.Ordinal));
         }
