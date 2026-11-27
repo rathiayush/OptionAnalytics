@@ -1661,6 +1661,21 @@ All must pass before committing.
   entry had already been kept (history, Telegram, a live order). `simulateDay`'s `asOfMs` (the live scan passes the clock) skips
   a signal whose candle's last minute has not ended; exits are still managed on the 1-minute bars (`tests/signal-live.test.mjs`:
   at every minute the live entries are the whole day's, none from a forming candle). Rows already kept stay in the History.
+  ONE TRADE AT A TIME ACROSS STRATEGIES, RUNNING P&L, NOT TAKEN (asked for - "many live strategies ... if they are the same direction do not trade
+  another, only trade if there is not any open trade ... same direction do not add up"; "live profit running with the current price of
+  options"; "trade given at 9:34 but EOD does not show it ... continue to show with a not taken tag"; `liveGroupEvents` in `signalLive.js`, the loop
+  in `signal-live.mjs`, `tests/signal-live-group.test.mjs`, `SignalStrategyStoreTests.cs`): the strategies on the same TRADED index (`tradeIn`, else
+  the index) are read together - their trades are taken in the order of their ENTRY TIME and one is taken only when none of the others' (any
+  direction) is open then (an open trade lasts until its exit, a running one to the end; an entry at the minute another exits is skipped, as inside
+  one strategy): the one that signalled first keeps the trade, another's signal inside it is NOT TAKEN (`simulateDay`'s `blocked` intervals,
+  `blockedBy`; the signal is not kept for later) and that strategy's later trades are worked out again without it. A 'skipped' event keeps it in the
+  History as a row tagged "not taken" (nothing to Telegram, no live order - SignalLiveOrders follows entry / exit only). An OPEN trade is marked to
+  the option's CURRENT price every round (kind 'mark': `SignalStrategyStore.MarkOpenTrades` puts its exit price, points and net - "running" - over
+  the open row, keeps no event, sends nothing; the list's Today line adds "(₹X running)" and the not-taken count - `SignalStrategyToday`'s
+  `OpenNet` / `NotTaken`). THE END-OF-DAY REPORT NO LONGER DELETES what was shown live (`RecordDayAsync` used to replace every row of the day with
+  the final read's closed trades, so a 9:34 trade the whole-day read did not reproduce vanished - 5 - 7 live, 2 - 3 at the end): a live row the final
+  read does not have stays, status "not taken", reason "shown live, not in the end-of-day read", no P&L, in no count. A strategy alone on its
+  index behaves exactly as before.
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

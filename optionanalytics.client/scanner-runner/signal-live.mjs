@@ -13,7 +13,7 @@
 
 import { attachDeltaPast, attachOrderFlow, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
 import { deltaDaysNeeded, futuresDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
-import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
+import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveGroupEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -163,6 +163,9 @@ async function round(nowMs) {
       failed(u, err.message)
     }
   }
+  // The strategies ready to be read (their days and data in), grouped by the index they TRADE: one trade open at a time across
+  // the group (liveGroupEvents - another strategy's signal while one is open is "not taken").
+  const ready = new Map()
   for (const [u, strategies] of byIndex) {
     if (complete && strategies.every((s) => s.reported)) continue
     for (const s of strategies) {
@@ -174,10 +177,25 @@ async function round(nowMs) {
       // Trading in another index: its day too - not read this round, the strategy waits for the next.
       const tradeDay = s.clean.tradeIn ? days.get(s.clean.tradeIn) ?? null : null
       if (s.clean.tradeIn && !tradeDay) continue
+      const traded = s.clean.tradeIn || u
+      ready.set(traded, [...(ready.get(traded) ?? []), { s, u, day, tradeDay }])
+    }
+  }
+  for (const group of ready.values()) {
+    let results
+    try {
+      results = liveGroupEvents(group.map(({ s, day, tradeDay }) => ({ name: s.name, day, engine: engineSettings(s.clean), tradeDay })), { complete, nowMs })
+    } catch (err) {
+      console.error(`${group.map((g) => g.s.name).join(', ')}: ${err.message}`)
+      continue
+    }
+    for (let i = 0; i < group.length; i++) {
+      const { s, u, day } = group[i]
+      const result = results[i]
       try {
-        const result = liveDayEvents(day, engineSettings(s.clean), { name: s.name, complete, nowMs, tradeDay })
         const sent = new Set(s.sent ?? [])
-        const fresh = result.events.filter((e) => !sent.has(e.key)).map(({ key, kind, text, trade, row }) => ({ key, kind, text, trade, row }))
+        // A 'mark' (a trade's running P&L) is sent every round - the server only updates the row; the rest once, by key.
+        const fresh = result.events.filter((e) => e.kind === 'mark' || !sent.has(e.key)).map(({ key, kind, text, trade, row }) => ({ key, kind, text, trade, row }))
         if (fresh.length) await api('/api/signal-strategies/live/events', { method: 'POST', body: { strategyId: s.id, date, events: fresh } })
         if (complete && !s.reported) {
           await api('/api/signal-strategies/live/day', { method: 'POST', body: { strategyId: s.id, date, ...dayRecord(day, result), text: dayReportText(s.name, day, result) } })

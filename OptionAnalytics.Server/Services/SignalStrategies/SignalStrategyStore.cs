@@ -31,6 +31,10 @@ public sealed class SignalStrategyStore
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders" };
     public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "limit", "reportedUtc" };
+    /// <summary>A history row's status for a signal or a live-shown trade that was not taken (another strategy's trade was open, or the
+    /// end-of-day read does not have it): it has no P&L and is in no count.</summary>
+    public const string NotTaken = "not taken";
+
     public static readonly string[] TradeColumns = { "date", "side", "signal", "action", "option", "entryTime", "entry", "sl", "target", "exitTime", "exit", "exitReason", "points", "gross", "charges", "net", "expiryDay", "why", "status", "key" };
     public static readonly string[] EventColumns = { "timeUtc", "date", "kind", "key", "text" };
     public static readonly string[] OrderColumns = { "timeUtc", "date", "trade", "kind", "status", "underlying", "option", "action", "lots", "price", "sl", "target", "reason", "orderIds", "message" };
@@ -215,8 +219,12 @@ public sealed class SignalStrategyStore
         List<SignalLiveEvent> fresh;
         lock (_lock)
         {
+            // A MARK is an open trade's running P&L at the option's current price (every round): it only updates the trade's row - no
+            // event is kept, nothing goes to Telegram and no live order follows it.
+            var marks = events.Where(e => e.Kind == "mark" && e.Row is not null).ToList();
+            if (marks.Count > 0) MarkOpenTrades(id, date, marks);
             var known = CsvTable.Read(HistoryPath(id, "events")).Where(r => r.GetValueOrDefault("date") == date).Select(r => r.GetValueOrDefault("key") ?? "").ToHashSet();
-            fresh = events.Where(e => !string.IsNullOrWhiteSpace(e.Key) && known.Add(e.Key!)).ToList();
+            fresh = events.Where(e => e.Kind != "mark" && !string.IsNullOrWhiteSpace(e.Key) && known.Add(e.Key!)).ToList();
             if (fresh.Count == 0) return (strategy, fresh);
             CsvTable.Append(HistoryPath(id, "events"), EventColumns, fresh.Select(e => (IReadOnlyDictionary<string, string?>)new Dictionary<string, string?>
             {
@@ -224,9 +232,27 @@ public sealed class SignalStrategyStore
             }));
             KeepTradeRows(id, date, fresh);
         }
+        // Only an entry or an exit is a message; a signal NOT TAKEN (another strategy's trade was open) is kept in the history only.
         if (strategy.Alerts)
-            foreach (var e in fresh) await NotifyAsync(WebUtility.HtmlEncode(e.Text ?? ""));
+            foreach (var e in fresh.Where(e => e.Kind is "entry" or "exit")) await NotifyAsync(WebUtility.HtmlEncode(e.Text ?? ""));
         return (strategy, fresh);
+    }
+
+    /// <summary>Marks the OPEN trades' rows to the option's current price (under the lock): the row's exit price, points, gross, charges
+    /// and net as if sold now, its exit reason "running" - a row that is still open only (a closed one is never touched).</summary>
+    private void MarkOpenTrades(string id, string date, IReadOnlyList<SignalLiveEvent> marks)
+    {
+        var rows = CsvTable.Read(HistoryPath(id, "trades")).Select(r => r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase)).ToList();
+        var changed = false;
+        foreach (var e in marks)
+        {
+            var key = Text(e.Row!["key"]);
+            var k = rows.FindIndex(r => r.GetValueOrDefault("date") == date && r.GetValueOrDefault("key") == key);
+            if (k < 0 || !string.Equals(rows[k].GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase)) continue;
+            foreach (var c in new[] { "exit", "exitReason", "points", "gross", "charges", "net" }) rows[k][c] = Text(e.Row![c]);
+            changed = true;
+        }
+        if (changed) CsvTable.Write(HistoryPath(id, "trades"), TradeColumns, rows.OrderBy(r => r.GetValueOrDefault("date"), StringComparer.Ordinal));
     }
 
     /// <summary>The trades' history as each signal comes (under the lock): an event's `row` (signalLive.js - tradeRow) by its
@@ -276,13 +302,29 @@ public sealed class SignalStrategyStore
             var keptDays = days.Where(r => r.GetValueOrDefault("date") != date).Select(r => (IReadOnlyDictionary<string, string?>)r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value)).ToList();
             keptDays.Add(row);
             CsvTable.Write(HistoryPath(id, "days"), DayColumns, keptDays.OrderBy(r => r["date"], StringComparer.Ordinal));
-            var keptTrades = CsvTable.Read(HistoryPath(id, "trades")).Where(r => r.GetValueOrDefault("date") != date)
+            var existing = CsvTable.Read(HistoryPath(id, "trades"));
+            var keptTrades = existing.Where(r => r.GetValueOrDefault("date") != date)
                 .Select(r => (IReadOnlyDictionary<string, string?>)r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value)).ToList();
+            var finalKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var t in (trades ?? new JsonArray()).OfType<JsonObject>())
             {
                 var tr = TradeColumns.ToDictionary(c => c, c => (string?)Text(t[c]), StringComparer.OrdinalIgnoreCase);
                 tr["date"] = date;
+                if (!string.IsNullOrEmpty(tr["key"])) finalKeys.Add(tr["key"]!);
                 keptTrades.Add(tr);
+            }
+            // A trade SHOWN LIVE that the end-of-day read does not have (asked for - "trade was given at 9:34 but EOD does not show it ... continue to
+            // show with a not taken tag"): kept in the history, tagged "not taken", with no P&L - it is out of the day's numbers, not out of sight.
+            foreach (var r in existing.Where(r => r.GetValueOrDefault("date") == date && !finalKeys.Contains(r.GetValueOrDefault("key") ?? "")))
+            {
+                var row = r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase);
+                if (!string.Equals(row.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase))
+                {
+                    row["status"] = NotTaken;
+                    row["exitReason"] = "shown live, not in the end-of-day read";
+                }
+                foreach (var c in new[] { "exitTime", "exit", "points", "gross", "charges", "net" }) row[c] = "";
+                keptTrades.Add(row);
             }
             CsvTable.Write(HistoryPath(id, "trades"), TradeColumns, keptTrades.OrderBy(r => r["date"], StringComparer.Ordinal));
         }
@@ -330,12 +372,15 @@ public sealed class SignalStrategyStore
 
     internal static SignalStrategyToday? TodayOf(string today, IReadOnlyList<Dictionary<string, string>> rows)
     {
-        if (rows.Count == 0) return null;
+        var notTaken = rows.Count(r => string.Equals(r.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase));
+        rows = rows.Where(r => !string.Equals(r.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase)).ToList();
+        if (rows.Count == 0 && notTaken == 0) return null;
         static decimal? Net(Dictionary<string, string> r) =>
             decimal.TryParse(r.GetValueOrDefault("net"), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : null;
         var closed = rows.Where(r => !string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase) && Net(r) is not null).ToList();
         var nets = closed.Select(r => Net(r)!.Value).ToList();
-        return new SignalStrategyToday(today, rows.Count, rows.Count - closed.Count, closed.Count, nets.Count(n => n > 0), nets.Count(n => n < 0), nets.Sum());
+        var running = rows.Where(r => string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase)).Select(Net).Where(n => n is not null).Sum(n => n!.Value);
+        return new SignalStrategyToday(today, rows.Count, rows.Count - closed.Count, closed.Count, nets.Count(n => n > 0), nets.Count(n => n < 0), nets.Sum(), notTaken, running);
     }
 
     private async Task NotifyAsync(string html)
@@ -350,8 +395,8 @@ public sealed class SignalStrategyStore
 }
 
 /// <summary>A strategy's trades today, as far as they have gone: how many, how many still open, closed, won / lost, and the
-/// closed ones' net (after charges).</summary>
-public sealed record SignalStrategyToday(string Date, int Trades, int Open, int Closed, int Wins, int Losses, decimal Net);
+/// closed ones' net (after charges), the signals NOT TAKEN and the OPEN trades' running net (at the option's current price).</summary>
+public sealed record SignalStrategyToday(string Date, int Trades, int Open, int Closed, int Wins, int Losses, decimal Net, int NotTaken = 0, decimal OpenNet = 0);
 
 /// <summary>A saved strategy: its name, owner, index, the live scan's switches, its settings (the page's) and whether it
 /// places LIVE Dhan orders (an admin's switch, off by default).</summary>
