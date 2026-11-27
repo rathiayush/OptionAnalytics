@@ -108,3 +108,13 @@ test('the ladder shown is the clock\'s minute: what the candle series read last'
   assert.equal(l.time, DAY + 12 * MIN)
   assert.equal(l.rows.find((r) => r.strike === 25000).call, 12e8)
 })
+
+test('the ladder carries each strike\'s net GEX (call + put) and the largest |net| for the net view', () => {
+  const l = gexLadder({ time: 1, spot: 100, strikes: [
+    { strike: 100, call: 5e7, put: -2e7 },
+    { strike: 105, call: 1e7, put: -4e7 },
+    { strike: 95, call: 2e7, put: 2e7 },
+  ] })
+  assert.deepEqual(l.rows.map((r) => [r.strike, r.net]), [[105, -3e7], [100, 3e7], [95, 4e7]])
+  assert.equal(l.maxNet, 4e7)
+})

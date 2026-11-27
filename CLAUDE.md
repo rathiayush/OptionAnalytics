@@ -402,6 +402,7 @@ All must pass before committing.
   but drops their captions (they sat over the call bars). Over the chart the HEADLINE numbers (the order-book card's look):
   spot, call wall, put wall, flip, max gamma - each with its distance - and the net GEX. Nothing after the clock
   (`tests/gex-spot.test.mjs` - a cut part way = the whole day for the candles finished; the ladder = the clock's minute).
+  NET GEX BY STRIKE (asked for - "net GEX on spot levels"; the "Net GEX by strike" tick beside the ladder, `optionanalytics.oiReplay.gexSpotLadderNet`, off by default): the ladder draws ONE bar a strike, its call + put GEX netted (`gexLadder` rows' `net`, `maxNet` the scale) - green right of the strike (dealers long gamma, sticky), red left (short gamma) - with its ₹ Cr; `GexLadderPrimitive.setLadder(ladder, share, net)`. Drawing only (`tests/gex-spot.test.mjs`).
   It feeds no strategy or alert.
 - PAGE PREFERENCES are kept for the ACCOUNT on the server (`UserPreferencesStore` - one JSON file per account under
   `Storage:PreferencesPath`, `/app/data/preferences` on the persistent volume; `GET` / `PUT /api/preferences`, Admin and

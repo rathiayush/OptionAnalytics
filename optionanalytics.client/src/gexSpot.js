@@ -99,6 +99,7 @@ export function gexLadder(minute) {
   return {
     time: minute.time, spot: minute.spot, step, rows, net: minute.net,
     maxAbs: Math.max(0, ...rows.map((r) => Math.max(Math.abs(r.call), Math.abs(r.put)))),
+    maxNet: Math.max(0, ...rows.map((r) => Math.abs(r.net))),
     callWall: minute.callWall ?? null, putWall: minute.putWall ?? null, maxGamma: minute.maxGamma ?? null, flip: minute.flip ?? null,
     posGex: minute.posGex ?? null, negGex: minute.negGex ?? null,
   }

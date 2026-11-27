@@ -35,6 +35,7 @@ export class GexLadderPrimitive {
     this._ladder = null
     this._share = GEX_LADDER_SHARE
     this._hover = null
+    this._net = false
     this._series = null
     this._requestUpdate = null
     const self = this
@@ -51,9 +52,11 @@ export class GexLadderPrimitive {
     this._requestUpdate = null
   }
 
-  setLadder(ladder, share = GEX_LADDER_SHARE) {
+  /** `net`: ONE bar a strike - its call + put GEX netted (+ green right of the strike, - red left) - instead of the two. */
+  setLadder(ladder, share = GEX_LADDER_SHARE, net = false) {
     this._ladder = ladder
     this._share = share
+    this._net = !!net
     this._requestUpdate?.()
   }
 
@@ -95,9 +98,10 @@ export class GexLadderPrimitive {
       ctx.textBaseline = 'top'
       ctx.fillStyle = LABEL
       ctx.textAlign = 'left'
-      ctx.fillText('PUTS γ', left + pad, Math.round(3 * vpr))
+      const net = this._net
+      ctx.fillText(net ? 'NET − (short γ)' : 'PUTS γ', left + pad, Math.round(3 * vpr))
       ctx.textAlign = 'right'
-      ctx.fillText('CALLS γ', W - pad, Math.round(3 * vpr))
+      ctx.fillText(net ? 'NET + (long γ)' : 'CALLS γ', W - pad, Math.round(3 * vpr))
       const yOf = (p) => this._series.priceToCoordinate(p)
       const y0 = yOf(l.rows[0].strike), y1 = yOf(l.rows[0].strike - l.step)
       const rowPx = y0 != null && y1 != null ? Math.abs(y1 - y0) * vpr : 0
@@ -108,7 +112,8 @@ export class GexLadderPrimitive {
       const showLabels = rowPx >= 10 * vpr
       const showValues = showLabels && sideW >= valueW * 2.5
       const barMax = showValues ? sideW - valueW : sideW
-      const scale = l.maxAbs > 0 ? 0.95 / l.maxAbs : 0
+      const top1 = net ? l.maxNet : l.maxAbs
+      const scale = top1 > 0 ? 0.95 / top1 : 0
       const spotRow = l.rows.reduce((b, r) => (b == null || Math.abs(r.strike - l.spot) < Math.abs(b.strike - l.spot) ? r : b), null)
       ctx.textBaseline = 'middle'
       for (const r of l.rows) {
@@ -123,14 +128,14 @@ export class GexLadderPrimitive {
         const barTop = top + Math.round((height - barH) / 2)
         const mid = top + height / 2
         // PUTS left of the strike, CALLS right - green dealers long gamma there, red short.
-        const putLen = Math.min(barMax, Math.abs(r.put) * scale * barMax)
+        const putLen = net ? (r.net < 0 ? Math.min(barMax, -r.net * scale * barMax) : 0) : Math.min(barMax, Math.abs(r.put) * scale * barMax)
         if (putLen >= 0.5) {
-          ctx.fillStyle = r.put >= 0 ? POS : NEG
+          ctx.fillStyle = net ? NEG : r.put >= 0 ? POS : NEG
           ctx.fillRect(putRight - putLen, barTop, Math.max(1, putLen), barH)
         }
-        const callLen = Math.min(barMax, Math.abs(r.call) * scale * barMax)
+        const callLen = net ? (r.net > 0 ? Math.min(barMax, r.net * scale * barMax) : 0) : Math.min(barMax, Math.abs(r.call) * scale * barMax)
         if (callLen >= 0.5) {
-          ctx.fillStyle = r.call >= 0 ? POS : NEG
+          ctx.fillStyle = net ? POS : r.call >= 0 ? POS : NEG
           ctx.fillRect(callLeft, barTop, Math.max(1, callLen), barH)
         }
         const tags = TAGS.filter((t) => l[t.key] === r.strike)
@@ -154,8 +159,8 @@ export class GexLadderPrimitive {
         if (showValues) {
           ctx.font = `${Math.round(9 * vpr)}px sans-serif`
           ctx.fillStyle = LABEL_DIM
-          if (putLen >= 0.5) { ctx.textAlign = 'right'; ctx.fillText(crShort(r.put), putRight - putLen - Math.round(2 * hpr), mid) }
-          if (callLen >= 0.5) { ctx.textAlign = 'left'; ctx.fillText(crShort(r.call), callLeft + callLen + Math.round(2 * hpr), mid) }
+          if (putLen >= 0.5) { ctx.textAlign = 'right'; ctx.fillText(crShort(net ? r.net : r.put), putRight - putLen - Math.round(2 * hpr), mid) }
+          if (callLen >= 0.5) { ctx.textAlign = 'left'; ctx.fillText(crShort(net ? r.net : r.call), callLeft + callLen + Math.round(2 * hpr), mid) }
           ctx.font = `${Math.round(10 * vpr)}px sans-serif`
         }
         if (this._hover != null && r.strike === this._hover) {
