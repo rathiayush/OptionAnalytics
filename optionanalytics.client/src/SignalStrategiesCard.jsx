@@ -85,15 +85,17 @@ const price = (v) => (Number.isFinite(num(v)) ? num(v).toFixed(2) : '—')
 const OPEN_TAG = <Tag color="processing" style={{ margin: 0 }}>open</Tag>
 // A signal NOT TAKEN (another strategy's trade was open) or a trade shown live that the end-of-day read does not have: kept, tagged.
 const NOT_TAKEN_TAG = <Tag color="warning" style={{ margin: 0 }}>not taken</Tag>
+const UNCONFIRMED_TAG = <Tag color="orange" style={{ margin: 0 }}>unconfirmed</Tag>
+const apartTag = (t) => (t.status === 'unconfirmed' ? UNCONFIRMED_TAG : NOT_TAKEN_TAG)
 const isOpen = (t) => t.status === 'open'
-const notTaken = (t) => t.status === 'not taken'
+const notTaken = (t) => t.status === 'not taken' || t.status === 'unconfirmed'
 // An open trade's RUNNING P&L at the option's current price (the server marks the row each minute).
 const running = (t) => (isOpen(t) && Number.isFinite(num(t.net)) ? <Text strong style={{ color: pnlColor(num(t.net)), fontSize: 12 }}>{rupees(num(t.net))} <Text type="secondary" style={{ fontSize: 11 }}>running</Text></Text> : null)
 // The strategy's trades AS EACH SIGNAL CAME (the server keeps a row at the entry - open - and fills it in at the exit):
 // entry time and premium, its stop-loss and target prices, the exit's time, price and reason, the P&L.
 const tradeColumns = [
   { title: 'Day', dataIndex: 'date', key: 'date', width: 80, render: (v) => dayjs(v).format('D MMM') },
-  { title: 'Trade', key: 'trade', width: 160, render: (_, t) => (notTaken(t) ? <Space direction="vertical" size={0}><span>{t.signal}</span>{NOT_TAKEN_TAG}</Space> : `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}`) },
+  { title: 'Trade', key: 'trade', width: 160, render: (_, t) => (notTaken(t) ? <Space direction="vertical" size={0}><span>{t.signal}</span>{apartTag(t)}</Space> : `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}`) },
   { title: 'Entry', key: 'entry', width: 110, render: (_, t) => (notTaken(t) ? t.entryTime : `${t.entryTime} · ${price(t.entry)}`) },
   { title: 'SL', dataIndex: 'sl', key: 'sl', width: 70, align: 'right', render: price },
   { title: 'Target', dataIndex: 'target', key: 'target', width: 70, align: 'right', render: price },
@@ -146,7 +148,7 @@ function TradeBlocks({ rows }) {
     <div key={`${t.date}|${t.entryTime}|${t.side}|${k}`} className="oa-bg-run">
       <Space size={6} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
         <Text strong style={{ fontSize: 13 }}>{dayjs(t.date).format('D MMM')} · {notTaken(t) ? `${t.signal} signal` : `${t.action} ${t.option}`}{t.side === 'mirror' ? <Text type="secondary" style={small}> (mirror)</Text> : null}</Text>
-        {notTaken(t) ? NOT_TAKEN_TAG : isOpen(t) ? <Space size={4}>{OPEN_TAG}{running(t)}</Space> : (!t.exitTime && !t.exit) ? OPEN_TAG : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>}
+        {notTaken(t) ? apartTag(t) : isOpen(t) ? <Space size={4}>{OPEN_TAG}{running(t)}</Space> : (!t.exitTime && !t.exit) ? OPEN_TAG : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>}
       </Space>
       {notTaken(t)
         ? <Text style={small}>{t.entryTime} · {t.exitReason}</Text>

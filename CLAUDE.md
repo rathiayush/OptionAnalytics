@@ -1674,7 +1674,8 @@ All must pass before committing.
   the open row, keeps no event, sends nothing; the list's Today line adds "(₹X running)" and the not-taken count - `SignalStrategyToday`'s
   `OpenNet` / `NotTaken`). THE END-OF-DAY REPORT NO LONGER DELETES what was shown live (`RecordDayAsync` used to replace every row of the day with
   the final read's closed trades, so a 9:34 trade the whole-day read did not reproduce vanished - 5 - 7 live, 2 - 3 at the end): a live row the final
-  read does not have stays, status "not taken", reason "shown live, not in the end-of-day read", no P&L, in no count. A strategy alone on its
+  read does not have stays - one that closed live exactly as it closed (it was TAKEN - a live order may follow it, so never relabelled "not
+  taken"), one still open "unconfirmed" (no P&L, in no count). "Not taken" is only for a signal that was skipped. A strategy alone on its
   index behaves exactly as before.
   A TRADE SHOWN IS PINNED (asked about - the History showed 09:34 and 09:49 both "open" for one strategy, the end of day only one: the live
   data is revised between rounds - a candle's book sampled again, a late bar - so a later read of the day no longer gave the 09:34 signal; its

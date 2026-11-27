@@ -159,11 +159,17 @@ public sealed class SignalStrategyStoreTests : IDisposable
         Assert.Equal(2, store.History(s.Id).Trades.Count);
         // The day's report puts its final rows over the day's.
         await store.RecordDayAsync(s.Id, "2026-10-26", new JsonObject { ["trades"] = 1 }, new JsonArray { Row(k1, open: false) }, "📊", Now);
-        // ...and a trade shown live that the final read does not have stays, tagged "not taken", with no P&L.
+        // ...and a trade shown live that the final read does not have is not dropped and never relabelled "not taken": one that closed live stays as it closed.
         var final = store.History(s.Id).Trades.ToDictionary(x => x["key"]);
         Assert.Equal(2, final.Count);
         Assert.Equal("closed", final[k1]["status"]);
-        Assert.Equal(("not taken", "", "shown live, not in the end-of-day read"), (final[k2]["status"], final[k2]["net"], final[k2]["exitReason"]));
+        Assert.Equal(("closed", "2300"), (final[k2]["status"], final[k2]["net"]));
+        // One that was still open (no exit seen) is "unconfirmed" - kept, no P&L.
+        var k3 = "2026-10-26|rule|3";
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k3}|entry", "entry", "in", null, Row(k3, open: true)) }, Now);
+        await store.RecordDayAsync(s.Id, "2026-10-26", new JsonObject { ["trades"] = 1 }, new JsonArray { Row(k1, open: false) }, "📊", Now);
+        var after = store.History(s.Id).Trades.ToDictionary(x => x["key"]);
+        Assert.Equal(("unconfirmed", ""), (after[k3]["status"], after[k3]["net"]));
     }
 
     [Fact]

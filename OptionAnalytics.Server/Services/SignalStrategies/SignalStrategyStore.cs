@@ -35,6 +35,9 @@ public sealed class SignalStrategyStore
     /// end-of-day read does not have it): it has no P&L and is in no count.</summary>
     public const string NotTaken = "not taken";
 
+    /// <summary>A live-shown trade that never got an exit and that the end-of-day read does not have: no P&L, in no count.</summary>
+    public const string Unconfirmed = "unconfirmed";
+
     public static readonly string[] TradeColumns = { "date", "side", "signal", "action", "option", "entryTime", "entry", "sl", "target", "exitTime", "exit", "exitReason", "points", "gross", "charges", "net", "expiryDay", "why", "status", "key" };
     public static readonly string[] EventColumns = { "timeUtc", "date", "kind", "key", "text" };
     public static readonly string[] OrderColumns = { "timeUtc", "date", "trade", "kind", "status", "underlying", "option", "action", "lots", "price", "sl", "target", "reason", "orderIds", "message" };
@@ -313,17 +316,19 @@ public sealed class SignalStrategyStore
                 if (!string.IsNullOrEmpty(tr["key"])) finalKeys.Add(tr["key"]!);
                 keptTrades.Add(tr);
             }
-            // A trade SHOWN LIVE that the end-of-day read does not have (asked for - "trade was given at 9:34 but EOD does not show it ... continue to
-            // show with a not taken tag"): kept in the history, tagged "not taken", with no P&L - it is out of the day's numbers, not out of sight.
+            // A trade SHOWN LIVE that the end-of-day read does not have (it should not happen - the live scan pins every entry it has shown - but
+            // a live ORDER may follow it, so it is never relabelled "not taken"): a row that closed live stays exactly as it closed, with its P&L
+            // - it was taken; one still open (no exit seen) is "unconfirmed" - kept in view, with no P&L, in no count. A signal that was NOT TAKEN
+            // (another trade open) stays as it was.
             foreach (var r in existing.Where(r => r.GetValueOrDefault("date") == date && !finalKeys.Contains(r.GetValueOrDefault("key") ?? "")))
             {
                 var row = r.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.OrdinalIgnoreCase);
-                if (!string.Equals(row.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(row.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase))
                 {
-                    row["status"] = NotTaken;
-                    row["exitReason"] = "shown live, not in the end-of-day read";
+                    row["status"] = Unconfirmed;
+                    row["exitReason"] = "shown live; no end-of-day numbers for it";
+                    foreach (var c in new[] { "exitTime", "exit", "points", "gross", "charges", "net" }) row[c] = "";
                 }
-                foreach (var c in new[] { "exitTime", "exit", "points", "gross", "charges", "net" }) row[c] = "";
                 keptTrades.Add(row);
             }
             CsvTable.Write(HistoryPath(id, "trades"), TradeColumns, keptTrades.OrderBy(r => r["date"], StringComparer.Ordinal));
@@ -372,8 +377,9 @@ public sealed class SignalStrategyStore
 
     internal static SignalStrategyToday? TodayOf(string today, IReadOnlyList<Dictionary<string, string>> rows)
     {
-        var notTaken = rows.Count(r => string.Equals(r.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase));
-        rows = rows.Where(r => !string.Equals(r.GetValueOrDefault("status"), NotTaken, StringComparison.OrdinalIgnoreCase)).ToList();
+        static bool Apart(Dictionary<string, string> r) => r.GetValueOrDefault("status") is { } st && (string.Equals(st, NotTaken, StringComparison.OrdinalIgnoreCase) || string.Equals(st, Unconfirmed, StringComparison.OrdinalIgnoreCase));
+        var notTaken = rows.Count(Apart);
+        rows = rows.Where(r => !Apart(r)).ToList();
         if (rows.Count == 0 && notTaken == 0) return null;
         static decimal? Net(Dictionary<string, string> r) =>
             decimal.TryParse(r.GetValueOrDefault("net"), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : null;
