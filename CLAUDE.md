@@ -1676,6 +1676,14 @@ All must pass before committing.
   the final read's closed trades, so a 9:34 trade the whole-day read did not reproduce vanished - 5 - 7 live, 2 - 3 at the end): a live row the final
   read does not have stays, status "not taken", reason "shown live, not in the end-of-day read", no P&L, in no count. A strategy alone on its
   index behaves exactly as before.
+  A TRADE SHOWN IS PINNED (asked about - the History showed 09:34 and 09:49 both "open" for one strategy, the end of day only one: the live
+  data is revised between rounds - a candle's book sampled again, a late bar - so a later read of the day no longer gave the 09:34 signal; its
+  row stayed "open" for ever while the strategy traded on, and the report dropped it): the runner passes every entry already kept today
+  (`pinnedEntries` - the `|entry` keys the server sent back as `sent`: side and entry ms) to `simulateDay`'s `pinned`: such a signal is put back
+  on its candle when the revised data does not give it (`why` "shown live earlier ...") and NONE of the limits skip it (window, one at a time,
+  max trades, day limits, another strategy's trade) - it is managed to its own exit like any trade, the trade carries `pinned: true`, and in
+  `liveGroupEvents` it is a fact that only blocks the others. So a live row always gets its exit and the end-of-day read keeps it. The "not taken
+  at the end of the day" rows above stay as the safety net (`tests/signal-live-group.test.mjs`).
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

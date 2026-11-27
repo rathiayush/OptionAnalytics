@@ -13,7 +13,7 @@
 
 import { attachDeltaPast, attachOrderFlow, cleanBacktestSettings, engineSettings, loadExpiryChains, prevProfileUrl } from '../src/signalBacktestJob.js'
 import { deltaDaysNeeded, futuresDaysNeeded, orderFlowNeeded } from '../src/signalBacktest.js'
-import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveGroupEvents, liveRunUrl, prepareLiveDay } from '../src/signalLive.js'
+import { LIVE_FROM_MINUTE, LIVE_UNTIL_MINUTE, REPORT_FROM_MINUTE, dayRecord, dayReportText, istClock, liveGroupEvents, liveRunUrl, pinnedEntries, prepareLiveDay } from '../src/signalLive.js'
 
 const BASE = (process.env.RUNNER_BASE_URL ?? 'http://127.0.0.1:8080').replace(/\/$/, '')
 const KEY = process.env.RUNNER_KEY ?? ''
@@ -184,7 +184,7 @@ async function round(nowMs) {
   for (const group of ready.values()) {
     let results
     try {
-      results = liveGroupEvents(group.map(({ s, day, tradeDay }) => ({ name: s.name, day, engine: engineSettings(s.clean), tradeDay })), { complete, nowMs })
+      results = liveGroupEvents(group.map(({ s, day, tradeDay }) => ({ name: s.name, day, engine: engineSettings(s.clean), tradeDay, pinned: pinnedEntries(s.sent, date) })), { complete, nowMs })
     } catch (err) {
       console.error(`${group.map((g) => g.s.name).join(', ')}: ${err.message}`)
       continue

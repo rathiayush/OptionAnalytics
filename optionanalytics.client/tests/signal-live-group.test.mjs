@@ -87,3 +87,40 @@ test('an open trade carries its RUNNING P&L at the option\'s current price - a m
   assert.equal(done.events.some((e) => e.kind === 'mark'), false)
   assert.equal(done.events.find((e) => e.kind === 'entry').row.net, '')
 })
+
+// ---- a trade SHOWN live is not read away later (the "open for ever" ghost: 09:34 shown, the later read gives 09:49 instead) --------
+import { pinnedEntries } from '../src/signalLive.js'
+
+test('the entries already shown are read from the kept event keys - today\'s, entries only', () => {
+  const keys = ['2026-10-05|rule|1791172800000|entry', '2026-10-05|rule|1791172800000|exit', '2026-10-05|mirror|1791173700000|entry', '2026-10-05|rule|5|skipped', '2026-10-04|rule|1|entry', 'x']
+  assert.deepEqual(pinnedEntries(keys, '2026-10-05'), [{ side: 'rule', time: 1791172800000 }, { side: 'mirror', time: 1791173700000 }])
+  assert.deepEqual(pinnedEntries(undefined, '2026-10-05'), [])
+})
+
+test('a PINNED trade stays a trade when the revised data no longer gives its signal - and is managed to its exit', () => {
+  // Read now: A's rule (true from the open) signals at 09:30. The scan had SHOWN a trade at 09:34 earlier (its data since revised).
+  const shown = at(9 * 60 + 34)
+  const d = day()
+  const plain = liveDayEvents(d, A({ timeStopMin: 30 }).engine, { name: 'A' })
+  assert.deepEqual(plain.trades.map((t) => t.entryTime), [at(9 * 60 + 30)])           // without it: only the 09:30 trade
+  const pinned = liveDayEvents(d, A({ timeStopMin: 30 }).engine, { name: 'A', pinned: [{ side: 'rule', time: shown }] })
+  // The 09:30 trade (09:30 - 10:00) is open at 09:34, but the shown trade is a fact: it is a trade too, with its own exit.
+  const t = pinned.trades.find((x) => x.entryTime === shown)
+  assert.ok(t, 'the shown 09:34 entry is still a trade')
+  assert.equal(t.pinned, true)
+  assert.match(t.why, /shown live earlier/)
+  assert.ok(pinned.events.some((e) => e.key.endsWith(`|${shown}|entry`)) && pinned.events.some((e) => e.key.endsWith(`|${shown}|exit`)))
+  // A pinned entry the data does not contain a minute for (a time never traded) is dropped quietly.
+  assert.equal(liveDayEvents(d, A({ timeStopMin: 30 }).engine, { name: 'A', pinned: [{ side: 'rule', time: shown + 5 }] }).trades.length, 1)
+})
+
+test('a pinned trade is not skipped by the limits and blocks the other strategies from its entry', () => {
+  const shown = at(9 * 60 + 34)
+  const d = day()
+  const [a, b] = liveGroupEvents([
+    { ...A({ maxTradesPerDay: 1, timeStopMin: 60 }), day: d, pinned: [{ side: 'rule', time: shown }] },
+    { ...B(), day: d },
+  ])
+  assert.ok(a.trades.some((t) => t.entryTime === shown))                         // pinned, though 1 trade a day was used by the 09:30 one
+  assert.equal(b.trades.length, 0)                                                 // B's 09:45 signal falls inside a trade that is open
+})

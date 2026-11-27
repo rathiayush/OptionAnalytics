@@ -125,8 +125,8 @@ export function notTakenRow(sig, day) {
  * `closed` and still `open`, and the closed ones' `summary`. `complete`: the session is over - a trade the data ran out on
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
-export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null, blocked = null } = {}) {
-  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay, asOfMs: complete ? null : nowMs, blocked })
+export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null, blocked = null, pinned = null } = {}) {
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay, asOfMs: complete ? null : nowMs, blocked, pinned })
   const isOpen = (t) => !complete && t.exitReason === 'Day end'
   const events = []
   for (const t of trades) {
@@ -159,6 +159,16 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
   }
 }
 
+/** The entries a strategy's day has SHOWN already - from the event keys the server kept (`date|rule-or-mirror|entry ms|entry`): [{ side, time }]. */
+export function pinnedEntries(sentKeys, date) {
+  const out = []
+  for (const key of sentKeys ?? []) {
+    const [d, side, ms, kind] = String(key).split('|')
+    if (d === date && kind === 'entry' && (side === 'rule' || side === 'mirror') && Number.isFinite(Number(ms))) out.push({ side, time: Number(ms) })
+  }
+  return out
+}
+
 /**
  * SEVERAL SAVED STRATEGIES ON ONE TRADED INDEX, ONE TRADE AT A TIME (asked for - "there are many live strategies ... if they are
  * the same direction do not trade another, only trade if there is not any open trade"; "same direction do not add up"): each
@@ -170,7 +180,7 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
  * One entry = exactly `liveDayEvents`. Returns a result for each entry, in the order given.
  */
 export function liveGroupEvents(entries, { complete = false, nowMs = null } = {}) {
-  const run = (e, blocked) => liveDayEvents(e.day, e.engine, { name: e.name, complete, nowMs, tradeDay: e.tradeDay, blocked })
+  const run = (e, blocked) => liveDayEvents(e.day, e.engine, { name: e.name, complete, nowMs, tradeDay: e.tradeDay, blocked, pinned: e.pinned })
   const results = entries.map((e) => run(e, null))
   if (entries.length < 2) return results
   const confirmed = []   // the trades taken, in entry order: { from, to, by, idx }
@@ -180,7 +190,8 @@ export function liveGroupEvents(entries, { complete = false, nowMs = null } = {}
     results.forEach((r, i) => { const t = r.trades[done[i]]; if (t && (pick < 0 || t.entryTime < results[pick].trades[done[pick]].entryTime)) pick = i })
     if (pick < 0) break
     const r = results[pick], t = r.trades[done[pick]]
-    if (confirmed.some((c) => c.idx !== pick && t.entryTime >= c.from && t.entryTime <= c.to)) {
+    // A PINNED trade was shown already - a fact, never re-read away: it only blocks the others.
+    if (!t.pinned && confirmed.some((c) => c.idx !== pick && t.entryTime >= c.from && t.entryTime <= c.to)) {
       results[pick] = run(entries[pick], confirmed.filter((c) => c.idx !== pick).map(({ from, to, by }) => ({ from, to, by })))
       continue
     }
