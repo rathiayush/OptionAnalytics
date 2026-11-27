@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { day as syntheticDay } from './synthetic-day.mjs'
 import { prepareDay, simulateDay } from '../src/signalBacktest.js'
 import { attachOrderFlow, cleanBacktestSettings, engineSettings } from '../src/signalBacktestJob.js'
-import { completedRun, dayRecord, dayReportText, istClock, liveDayEvents, liveRunUrl, liveTrade, prepareLiveDay, tradeRow } from '../src/signalLive.js'
+import { completedRun, dayRecord, dayReportText, istClock, liveDayEvents, liveGroupEvents, liveRunUrl, liveTrade, prepareLiveDay, tradeRow } from '../src/signalLive.js'
 
 const { run, minuteBars } = syntheticDay()          // 2026-10-05, 09:15 - 14:15
 const DATE = '2026-10-05'
@@ -60,7 +60,17 @@ test('at any minute the live day is the backtest of the whole day so far: entrie
     assert.equal(live.events.filter((e) => e.kind === 'entry').length, live.trades.length)
     assert.equal(live.events.filter((e) => e.kind === 'exit').length, live.closed.length)
     // A key once seen is the same later (so the server sends it once); later rounds only add.
-    const keys = live.events.map((e) => e.key)
+    // (a 'mark' - an open trade's running P&L - is no event the server keeps: it goes every round and is gone once the trade closes)
+    for (const t of live.open) {
+      const mark = live.events.find((e) => e.kind === 'mark' && e.row.key === `${t.date}|${t.strategy}|${t.entryTime}`)
+      assert.ok(mark, `${hhmm}: an open trade has its running mark`)
+      assert.equal(mark.row.status, 'open')
+      assert.equal(mark.row.exit, Math.round(t.exit * 100) / 100)             // the option's current price (its last completed minute's close)
+      assert.equal(mark.row.net, Math.round(t.net * 100) / 100)               // the running P&L, as if sold now
+      assert.equal(mark.row.exitReason, 'running')
+    }
+    assert.equal(live.events.filter((e) => e.kind === 'mark').length, live.open.length)
+    const keys = live.events.filter((e) => e.kind !== 'mark').map((e) => e.key)
     for (const k of keysSeen) assert.ok(keys.includes(k), `${hhmm} lost ${k}`)
     keys.forEach((k) => keysSeen.add(k))
   }
@@ -214,7 +224,7 @@ test('each event carries its trade for the server\'s live orders: the traded opt
   assert.equal(pts.stopLossPoints, 12)
   assert.equal(pts.targetPoints, 0)
   // Mirror trades carry theirs too.
-  assert.ok(live.events.some((e) => e.trade.strategy === 'mirror') || !live.closed.some((x) => x.strategy === 'mirror'))
+  assert.ok(live.events.some((e) => e.trade?.strategy === 'mirror') || !live.closed.some((x) => x.strategy === 'mirror'))
   // Each event also carries its trade's HISTORY ROW as of that event: open at the entry, closed at the exit - the same key.
   assert.equal(entry.row.status, 'open')
   assert.equal(entry.row.key, entry.trade.key)
@@ -323,10 +333,12 @@ test('Σ 3 expiries live: a strategy saved with it reads today with its next and
   const events = (id) => noon.posted.find((p) => p.path === '/api/signal-strategies/live/events' && p.body.strategyId === id)?.body.events ?? []
   const summedDay = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00'), expiryChains: [SUM_NEXT, SUM_MONTHLY] })
   assert.equal(summedDay.expiries, 3)
-  assert.deepEqual(events('s2').map((e) => e.key), liveDayEvents(summedDay, engineSettings(sumSettings)).events.map((e) => e.key))
-  // The strategy without it: as before.
+  // Both trade NIFTY, so one trade at a time across them (liveGroupEvents): the group's keys, each strategy's own day.
   const day = prepareLiveDay({ ...run, optionExpiry: '2026-10-06' }, { underlying: 'NIFTY', nowMs: at('12:00') })
-  assert.deepEqual(events('s1').map((e) => e.key), liveDayEvents(day, ENGINE).events.map((e) => e.key))
+  const group = liveGroupEvents([{ name: 'S1', day, engine: ENGINE }, { name: 'Summed', day: summedDay, engine: engineSettings(sumSettings) }])
+  assert.deepEqual(events('s2').map((e) => e.key), group[1].events.map((e) => e.key))
+  // The strategy without it: as before.
+  assert.deepEqual(events('s1').map((e) => e.key), group[0].events.map((e) => e.key))
   // Its other expiries not readable now: it waits (backed off on its own) - the strategy without it goes on.
   const busy = await runLoop('2026-10-05T06:30:00Z', { strategies: [STRATEGY, summing], bandsOk: false })
   assert.ok(busy.posted.some((p) => p.body.strategyId === 's1'))

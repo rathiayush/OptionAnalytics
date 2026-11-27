@@ -3334,9 +3334,12 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
  * max profit") and every later signal is skipped. Returns `{ trades, signals, dayLimit, expirySkipped }` (dayLimit 'loss' | 'profit' | null) - every trade `{ date,
  * strategy ('rule' | 'mirror'), dir, why, side, strike, action, expiryDay, overridden, entryTime, exitTime, entry, exit,
  * exitReason, points, gross, charges, net, holdMin }`; every signal
- * `{ strategy, time, dir, why, taken, skipped }`.
+ * `{ strategy, time, dir, why, taken, skipped }`. `blocked` - the intervals `{ from, to, by, dir }` (ms) in which another strategy's
+ * trade of the SAME direction is open: a signal inside one is skipped (`blockedBy`). `pinned` - entries `{ side, time }` ALREADY SHOWN by the live scan: each stays a
+ * trade (its signal is put back on its candle when the revised data no longer gives it, and none of the day's limits skip it) and is
+ * managed to its exit like any other.
  */
-export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null } = {}) {
+export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null, blocked = null, pinned = null } = {}) {
   const s = { ...BACKTEST_DEFAULTS, ...settings }
   const from = clockMinute(s.entryFrom) ?? 9 * 60 + 30
   const lastEntry = clockMinute(s.lastEntry) ?? 14 * 60 + 45
@@ -3386,7 +3389,22 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null }
     const endMin = SESSION_FIRST + (Math.floor((istMinute(last) - SESSION_FIRST) / view.tf) + 1) * view.tf
     return last + (endMin - istMinute(last)) * MIN <= asOfMs
   }
-  for (const sig of ruleSignals(view, s.rule, { openAt })) {
+  // PINNED entries (the live scan's: shown, kept, maybe placed): a trade shown must not vanish when a later read of the day - its data
+  // revised, a candle's book sampled again - no longer gives the signal (it was left "open" for ever while the strategy traded on).
+  const signalsOf = ruleSignals(view, s.rule, { openAt })
+  if (pinned?.length) {
+    const r = normalizeRule(s.rule, null)
+    for (const pin of pinned) {
+      const k = (() => { for (let x = 0; x < view.n; x++) if (d.t[minuteOfSignal(x)] === pin.time) return x; return -1 })()
+      if (k < 0 || signalsOf.some((g) => g.i === k && g.side === pin.side)) continue
+      const action = pin.side === 'mirror' ? ACTION[r.action]?.opposite : r.action
+      if (!ACTION[action]) continue
+      signalsOf.push({ i: k, side: pin.side, action, why: `${ACTION[action].label}${pin.side === 'mirror' ? ' (mirror)' : ''}: shown live earlier - the revised data no longer gives the signal` })
+    }
+    signalsOf.sort((a, b) => a.i - b.i)
+  }
+  const pinnedAt = new Set((pinned ?? []).map((x) => `${x.side}|${x.time}`))
+  for (const sig of signalsOf) {
     if (!candleDone(sig.i)) continue
     const i = minuteOfSignal(sig.i)
     const { dir, mode: ruleMode } = ACTION[sig.action]
@@ -3394,21 +3412,26 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null }
     const overridden = mode !== ruleMode
     const why = overridden ? `Expiry day - ${mode === 'sell' ? 'selling' : 'buying'} instead · ${sig.why}` : sig.why
     const minute = istMinute(d.t[i])
-    const row = { strategy: sig.side, time: d.t[i], dir, why, taken: false, skipped: null }
+    const forced = pinnedAt.has(`${sig.side}|${d.t[i]}`)             // shown live already: none of the limits below skip it
+    const row = { strategy: sig.side, time: d.t[i], dir, why, taken: false, skipped: null, ...(forced ? { pinned: true } : {}) }
     signals.push(row)
     if (!td) { row.skipped = `no ${s.tradeIn} data this day`; continue }
-    if (expirySkipped) { row.skipped = EXPIRY_SKIP_REASON; continue }
-    if (minute < from || minute > lastEntry) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
-    if (i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
-    if (count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
-    if (dayLimit) { row.skipped = `the day's max ${dayLimit} reached`; continue }
+    if (expirySkipped && !forced) { row.skipped = EXPIRY_SKIP_REASON; continue }
+    if (!forced && (minute < from || minute > lastEntry)) { row.skipped = `outside ${s.entryFrom} - ${s.lastEntry}`; continue }
+    if (!forced && i <= busyUntil) { row.skipped = 'a trade still open, or cooling down'; continue }
+    // ANOTHER STRATEGY'S TRADE IS OPEN (`blocked` - [{ from, to, by }] ms, the live scan's other strategies on the same traded index:
+    // "if there is a trade open do not trade another - same direction do not add up"): not taken, and the signal is not kept for later.
+    const other = forced ? null : blocked?.find((b) => b.dir === dir && d.t[i] >= b.from && d.t[i] <= b.to)
+    if (other) { row.skipped = `another strategy's ${dir > 0 ? 'bullish' : 'bearish'} trade is open (${other.by})`; row.blockedBy = other.by; continue }
+    if (!forced && count >= s.maxTradesPerDay) { row.skipped = `${s.maxTradesPerDay} trades already today`; continue }
+    if (!forced && dayLimit) { row.skipped = `the day's max ${dayLimit} reached`; continue }
     const j = tradeAt(i)
     if (j < 0) { row.skipped = `no ${s.tradeIn} minute at the signal`; continue }
     const option = optionFor(dir, mode, td.atm[j], td.step, s.moneyness)
     const day = dayCfg && { ...dayCfg, realized }
     // No room left under the day's max loss for this trade's own charges (out at its entry would already breach it): the
     // day is done - not a trade that can only exit at once at a loss past the limit.
-    if (day?.maxLoss > 0) {
+    if (!forced && day?.maxLoss > 0) {
       const entry = premiumAt((option.side === 'CE' ? td.ce : td.pe).get(option.strike), j)
       const level = entry > 0 ? dayLevel(option, entry, -day.maxLoss, day) : null
       if (level != null && (option.action === 'SELL' ? level <= entry : level >= entry)) {
@@ -3427,7 +3450,7 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null }
     const gross = trade.points * s.lots * lotSize
     const net = s.charges && money ? money.net : gross
     trades.push({
-      date: d.date, strategy: sig.side, dir, why, ...option, ...(cross ? { tradeIndex: td.underlying } : {}), expiryDay: Boolean(td.isExpiry), overridden,
+      date: d.date, strategy: sig.side, dir, why, ...(forced ? { pinned: true } : {}), ...option, ...(cross ? { tradeIndex: td.underlying } : {}), expiryDay: Boolean(td.isExpiry), overridden,
       // Entered at the signal's clock (the traded index's last premium then - a minute it lacks reads the one before).
       entryTime: d.t[i], exitTime: td.t[trade.exitIndex], entry: trade.entry, exit: trade.exit, exitReason: trade.exitReason,
       points: trade.points, gross, charges: s.charges && money ? money.charges : 0, net,

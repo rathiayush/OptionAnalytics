@@ -5,7 +5,7 @@ import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
 import { RULE_ACTIONS, normalizeRule, ruleText } from './signalBacktest.js'
 import { createStrategy, deleteStrategy, historyCsvUrl, strategyHistory, updateStrategy } from './signalStrategiesApi.js'
-import { orderTrades } from './signalStrategyHistory.js'
+import { orderTrades, sortStrategies, sortTrades, totalOf } from './signalStrategyHistory.js'
 
 // The Signal backtest's SAVED STRATEGIES on the page: save the rule and its settings by name (on the server, CSV), load one
 // back, update it with the page's settings, remove it - and its daily LIVE scan: "Live" scans it on every trading day on
@@ -82,20 +82,29 @@ const dayColumns = [
   { title: 'Signals', dataIndex: 'signals', key: 'signals', width: 70, align: 'right' },
 ]
 const price = (v) => (Number.isFinite(num(v)) ? num(v).toFixed(2) : '—')
+const stamp = (t) => `${t.date ?? ''} ${t.entryTime ?? ''}`
 const OPEN_TAG = <Tag color="processing" style={{ margin: 0 }}>open</Tag>
+// A signal NOT TAKEN (another strategy's trade was open) or a trade shown live that the end-of-day read does not have: kept, tagged.
+const NOT_TAKEN_TAG = <Tag color="warning" style={{ margin: 0 }}>not taken</Tag>
+const UNCONFIRMED_TAG = <Tag color="orange" style={{ margin: 0 }}>unconfirmed</Tag>
+const apartTag = (t) => (t.status === 'unconfirmed' ? UNCONFIRMED_TAG : NOT_TAKEN_TAG)
+const isOpen = (t) => t.status === 'open'
+const notTaken = (t) => t.status === 'not taken' || t.status === 'unconfirmed'
+// An open trade's RUNNING P&L at the option's current price (the server marks the row each minute).
+const running = (t) => (isOpen(t) && Number.isFinite(num(t.net)) ? <Text strong style={{ color: pnlColor(num(t.net)), fontSize: 12 }}>{rupees(num(t.net))} <Text type="secondary" style={{ fontSize: 11 }}>running</Text></Text> : null)
 // The strategy's trades AS EACH SIGNAL CAME (the server keeps a row at the entry - open - and fills it in at the exit):
 // entry time and premium, its stop-loss and target prices, the exit's time, price and reason, the P&L.
 const tradeColumns = [
-  { title: 'Day', dataIndex: 'date', key: 'date', width: 80, render: (v) => dayjs(v).format('D MMM') },
-  { title: 'Trade', key: 'trade', width: 160, render: (_, t) => `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}` },
-  { title: 'Entry', key: 'entry', width: 110, render: (_, t) => `${t.entryTime} · ${price(t.entry)}` },
+  { title: 'Day', dataIndex: 'date', key: 'date', width: 80, render: (v) => dayjs(v).format('D MMM'), sorter: (a, b) => stamp(a).localeCompare(stamp(b)), defaultSortOrder: 'descend', sortDirections: ['descend', 'ascend'] },
+  { title: 'Trade', key: 'trade', width: 160, render: (_, t) => (notTaken(t) ? <Space direction="vertical" size={0}><span>{t.signal}</span>{apartTag(t)}</Space> : `${t.action} ${t.option}${t.side === 'mirror' ? ' (mirror)' : ''}`) },
+  { title: 'Entry', key: 'entry', width: 110, render: (_, t) => (notTaken(t) ? t.entryTime : `${t.entryTime} · ${price(t.entry)}`) },
   { title: 'SL', dataIndex: 'sl', key: 'sl', width: 70, align: 'right', render: price },
   { title: 'Target', dataIndex: 'target', key: 'target', width: 70, align: 'right', render: price },
-  { title: 'Exit', key: 'exit', width: 110, render: (_, t) => (t.status === 'open' || (!t.exitTime && !t.exit) ? OPEN_TAG : `${t.exitTime} · ${price(t.exit)}`) },
+  { title: 'Exit', key: 'exit', width: 110, render: (_, t) => (notTaken(t) ? '—' : isOpen(t) ? <Space direction="vertical" size={0}>{OPEN_TAG}<span style={{ fontSize: 12 }}>now {price(t.exit)}</span></Space> : (!t.exitTime && !t.exit) ? OPEN_TAG : `${t.exitTime} · ${price(t.exit)}`) },
   { title: 'Why out', dataIndex: 'exitReason', key: 'reason', width: 130 },
   { title: 'Gross', dataIndex: 'gross', key: 'gross', width: 90, align: 'right', render: (v) => <span style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</span> },
   { title: 'Charges', dataIndex: 'charges', key: 'charges', width: 80, align: 'right', render: (v) => rupees(num(v)) },
-  { title: 'Net', dataIndex: 'net', key: 'net', width: 90, align: 'right', render: (v) => <Text strong style={{ color: pnlColor(num(v)) }}>{rupees(num(v))}</Text> },
+  { title: 'Net', key: 'net', width: 100, align: 'right', render: (_, t) => (isOpen(t) ? running(t) : notTaken(t) ? '—' : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>) },
   { title: 'At the signal', dataIndex: 'why', key: 'why', width: 320, ellipsis: { showTitle: false }, render: (v) => <Tooltip title={v}><span>{v}</span></Tooltip> },
 ]
 // The LIVE Dhan orders, ONE ROW A TRADE (orderTrades): punched when, at what LIMIT, its super order's stop-loss and target,
@@ -127,7 +136,7 @@ const orderColumns = [
 ]
 const eventColumns = [
   { title: 'Sent', dataIndex: 'timeUtc', key: 'time', width: 120, render: (v) => dayjs(v).format('D MMM HH:mm') },
-  { title: '', dataIndex: 'kind', key: 'kind', width: 70, render: (v) => <Tag color={v === 'entry' ? 'blue' : 'default'} style={{ margin: 0 }}>{v}</Tag> },
+  { title: '', dataIndex: 'kind', key: 'kind', width: 80, render: (v) => <Tag color={v === 'entry' ? 'blue' : v === 'skipped' ? 'warning' : 'default'} style={{ margin: 0 }}>{v === 'skipped' ? 'not taken' : v}</Tag> },
   { title: 'Message', dataIndex: 'text', key: 'text', render: (v) => <Text style={{ fontSize: 12, whiteSpace: 'pre-wrap' }}>{v}</Text> },
 ]
 
@@ -139,11 +148,14 @@ function TradeBlocks({ rows }) {
   return rows.map((t, k) => (
     <div key={`${t.date}|${t.entryTime}|${t.side}|${k}`} className="oa-bg-run">
       <Space size={6} wrap style={{ justifyContent: 'space-between', width: '100%' }}>
-        <Text strong style={{ fontSize: 13 }}>{dayjs(t.date).format('D MMM')} · {t.action} {t.option}{t.side === 'mirror' ? <Text type="secondary" style={small}> (mirror)</Text> : null}</Text>
-        {t.status === 'open' || (!t.exitTime && !t.exit) ? OPEN_TAG : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>}
+        <Text strong style={{ fontSize: 13 }}>{dayjs(t.date).format('D MMM')} · {notTaken(t) ? `${t.signal} signal` : `${t.action} ${t.option}`}{t.side === 'mirror' ? <Text type="secondary" style={small}> (mirror)</Text> : null}</Text>
+        {notTaken(t) ? apartTag(t) : isOpen(t) ? <Space size={4}>{OPEN_TAG}{running(t)}</Space> : (!t.exitTime && !t.exit) ? OPEN_TAG : <Text strong style={{ color: pnlColor(num(t.net)) }}>{rupees(num(t.net))}</Text>}
       </Space>
-      <Text style={small}>In {t.entryTime} @ {price(t.entry)} · SL {price(t.sl)} · Target {price(t.target)}</Text>
-      {(t.exitTime || t.exit) && <Text style={small}>Out {t.exitTime} @ {price(t.exit)} · {t.exitReason}{num(t.charges) > 0 ? ` · charges ${rupees(num(t.charges))}` : ''}</Text>}
+      {notTaken(t)
+        ? <Text style={small}>{t.entryTime} · {t.exitReason}</Text>
+        : <Text style={small}>In {t.entryTime} @ {price(t.entry)} · SL {price(t.sl)} · Target {price(t.target)}</Text>}
+      {isOpen(t) && Number.isFinite(num(t.exit)) && <Text style={small}>Now @ {price(t.exit)} (the option's current price)</Text>}
+      {!isOpen(t) && !notTaken(t) && (t.exitTime || t.exit) && <Text style={small}>Out {t.exitTime} @ {price(t.exit)} · {t.exitReason}{num(t.charges) > 0 ? ` · charges ${rupees(num(t.charges))}` : ''}</Text>}
     </div>
   ))
 }
@@ -193,7 +205,7 @@ export function StrategyHistoryModal({ strategy, onClose }) {
           size="small"
           items={[
             { key: 'days', label: `Days (${days.length})`, children: <Table size="small" rowKey="date" columns={dayColumns} dataSource={days} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 520 }} loading={!history && !error} /> },
-            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: narrow ? <TradeBlocks rows={history?.trades ?? []} /> : <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={history?.trades ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1320 }} /> },
+            { key: 'trades', label: `Trades (${history?.trades?.length ?? 0})`, children: narrow ? <TradeBlocks rows={sortTrades(history?.trades)} /> : <Table size="small" rowKey={(t, k) => `${t.date}|${t.entryTime}|${t.side}|${k}`} columns={tradeColumns} dataSource={sortTrades(history?.trades)} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1320 }} /> },
             { key: 'events', label: `Alerts (${history?.events?.length ?? 0})`, children: <Table size="small" rowKey={(e, k) => `${e.key}|${k}`} columns={eventColumns} dataSource={history?.events ?? []} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 600 }} /> },
             ...(strategy.liveOrders || history?.orders?.length > 0
               ? [{ key: 'orders', label: `Live orders (${liveTrades.length})`, children: narrow ? <OrderBlocks rows={liveTrades} /> : <Table size="small" rowKey="key" columns={orderColumns} dataSource={liveTrades} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1350 }} /> }]
@@ -208,6 +220,17 @@ export function StrategyHistoryModal({ strategy, onClose }) {
 /** TODAY'S trades (asked for - "last day should show current day trades, not last day"): the server's summary of the
  *  strategy's trades of today (`todayTrades` - its trades file, written as each signal comes): the closed trades' net, how
  *  many, how many still open, won / lost - and today's alerts. Refreshed with the list (each minute while one is live). */
+/** The strategy's TOTAL profit (the list's sort key): every reported day plus today's closed and running, and how many days it has been scanned. */
+function TotalCell({ s }) {
+  const v = totalOf(s)
+  return (
+    <Space direction="vertical" size={0}>
+      <Text strong style={{ color: pnlColor(v), fontSize: 13 }}>{rupees(v)}</Text>
+      <Text type="secondary" style={{ fontSize: 11 }}>{s.daysScanned > 0 ? `${s.daysScanned} day${s.daysScanned === 1 ? '' : 's'} + today` : 'today only'}</Text>
+    </Space>
+  )
+}
+
 function TodayCell({ s, today }) {
   const t = s.todayTrades
   const label = `Today (${dayjs(today ?? undefined).format('ddd D MMM')})`
@@ -225,9 +248,17 @@ function TodayCell({ s, today }) {
     <Space direction="vertical" size={0}>
       <Text style={{ fontSize: 12 }}>
         {label}: {t.closed > 0 ? <Text strong style={{ color: pnlColor(t.net) }}>{rupees(t.net)}</Text> : <Text type="secondary">₹0 closed</Text>}
-        {' · '}{t.trades} trade{t.trades === 1 ? '' : 's'}{t.open > 0 ? <Text style={{ color: '#faad14' }}> · {t.open} open</Text> : null}
+        {' · '}{t.trades} trade{t.trades === 1 ? '' : 's'}{t.open > 0 ? <Text style={{ color: '#faad14' }}> · {t.open} open{Number.isFinite(t.openNet) && t.openNet !== 0 ? <Text style={{ color: pnlColor(t.openNet) }}> ({rupees(t.openNet)} running)</Text> : null}</Text> : null}
+        {t.notTaken > 0 ? <Text type="secondary"> · {t.notTaken} not taken</Text> : null}
       </Text>
       {detail && <Text type="secondary" style={{ fontSize: 11 }}>{detail}</Text>}
+      {/* Each open trade: the option, its entry and the option's CURRENT price with the running P&L (marked every minute by the scan). */}
+      {(t.running ?? []).map((r, k) => (
+        <Text key={k} style={{ fontSize: 11 }}>
+          {r.action} {r.option} {price(r.entry)} → <Text strong style={{ fontSize: 11 }}>{price(r.now)}</Text>{' '}
+          <Text strong style={{ fontSize: 11, color: pnlColor(num(r.net)) }}>{Number.isFinite(num(r.net)) ? rupees(num(r.net)) : ''}</Text>
+        </Text>
+      ))}
     </Space>
   )
 }
@@ -310,6 +341,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       <Paragraph type="secondary" style={{ fontSize: 11, margin: 0 }} ellipsis={{ rows: 2, tooltip: narrow ? false : ruleOf(s) }}>{ruleOf(s)}</Paragraph>
     </div>
   )
+  const sorted = useMemo(() => sortStrategies(strategies), [strategies])
   const anyLive = strategies.some((s) => s.live)
   const title = (
     <Space size={8} wrap>
@@ -322,10 +354,11 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   if (!strategies.length) {
     body = <Text type="secondary" style={{ fontSize: 12 }}>Save the rule and settings on the page as a strategy - load it back any time, run it in the background, and scan it live every trading day with Telegram alerts and a daily report.</Text>
   } else if (narrow) {
-    body = strategies.map((s) => (
+    body = sorted.map((s) => (
       <div key={s.id} className="oa-bg-run">
         {what(s)}
         {switches(s)}
+        <TotalCell s={s} />
         <TodayCell s={s} today={today} />
         {actions(s)}
       </div>
@@ -333,14 +366,15 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   } else {
     body = (
       <Table
-        size="small" rowKey="id" dataSource={strategies} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
+        size="small" rowKey="id" dataSource={sorted} pagination={{ pageSize: 10, hideOnSinglePage: true, showSizeChanger: false }}
         // FIXED layout: the columns keep their widths and the strategy takes the rest - with the auto layout a long rule
         // stretched it and squeezed "Today" to a letter a line.
         tableLayout="fixed" scroll={{ x: 1000 }}
         columns={[
           { title: 'Strategy', key: 'what', render: (_, s) => what(s) },
           { title: 'Live scan', key: 'live', width: 210, render: (_, s) => switches(s) },
-          { title: 'Today', key: 'today', width: 230, render: (_, s) => <TodayCell s={s} today={today} /> },
+          { title: 'Total', key: 'total', width: 130, sorter: (a, b) => totalOf(a) - totalOf(b), defaultSortOrder: 'descend', sortDirections: ['descend', 'ascend'], render: (_, s) => <TotalCell s={s} /> },
+          { title: 'Today', key: 'today', width: 260, render: (_, s) => <TodayCell s={s} today={today} /> },
           { title: '', key: 'actions', width: 300, render: (_, s) => actions(s) },
         ]}
       />

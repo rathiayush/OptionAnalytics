@@ -37,3 +37,24 @@ test('a placed trade with no exit yet is open; a line written before the price c
   assert.equal(t.sl, null)
   assert.deepEqual(orderTrades(undefined), [])
 })
+
+// ---- the list's order: strategies by total profit, trades by date and time (asked for) ------------------------------------------
+import { sortStrategies, sortTrades, totalOf } from '../src/signalStrategyHistory.js'
+
+test('strategies are sorted by TOTAL profit, best first, ties by name - a missing total reads as 0', () => {
+  const list = [{ name: 'B', totalNet: -500 }, { name: 'C' }, { name: 'A', totalNet: 12000.5 }, { name: 'D', totalNet: '300' }, { name: 'E', totalNet: 0 }]
+  assert.deepEqual(sortStrategies(list).map((s) => s.name), ['A', 'D', 'C', 'E', 'B'])
+  assert.equal(totalOf({ totalNet: 'x' }), 0)
+  assert.deepEqual(list.map((s) => s.name), ['B', 'C', 'A', 'D', 'E'])        // the list given is not changed
+  assert.deepEqual(sortStrategies(undefined), [])
+})
+
+test('trades are sorted by date and then time of entry - newest first, or the other way', () => {
+  const rows = [
+    { date: '2026-11-27', entryTime: '09:49' }, { date: '2026-11-26', entryTime: '14:02' }, { date: '2026-11-27', entryTime: '12:24' },
+    { date: '2026-11-27', entryTime: '09:34' }, { date: '2026-11-27', entryTime: '12:29' },
+  ]
+  assert.deepEqual(sortTrades(rows).map((t) => `${t.date.slice(8)} ${t.entryTime}`), ['27 12:29', '27 12:24', '27 09:49', '27 09:34', '26 14:02'])
+  assert.deepEqual(sortTrades(rows, { ascending: true }).map((t) => `${t.date.slice(8)} ${t.entryTime}`), ['26 14:02', '27 09:34', '27 09:49', '27 12:24', '27 12:29'])
+  assert.deepEqual(sortTrades(null), [])
+})

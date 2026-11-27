@@ -22,6 +22,20 @@ export const LIVE_MIN_MINUTES = 5
 export const liveRunUrl = (u, date) => `${runUrl(u, date)}&forceLive=true`
 
 const msOf = (p) => (p?.ms != null ? p.ms : Date.parse(p?.time))
+/** Settle time after a minute closes before it is read (its last ticks and bars reach the server's memory). */
+export const SETTLE_MS = 3_000
+/** When the next round starts: the minute after the one the round BELONGED to (`startedAt`), `settleMs` past its end - so a round that overran
+ *  starts the next at once (never waits a whole extra minute, which used to push a signal's entry past the "late" limits). */
+export const nextRoundAt = (startedAt, settleMs = SETTLE_MS) => Math.floor(startedAt / MIN_MS) * MIN_MS + MIN_MS + settleMs
+/** `fn` over `list`, at most `limit` at a time, in the order given (results in order). */
+export async function mapLimit(list, limit, fn) {
+  const out = new Array(list.length)
+  let next = 0
+  const worker = async () => { for (;;) { const k = next++; if (k >= list.length) return; out[k] = await fn(list[k], k) } }
+  await Promise.all(Array.from({ length: Math.min(limit, list.length) }, worker))
+  return out
+}
+
 /** The run with only the minutes COMPLETED at `nowMs` (a 1-minute point is stamped at its start). */
 export function completedRun(run, nowMs) {
   const cut = (list) => (Array.isArray(list) ? list.filter((p) => { const t = msOf(p); return Number.isFinite(t) && t + MIN_MS <= nowMs }) : list)
@@ -91,7 +105,7 @@ export function liveTrade(t, day, engine, { tradeDay = null, exit = false } = {}
  * its entry premium: a bought option's stop under it and target over it, a sold one's the other way; '' = none). Sent with
  * every event, so the history is updated the moment the signal is; the day's report puts the final rows over them.
  */
-export function tradeRow(t, day, engine, { tradeDay = null, open = false } = {}) {
+export function tradeRow(t, day, engine, { tradeDay = null, open = false, running = false } = {}) {
   const lt = liveTrade(t, day, engine, { tradeDay })
   const sell = t.action === 'SELL'
   const level = (points, up) => (points > 0 ? r2(t.entry + (up ? points : -points)) : '')
@@ -100,9 +114,22 @@ export function tradeRow(t, day, engine, { tradeDay = null, open = false } = {})
     entryTime: clock(t.entryTime), entry: r2(t.entry), sl: level(lt.stopLossPoints, sell), target: level(lt.targetPoints, !sell),
     expiryDay: t.expiryDay ? (t.overridden ? 'yes - overridden' : 'yes') : '', why: t.why, status: open ? 'open' : 'closed', key: lt.key,
   }
+  // An OPEN trade is marked to the option's CURRENT price (its last completed minute's close - simulateTrade's "Day end" exit):
+  // `exit` is that price, points / gross / charges / net the running P&L as if sold now (status 'open' keeps it out of the closed totals).
   return open
-    ? { ...base, exitTime: '', exit: '', exitReason: '', points: '', gross: '', charges: '', net: '' }
+    ? (running
+      ? { ...base, exitTime: '', exit: r2(t.exit), exitReason: 'running', points: r2(t.points), gross: r2(t.gross), charges: r2(t.charges), net: r2(t.net) }
+      : { ...base, exitTime: '', exit: '', exitReason: '', points: '', gross: '', charges: '', net: '' })
     : { ...base, exitTime: clock(t.exitTime), exit: r2(t.exit), exitReason: t.exitReason, points: r2(t.points), gross: r2(t.gross), charges: r2(t.charges), net: r2(t.net) }
+}
+
+/** A signal that was NOT taken because another strategy's trade was open, as a history row (status 'not taken'). */
+export function notTakenRow(sig, day) {
+  return {
+    date: day.date, side: sig.strategy, signal: sig.dir > 0 ? 'bullish' : 'bearish', action: '', option: '', entryTime: clock(sig.time), entry: '', sl: '', target: '',
+    exitTime: '', exit: '', exitReason: sig.skipped, points: '', gross: '', charges: '', net: '', expiryDay: '', why: sig.why, status: 'not taken',
+    key: `${day.date}|${sig.strategy}|${sig.time}`,
+  }
 }
 
 /**
@@ -112,8 +139,8 @@ export function tradeRow(t, day, engine, { tradeDay = null, open = false } = {})
  * `closed` and still `open`, and the closed ones' `summary`. `complete`: the session is over - a trade the data ran out on
  * exits there. `nowMs`: an entry first seen more than 3 minutes after it is marked "seen late" (after a restart).
  */
-export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null } = {}) {
-  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay, asOfMs: complete ? null : nowMs })
+export function liveDayEvents(day, engine, { name = 'Strategy', complete = false, nowMs = null, tradeDay = null, blocked = null, pinned = null } = {}) {
+  const { trades, signals, dayLimit, expirySkipped } = simulateDay(day, engine, { tradeDay, asOfMs: complete ? null : nowMs, blocked, pinned })
   const isOpen = (t) => !complete && t.exitReason === 'Day end'
   const events = []
   for (const t of trades) {
@@ -121,22 +148,71 @@ export function liveDayEvents(day, engine, { name = 'Strategy', complete = false
     const late = nowMs != null && nowMs - (t.entryTime + MIN_MS) > 3 * MIN_MS
     events.push({
       key: `${key}|entry`, kind: 'entry', at: t.entryTime, text: entryText(name, day.underlying, t, { late }),
-      trade: liveTrade(t, day, engine, { tradeDay }), row: tradeRow(t, day, engine, { tradeDay, open: true }),
+      trade: liveTrade(t, day, engine, { tradeDay }), row: tradeRow(t, day, engine, { tradeDay, open: true, running: isOpen(t) }),
     })
-    if (!isOpen(t)) {
+    // A trade still open: its running P&L at the option's current price, every round (kind 'mark' - the server only updates its row,
+    // keeps no event and sends nothing to Telegram).
+    if (isOpen(t)) {
+      events.push({ key: `${key}|mark`, kind: 'mark', at: t.entryTime, text: '', trade: null, row: tradeRow(t, day, engine, { tradeDay, open: true, running: true }) })
+    } else {
       events.push({
         key: `${key}|exit`, kind: 'exit', at: t.exitTime, text: exitText(name, day.underlying, t),
         trade: liveTrade(t, day, engine, { tradeDay, exit: true }), row: tradeRow(t, day, engine, { tradeDay }),
       })
     }
   }
+  // A signal NOT TAKEN because another strategy's trade was open: kept in the history with a "not taken" tag (nothing sent).
+  const notTaken = signals.filter((x) => x.blockedBy)
+  for (const x of notTaken) events.push({ key: `${day.date}|${x.strategy}|${x.time}|skipped`, kind: 'skipped', at: x.time, text: '', trade: null, row: notTakenRow(x, day) })
   events.sort((a, b) => a.at - b.at || (a.kind === b.kind ? 0 : a.kind === 'entry' ? -1 : 1))
   const closed = trades.filter((t) => !isOpen(t))
   return {
-    trades, closed, open: trades.filter(isOpen), events, signals: signals.length, dayLimit: dayLimit ?? null, expirySkipped: Boolean(expirySkipped),
+    trades, closed, open: trades.filter(isOpen), events, signals: signals.length, notTaken: notTaken.length, dayLimit: dayLimit ?? null, expirySkipped: Boolean(expirySkipped),
     tradeIn: engine.tradeIn || '', closedRows: closed.map((t) => tradeRow(t, day, engine, { tradeDay })),
     summary: summarize(closed),
   }
+}
+
+/** The entries a strategy's day has SHOWN already - from the event keys the server kept (`date|rule-or-mirror|entry ms|entry`): [{ side, time }]. */
+export function pinnedEntries(sentKeys, date) {
+  const out = []
+  for (const key of sentKeys ?? []) {
+    const [d, side, ms, kind] = String(key).split('|')
+    if (d === date && kind === 'entry' && (side === 'rule' || side === 'mirror') && Number.isFinite(Number(ms))) out.push({ side, time: Number(ms) })
+  }
+  return out
+}
+
+/**
+ * SEVERAL SAVED STRATEGIES ON ONE TRADED INDEX, ONE TRADE AT A TIME (asked for - "there are many live strategies ... if they are
+ * the same direction do not trade another, only trade if there is not any open trade"; "same direction do not add up"): each
+ * entry `{ name, day, engine, tradeDay }` is a strategy's own day; their trades are taken in the order of their ENTRY TIME and a
+ * trade is taken only when none of the others' (in the same direction) is open then - an open trade lasts until its exit (a running one
+ * until the end), an entry at the minute another exits is skipped as inside one strategy. The one that signalled first keeps
+ * the trade; another's signal inside it is NOT TAKEN (`blocked` on `simulateDay` - `notTaken`, a "not taken" row) and that
+ * strategy's later trades are worked out again without it (its cooldown, max trades and day limits as if it had not traded).
+ * One entry = exactly `liveDayEvents`. Returns a result for each entry, in the order given.
+ */
+export function liveGroupEvents(entries, { complete = false, nowMs = null } = {}) {
+  const run = (e, blocked) => liveDayEvents(e.day, e.engine, { name: e.name, complete, nowMs, tradeDay: e.tradeDay, blocked, pinned: e.pinned })
+  const results = entries.map((e) => run(e, null))
+  if (entries.length < 2) return results
+  const confirmed = []   // the trades taken, in entry order: { from, to, by, idx }
+  const done = entries.map(() => 0)
+  for (let guard = 0; guard < 2000; guard++) {
+    let pick = -1
+    results.forEach((r, i) => { const t = r.trades[done[i]]; if (t && (pick < 0 || t.entryTime < results[pick].trades[done[pick]].entryTime)) pick = i })
+    if (pick < 0) break
+    const r = results[pick], t = r.trades[done[pick]]
+    // A PINNED trade was shown already - a fact, never re-read away: it only blocks the others.
+    if (!t.pinned && confirmed.some((c) => c.idx !== pick && c.dir === t.dir && t.entryTime >= c.from && t.entryTime <= c.to)) {
+      results[pick] = run(entries[pick], confirmed.filter((c) => c.idx !== pick).map(({ from, to, by, dir }) => ({ from, to, by, dir })))
+      continue
+    }
+    confirmed.push({ from: t.entryTime, to: r.open.includes(t) ? Infinity : t.exitTime, by: entries[pick].name, idx: pick, dir: t.dir })
+    done[pick]++
+  }
+  return results
 }
 
 const r2 = (v) => (Number.isFinite(v) ? Math.round(v * 100) / 100 : null)
@@ -165,7 +241,8 @@ export function dayReportText(name, day, result) {
     result.closed.forEach((t, k) => lines.push(`${k + 1}. ${clock(t.entryTime)} - ${clock(t.exitTime)} ${tradeName(t)} ${t.entry.toFixed(2)} → ${t.exit.toFixed(2)} ${t.exitReason} ${rupees(t.net)}${tags(t).length ? ` (${tags(t).join(', ')})` : ''}`))
   }
   if (result.dayLimit) lines.push(`The day's max ${result.dayLimit} was reached - no more trades after it.`)
-  const skipped = result.signals - result.trades.length
+  if (result.notTaken > 0) lines.push(`${result.notTaken} signal${result.notTaken === 1 ? '' : 's'} not taken - another strategy's trade was open.`)
+  const skipped = result.signals - result.trades.length - (result.notTaken ?? 0)
   if (skipped > 0 && !result.expirySkipped) lines.push(`${skipped} more signal${skipped === 1 ? '' : 's'} not taken (a trade open, the day's limits, the cooldown or outside 09:30 - 14:45).`)
   return lines.join('\n')
 }

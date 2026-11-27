@@ -159,7 +159,55 @@ public sealed class SignalStrategyStoreTests : IDisposable
         Assert.Equal(2, store.History(s.Id).Trades.Count);
         // The day's report puts its final rows over the day's.
         await store.RecordDayAsync(s.Id, "2026-10-26", new JsonObject { ["trades"] = 1 }, new JsonArray { Row(k1, open: false) }, "📊", Now);
-        Assert.Equal(k1, Assert.Single(store.History(s.Id).Trades)["key"]);
+        // ...and a trade shown live that the final read does not have is not dropped and never relabelled "not taken": one that closed live stays as it closed.
+        var final = store.History(s.Id).Trades.ToDictionary(x => x["key"]);
+        Assert.Equal(2, final.Count);
+        Assert.Equal("closed", final[k1]["status"]);
+        Assert.Equal(("closed", "2300"), (final[k2]["status"], final[k2]["net"]));
+        // One that was still open (no exit seen) is "unconfirmed" - kept, no P&L.
+        var k3 = "2026-10-26|rule|3";
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k3}|entry", "entry", "in", null, Row(k3, open: true)) }, Now);
+        await store.RecordDayAsync(s.Id, "2026-10-26", new JsonObject { ["trades"] = 1 }, new JsonArray { Row(k1, open: false) }, "📊", Now);
+        var after = store.History(s.Id).Trades.ToDictionary(x => x["key"]);
+        Assert.Equal(("unconfirmed", ""), (after[k3]["status"], after[k3]["net"]));
+    }
+
+    [Fact]
+    public async Task An_open_trade_is_marked_to_the_current_price_each_round_and_a_not_taken_signal_is_kept_with_its_tag()
+    {
+        var telegrams = new List<string>();
+        var store = Store(telegrams);
+        var s = store.Create("me@x.com", Request("S"), Now).Strategy!;
+        JsonObject Row(string key, string status, string exit, string net, string reason = "") => new()
+        {
+            ["key"] = key, ["status"] = status, ["side"] = "rule", ["signal"] = "bullish", ["action"] = "BUY", ["option"] = "NIFTY 25000 CE",
+            ["entryTime"] = "09:34", ["entry"] = 100, ["exit"] = exit, ["exitReason"] = reason, ["net"] = net, ["why"] = "Buy CE: a",
+        };
+        var k = "2026-10-26|rule|1";
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k}|entry", "entry", "in", null, Row(k, "open", "", "")) }, Now);
+        // A mark: the row follows the option's price (running P&L) - no event kept, nothing sent, the row still open.
+        var sent = telegrams.Count;
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k}|mark", "mark", "", null, Row(k, "open", "112.5", "1250", "running")) }, Now);
+        var t = Assert.Single(store.History(s.Id).Trades);
+        Assert.Equal(("open", "112.5", "1250", "running"), (t["status"], t["exit"], t["net"], t["exitReason"]));
+        Assert.Equal(sent, telegrams.Count);
+        Assert.Single(store.History(s.Id).Events);
+        // The next mark moves it again; a closed trade is never touched by a late mark.
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k}|mark", "mark", "", null, Row(k, "open", "90", "-1000", "running")) }, Now);
+        Assert.Equal("-1000", Assert.Single(store.History(s.Id).Trades)["net"]);
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k}|exit", "exit", "out", null, Row(k, "closed", "95", "-500", "Time stop")) }, Now);
+        await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{k}|mark", "mark", "", null, Row(k, "open", "200", "9999", "running")) }, Now);
+        Assert.Equal(("closed", "-500"), (store.History(s.Id).Trades[0]["status"], store.History(s.Id).Trades[0]["net"]));
+        // A signal NOT TAKEN (another strategy's trade open): a row tagged "not taken", kept once, no message, no live order.
+        var kn = "2026-10-26|rule|2";
+        var before = telegrams.Count;
+        var (_, fresh) = await store.KeepEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new($"{kn}|skipped", "skipped", "", null, Row(kn, "not taken", "", "", "another strategy's trade is open (A)")) }, Now);
+        Assert.Single(fresh);
+        Assert.Equal(before, telegrams.Count);
+        Assert.Equal("not taken", store.History(s.Id).Trades.First(x => x["key"] == kn)["status"]);
+        // The list counts it apart: not a trade, not open.
+        var today = store.Glance(s.Id, "2026-10-26").Today!;
+        Assert.Equal((1, 0, 1), (today.Trades, today.Open, today.NotTaken));
     }
 
     [Fact]
@@ -185,10 +233,12 @@ public sealed class SignalStrategyStoreTests : IDisposable
         }, Now);
         (_, var events, today) = store.Glance(s.Id, "2026-10-26");
         Assert.Equal(3, events);
-        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 1, 2, 1, 1, 1499.5m), today);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 1, 2, 1, 1, 1499.5m), today! with { Running = null });
+        Assert.Equal("NIFTY 25000 CE", Assert.Single(today!.Running!).Option);
         // The open one closes: counted and netted.
         await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new("c|exit", "exit", "out", null, Row("c", open: false, 100)) }, Now);
-        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 0, 3, 2, 1, 1599.5m), store.Glance(s.Id, "2026-10-26").Today);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 0, 3, 2, 1, 1599.5m), store.Glance(s.Id, "2026-10-26").Today! with { Running = null });
+        Assert.Equal((49680m, 1), store.Totals(s.Id, "2026-10-26"));      // the 23 Oct report; today is the live summary's
         Assert.Null(SignalStrategyStore.TodayOf("2026-10-27", []));
     }
 
