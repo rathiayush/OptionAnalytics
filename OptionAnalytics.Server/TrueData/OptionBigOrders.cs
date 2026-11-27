@@ -11,6 +11,11 @@ public sealed record BigOrderEvent(
     long Seq, DateTimeOffset Time, string Symbol, decimal Strike, string Type, long Qty, decimal Lots, decimal Price, bool Buy, decimal Value,
     decimal Ratio, decimal TouchRatio, bool Through, bool Bundled, long? OiChange, decimal MovePct, int AtmDistance, int LotSize);
 
+/// <summary>One option's trading in ONE MINUTE from TrueData's ticks (the Tick Flow page's Option CDV / OBV): the quantity bought at the ask and sold at the bid
+/// (the side the quote BEFORE each tick gives - every tick, not only the big ones), and the premium's first / last price in the minute. <paramref name="T"/> is the
+/// minute's start (epoch ms).</summary>
+public sealed record OptionFlowMinute(long T, string Symbol, string Type, decimal Strike, long Buy, long Sell, decimal Open, decimal Close, int LotSize);
+
 /// <summary>Where an option chain comes from (TrueData's REST master; a fake in the tests).</summary>
 public interface IOptionChainSource
 {
@@ -131,6 +136,7 @@ public sealed class OptionBigOrderWatch
     private readonly object _lock = new();
     private readonly Dictionary<string, State> _states = new(StringComparer.Ordinal);
     private readonly List<BigOrderEvent> _events = new();
+    private readonly Dictionary<(string Symbol, long Minute), FlowCell> _flow = new();
     private long _seq, _ticks;
     private int _stateCount;   // distinct options (an alias is a second key to the same state)
     private DateOnly? _day;
@@ -141,6 +147,13 @@ public sealed class OptionBigOrderWatch
     /// <summary>The strike the window is centred on and the strike step - for each event's distance from the ATM.</summary>
     public decimal Atm { get; set; }
     public decimal Step { get; set; } = 50;
+
+    private sealed class FlowCell
+    {
+        public OptionContract Contract = null!;
+        public long Buy, Sell;
+        public decimal Open, Close;
+    }
 
     private sealed class State
     {
@@ -182,7 +195,7 @@ public sealed class OptionBigOrderWatch
 
     public int TrackedCount { get { lock (_lock) return _stateCount; } }
 
-    public void Clear() { lock (_lock) { _states.Clear(); _stateCount = 0; _events.Clear(); _ticks = 0; _lastTickAt = null; } }
+    public void Clear() { lock (_lock) { _states.Clear(); _stateCount = 0; _events.Clear(); _flow.Clear(); _ticks = 0; _lastTickAt = null; } }
 
     /// <summary>A best bid / ask update with no trade.</summary>
     public void OnQuote(string symbolId, decimal bid, long bidQty, decimal ask, long askQty)
@@ -201,7 +214,7 @@ public sealed class OptionBigOrderWatch
         {
             if (!_states.TryGetValue(t.SymbolId, out var s)) return null;
             var day = DateOnly.FromDateTime(time.ToOffset(Ist).DateTime);
-            if (_day != day) { _events.Clear(); _day = day; foreach (var st in _states.Values) { st.Recent.Clear(); st.LastTtq = 0; st.LastOi = 0; } }
+            if (_day != day) { _events.Clear(); _flow.Clear(); _day = day; foreach (var st in _states.Values) { st.Recent.Clear(); st.LastTtq = 0; st.LastOi = 0; } }
             _ticks++;
             _lastTickAt = time;
 
@@ -213,11 +226,19 @@ public sealed class OptionBigOrderWatch
             var lotSize = Math.Max(1, s.Contract.LotSize);
 
             BigOrderEvent? made = null;
+            var minute = time.ToUnixTimeMilliseconds() / 60_000 * 60_000;
+            FlowCell? cell = null;
+            if (t.Price > 0)
+            {
+                if (!_flow.TryGetValue((s.Contract.Symbol, minute), out cell)) { cell = new FlowCell { Contract = s.Contract, Open = t.Price }; _flow[(s.Contract.Symbol, minute)] = cell; }
+                cell.Close = t.Price;
+            }
             // A quantity of one on a lot-sized contract is TrueData's day-high / low update, not a trade.
             if (qty > 1 || lotSize == 1)
             {
                 var buy = TickBook.Side(t.Price, s.Bid, s.Ask, s.LastPrice, s.LastBuy);
                 var lots = (decimal)qty / lotSize;
+                if (cell is not null && qty > 0) { if (buy) cell.Buy += qty; else cell.Sell += qty; }
                 // The cheap test first: most ticks are small, and only a candidate pays for the median of the option's usual.
                 if (lots >= FloorLots)
                 {
@@ -268,6 +289,16 @@ public sealed class OptionBigOrderWatch
             var take = Math.Min(limit, _events.Count - lo);
             return _events.GetRange(_events.Count - take, take);
         }
+    }
+
+    /// <summary>Every option's minutes from <paramref name="sinceMinute"/> (epoch ms; the forming minute is re-sent each time), oldest first.</summary>
+    public IReadOnlyList<OptionFlowMinute> FlowSince(long sinceMinute)
+    {
+        lock (_lock)
+            return _flow.Where(kv => kv.Key.Minute >= sinceMinute)
+                .OrderBy(kv => kv.Key.Minute).ThenBy(kv => kv.Value.Contract.Strike)
+                .Select(kv => new OptionFlowMinute(kv.Key.Minute, kv.Key.Symbol, kv.Value.Contract.Call ? "CE" : "PE", kv.Value.Contract.Strike, kv.Value.Buy, kv.Value.Sell, kv.Value.Open, kv.Value.Close, Math.Max(1, kv.Value.Contract.LotSize)))
+                .ToList();
     }
 
     public (long LastSeq, long Ticks, DateTimeOffset? LastTickAt, int Tracked) Meta()

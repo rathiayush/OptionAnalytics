@@ -67,6 +67,28 @@ public sealed class OptionBigOrdersTests
     }
 
     [Fact]
+    public void EveryTickIsAddedToItsMinutesFlow_OnTheSideOfTheQuoteBefore()
+    {
+        var (w, c, ttq) = Warm();   // six ticks of one lot at 100.25 (inside the 100 x 100.5 quote), 10:00:00 - 10:00:05
+        var all = w.FlowSince(0);
+        Assert.Single(all);
+        Assert.Equal(6 * Lot, all[0].Buy + all[0].Sell);          // every quiet tick counts, not only the big ones
+        // 10:00:10 a buy at the ask, 10:00:11 a sell at the bid (the packet's own quote is the next tick's "before").
+        w.OnTrade(Tick(c, 10, 100.5m, 3 * Lot, ttq + 3 * Lot, 100m, 500, 100.5m, 500), T0.AddSeconds(10));
+        w.OnTrade(Tick(c, 11, 100m, 2 * Lot, ttq + 5 * Lot, 100m, 500, 100.5m, 500), T0.AddSeconds(11));
+        var minute = w.FlowSince(0).Single();
+        Assert.True(minute.Buy >= 3 * Lot);
+        Assert.True(minute.Sell >= 2 * Lot);
+        Assert.Equal(100.25m, minute.Open);                         // the minute's first price
+        Assert.Equal(100m, minute.Close);                           // and its last
+        Assert.Equal("CE", minute.Type);
+        // The next minute is its own row; "since" re-sends the forming minute and leaves the earlier ones.
+        w.OnTrade(Tick(c, 70, 101m, 2 * Lot, ttq + 7 * Lot, 100.5m, 500, 101m, 500), T0.AddSeconds(70));
+        Assert.Equal(2, w.FlowSince(0).Count);
+        Assert.Single(w.FlowSince(minute.T + 60_000));
+    }
+
+    [Fact]
     public void ASellAtTheBidAndASweepThroughTheTouch()
     {
         var (w, c, ttq) = Warm();
