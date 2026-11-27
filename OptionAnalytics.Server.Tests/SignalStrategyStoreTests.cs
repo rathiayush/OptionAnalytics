@@ -233,10 +233,12 @@ public sealed class SignalStrategyStoreTests : IDisposable
         }, Now);
         (_, var events, today) = store.Glance(s.Id, "2026-10-26");
         Assert.Equal(3, events);
-        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 1, 2, 1, 1, 1499.5m), today);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 1, 2, 1, 1, 1499.5m), today! with { Running = null });
+        Assert.Equal("NIFTY 25000 CE", Assert.Single(today!.Running!).Option);
         // The open one closes: counted and netted.
         await store.RecordEventsAsync(s.Id, "2026-10-26", new List<SignalLiveEvent> { new("c|exit", "exit", "out", null, Row("c", open: false, 100)) }, Now);
-        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 0, 3, 2, 1, 1599.5m), store.Glance(s.Id, "2026-10-26").Today);
+        Assert.Equal(new SignalStrategyToday("2026-10-26", 3, 0, 3, 2, 1, 1599.5m), store.Glance(s.Id, "2026-10-26").Today! with { Running = null });
+        Assert.Equal((49680m, 1), store.Totals(s.Id, "2026-10-26"));      // the 23 Oct report; today is the live summary's
         Assert.Null(SignalStrategyStore.TodayOf("2026-10-27", []));
     }
 

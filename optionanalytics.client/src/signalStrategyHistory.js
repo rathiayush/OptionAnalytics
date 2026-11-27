@@ -36,3 +36,11 @@ export function orderTrades(rows) {
     .map((t) => ({ ...t, open: Boolean(t.orderIds) && !t.exitStatus }))
     .sort((a, b) => String(b.placedAt ?? b.exitAt ?? '').localeCompare(String(a.placedAt ?? a.exitAt ?? '')))
 }
+
+/** A strategy's TOTAL profit as the list sorts it: the server's `totalNet` (every reported day + today's closed trades + the open ones' running P&L). */
+export const totalOf = (s) => (Number.isFinite(Number(s?.totalNet)) ? Number(s.totalNet) : 0)
+/** Strategies by total profit, best first (ties by name) - the list's default order. */
+export const sortStrategies = (list) => [...(list ?? [])].sort((a, b) => totalOf(b) - totalOf(a) || String(a.name).localeCompare(String(b.name)))
+const stamp = (t) => `${t?.date ?? ''} ${t?.entryTime ?? ''}`
+/** Trades by date and time of entry, newest first (`ascending` for the other way round). */
+export const sortTrades = (rows, { ascending = false } = {}) => [...(rows ?? [])].sort((a, b) => (ascending ? stamp(a).localeCompare(stamp(b)) : stamp(b).localeCompare(stamp(a))))

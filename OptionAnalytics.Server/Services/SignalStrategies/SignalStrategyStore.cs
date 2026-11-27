@@ -375,6 +375,18 @@ public sealed class SignalStrategyStore
         }
     }
 
+    /// <summary>A strategy's TOTAL over every day the live scan has reported (the days file's net, today excluded - today is the live
+    /// summary's, closed plus running): what the list sorts by.</summary>
+    public (decimal Net, int Days) Totals(string id, string today)
+    {
+        lock (_lock)
+        {
+            var days = CsvTable.Read(HistoryPath(id, "days")).Where(r => r.GetValueOrDefault("date") != today).ToList();
+            var net = days.Sum(r => decimal.TryParse(r.GetValueOrDefault("net"), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : 0m);
+            return (net, days.Count);
+        }
+    }
+
     internal static SignalStrategyToday? TodayOf(string today, IReadOnlyList<Dictionary<string, string>> rows)
     {
         static bool Apart(Dictionary<string, string> r) => r.GetValueOrDefault("status") is { } st && (string.Equals(st, NotTaken, StringComparison.OrdinalIgnoreCase) || string.Equals(st, Unconfirmed, StringComparison.OrdinalIgnoreCase));
@@ -385,8 +397,12 @@ public sealed class SignalStrategyStore
             decimal.TryParse(r.GetValueOrDefault("net"), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : null;
         var closed = rows.Where(r => !string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase) && Net(r) is not null).ToList();
         var nets = closed.Select(r => Net(r)!.Value).ToList();
-        var running = rows.Where(r => string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase)).Select(Net).Where(n => n is not null).Sum(n => n!.Value);
-        return new SignalStrategyToday(today, rows.Count, rows.Count - closed.Count, closed.Count, nets.Count(n => n > 0), nets.Count(n => n < 0), nets.Sum(), notTaken, running);
+        var open = rows.Where(r => string.Equals(r.GetValueOrDefault("status"), "open", StringComparison.OrdinalIgnoreCase)).ToList();
+        var running = open.Select(Net).Where(n => n is not null).Sum(n => n!.Value);
+        static decimal? Dec(Dictionary<string, string> r, string c) => decimal.TryParse(r.GetValueOrDefault(c), NumberStyles.Number, CultureInfo.InvariantCulture, out var v) ? v : null;
+        // Each open trade with the option's CURRENT price and its running P&L (the scan marks the row every minute).
+        var lines = open.Select(r => new SignalRunningTrade(r.GetValueOrDefault("option") ?? "", r.GetValueOrDefault("action") ?? "", r.GetValueOrDefault("entryTime") ?? "", Dec(r, "entry"), Dec(r, "exit"), Dec(r, "net"))).ToList();
+        return new SignalStrategyToday(today, rows.Count, rows.Count - closed.Count, closed.Count, nets.Count(n => n > 0), nets.Count(n => n < 0), nets.Sum(), notTaken, running, lines);
     }
 
     private async Task NotifyAsync(string html)
@@ -402,7 +418,10 @@ public sealed class SignalStrategyStore
 
 /// <summary>A strategy's trades today, as far as they have gone: how many, how many still open, closed, won / lost, and the
 /// closed ones' net (after charges), the signals NOT TAKEN and the OPEN trades' running net (at the option's current price).</summary>
-public sealed record SignalStrategyToday(string Date, int Trades, int Open, int Closed, int Wins, int Losses, decimal Net, int NotTaken = 0, decimal OpenNet = 0);
+public sealed record SignalStrategyToday(string Date, int Trades, int Open, int Closed, int Wins, int Losses, decimal Net, int NotTaken = 0, decimal OpenNet = 0, IReadOnlyList<SignalRunningTrade>? Running = null);
+
+/// <summary>An open trade as the list shows it: the option, the entry (time and premium), the option's current price and the running P&amp;L.</summary>
+public sealed record SignalRunningTrade(string Option, string Action, string EntryTime, decimal? Entry, decimal? Now, decimal? Net);
 
 /// <summary>A saved strategy: its name, owner, index, the live scan's switches, its settings (the page's) and whether it
 /// places LIVE Dhan orders (an admin's switch, off by default).</summary>

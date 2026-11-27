@@ -50,7 +50,10 @@ public sealed class SignalStrategyController : ControllerBase
             strategies = _store.List(Scope).Select(s =>
             {
                 var (last, events, todayTrades) = _store.Glance(s.Id, today);
-                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.LiveOrders, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events, todayTrades };
+                var (pastNet, pastDays) = _store.Totals(s.Id, today);
+                // The total the list sorts by: every reported day, plus today's closed trades and the open ones' running P&L.
+                var totalNet = pastNet + (todayTrades?.Net ?? 0m) + (todayTrades?.OpenNet ?? 0m);
+                return new { s.Id, s.Name, s.Owner, s.Underlying, s.Live, s.Alerts, s.DailyReport, s.LiveOrders, s.CreatedUtc, s.UpdatedUtc, s.Settings, lastDay = last, eventsToday = events, todayTrades, totalNet, daysScanned = pastDays };
             }),
         };
     }

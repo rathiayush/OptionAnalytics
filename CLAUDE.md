@@ -1685,6 +1685,12 @@ All must pass before committing.
   max trades, day limits, another strategy's trade) - it is managed to its own exit like any trade, the trade carries `pinned: true`, and in
   `liveGroupEvents` it is a fact that only blocks the others. So a live row always gets its exit and the end-of-day read keeps it. The "not taken
   at the end of the day" rows above stay as the safety net (`tests/signal-live-group.test.mjs`).
+  THE SAVED STRATEGIES' ORDER AND RUNNING NUMBERS (asked for - "sorted by default by total profit, then trades within sorted by date time ... show live
+  price and PnL running"): the list is sorted by TOTAL profit, best first (`sortStrategies` - the server's `totalNet` = every reported day's net,
+  `SignalStrategyStore.Totals`, plus today's closed trades and the open ones' running P&L; a "Total" column, its arrows turn it), the History's trades
+  by date and time of entry, newest first (`sortTrades`, the Day column's arrows turn it); a strategy's Today cell lists each OPEN trade - the option,
+  its entry premium, the option's CURRENT price and the running P&L (`SignalStrategyToday.Running` - the rows the scan marks every minute), and the
+  History's open rows show "now" price and the running net (`tests/signal-strategy-history.test.mjs`, `SignalStrategyStoreTests.cs`).
   SPEED OF THE LIVE SCAN, 50 STRATEGIES (asked for - "50 strategies that we need to identify every minute, ultra fast so no trade is missed"):
   measured, the engine is not the slow part (a day prepared once an index ~0.15 s, 50 strategies read together ~50 ms on the test day - held by a
   test under 5 s); what cost minutes was the loop around it, now fixed: every index is loaded AT ONCE (`loadIndex` in `Promise.all` - one slow index
