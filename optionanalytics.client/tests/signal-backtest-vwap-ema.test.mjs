@@ -111,7 +111,7 @@ test('the setting: held to a period of 2 - 200 (else off), shown in the report, 
   assert.equal(template.settings.timeframe, 3)
 })
 
-test('EMA vs VWAP: the 9 EMA over / under / crossed VWAP; the crossover template buys the call and its mirror the put', () => {
+test('EMA vs VWAP: the 9 EMA over / under / crossed VWAP', () => {
   // Spot 24980 for 60 minutes (EMA under VWAP 25000), then 25020: the 9 EMA of 3-minute closes crosses VWAP a few candles later.
   const up = (i) => (i < 60 ? 24980 : 25020)
   const v = timeframeView(day(up), 3)
@@ -123,14 +123,6 @@ test('EMA vs VWAP: the 9 EMA over / under / crossed VWAP; the crossover template
   assert.ok(cross != null && at(cross, 'crossedAbove', 1) && !at(cross, 'crossedBelow', 3))
   assert.ok(at(cross + 3, 'above') && !at(cross + 3, 'crossedAbove', 1) && at(cross + 3, 'crossedAbove', 5))
   assert.equal(c.options.find((o) => o.value === 'crossedAbove').opposite, 'crossedBelow')
-  const t = RULE_TEMPLATES.find((x) => x.id === 'ema9VwapCross')
-  const E = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), t))
-  const call = simulateDay(day(up), E)
-  assert.equal(call.trades.length, 1); assert.equal(call.trades[0].side, 'CE')
-  const down = simulateDay(day((i) => (i < 60 ? 25020 : 24980)), E)
-  assert.equal(down.trades.length, 1); assert.equal(down.trades[0].side, 'PE')
-  assert.equal(simulateDay(day(() => 25020), E).trades.length, 0)      // never crossed: no trade
-  assert.equal(E.lastEntry, '14:00'); assert.equal(E.exitEma, 9)
 })
 
 test('the wick template needs the trend first: the same wick with the 9 EMA UNDER VWAP is not taken', () => {
