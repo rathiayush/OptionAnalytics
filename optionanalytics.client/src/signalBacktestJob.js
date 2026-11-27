@@ -6,7 +6,7 @@
 // A run = its days' OUTCOMES put together: each day is replayed through the rule on its own (simulateDay - the days are
 // independent, as simulateRun has them), so the background job keeps a day's trades and drops the day itself.
 import {
-  BACKTEST_DEFAULTS, COST_SL_CHOICES, SPOT_STOP_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXIT_EMA_ON_CHOICES, SPOT_STOP_CHOICES, EXPIRY_DAY_CHOICES, LEVEL_UNITS, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, deltaDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule,
   orderFlowNeeded, prepareDay, ruleText, simulateDay, summarize,
 } from './signalBacktest.js'
 import { FLOW_BOOK, FLOW_NONE, FLOW_PROFILE, orderFlowMinutes, orderFlowUrl } from './orderFlowFeatures.js'
@@ -229,6 +229,7 @@ export function cleanBacktestSettings(s = {}) {
     spotStop: SPOT_STOP_CHOICES.includes(s?.spotStop) ? s.spotStop : d.spotStop,
     spotRR: held(s?.spotRR, 0, 10, d.spotRR),
     exitEma: Math.round(held(s?.exitEma, 0, 200, d.exitEma)) >= 2 ? Math.round(held(s?.exitEma, 0, 200, d.exitEma)) : 0,
+    exitEmaOn: EXIT_EMA_ON_CHOICES.includes(s?.exitEmaOn) ? s.exitEmaOn : d.exitEmaOn,
     slPct: held(s?.slPct, 0, max, d.slPct),
     targetPct: held(s?.targetPct, 0, max, d.targetPct),
     levelUnit,
@@ -445,7 +446,7 @@ export function reportHead(s, okDays) {
 // The spot stop / target in words (' · spot stop at the signal candle · target 1:2'), '' when off.
 export function spotStopText(s) {
   const stop = s?.spotStop === 'candle' ? ` · spot stop at the signal candle${s.spotRR > 0 ? ` · spot target 1:${s.spotRR}` : ''}` : ''
-  return `${stop}${s?.exitEma >= 2 ? ` · exit when a candle closes through the ${s.exitEma} EMA` : ''}`
+  return `${stop}${s?.exitEma >= 2 ? ` · exit when a ${s.exitEmaOn === 'premium' ? 'premium ' : ''}candle closes through the ${s.exitEma} EMA` : ''}`
 }
 
 // The trailing stop in words (' · trail 10% after +5%'), '' when off.

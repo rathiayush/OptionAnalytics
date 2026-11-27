@@ -7,7 +7,7 @@ import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, use
 import { createZoomableChart } from './chartZoom.js'
 import { PAPER_TRADE_LOT_SIZE } from './tradeDefaults.js'
 import {
-  BACKTEST_DEFAULTS, COST_SL_CHOICES, SPOT_STOP_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
+  BACKTEST_DEFAULTS, COST_SL_CHOICES, EXIT_EMA_ON_CHOICES, SPOT_STOP_CHOICES, DEFAULT_THEN_WINDOW, EXPIRY_DAY_CHOICES, MONEYNESS_CHOICES, THEN_WINDOWS, MAX_BACKGROUND_DAYS, MAX_BACKTEST_DAYS, MAX_GROUP_DEPTH, RULE_ACTIONS, RULE_CONDITIONS, TIMEFRAMES, WINDOW_CHOICES, backtestDays, cleanLine, istMinute,
   deltaDaysNeeded, futuresDaysNeeded, mirrorIsSame, mirrorLines, normalizeRule, optionName, orderFlowNeeded, ruleText, setConnectorAt, tradesCsv, treeFromLogic,
 } from './signalBacktest.js'
 import { FLOW_BOOK, FLOW_PROFILE } from './orderFlowFeatures.js'
@@ -45,6 +45,7 @@ const STORE = {
   spotStop: 'optionanalytics.signalBacktest.spotStop',
   spotRR: 'optionanalytics.signalBacktest.spotRR',
   exitEma: 'optionanalytics.signalBacktest.exitEma',
+  exitEmaOn: 'optionanalytics.signalBacktest.exitEmaOn',
   range: 'optionanalytics.signalBacktest.range',
   moneyness: 'optionanalytics.signalBacktest.moneyness',
   slPct: 'optionanalytics.signalBacktest.slPct',
@@ -425,6 +426,8 @@ export default function SignalBacktestPage() {
   const spotStop = SPOT_STOP_CHOICES.includes(storedSpotStop) ? storedSpotStop : ''
   const [spotRR, setSpotRR] = usePersistedState(STORE.spotRR, BACKTEST_DEFAULTS.spotRR)
   const [exitEma, setExitEma] = usePersistedState(STORE.exitEma, BACKTEST_DEFAULTS.exitEma)
+  const [storedExitEmaOn, setExitEmaOn] = usePersistedState(STORE.exitEmaOn, BACKTEST_DEFAULTS.exitEmaOn)
+  const exitEmaOn = EXIT_EMA_ON_CHOICES.includes(storedExitEmaOn) ? storedExitEmaOn : 'spot'
   const [timeStopMin, setTimeStopMin] = usePersistedState(STORE.timeStopMin, BACKTEST_DEFAULTS.timeStopMin)
   const [entryFrom, setEntryFrom] = usePersistedState(STORE.entryFrom, BACKTEST_DEFAULTS.entryFrom)
   const [lastEntry, setLastEntry] = usePersistedState(STORE.lastEntry, BACKTEST_DEFAULTS.lastEntry)
@@ -542,8 +545,8 @@ export default function SignalBacktestPage() {
   const pageSettings = useMemo(() => cleanBacktestSettings({
     underlying: index, tradeIn, from: range?.[0], to: range?.[1], rule: { tree: rule.tree, action: rule.action, mirror: rule.mirror },
     moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder, otherPerTrade,
-    timeframe, expiryDay, costSl, costAfter, spotStop, spotRR, exitEma, entryFrom, lastEntry, strategyName: strategyNameText, sumExpiries,
-  }), [index, entryFrom, lastEntry, tradeIn, costSl, costAfter, spotStop, spotRR, exitEma, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
+    timeframe, expiryDay, costSl, costAfter, spotStop, spotRR, exitEma, exitEmaOn, entryFrom, lastEntry, strategyName: strategyNameText, sumExpiries,
+  }), [index, entryFrom, lastEntry, tradeIn, costSl, costAfter, spotStop, spotRR, exitEma, exitEmaOn, range, rule, moneyness, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, maxTradesPerDay, cooldownMin, maxDayLoss, maxDayProfit, lots, charges, sttPct, brokeragePerOrder,
     otherPerTrade, timeframe, expiryDay, strategyNameText, sumExpiries])
   // The report - worked out again, in an instant, whenever a setting or the rule changes: each day's outcome, put together.
   // The run's own index and trade-in index (the days it loaded) - a change of either after it waits for the next run.
@@ -586,7 +589,7 @@ export default function SignalBacktestPage() {
     if (s.from && s.to) setRange([s.from, s.to])
     setStoredRule(s.rule)
     // Its levels are the levels of ITS traded index.
-    setMoneyness(s.moneyness); setCostSl(s.costSl); setSpotStop(s.spotStop); setSpotRR(s.spotRR); setExitEma(s.exitEma); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
+    setMoneyness(s.moneyness); setCostSl(s.costSl); setSpotStop(s.spotStop); setSpotRR(s.spotRR); setExitEma(s.exitEma); setExitEmaOn(s.exitEmaOn); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
     setLevelsFor(s.tradeIn || s.underlying, { slPct: s.slPct, targetPct: s.targetPct, levelUnit: s.levelUnit, trailGap: s.trailGap, trailStart: s.trailStart, costAfter: s.costAfter })
     setTimeStopMin(s.timeStopMin); setMaxTradesPerDay(s.maxTradesPerDay); setCooldownMin(s.cooldownMin); setLots(s.lots); setCharges(s.charges); setTimeframe(s.timeframe)
     setMaxDayLoss(s.maxDayLoss); setMaxDayProfit(s.maxDayProfit)
@@ -605,13 +608,13 @@ export default function SignalBacktestPage() {
   const applyTemplate = (id, quiet = false) => {
     const tpl = templateById(id)
     if (!tpl) return
-    setUndoTemplate({ name: tpl.name, rule: storedRule, strategyName: strategyNameText, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, spotStop, spotRR, exitEma, entryFrom, lastEntry } })
+    setUndoTemplate({ name: tpl.name, rule: storedRule, strategyName: strategyNameText, levels: { timeframe, slPct, targetPct, levelUnit, trailGap, trailStart, timeStopMin, spotStop, spotRR, exitEma, exitEmaOn, entryFrom, lastEntry } })
     const s = withTemplate(pageSettings, tpl)
     setStoredRule(s.rule)
     setStrategyName(tpl.name)
     setTimeframe(s.timeframe); setSlPct(s.slPct); setTargetPct(s.targetPct); setLevelUnit(s.levelUnit)
     setTrailGap(s.trailGap); setTrailStart(s.trailStart); setTimeStopMin(s.timeStopMin)
-    setSpotStop(s.spotStop); setSpotRR(s.spotRR); setExitEma(s.exitEma); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
+    setSpotStop(s.spotStop); setSpotRR(s.spotRR); setExitEma(s.exitEma); setExitEmaOn(s.exitEmaOn); setEntryFrom(s.entryFrom); setLastEntry(s.lastEntry)
     if (!quiet) message.success(`"${tpl.name}" is on the page - its rule, timeframe and levels. Change anything, then Run.`)
   }
   const undoTemplateLoad = () => {
@@ -621,7 +624,7 @@ export default function SignalBacktestPage() {
     setStrategyName(nameBefore ?? '')
     setTimeframe(levels.timeframe); setSlPct(levels.slPct); setTargetPct(levels.targetPct); setLevelUnit(levels.levelUnit)
     setTrailGap(levels.trailGap); setTrailStart(levels.trailStart); setTimeStopMin(levels.timeStopMin)
-    setSpotStop(levels.spotStop); setSpotRR(levels.spotRR); setExitEma(levels.exitEma ?? 0); setEntryFrom(levels.entryFrom); setLastEntry(levels.lastEntry)
+    setSpotStop(levels.spotStop); setSpotRR(levels.spotRR); setExitEma(levels.exitEma ?? 0); setExitEmaOn(levels.exitEmaOn ?? 'spot'); setEntryFrom(levels.entryFrom); setLastEntry(levels.lastEntry)
     setUndoTemplate(null)
   }
   const phone = useMediaQuery('(max-width: 640px)')
@@ -1004,7 +1007,11 @@ export default function SignalBacktestPage() {
                 </Space>
               </Tooltip>
               <Tooltip title="Exit when a COMPLETED candle of the timeframe closes through this EMA of the spot candles - under it for a call (or a sold put), over it for a put (0 = off). The VWAP + 9 EMA strategy's exit. Works beside the premium SL / target / trail - whichever comes first.">
-                <Space size={4}><Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Exit on EMA</Text><InputNumber size="small" min={0} max={200} value={exitEma} onChange={(v) => setExitEma(v ?? 0)} addonAfter="0 = off" style={{ width: 130 }} aria-label="Exit when a candle closes through this EMA" /></Space>
+                <Space size={4}>
+                  <Text type="secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Exit on EMA</Text>
+                  <InputNumber size="small" min={0} max={200} value={exitEma} onChange={(v) => setExitEma(v ?? 0)} addonAfter="0 = off" style={{ width: 130 }} aria-label="Exit when a candle closes through this EMA" />
+                  {exitEma >= 2 && <Segmented size="small" value={exitEmaOn} onChange={setExitEmaOn} options={[{ value: 'spot', label: 'Spot' }, { value: 'premium', label: 'Option' }]} aria-label="Read the EMA on" />}
+                </Space>
               </Tooltip>
               <Tooltip title="Out at the bar's close this many minutes after the entry (0 = off). Every trade is out by 15:10 anyway.">
                 <Space size={4}><Text type="secondary" style={{ fontSize: 12 }}>Time stop</Text><InputNumber size="small" min={0} max={360} value={timeStopMin} onChange={(v) => setTimeStopMin(v ?? 0)} addonAfter="min" style={{ width: 110 }} /></Space>
