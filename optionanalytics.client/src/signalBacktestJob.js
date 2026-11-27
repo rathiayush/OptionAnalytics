@@ -228,6 +228,7 @@ export function cleanBacktestSettings(s = {}) {
     costAfter: held(s?.costAfter, 0, 5000, d.costAfter),
     spotStop: SPOT_STOP_CHOICES.includes(s?.spotStop) ? s.spotStop : d.spotStop,
     spotRR: held(s?.spotRR, 0, 10, d.spotRR),
+    exitEma: Math.round(held(s?.exitEma, 0, 200, d.exitEma)) >= 2 ? Math.round(held(s?.exitEma, 0, 200, d.exitEma)) : 0,
     slPct: held(s?.slPct, 0, max, d.slPct),
     targetPct: held(s?.targetPct, 0, max, d.targetPct),
     levelUnit,
@@ -443,7 +444,8 @@ export function reportHead(s, okDays) {
 
 // The spot stop / target in words (' · spot stop at the signal candle · target 1:2'), '' when off.
 export function spotStopText(s) {
-  return s?.spotStop === 'candle' ? ` · spot stop at the signal candle${s.spotRR > 0 ? ` · spot target 1:${s.spotRR}` : ''}` : ''
+  const stop = s?.spotStop === 'candle' ? ` · spot stop at the signal candle${s.spotRR > 0 ? ` · spot target 1:${s.spotRR}` : ''}` : ''
+  return `${stop}${s?.exitEma >= 2 ? ` · exit when a candle closes through the ${s.exitEma} EMA` : ''}`
 }
 
 // The trailing stop in words (' · trail 10% after +5%'), '' when off.

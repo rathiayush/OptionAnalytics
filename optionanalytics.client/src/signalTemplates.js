@@ -29,7 +29,7 @@ export const TEMPLATE_FAMILIES = [
 ]
 
 // The levels a template sets when it is loaded (what it does not name is off: no trail, no time stop).
-const LEVELS = { levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, spotStop: '', spotRR: 0 }
+const LEVELS = { levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, spotStop: '', spotRR: 0, exitEma: 0 }
 // The option delta profile a line reads: the PREVIOUS DAY's ("Profile of: Days before", 1 day - fixed all day, known before
 // the open) or TODAY's so far (developing).
 const PREV_DAY = { param3: 1, param4: 1 }
@@ -38,6 +38,17 @@ const TODAY = { param3: 1, param4: 0 }
 /** The templates: { id, family, name, idea, rule: { tree, action, mirror }, settings: { timeframe, slPct, targetPct,
  *  trailGap?, trailStart?, timeStopMin? } }. */
 export const RULE_TEMPLATES = [
+  // THE VWAP + 9 EMA STRATEGY (asked for - "3 min, VWAP 9 EMA strategy, wick through: enter when the candle wicks through VWAP,
+  // exit when candles break through the EMA, and the opposite for puts"). The usual retail write-up: VWAP is the trend line of
+  // the day and the 9 EMA the momentum line - a pullback that wicks into VWAP and is rejected is the entry, the trade is held
+  // while candles stay on the right side of the 9 EMA and is closed on the first candle that closes through it. The entry
+  // candle must also close beyond the 9 EMA (else the exit would fire on the next candle). No premium SL / target. Unmeasured.
+  {
+    id: 'vwapEmaWick', family: 'trend', name: 'VWAP + 9 EMA - wick through VWAP, exit on the 9 EMA (3 min)',
+    idea: 'On 3-minute candles: a candle wicks BELOW VWAP (its low at or under it) and closes back above it, and also closes over the 9 EMA - sellers tried to push under VWAP and were rejected - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA (the premium SL / target are off; the 15:10 square-off still applies). Mirror: a candle wicks ABOVE VWAP, closes back under it and under the 9 EMA - buy the put; exit when a candle closes OVER the 9 EMA. Set an SL on the page to cap a failed trade.',
+    rule: { tree: ALL(L('vwapWick', 'wickUp', { param: 0, windowMin: 3 }), L('emaPrice', 'above', { param: 0, param2: 9 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 0, targetPct: 0, exitEma: 9 },
+  },
   // GIANLUCA BRUNI'S "TRIPLE SPRINT" - THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - the "Direction, Area, Trigger" breakdown of his setup:
   // previous session's VAH / VAL as the area, a 15-minute candle closing outside it on unusually LOW volume as the trigger,
   // entry at that close, stop at the breakout candle's low, a fixed 1:2 target; a ForexFactory write-up of the same setup adds

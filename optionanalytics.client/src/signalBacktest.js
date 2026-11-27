@@ -2284,6 +2284,28 @@ export const RULE_CONDITIONS = [
     show: (d, i) => `price ${fmtP(d.price.c[i])} · VWAP ${fmtP(d.vwap[i])}`,
   },
   {
+    // THE VWAP WICK (asked for - the "VWAP + 9 EMA" strategy: "enter when the candle wicks through VWAP"): a candle that
+    // poked through VWAP and CLOSED BACK on the side it came from - low <= VWAP < close (bullish: sellers pushed under it and
+    // were rejected) or high >= VWAP > close (bearish) - within the look-back; "by ≥ %" = how far past VWAP the close is.
+    id: 'vwapWick', group: 'Price', name: 'Candle wicks through VWAP',
+    options: [
+      opt('wickUp', 'Wicked below VWAP, closed back above it (low ≤ VWAP < close)', 'wickDown', { ...W, ...OVER }),
+      opt('wickDown', 'Wicked above VWAP, closed back below it (high ≥ VWAP > close)', 'wickUp', { ...W, ...OVER }),
+    ],
+    test: (d, i, v, w, p) => {
+      const by = frac(p)
+      const hit = (k) => {
+        const vw = d.vwap[k]
+        if (!finite(vw)) return false
+        return v === 'wickUp' ? d.price.l[k] <= vw && d.price.c[k] > vw && d.price.c[k] - vw >= by * vw
+          : v === 'wickDown' ? d.price.h[k] >= vw && d.price.c[k] < vw && vw - d.price.c[k] >= by * vw
+          : false
+      }
+      return inWindow(i, w, hit) >= 0
+    },
+    show: (d, i) => `low ${fmtP(d.price.l[i])} · high ${fmtP(d.price.h[i])} · close ${fmtP(d.price.c[i])} · VWAP ${fmtP(d.vwap[i])}`,
+  },
+  {
     id: 'spotMove', group: 'Price', name: 'Spot move',
     options: [opt('rising', 'Rising', 'falling', MOVE), opt('falling', 'Falling', 'rising', MOVE), opt('sideways', 'Sideways (moved less than)', 'sideways', MOVE)],
     test: (d, i, v, w, p) => {
@@ -3157,6 +3179,10 @@ export const BACKTEST_DEFAULTS = {
   // that minute (its open when spot opened through), beside the premium SL / target / trail - whichever comes first.
   spotStop: '',
   spotRR: 0,
+  // EXIT WHEN A CANDLE CLOSES THROUGH THE EMA (asked for - the "VWAP + 9 EMA" strategy: "exit when candles break through the
+  // EMA"): the period of an EMA of the spot candles of the timeframe (0 = off); the first COMPLETED candle after the signal that
+  // closes under it (a bullish trade - over it for a bearish one) ends the trade at the option's close of that candle's last minute.
+  exitEma: 0,
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
@@ -3242,7 +3268,7 @@ export function dayLevel(option, entry, amount, { realized = 0, qty, stt = 0, fl
  * level"): 'spot' / 'premium' - armed after a bar closed in profit by at least `costAfter` (spot points / the premium in
  * `levelUnit`; 0 = any profit), then out when spot is back at the entry's spot / at the entry premium.
  */
-export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '', costAfter = 0, spotLevels = null }) {
+export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct', trailGap = 0, trailStart = 0, timeStopMin = 0, squareOff = '15:10', day = null, costSl = '', costAfter = 0, spotLevels = null, emaExit = null }) {
   const packed = (option.side === 'CE' ? d.ce : d.pe).get(option.strike)
   const entry = premiumAt(packed, i)
   if (!(entry > 0)) return null
@@ -3301,6 +3327,8 @@ export function simulateTrade(d, i, option, { slPct, targetPct, levelUnit = 'pct
         const through = bullish ? d.spot.o[j] >= spotTargetAt : d.spot.o[j] <= spotTargetAt
         exit = { j, price: through ? b.o : b.c, reason: `Spot target (${spotTargetAt.toFixed(2)})` }
       }
+      // A candle of the timeframe CLOSED through the EMA (`emaExit` { at, reason } - simulateDay): out at this bar's close.
+      else if (emaExit != null && j >= emaExit.at) exit = { j, price: b.c, reason: emaExit.reason }
       // After the bar: in profit at its close - the cost stop is armed from the next bar.
       if (costOn && !costArmed && !exit) {
         costArmed = inProfitBy(costSl === 'spot' ? (bullish ? d.spot.c[j] - entrySpot : entrySpot - d.spot.c[j]) : (short ? entry - b.c : b.c - entry))
@@ -3417,7 +3445,21 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null }
         continue
       }
     }
-    const trade = simulateTrade(td, j, option, { ...s, day, spotLevels: spotLevelsAt(td, view.from ? d.t[view.from[sig.i]] : d.t[i], d.t[i], dir, j, s) })
+    // EXIT ON THE EMA (`exitEma`): the first completed candle after the signal's that closes through the EMA the wrong way
+    // (spot under it for a bullish trade, over it for a bearish one); its last minute, on the traded day's clock.
+    let emaExit = null
+    if (s.exitEma >= 2 && view.spot) {
+      const e = emaSeries(view, s.exitEma), c = view.spot.c
+      for (let k = sig.i + 1; k < view.n; k++) {
+        if (!candleDone(k)) break
+        if (finite(e[k]) && (dir > 0 ? c[k] < e[k] : c[k] > e[k])) {
+          const at = cross ? lastAtOrBefore(td.t, d.t[minuteOfSignal(k)]) : minuteOfSignal(k)
+          if (at > j) emaExit = { at, reason: `Spot closed ${dir > 0 ? 'under' : 'over'} the ${s.exitEma} EMA (${s.timeframe}m candle)` }
+          break
+        }
+      }
+    }
+    const trade = simulateTrade(td, j, option, { ...s, day, emaExit, spotLevels: spotLevelsAt(td, view.from ? d.t[view.from[sig.i]] : d.t[i], d.t[i], dir, j, s) })
     if (!trade) { row.skipped = `no premium for ${cross ? `${s.tradeIn} ` : ''}${option.strike} ${option.side}`; continue }
     row.taken = true
     count++
