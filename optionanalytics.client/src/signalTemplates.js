@@ -43,6 +43,16 @@ export const RULE_TEMPLATES = [
   // the day and the 9 EMA the momentum line - a pullback that wicks into VWAP and is rejected is the entry, the trade is held
   // while candles stay on the right side of the 9 EMA and is closed on the first candle that closes through it. The entry
   // candle must also close beyond the 9 EMA (else the exit would fire on the next candle). No premium SL / target. Unmeasured.
+  // THE 9 EMA / VWAP CROSSOVER (the strategy's other entry, as written up by traders: "enter when the 9 EMA crosses above VWAP -
+  // bullish momentum with volume backing; below it, bearish"; 3 or 5 minute charts). The EMA of the price series (futures, else
+  // the index) crossing VWAP, with the candle closing on that side of both; exit when a candle closes back through the 9 EMA.
+  // It chops in sideways / slow midday markets (the write-up's own caveat) - so entries stop at 14:00 and a spot SL is not set.
+  {
+    id: 'ema9VwapCross', family: 'trend', name: 'VWAP + 9 EMA - 9 EMA crosses VWAP, exit on the 9 EMA (3 min)',
+    idea: 'On 3-minute candles: the 9 EMA of the price crosses ABOVE VWAP (within the last 3 candles) while the candle closes above it - momentum turning up with the day\'s volume-weighted price under it - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA. Mirror: the 9 EMA crosses BELOW VWAP and the candle closes under it - buy the put, out when a candle closes OVER the 9 EMA. Crossovers whipsaw in sideways, low-volume stretches, so entries run 09:30 - 14:00 only; set an SL on the page to cap a failed trade.',
+    rule: { tree: ALL(L('emaVwap', 'crossedAbove', { param: 0, param2: 9, windowMin: 9 }), L('vwap', 'above', { param: 0 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 0, targetPct: 0, exitEma: 9, lastEntry: '14:00' },
+  },
   {
     id: 'vwapEmaWick', family: 'trend', name: 'VWAP + 9 EMA - wick through VWAP, exit on the 9 EMA (3 min)',
     idea: 'On 3-minute candles: a candle wicks BELOW VWAP (its low at or under it) and closes back above it, and also closes over the 9 EMA - sellers tried to push under VWAP and were rejected - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA (the premium SL / target are off; the 15:10 square-off still applies). Mirror: a candle wicks ABOVE VWAP, closes back under it and under the 9 EMA - buy the put; exit when a candle closes OVER the 9 EMA. Set an SL on the page to cap a failed trade.',

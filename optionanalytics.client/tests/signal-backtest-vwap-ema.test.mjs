@@ -106,6 +106,28 @@ test('the setting: held to a period of 2 - 200 (else off), shown in the report, 
   assert.equal(cleanBacktestSettings({ exitEma: 'x' }).exitEma, 0)
   assert.match(reportHead(cleanBacktestSettings({ exitEma: 9, from: '2026-10-01', to: '2026-10-05' }), 3), /exit when a candle closes through the 9 EMA/)
   assert.equal(withTemplate(cleanBacktestSettings({}), template).exitEma, 9)
-  assert.equal(withTemplate(cleanBacktestSettings({ exitEma: 9 }), RULE_TEMPLATES.find((t) => t.id !== 'vwapEmaWick')).exitEma, 0)   // another template: off
+  assert.equal(withTemplate(cleanBacktestSettings({ exitEma: 9 }), RULE_TEMPLATES.find((t) => t.exitEma == null && !t.settings.exitEma)).exitEma, 0)   // another template: off
   assert.equal(template.settings.timeframe, 3)
+})
+
+test('EMA vs VWAP: the 9 EMA over / under / crossed VWAP; the crossover template buys the call and its mirror the put', () => {
+  // Spot 24980 for 60 minutes (EMA under VWAP 25000), then 25020: the 9 EMA of 3-minute closes crosses VWAP a few candles later.
+  const up = (i) => (i < 60 ? 24980 : 25020)
+  const v = timeframeView(day(up), 3)
+  const c = cond('emaVwap')
+  const at = (k, value, w = 1) => c.test(v, k, value, w, 0, 9)
+  assert.ok(at(19, 'below') && !at(19, 'above') && !at(19, 'crossedAbove', 3))
+  // The first closes at 25020 are 3-minute candle 20; the EMA (alpha 0.2) passes 25000 at the 2nd - 3rd candle after.
+  const cross = [20, 21, 22, 23, 24].find((k) => at(k, 'above'))
+  assert.ok(cross != null && at(cross, 'crossedAbove', 1) && !at(cross, 'crossedBelow', 3))
+  assert.ok(at(cross + 3, 'above') && !at(cross + 3, 'crossedAbove', 1) && at(cross + 3, 'crossedAbove', 5))
+  assert.equal(c.options.find((o) => o.value === 'crossedAbove').opposite, 'crossedBelow')
+  const t = RULE_TEMPLATES.find((x) => x.id === 'ema9VwapCross')
+  const E = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), t))
+  const call = simulateDay(day(up), E)
+  assert.equal(call.trades.length, 1); assert.equal(call.trades[0].side, 'CE')
+  const down = simulateDay(day((i) => (i < 60 ? 25020 : 24980)), E)
+  assert.equal(down.trades.length, 1); assert.equal(down.trades[0].side, 'PE')
+  assert.equal(simulateDay(day(() => 25020), E).trades.length, 0)      // never crossed: no trade
+  assert.equal(E.lastEntry, '14:00'); assert.equal(E.exitEma, 9)
 })
