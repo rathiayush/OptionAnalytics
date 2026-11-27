@@ -7,6 +7,7 @@ import { isHedgePosition, otmSteps } from './tickLiquidityMap.js'
 import { useBigOptionOrders, useBigOptionOrdersDay } from './useBigOptionOrders.js'
 import { TickProfileCard } from './TickProfileCard.jsx'
 import { TickLiquidityMap } from './TickLiquidityMap.jsx'
+import { TickOptionFlowCard } from './TickOptionFlowCard.jsx'
 
 const { Text } = Typography
 const SHOWN = 50
@@ -159,6 +160,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
         ))}
       </Space>
 
+      <TickOptionFlowCard replay={replay} index={index} />
       <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
 
       <TickProfileCard kind="options" index={index} orders={big} dayBars={dayBars} priceBars={priceBars} lotSize={lotSize} pageRow={pageRow} refine={refine} replayDate={replayDate} />

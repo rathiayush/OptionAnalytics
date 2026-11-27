@@ -46,6 +46,14 @@ public sealed class TickFlowController : ControllerBase
             ? Ok(new { enabled = false })
             : Ok(new { enabled = true, optionTicks = _feed.OptionTicksOn, options = _feed.OptionsSnapshot(), events = _feed.Watch.Since(since, Math.Clamp(limit, 1, 5000)) });
 
+    /// <summary>The options' minute-by-minute flow (every tick's quantity on the side of the quote before it, and the premium's open / close) from
+    /// <paramref name="since"/> (epoch ms of a minute; 0 = the whole day) - the Tick Flow page's Option CDV / OBV. Live only; memory, a new IST day starts empty.</summary>
+    [HttpGet("options/flow")]
+    public ActionResult OptionsFlow([FromQuery] long since = 0) =>
+        _feed is null
+            ? Ok(new { enabled = false })
+            : Ok(new { enabled = true, optionTicks = _feed.OptionTicksOn, now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), rows = _feed.Watch.FlowSince(since) });
+
     /// <summary>The big option orders of a PAST day (replay), rebuilt from TrueData's tick history of the option contracts: the first ask starts the build in the
     /// background (state "loading", contracts done of total - ask again), then "ready" with every order of the day (the page cuts them at its clock) or "failed" with why.</summary>
     [HttpGet("options/day")]
