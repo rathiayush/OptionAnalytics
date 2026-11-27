@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Empty, InputNumber, Segmented, Select, Slider, Space, Statistic, Tag, Tooltip, Typography } from 'antd'
 import { PauseCircleOutlined, PlayCircleOutlined, StepBackwardOutlined } from '@ant-design/icons'
 import { NavBar, POLL_HEADERS, useAuth, usePersistedState } from './shared.jsx'
@@ -9,6 +9,7 @@ import { TickBigOrdersCard } from './TickBigOrdersCard.jsx'
 import { TickFeedCheckCard } from './TickFeedCheckCard.jsx'
 import { TickFuturesDeltaChart } from './TickFuturesDeltaChart.jsx'
 import { TickProfileCard } from './TickProfileCard.jsx'
+import { useFollowReplayClock } from './replaySync.jsx'
 import { futuresDeltaRows } from './tickDeltaProfile.js'
 import { absorptionExhaustion, auctionOf, barVwaps, cotOfBars, cotRead, icebergs, stackedImbalances, unfinishedAuctions, volumeProfile } from './tickFlowTools.js'
 import { MIN, aggregateTickBars, coveragePct, cumulativeDelta, fmtQty, msOf, prepareTickDay, replayCut, weekdayChoices } from './tickFlowMath.js'
@@ -107,6 +108,24 @@ export default function TickFlowPage() {
   const index = INDICES.includes(underlying) ? underlying : 'NIFTY'
   const rowSize = rowSizes?.[index] ?? DEFAULT_ROWS[index]
   const replay = mode === 'replay'
+  // FOLLOWS OI REPLAY (asked for - "sync this with the OI Replay page"; the Profiles page's one-way clock, useFollowReplayClock): while an OI Replay tab is
+  // answering, this page takes its index, its day (Replay) or Live, and its clock - the end of the minute it shows - and its own controls are locked.
+  // Nothing here moves OI Replay, and no TrueData data goes to it. A day outside the days TrueData keeps is said, not shown.
+  const [follow, setFollow] = usePersistedState('optionanalytics.tickFlow.follow', true)
+  const [followed, setFollowed] = useState({ date: null, ms: null, note: null })
+  const onClock = useCallback((msg) => {
+    if (!INDICES.includes(msg.underlying)) { setFollowed({ date: null, ms: null, note: `${msg.underlying} is not streamed by TrueData here (NIFTY and BANKNIFTY only).` }); return }
+    setUnderlying(msg.underlying)
+    if (msg.live) { setMode('live'); setFollowed({ date: null, ms: null, note: null }); return }
+    const day = msg.date ?? msg.loadingDate ?? msg.failedDate
+    if (!day) return
+    if (!days.includes(day)) { setFollowed({ date: null, ms: null, note: `${day}: TrueData's tick history does not hold that day (the last ${days.length} weekdays only).` }); return }
+    setMode('replay')
+    setReplayDay(day)
+    setFollowed({ date: day, ms: msg.date ? msg.ms ?? null : null, note: null })
+  }, [days, setUnderlying, setMode]) // eslint-disable-line react-hooks/exhaustive-deps
+  const followClock = useFollowReplayClock(follow, onClock)
+  const following = follow && followClock.connected
   const { day: loaded, error, loading, status } = useTickDay(index, rowSize, replay ? replayDay : null, reload)
 
   // A replayed day: every time as ms once, the clock at the day's first minute, and the page shows the day cut at the clock.
@@ -117,20 +136,21 @@ export default function TickFlowPage() {
   }, [prepared])
   // The clock and play state belong to the day loaded: another day (or a reload) starts at its first minute, paused.
   const rangeKey = range ? `${range.start}-${range.end}` : null
-  const clock = range ? (pos.key === rangeKey ? pos.ms : range.start) : null
-  const playing = playState.key === rangeKey && playState.on
+  const followedMs = following && followed.date === replayDay ? followed.ms : null
+  const clock = range ? (followedMs != null ? Math.max(range.start, Math.min(range.end, followedMs)) : pos.key === rangeKey ? pos.ms : range.start) : null
+  const playing = !following && playState.key === rangeKey && playState.on
   const setClock = (ms) => setPos({ key: rangeKey, ms })
   const setPlaying = (on) => setPlayState({ key: rangeKey, on })
   const clockRef = useRef(null)
   useEffect(() => { clockRef.current = clock }, [clock])
   useEffect(() => {
-    if (!playing || !range) return undefined
+    if (!playing || !range || following) return undefined
     const timer = setInterval(() => {
       const next = (clockRef.current ?? range.start) + speed * 200
       if (next >= range.end) { setPos({ key: rangeKey, ms: range.end }); setPlayState({ key: rangeKey, on: false }) } else setPos({ key: rangeKey, ms: next })
     }, 200)
     return () => clearInterval(timer)
-  }, [playing, range, rangeKey, speed])
+  }, [playing, range, rangeKey, speed, following])
   const cut = useMemo(() => (prepared && clock != null ? replayCut(prepared, clock, rowSize) : null), [prepared, clock, rowSize])
   const day = replay ? (cut ? { meta: { ...loaded.meta, lastPrice: cut.lastPrice, bid: cut.bid, bidQty: cut.bidQty, ask: cut.ask, askQty: cut.askQty }, bars: cut.bars, bubbles: cut.bubbles, quotes: cut.quotes } : null) : loaded
 
@@ -195,8 +215,14 @@ export default function TickFlowPage() {
         <Card size="small" title="Tick Flow - footprint and order bubbles from TrueData's tick feed">
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Space wrap size={[12, 8]}>
-              <Segmented value={mode} onChange={setMode} options={[{ value: 'live', label: 'Live' }, { value: 'replay', label: 'Replay' }]} />
-              <Segmented value={index} onChange={setUnderlying} options={INDICES} />
+              <Segmented value={mode} disabled={following} onChange={setMode} options={[{ value: 'live', label: 'Live' }, { value: 'replay', label: 'Replay' }]} />
+              <Segmented value={index} disabled={following} onChange={setUnderlying} options={INDICES} />
+              <Tooltip title="Take OI Replay's index, day and clock while an OI Replay tab (this browser or another device with Sync + Devices) is open - this page's own controls are locked then. Nothing here moves OI Replay.">
+                <Checkbox checked={follow} onChange={(e) => setFollow(e.target.checked)}>Follow OI Replay</Checkbox>
+              </Tooltip>
+              {following && <Tag color="blue">⇄ OI Replay{followClock.remote ? ` on ${followClock.remote}` : ''} · {followClock.clock?.underlying}{followClock.clock?.live ? ' live' : followClock.clock?.date ? ` ${followClock.clock.date}` : ''}</Tag>}
+              {follow && !following && <Text type="secondary" style={{ fontSize: 12 }}>No OI Replay tab answering - own controls.</Text>}
+              {following && followed.note && <Text type="warning" style={{ fontSize: 12 }}>{followed.note}</Text>}
               <Select value={timeframe} onChange={setTimeframe} style={{ width: 110 }} options={[1, 3, 5, 15].map((v) => ({ value: v, label: `${v} min` }))} />
               <Select value={rowSize} onChange={(v) => setRowSizes({ ...(rowSizes ?? {}), [index]: v })} style={{ width: 120 }} options={ROW_OPTIONS} />
               <Tooltip title={`Where the live ticks come from: TrueData's WebSocket (JSON messages) or its TCP stream (binary packets with the last tick's volume and a sequence number). Once picked, the server reconnects through it and the data comes from there - one login an account, so the other is closed. ${isAdmin ? 'Kept across a restart.' : 'An admin picks it.'} Replay of a past day is always TrueData's tick history (REST).`}>
@@ -234,7 +260,7 @@ export default function TickFlowPage() {
                   onChange={(v) => setToolsOn(Object.fromEntries(['vwap', 'profile', 'delta', 'auction', 'stacked', 'cot', 'absorption', 'iceberg'].map((k) => [k, v.includes(k)])))}
                   options={[{ value: 'vwap', label: 'VWAP' }, { value: 'profile', label: 'Volume profile' }, { value: 'delta', label: 'Delta profile (futures)' }, { value: 'auction', label: 'Auctions (FA / UA)' }, { value: 'stacked', label: 'Stacked imbalances' }, { value: 'cot', label: 'COT high / low' }, { value: 'absorption', label: 'Absorption / exhaustion' }, { value: 'iceberg', label: 'Icebergs' }]} />
               </Tooltip>
-              {replay && <Select value={replayDay} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
+              {replay && <Select value={replayDay} disabled={following} onChange={(v) => setReplayDay(v)} style={{ width: 130 }} options={days.map((d) => ({ value: d, label: d }))} />}
               {replay && <Button size="small" onClick={() => setReload((n) => n + 1)}>Reload</Button>}
               <Tag color={feedState === 'streaming' ? 'green' : off ? 'default' : 'orange'}>TrueData: {off ? 'off' : feedState}</Tag>
               {stream && (
@@ -283,12 +309,12 @@ export default function TickFlowPage() {
               ? <Text type="secondary">{loading ? 'Loading the day…' : error ? '' : 'No ticks for that day.'}</Text>
               : (
                 <Space size={12} wrap style={{ width: '100%' }}>
-                  <Button type="primary" icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} onClick={() => { if (!playing && clock >= range.end) setClock(range.start); setPlaying(!playing) }}>{playing ? 'Pause' : 'Play'}</Button>
-                  <Button icon={<StepBackwardOutlined />} onClick={() => { setPlaying(false); setClock(range.start) }}>Reset</Button>
-                  <Select value={speed} onChange={setSpeed} style={{ width: 90 }} options={SPEEDS} />
+                  <Button type="primary" disabled={following} icon={playing ? <PauseCircleOutlined /> : <PlayCircleOutlined />} onClick={() => { if (!playing && clock >= range.end) setClock(range.start); setPlaying(!playing) }}>{playing ? 'Pause' : 'Play'}</Button>
+                  <Button disabled={following} icon={<StepBackwardOutlined />} onClick={() => { setPlaying(false); setClock(range.start) }}>Reset</Button>
+                  <Select value={speed} disabled={following} onChange={setSpeed} style={{ width: 90 }} options={SPEEDS} />
                   <Text strong style={{ minWidth: 70 }}>{clock != null ? hhmmss(clock) : ''}</Text>
                   <div style={{ flex: 1, minWidth: 200 }}>
-                    <Slider min={range.start} max={range.end} step={1000} value={clock ?? range.start} tooltip={{ open: false }}
+                    <Slider min={range.start} max={range.end} step={1000} disabled={following} value={clock ?? range.start} tooltip={{ open: false }}
                       onChange={(v) => setClock(v)} onChangeComplete={() => {}} />
                   </div>
                 </Space>
