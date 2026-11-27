@@ -325,7 +325,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
         <Button size="small" icon={<SaveOutlined />}>Update</Button>
       </Popconfirm>
       <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOf(s)}>History</Button>
-      <Popconfirm title={`Remove "${s.name}" and its history?`} okText="Remove" cancelText="Keep" onConfirm={() => act(s.id, () => deleteStrategy(s.id), `"${s.name}" removed.`)}>
+      <Popconfirm title={`Remove "${s.name}" from the list? Its history stays on the server (nothing is deleted).`} okText="Remove" cancelText="Keep" onConfirm={() => act(s.id, () => deleteStrategy(s.id), `"${s.name}" removed.`)}>
         <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Remove this strategy" title="Remove this strategy" />
       </Popconfirm>
     </Space>

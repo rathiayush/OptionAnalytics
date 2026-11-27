@@ -156,15 +156,32 @@ public sealed class SignalStrategyStore
         }
     }
 
-    /// <summary>A strategy and its history removed.</summary>
+    /// <summary>A strategy removed from the list. NOTHING IS DELETED (asked for - "never hard delete anything in system"): its record is written to
+    /// <c>removed/{id}.json</c> and its history files move to <c>removed/history/</c>.</summary>
     public bool Delete(string id, string? owner)
     {
         lock (_lock)
         {
             var all = ReadAll();
-            if (all.RemoveAll(s => s.Id == id && (owner is null || Same(s.Owner, owner))) == 0) return false;
+            var gone = all.FirstOrDefault(s => s.Id == id && (owner is null || Same(s.Owner, owner)));
+            if (gone is null) return false;
+            all.RemoveAll(s => s.Id == id);
             WriteAll(all);
-            foreach (var kind in HistoryKinds) { try { File.Delete(HistoryPath(id, kind)); } catch { /* best effort */ } }
+            try
+            {
+                var removed = Path.Combine(_dir, "removed");
+                Directory.CreateDirectory(Path.Combine(removed, "history"));
+                File.WriteAllText(Path.Combine(removed, $"{id}.json"), System.Text.Json.JsonSerializer.Serialize(gone));
+                foreach (var kind in HistoryKinds)
+                {
+                    var from = HistoryPath(id, kind);
+                    if (!File.Exists(from)) continue;
+                    var to = Path.Combine(removed, "history", Path.GetFileName(from));
+                    if (File.Exists(to)) to = Path.Combine(removed, "history", $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Path.GetFileName(from)}");
+                    File.Move(from, to);
+                }
+            }
+            catch { /* best effort - what could not move stays where it is */ }
             return true;
         }
     }

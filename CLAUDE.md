@@ -1606,8 +1606,8 @@ All must pass before committing.
   tried ONCE more at the end - never a loop - and the report written as JSON (`reportReplacer` keeps an Infinity profit
   factor). Each run is a file under `{Storage:ScannerRunnerPath}/signal-backtests/` (`{id}.json` - settings, state,
   progress; `{id}.result.json` - the report): the queue and the reports survive a restart / deploy, a run the restart cut
-  off is queued again (failed after `MaxAttempts` 3 starts); `MaxJobs` 60 kept (the oldest finished go first), 20 waiting
-  an account. Telegram when a run ends (on by default in the dialog - `optionanalytics.signalBacktest.bgTelegram`). The
+  off is queued again (failed after `MaxAttempts` 3 starts); NO CAP on the runs kept and NOTHING IS EVER DELETED (asked for - "never hard delete anything in system"; the cap was 60, then 1000, and each removed the oldest finished runs with their reports: "older background runs cannot be seen"): "Remove" takes a run off the list and MOVES its settings / report / dataset to `{signal-backtests}/removed/`, and removing a saved strategy writes its record to `{signal-strategies}/removed/{id}.json` and moves its history to `removed/history/` (a name already there gets a timestamp); only the half-written `.running` scratch files are deleted (`SignalBacktestJobServiceTests.cs`, `SignalStrategyStoreTests.cs`); the 20 waiting an account limit stays.
+  Telegram when a run ends (on by default in the dialog - `optionanalytics.signalBacktest.bgTelegram`). The
   page's "Background runs" card lists them (the days with their years - `runRange`, the run's name and the report's
   heading carry them too; state, day k of n, the result so far / its numbers; a page TIMER with
   `POLL_HEADERS` - 5 s while one runs or waits to run now, 30 s while one only waits for its time - `signalBacktestQueue.js`;
