@@ -57,14 +57,14 @@ public sealed class TickFlowController : ControllerBase
     /// <summary>The big option orders of a PAST day (replay), rebuilt from TrueData's tick history of the option contracts: the first ask starts the build in the
     /// background (state "loading", contracts done of total - ask again), then "ready" with every order of the day (the page cuts them at its clock) or "failed" with why.</summary>
     [HttpGet("options/day")]
-    public ActionResult OptionsDay([FromQuery] string underlying, [FromQuery] DateOnly date, [FromQuery] int strikes = 10)
+    public ActionResult OptionsDay([FromQuery] string underlying, [FromQuery] DateOnly date, [FromQuery] int strikes = 10, [FromQuery] bool flow = false)
     {
         if (_feed is null || _optionHistory is null) return NotFound(new { error = "The TrueData live feed is off (TrueData:Live:Enabled)." });
         if (!_feed.OptionTicksOn) return NotFound(new { error = "Option tick processing is off (TrueData:Live:OptionTicks)." });
         var instrument = _feed.InstrumentFor(underlying);
         if (instrument is null) return NotFound(new { error = $"{underlying?.ToUpperInvariant()} is not streamed (TrueData:Live:Instruments)." });
         var s = _optionHistory.Request(instrument, date, strikes);
-        return Ok(new { state = s.State, done = s.Done, total = s.Total, failed = s.Failed, error = s.Error, expiry = s.Expiry, step = s.Step, events = s.Events });
+        return Ok(new { state = s.State, done = s.Done, total = s.Total, failed = s.Failed, error = s.Error, expiry = s.Expiry, step = s.Step, events = flow ? Array.Empty<BigOrderEvent>() : s.Events, flow = flow ? s.Flow : null });
     }
 
     public sealed record OptionsRequest(string? Underlying, int Strikes);

@@ -160,7 +160,7 @@ export function TickBigOrdersCard({ isAdmin, replay, showLots: pageShowLots = tr
         ))}
       </Space>
 
-      <TickOptionFlowCard replay={replay} index={index} />
+      <TickOptionFlowCard replay={replay} index={index} replayDate={replay ? replayDate : null} clockMs={replay ? clockMs : null} />
       <TickLiquidityMap orders={big} priceBars={priceBars} step={index === 'BANKNIFTY' ? 100 : 50} />
 
       <TickProfileCard kind="options" index={index} orders={big} dayBars={dayBars} priceBars={priceBars} lotSize={lotSize} pageRow={pageRow} refine={refine} replayDate={replayDate} />
