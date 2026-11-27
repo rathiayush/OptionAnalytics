@@ -23,8 +23,8 @@ namespace OptionAnalytics.Server.Services;
 /// </summary>
 public sealed class SignalBacktestJobService : BackgroundService
 {
-    /// <summary>Runs kept - past it the oldest finished ones go (their reports with them).</summary>
-    public const int MaxJobs = 1000;   // was 60: a run over the cap deleted the oldest finished run AND its report - older runs vanished from the list (a report is a small JSON; only a Feature finder's dataset CSV is big)
+    // NOTHING IS EVER DELETED (asked for - "never hard delete anything in system"): there is no cap on the runs kept - it was 60, then 1000,
+    // and every cap removed the oldest finished runs and their reports. "Remove" hides a run and moves its files to {folder}/removed/.
     /// <summary>Runs one account may have waiting or running.</summary>
     public const int MaxWaitingPerOwner = 20;
     /// <summary>Starts a run gets: one cut off by a restart this many times is failed, not started again.</summary>
@@ -110,7 +110,6 @@ public sealed class SignalBacktestJobService : BackgroundService
             job = plan with { Id = NewId(now), Owner = owner, CreatedUtc = now };
             _jobs[job.Id] = job;
             Save(job);
-            Trim();
         }
         _logger.LogInformation("Signal backtest {Id} queued by {Owner}: {Name}{When}.", job.Id, owner, job.Name, job.StartAtUtc is { } at ? $" (starts {at:u})" : "");
         _wake.Release();
@@ -134,7 +133,8 @@ public sealed class SignalBacktestJobService : BackgroundService
         return true;
     }
 
-    /// <summary>Removes a run and its report (a running one is stopped first).</summary>
+    /// <summary>Removes a run from the list (a running one is stopped first). Nothing is deleted: its settings, report and dataset move to
+    /// the <c>removed</c> folder beside the runs, so a run removed by mistake can be put back by moving the files.</summary>
     public bool Delete(string id, string? owner)
     {
         if (Get(id, owner) is null) return false;
@@ -142,8 +142,9 @@ public sealed class SignalBacktestJobService : BackgroundService
         lock (_lock)
         {
             _jobs.Remove(id);
-            foreach (var path in new[] { JobPath(id), ResultFile(id), ResultFile(id) + ".running", ResultFile(id) + ".running.tmp",
-                         FeaturesFile(id), FeaturesFile(id) + ".running", FeaturesFile(id) + ".running.tmp" })
+            foreach (var path in new[] { JobPath(id), ResultFile(id), FeaturesFile(id) }) Archive(path);
+            // (the half-written ".running" files are scratch, not data: a run that never finished has no report to keep)
+            foreach (var path in new[] { ResultFile(id) + ".running", ResultFile(id) + ".running.tmp", FeaturesFile(id) + ".running", FeaturesFile(id) + ".running.tmp" })
                 TryDelete(path);
         }
         return true;
@@ -533,20 +534,6 @@ public sealed class SignalBacktestJobService : BackgroundService
         foreach (var stale in Directory.EnumerateFiles(_dir, "*.running*")) TryDelete(stale);
     }
 
-    /// <summary>Over <see cref="MaxJobs"/>: the oldest finished runs go (under the lock).</summary>
-    private void Trim()
-    {
-        var extra = _jobs.Count - MaxJobs;
-        if (extra <= 0) return;
-        foreach (var job in _jobs.Values.Where(j => j.State is not ("queued" or "running")).OrderBy(j => j.CreatedUtc).Take(extra).ToList())
-        {
-            _jobs.Remove(job.Id);
-            TryDelete(JobPath(job.Id));
-            TryDelete(ResultFile(job.Id));
-            TryDelete(FeaturesFile(job.Id));
-        }
-    }
-
     private void StopForShutdown()
     {
         _stopping = true;
@@ -557,6 +544,21 @@ public sealed class SignalBacktestJobService : BackgroundService
                 try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
             }
         }
+    }
+
+    /// <summary>Moves a file into <c>removed/</c> beside the runs (a name already there gets a timestamp) - never deletes it.</summary>
+    private void Archive(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return;
+            var dir = Path.Combine(_dir, "removed");
+            Directory.CreateDirectory(dir);
+            var target = Path.Combine(dir, Path.GetFileName(path));
+            if (File.Exists(target)) target = Path.Combine(dir, $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Path.GetFileName(path)}");
+            File.Move(path, target);
+        }
+        catch { /* best effort - the file stays where it is */ }
     }
 
     private static void TryDelete(string path)

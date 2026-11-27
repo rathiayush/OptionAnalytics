@@ -278,9 +278,11 @@ public sealed class SignalStrategyStoreTests : IDisposable
         store.Update(s.Id, null, new SignalStrategyRequest(DailyReport: false), Now);
         await store.RecordDayAsync(s.Id, "2026-10-28", new JsonObject { ["trades"] = 0 }, new JsonArray(), "📊 off", Now);
         Assert.Equal(2, telegrams.Count);
-        // Removing the strategy removes its history.
+        // Removing the strategy takes it off the list - nothing is deleted: its history and record move to removed/.
         Assert.True(store.Delete(s.Id, "me@x.com"));
         Assert.False(File.Exists(store.HistoryPath(s.Id, "days")));
+        Assert.Contains(Directory.GetFiles(_dir, $"{s.Id}-days.csv", SearchOption.AllDirectories), f => f.Contains("removed"));
+        Assert.Contains(Directory.GetFiles(_dir, $"{s.Id}.json", SearchOption.AllDirectories), f => f.Contains("removed"));
         Assert.Equal(0, await store.RecordEventsAsync(s.Id, "2026-10-29", new List<SignalLiveEvent> { new("k", "entry", "x") }, Now));   // gone: nothing kept
     }
 

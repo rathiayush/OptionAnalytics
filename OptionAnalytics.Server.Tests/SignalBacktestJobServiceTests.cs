@@ -245,21 +245,31 @@ public sealed class SignalBacktestJobServiceTests : IDisposable
     }
 
     [Fact]
-    public void The_oldest_finished_runs_go_past_the_limit()
+    public void No_run_is_ever_dropped_however_many_there_are()
     {
         var s = Service(GoodScript());
         var first = s.Add("a@x.com", Request(), Now).Job!;
         s.Cancel(first.Id, null);
-        for (var k = 1; k < SignalBacktestJobService.MaxJobs; k++)
+        for (var k = 1; k < 150; k++)
         {
             var job = s.Add($"u{k % 5}@x.com", Request(), Now.AddMinutes(k)).Job!;
             s.Cancel(job.Id, null);
         }
-        Assert.Equal(SignalBacktestJobService.MaxJobs, s.List(null).Count);
-        s.Add("a@x.com", Request(), Now.AddDays(1));
-        Assert.Equal(SignalBacktestJobService.MaxJobs, s.List(null).Count);
-        Assert.Null(s.Get(first.Id, null));                     // the oldest finished one went
-        Assert.False(File.Exists(Path.Combine(JobsDir, $"{first.Id}.json")));
+        Assert.Equal(150, s.List(null).Count);                  // there is no cap: it was 60, and the 61st run deleted the oldest one's report
+        Assert.NotNull(s.Get(first.Id, null));
+        Assert.True(File.Exists(Path.Combine(JobsDir, $"{first.Id}.json")));
+    }
+
+    [Fact]
+    public void Removing_a_run_hides_it_but_keeps_its_files()
+    {
+        var s = Service(GoodScript());
+        var job = s.Add("me@x.com", Request(), Now).Job!;
+        s.Cancel(job.Id, null);
+        Assert.True(s.Delete(job.Id, "me@x.com"));
+        Assert.Null(s.Get(job.Id, null));                       // gone from the list...
+        Assert.False(File.Exists(Path.Combine(JobsDir, $"{job.Id}.json")));
+        Assert.True(File.Exists(Path.Combine(JobsDir, "removed", $"{job.Id}.json")));   // ...but on disk
     }
 
     [Fact]

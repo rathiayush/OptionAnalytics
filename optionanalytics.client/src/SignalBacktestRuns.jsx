@@ -228,7 +228,7 @@ function Actions({ job: j, viewingIds, busy, onOpen, onUse, onCancel, onDelete }
             </Popconfirm>
           )
         : (
-            <Popconfirm title="Remove this run and its report?" okText="Remove" cancelText="Keep" onConfirm={() => onDelete(j.id)}>
+            <Popconfirm title="Remove this run from the list? Its report stays on the server (nothing is deleted)." okText="Remove" cancelText="Keep" onConfirm={() => onDelete(j.id)}>
               <Button size="small" type="text" icon={<DeleteOutlined />} loading={busy} aria-label="Remove this run" title="Remove this run" />
             </Popconfirm>
           )}
