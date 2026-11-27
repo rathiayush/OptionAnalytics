@@ -37,12 +37,13 @@ function day(spot, n = 375) {
     breaks: [], hp: [], prevVp: null, priceSource: 'futures', ce: legs(false), pe: legs(true),
   }
 }
-// Under VWAP at 24990; the 3-minute candle of minutes 60 - 62 wicks to 24995 (under 25000) and closes 25010 - back over VWAP and
-// over the 9 EMA (~24994); it holds 25010 until minute 90, then drops to 24980: the candle of minutes 90 - 92 closes under the EMA.
-const UP = (i) => (i < 60 ? 24990 : i === 60 ? { o: 24998, h: 25008, l: 24995, c: 25005 } : i < 62 ? 25005 : i === 62 ? { o: 25005, h: 25010, l: 25005, c: 25010 } : i < 90 ? 25010 : 24980)
-// The mirror: over VWAP at 25010; the candle of minutes 60 - 62 wicks up to 25005 only after opening under... high 25005 over VWAP,
-// closes 24990 under it and under the 9 EMA (~25006); holds 24990 until minute 90, then 25020: that candle closes over the EMA.
-const DOWN = (i) => (i < 60 ? 25010 : i === 60 ? { o: 25002, h: 25005, l: 24992, c: 24995 } : i < 62 ? 24995 : i === 62 ? { o: 24995, h: 25005, l: 24990, c: 24990 } : i < 90 ? 24990 : 25020)
+// UP: over VWAP all morning (25010, so the 9 EMA is above VWAP); the 3-minute candle of minutes 60 - 62 wicks down to 24995
+// (under VWAP) and closes back at 25012 - over VWAP and over the 9 EMA; it holds 25012 until minute 90, then drops to 24980:
+// the candle of minutes 90 - 92 closes under the EMA.
+const UP = (i) => (i < 60 ? 25010 : i === 60 ? { o: 25005, h: 25010, l: 24995, c: 25005 } : i < 62 ? 25005 : i === 62 ? { o: 25005, h: 25012, l: 25005, c: 25012 } : i < 90 ? 25012 : 24980)
+// DOWN, the mirror: under VWAP all morning (24990, the EMA below VWAP); the candle of 60 - 62 wicks up to 25005 and closes
+// back at 24988 - under VWAP and the EMA; holds until minute 90, then 25020: that candle closes over the EMA.
+const DOWN = (i) => (i < 60 ? 24990 : i === 60 ? { o: 24995, h: 25005, l: 24990, c: 24992 } : i < 62 ? 24992 : i === 62 ? { o: 24992, h: 24992, l: 24988, c: 24988 } : i < 90 ? 24988 : 25020)
 const template = RULE_TEMPLATES.find((t) => t.id === 'vwapEmaWick')
 const ENGINE = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), template))
 const run = (d, over = {}) => simulateDay(d, { ...ENGINE, ...over })
@@ -106,6 +107,26 @@ test('the setting: held to a period of 2 - 200 (else off), shown in the report, 
   assert.equal(cleanBacktestSettings({ exitEma: 'x' }).exitEma, 0)
   assert.match(reportHead(cleanBacktestSettings({ exitEma: 9, from: '2026-10-01', to: '2026-10-05' }), 3), /exit when a candle closes through the 9 EMA/)
   assert.equal(withTemplate(cleanBacktestSettings({}), template).exitEma, 9)
-  assert.equal(withTemplate(cleanBacktestSettings({ exitEma: 9 }), RULE_TEMPLATES.find((t) => t.id !== 'vwapEmaWick')).exitEma, 0)   // another template: off
+  assert.equal(withTemplate(cleanBacktestSettings({ exitEma: 9 }), RULE_TEMPLATES.find((t) => t.exitEma == null && !t.settings.exitEma)).exitEma, 0)   // another template: off
   assert.equal(template.settings.timeframe, 3)
+})
+
+test('EMA vs VWAP: the 9 EMA over / under / crossed VWAP', () => {
+  // Spot 24980 for 60 minutes (EMA under VWAP 25000), then 25020: the 9 EMA of 3-minute closes crosses VWAP a few candles later.
+  const up = (i) => (i < 60 ? 24980 : 25020)
+  const v = timeframeView(day(up), 3)
+  const c = cond('emaVwap')
+  const at = (k, value, w = 1) => c.test(v, k, value, w, 0, 9)
+  assert.ok(at(19, 'below') && !at(19, 'above') && !at(19, 'crossedAbove', 3))
+  // The first closes at 25020 are 3-minute candle 20; the EMA (alpha 0.2) passes 25000 at the 2nd - 3rd candle after.
+  const cross = [20, 21, 22, 23, 24].find((k) => at(k, 'above'))
+  assert.ok(cross != null && at(cross, 'crossedAbove', 1) && !at(cross, 'crossedBelow', 3))
+  assert.ok(at(cross + 3, 'above') && !at(cross + 3, 'crossedAbove', 1) && at(cross + 3, 'crossedAbove', 5))
+  assert.equal(c.options.find((o) => o.value === 'crossedAbove').opposite, 'crossedBelow')
+})
+
+test('the wick template needs the trend first: the same wick with the 9 EMA UNDER VWAP is not taken', () => {
+  const against = (i) => (i < 60 ? 24980 : i === 60 ? { o: 24998, h: 25008, l: 24995, c: 25005 } : i < 62 ? 25005 : i === 62 ? { o: 25005, h: 25012, l: 25005, c: 25012 } : 25012)
+  assert.equal(run(day(against)).trades.length, 0)             // wick + close over VWAP and the EMA, but the EMA is still under VWAP
+  assert.equal(run(day(UP)).trades.length, 1)
 })

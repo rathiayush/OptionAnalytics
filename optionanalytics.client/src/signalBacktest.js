@@ -520,6 +520,12 @@ export function emaSeries(d, p = 20) {
   const n = fitPeriod(p, 20)
   return indicatorCache(d, `ema${n}`, () => { const { warm, closes } = indicatorCloses(d); return emaOver(closes, n).subarray(warm) })
 }
+/** The EMA (`p` candles) of the day's PRICE series' closes (the near futures', else the index's - the series VWAP is read on),
+ *  from the day's first candle: NaN until it has `p` candles. */
+export function priceEma(d, p = 9) {
+  const n = fitPeriod(p, 9)
+  return indicatorCache(d, `pema${n}`, () => emaOver(d.price.c, n))
+}
 /** The RSI (`p` candles) of the day's spot closes, a value a candle of `d` (NaN until it has `p` changes). */
 export function rsiSeries(d, p = 14) {
   const n = fitPeriod(p, 14)
@@ -2304,6 +2310,29 @@ export const RULE_CONDITIONS = [
       return inWindow(i, w, hit) >= 0
     },
     show: (d, i) => `low ${fmtP(d.price.l[i])} · high ${fmtP(d.price.h[i])} · close ${fmtP(d.price.c[i])} · VWAP ${fmtP(d.vwap[i])}`,
+  },
+  {
+    // THE 9 EMA vs VWAP (asked for - the VWAP + 9 EMA strategy: "enter when the 9 EMA crosses above VWAP, signaling bullish
+    // momentum"): the EMA (`param2` periods, 9) of the PRICE series' closes - the series VWAP is read on - over / under VWAP,
+    // or crossed it in the look-back and still on that side; "by >= %" of VWAP.
+    id: 'emaVwap', group: 'Price', name: 'EMA vs VWAP',
+    options: [
+      opt('above', 'EMA above VWAP', 'below', { ...OVER, ...EMA_PERIOD }), opt('below', 'EMA below VWAP', 'above', { ...OVER, ...EMA_PERIOD }),
+      opt('crossedAbove', 'EMA crossed above VWAP', 'crossedBelow', { ...W, ...OVER, ...EMA_PERIOD }), opt('crossedBelow', 'EMA crossed below VWAP', 'crossedAbove', { ...W, ...OVER, ...EMA_PERIOD }),
+    ],
+    test: (d, i, v, w, p, p2) => {
+      const e = priceEma(d, fitPeriod(p2, 9))
+      const gap = (k) => e[k] - d.vwap[k]
+      const far = () => Math.abs(gap(i)) >= frac(p) * d.vwap[i]
+      switch (v) {
+        case 'above': return gap(i) > 0 && far()
+        case 'below': return gap(i) < 0 && far()
+        case 'crossedAbove': return crossed(gap, i, w, true) && far()
+        case 'crossedBelow': return crossed(gap, i, w, false) && far()
+        default: return false
+      }
+    },
+    show: (d, i, l) => { const n = fitPeriod(l?.param2, 9); return `EMA ${n} ${fmtP(priceEma(d, n)[i])} · VWAP ${fmtP(d.vwap[i])}` },
   },
   {
     id: 'spotMove', group: 'Price', name: 'Spot move',

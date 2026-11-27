@@ -45,8 +45,8 @@ export const RULE_TEMPLATES = [
   // candle must also close beyond the 9 EMA (else the exit would fire on the next candle). No premium SL / target. Unmeasured.
   {
     id: 'vwapEmaWick', family: 'trend', name: 'VWAP + 9 EMA - wick through VWAP, exit on the 9 EMA (3 min)',
-    idea: 'On 3-minute candles: a candle wicks BELOW VWAP (its low at or under it) and closes back above it, and also closes over the 9 EMA - sellers tried to push under VWAP and were rejected - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA (the premium SL / target are off; the 15:10 square-off still applies). Mirror: a candle wicks ABOVE VWAP, closes back under it and under the 9 EMA - buy the put; exit when a candle closes OVER the 9 EMA. Set an SL on the page to cap a failed trade.',
-    rule: { tree: ALL(L('vwapWick', 'wickUp', { param: 0, windowMin: 3 }), L('emaPrice', 'above', { param: 0, param2: 9 })), action: 'buyCE', mirror: true },
+    idea: 'The write-up\'s pullback entry: the trend first - the 9 EMA is ABOVE VWAP (momentum with the day\'s volume-weighted price under it). On 3-minute candles a candle then wicks BELOW VWAP (its low at or under it) and closes back above it and over the 9 EMA - sellers tried to push under VWAP and were rejected - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA (premium SL / target off; the 15:10 square-off still applies). Mirror: the 9 EMA below VWAP, a candle wicks ABOVE VWAP and closes back under it and under the 9 EMA - buy the put; exit when a candle closes OVER the 9 EMA. Set an SL on the page to cap a failed trade.',
+    rule: { tree: ALL(L('emaVwap', 'above', { param: 0, param2: 9 }), L('vwapWick', 'wickUp', { param: 0, windowMin: 3 }), L('emaPrice', 'above', { param: 0, param2: 9 })), action: 'buyCE', mirror: true },
     settings: { timeframe: 3, slPct: 0, targetPct: 0, exitEma: 9 },
   },
   // GIANLUCA BRUNI'S "TRIPLE SPRINT" - THE VALUE AREA LOW-VOLUME BREAKOUT (asked for - the "Direction, Area, Trigger" breakdown of his setup:
