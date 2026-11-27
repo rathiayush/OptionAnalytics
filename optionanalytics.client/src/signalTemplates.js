@@ -29,7 +29,7 @@ export const TEMPLATE_FAMILIES = [
 ]
 
 // The levels a template sets when it is loaded (what it does not name is off: no trail, no time stop).
-const LEVELS = { levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, spotStop: '', spotRR: 0, exitEma: 0 }
+const LEVELS = { levelUnit: 'pct', trailGap: 0, trailStart: 0, timeStopMin: 0, spotStop: '', spotRR: 0, exitEma: 0, exitEmaOn: 'spot' }
 // The option delta profile a line reads: the PREVIOUS DAY's ("Profile of: Days before", 1 day - fixed all day, known before
 // the open) or TODAY's so far (developing).
 const PREV_DAY = { param3: 1, param4: 1 }
@@ -43,6 +43,14 @@ export const RULE_TEMPLATES = [
   // the day and the 9 EMA the momentum line - a pullback that wicks into VWAP and is rejected is the entry, the trade is held
   // while candles stay on the right side of the 9 EMA and is closed on the first candle that closes through it. The entry
   // candle must also close beyond the 9 EMA (else the exit would fire on the next candle). No premium SL / target. Unmeasured.
+  // The same strategy read on the OPTION'S OWN premium chart (asked for - "this should also happen on options chart"): the ATM call's
+  // premium against ITS VWAP and 9 EMA; the put the same on the put's own chart (the mirror).
+  {
+    id: 'vwapEmaWickOption', family: 'trend', name: 'VWAP + 9 EMA on the option chart - wick through the premium\'s VWAP, exit on its 9 EMA (3 min)',
+    idea: 'The VWAP + 9 EMA wick strategy drawn on the option\'s own chart. Calls: the ATM call\'s premium has its 9 EMA ABOVE its own VWAP (the trend), a 3-minute premium candle wicks BELOW that VWAP and closes back above it and over its 9 EMA - sellers of the option were rejected - buy that call. Exit when a 3-minute candle of the call\'s premium closes UNDER its 9 EMA. Mirror: the same on the ATM PUT\'s own chart - buy the put, out when the put\'s premium closes under its 9 EMA. The premium\'s VWAP uses the strike\'s own traded volume from 09:15 (no volume = no signal) and the premium series starts at the strike\'s first candle, so the 9 EMA is ready after 9 candles (27 minutes). Set an SL on the page to cap a failed trade.',
+    rule: { tree: ALL(L('cePremEmaVwap', 'above', { param: 0, param2: 9 }), L('cePremVwapWick', 'wickUp', { param: 0, windowMin: 3 }), L('cePremEma', 'above', { param: 0, param2: 9 })), action: 'buyCE', mirror: true },
+    settings: { timeframe: 3, slPct: 0, targetPct: 0, exitEma: 9, exitEmaOn: 'premium' },
+  },
   {
     id: 'vwapEmaWick', family: 'trend', name: 'VWAP + 9 EMA - wick through VWAP, exit on the 9 EMA (3 min)',
     idea: 'The write-up\'s pullback entry: the trend first - the 9 EMA is ABOVE VWAP (momentum with the day\'s volume-weighted price under it). On 3-minute candles a candle then wicks BELOW VWAP (its low at or under it) and closes back above it and over the 9 EMA - sellers tried to push under VWAP and were rejected - buy the call. Exit when a 3-minute candle closes UNDER the 9 EMA (premium SL / target off; the 15:10 square-off still applies). Mirror: the 9 EMA below VWAP, a candle wicks ABOVE VWAP and closes back under it and under the 9 EMA - buy the put; exit when a candle closes OVER the 9 EMA. Set an SL on the page to cap a failed trade.',

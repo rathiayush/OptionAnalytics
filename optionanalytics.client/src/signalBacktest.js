@@ -2029,6 +2029,43 @@ function premiumConditions(side) {
       },
       show: (d, i, l) => showPrem(d, i, (k) => { const n = fitPeriod(l?.param2, 14); return `RSI(${n}) ${fmtP(premiumRsi(d, side, k, n)[i])}` }),
     },
+    {
+      // THE VWAP + 9 EMA STRATEGY ON THE OPTION'S OWN CHART (asked for - "this should also happen on options chart"): the premium
+      // candle wicked through the premium's VWAP and closed back on its side - low <= VWAP < close ('wickUp') / high >= VWAP > close.
+      id: id('VwapWick'), group: 'Options', mirror: `${other.toLowerCase()}PremVwapWick`, name: name('candle wicks through its VWAP'),
+      options: [
+        opt('wickUp', 'Wicked below its VWAP, closed back above it (low ≤ VWAP < close)', 'wickUp', { ...W, ...OVER_WIDE }),
+        opt('wickDown', 'Wicked above its VWAP, closed back below it (high ≥ VWAP > close)', 'wickDown', { ...W, ...OVER_WIDE }),
+      ],
+      test: (d, i, v, w, p) => {
+        const k = strikeAt(d, i)
+        if (!Number.isFinite(k)) return false
+        const c = premiumCandles(d, side, k)
+        const hit = (j) => {
+          const vw = c.vwap[j]
+          if (!finite(vw)) return false
+          return v === 'wickUp' ? c.l[j] <= vw && c.c[j] > vw && c.c[j] - vw >= frac(p) * vw
+            : v === 'wickDown' ? c.h[j] >= vw && c.c[j] < vw && vw - c.c[j] >= frac(p) * vw : false
+        }
+        return inWindow(i, w, hit) >= 0
+      },
+      show: (d, i) => showPrem(d, i, (k) => { const c = premiumCandles(d, side, k); return `low ${fmtP(c.l[i])} · high ${fmtP(c.h[i])} · VWAP ${fmtP(c.vwap[i])}` }),
+    },
+    {
+      // The premium's EMA over / under its own VWAP - the strategy's trend (the 9 EMA over VWAP).
+      id: id('EmaVwap'), group: 'Options', mirror: `${other.toLowerCase()}PremEmaVwap`, name: name('EMA vs its VWAP'),
+      options: [
+        opt('above', 'EMA above its VWAP', 'above', { ...OVER_WIDE, ...EMA_PERIOD }), opt('below', 'EMA below its VWAP', 'below', { ...OVER_WIDE, ...EMA_PERIOD }),
+      ],
+      test: (d, i, v, w, p, p2) => {
+        const k = strikeAt(d, i)
+        if (!Number.isFinite(k)) return false
+        const e = premiumEma(d, side, k, fitPeriod(p2, 9))[i], vw = premiumCandles(d, side, k).vwap[i]
+        if (!finite(e) || !finite(vw)) return false
+        return v === 'above' ? e > vw && e - vw >= frac(p) * vw : v === 'below' ? e < vw && vw - e >= frac(p) * vw : false
+      },
+      show: (d, i, l) => showPrem(d, i, (k) => { const n = fitPeriod(l?.param2, 9); return `EMA ${n} ${fmtP(premiumEma(d, side, k, n)[i])} · VWAP ${fmtP(premiumCandles(d, side, k).vwap[i])}` }),
+    },
   ]
 }
 
@@ -3212,6 +3249,9 @@ export const BACKTEST_DEFAULTS = {
   // EMA"): the period of an EMA of the spot candles of the timeframe (0 = off); the first COMPLETED candle after the signal that
   // closes under it (a bullish trade - over it for a bearish one) ends the trade at the option's close of that candle's last minute.
   exitEma: 0,
+  // ...read on the SPOT's candles ('spot', the default) or on the TRADED OPTION's own premium chart ('premium': a bought option out
+  // when its premium candle closes under its EMA, a sold one over it).
+  exitEmaOn: 'spot',
   // The rule the page opens with: put writing ahead since the open AND price over VWAP - buy the call; the mirror (call
   // writing ahead AND price under VWAP) buys the put.
   rule: { tree: { op: 'and', not: false, items: [{ line: { id: 'oiOpen', value: 'peAhead', param: 0 } }, { line: { id: 'vwap', value: 'above', param: 0 } }] }, action: 'buyCE', mirror: true },
@@ -3221,6 +3261,8 @@ export const BACKTEST_DEFAULTS = {
 export const COST_SL_CHOICES = ['', 'spot', 'premium']
 /** The spot stop choices (`spotStop`): off, at the signal candle's low / high. */
 export const SPOT_STOP_CHOICES = ['', 'candle']
+/** What the exit EMA is read on (`exitEmaOn`): the spot candles, or the traded option's premium candles. */
+export const EXIT_EMA_ON_CHOICES = ['spot', 'premium']
 /** The strikes a trade can take (`moneyness`): ATM, 1 - 4 in the money (+), 1 - 4 out of it (-). */
 export const MONEYNESS_CHOICES = [0, 1, 2, 3, 4, -1, -2, -3, -4]
 
@@ -3477,14 +3519,32 @@ export function simulateDay(d, settings = {}, { tradeDay = null, asOfMs = null }
     // EXIT ON THE EMA (`exitEma`): the first completed candle after the signal's that closes through the EMA the wrong way
     // (spot under it for a bullish trade, over it for a bearish one); its last minute, on the traded day's clock.
     let emaExit = null
-    if (s.exitEma >= 2 && view.spot) {
-      const e = emaSeries(view, s.exitEma), c = view.spot.c
-      for (let k = sig.i + 1; k < view.n; k++) {
-        if (!candleDone(k)) break
-        if (finite(e[k]) && (dir > 0 ? c[k] < e[k] : c[k] > e[k])) {
-          const at = cross ? lastAtOrBefore(td.t, d.t[minuteOfSignal(k)]) : minuteOfSignal(k)
-          if (at > j) emaExit = { at, reason: `Spot closed ${dir > 0 ? 'under' : 'over'} the ${s.exitEma} EMA (${s.timeframe}m candle)` }
-          break
+    if (s.exitEma >= 2) {
+      const onPremium = s.exitEmaOn === 'premium'
+      // The candles read: the signal's view (spot - or the premium of the option on the same day), or the traded day's own view.
+      const tv = cross ? timeframeView(td, s.timeframe) : view
+      const strike = (option.side === 'CE' ? 'ce' : 'pe')
+      const series = onPremium ? { c: premiumCandles(tv, strike, option.strike).c, e: premiumEma(tv, strike, option.strike, s.exitEma) } : (tv.spot ? { c: tv.spot.c, e: emaSeries(tv, s.exitEma) } : null)
+      if (series) {
+        const lastMin = (k) => (tv.at ? tv.at[k] : k)
+        const done = (k) => {
+          if (asOfMs == null || !tv.at) return true
+          const last = td.t[lastMin(k)]
+          const endMin = SESSION_FIRST + (Math.floor((istMinute(last) - SESSION_FIRST) / tv.tf) + 1) * tv.tf
+          return last + (endMin - istMinute(last)) * MIN <= asOfMs
+        }
+        // Spot: out when it closes the wrong way for the trade's direction; the premium: a bought option when ITS close is under its
+        // EMA, a sold one over it.
+        const against = onPremium ? (option.action === 'SELL' ? 1 : -1) : -dir
+        let k = 0
+        while (k < tv.n && lastMin(k) <= j) k++
+        for (; k < tv.n; k++) {
+          if (!done(k)) break
+          const x = series.c[k], e = series.e[k]
+          if (finite(x) && finite(e) && (against < 0 ? x < e : x > e)) {
+            emaExit = { at: lastMin(k), reason: `${onPremium ? 'Premium' : 'Spot'} closed ${against < 0 ? 'under' : 'over'} the ${s.exitEma} EMA (${s.timeframe}m candle)` }
+            break
+          }
         }
       }
     }

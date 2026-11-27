@@ -130,3 +130,45 @@ test('the wick template needs the trend first: the same wick with the 9 EMA UNDE
   assert.equal(run(day(against)).trades.length, 0)             // wick + close over VWAP and the EMA, but the EMA is still under VWAP
   assert.equal(run(day(UP)).trades.length, 1)
 })
+
+// ---- the same strategy on the OPTION'S OWN premium chart ------------------------------------------------------------------
+// The calls' premium: 100 + half spot's move over 25000 - so it follows spot - with volume at every strike (the premium's VWAP needs it).
+function withVolume(d) {
+  d.ceVol = new Map(); d.peVol = new Map()
+  for (const k of d.ce.keys()) { d.ceVol.set(k, new Float64Array(d.n).fill(100)); d.peVol.set(k, new Float64Array(d.n).fill(100)) }
+  return d
+}
+// The call's premium over its VWAP (a morning at 105, VWAP ~105); a 3-minute candle wicks to 99 (under VWAP) and closes 106 (over VWAP and
+// the 9 EMA); it holds 106, then at minute 90 falls to 90: the candle of 90 - 92 closes under the premium's EMA.
+const PUP = (i) => (i < 60 ? 25010 : i === 60 ? { o: 25010, h: 25012, l: 24998, c: 25010 } : i < 62 ? 25010 : i === 62 ? { o: 25010, h: 25012, l: 25010, c: 25012 } : i < 90 ? 25012 : 24980)
+const optionT = RULE_TEMPLATES.find((t) => t.id === 'vwapEmaWickOption')
+const OE = engineSettings(withTemplate(cleanBacktestSettings({ underlying: 'NIFTY', charges: false }), optionT))
+
+test('the premium conditions: its low / high through its own VWAP, its EMA over / under it, the mirror the other side\'s same one', () => {
+  const v = timeframeView(withVolume(day(PUP)), 3)
+  const wick = cond('cePremVwapWick'), ev = cond('cePremEmaVwap')
+  assert.ok(wick.test(v, 20, 'wickUp', 1, 0) && !wick.test(v, 19, 'wickUp', 1, 0) && !wick.test(v, 20, 'wickDown', 1, 0))
+  assert.ok(ev.test(v, 20, 'above', 1, 0, 9) && !ev.test(v, 20, 'below', 1, 0, 9))
+  assert.equal(wick.mirror, 'pePremVwapWick'); assert.equal(ev.mirror, 'pePremEmaVwap')
+  assert.ok(!wick.test(timeframeView(day(PUP), 3), 20, 'wickUp', 1, 0))          // no volume = no VWAP = never true
+})
+
+test('the option template: the call bought on its own wick, out when ITS premium candle closes under ITS 9 EMA', () => {
+  assert.equal(OE.exitEmaOn, 'premium'); assert.equal(OE.exitEma, 9)
+  const out = simulateDay(withVolume(day(PUP)), OE)
+  assert.equal(out.trades.length, 1)
+  const t = out.trades[0]
+  assert.equal(t.side, 'CE')
+  assert.equal(t.entryTime, T915 + 62 * MIN)
+  assert.match(t.exitReason, /^Premium closed under the 9 EMA/)
+  assert.equal(t.exitTime, T915 + 92 * MIN)
+})
+
+test('the exit on the option reads the OPTION: spot closing under its EMA does not exit a trade set to read the premium', () => {
+  const d = withVolume(day(PUP))
+  const spotExit = simulateDay(d, { ...OE, exitEmaOn: 'spot' })
+  assert.match(spotExit.trades[0].exitReason, /^Spot closed under the 9 EMA/)
+  assert.equal(cleanBacktestSettings({ exitEmaOn: 'bogus' }).exitEmaOn, 'spot')
+  assert.equal(cleanBacktestSettings({ exitEmaOn: 'premium' }).exitEmaOn, 'premium')
+  assert.match(reportHead(cleanBacktestSettings({ exitEma: 9, exitEmaOn: 'premium', from: '2026-10-01', to: '2026-10-05' }), 3), /exit when a premium candle closes through the 9 EMA/)
+})
