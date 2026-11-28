@@ -101,7 +101,7 @@ public sealed class OrderFlowController : ControllerBase
         [FromQuery] int minTradeLots = 1, [FromQuery] int heatmapColumns = 3000, [FromQuery] decimal? heatmapRowSize = null, [FromQuery] bool backfillBars = false,
         CancellationToken cancellationToken = default)
     {
-        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 12000), cancellationToken, HeatRow(heatmapRowSize), backfillBars);
+        var result = await _history.DayAsync(underlying, date, expiry, Math.Clamp(rowSize, 0, 1000), minTradeLots, Math.Clamp(heatmapColumns, 50, 22500), cancellationToken, HeatRow(heatmapRowSize), backfillBars);
         return result.Snapshot is null ? NotFound(new { error = result.Error }) : result.Snapshot;
     }
 

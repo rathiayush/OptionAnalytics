@@ -219,10 +219,12 @@ public sealed class OrderFlowEngineTests
         var engine = NewEngine();
         for (var s = 0; s < 10; s++) engine.OnTick(Tick(100m, 1000 + s, 99.95m, 100m), T0.AddSeconds(s));
 
-        var heatmap = engine.Snapshot(0, 1, 100).Heatmap;
-        Assert.Equal(5, heatmap.Count); // seconds 0, 2, 4, 6, 8
-        Assert.Equal(3, engine.Snapshot(0, 1, 3).Heatmap.Count);
-        Assert.Equal(T0.AddSeconds(8), engine.Snapshot(0, 1, 3).Heatmap[^1].Time);
+        var heatmap = engine.Snapshot(0, 1, 22500).Heatmap;
+        Assert.Equal(10, heatmap.Count); // one a second: 0 .. 9
+        // Fewer columns = wider CLOCK buckets (the last snapshot of each), not a stride over what is recorded.
+        var coarse = engine.Snapshot(0, 1, 50).Heatmap;
+        Assert.InRange(coarse.Count, 1, 2);
+        Assert.Equal(T0.AddSeconds(9), coarse[^1].Time);
     }
 
     [Fact]
@@ -233,7 +235,7 @@ public sealed class OrderFlowEngineTests
         // 15:29:50 and :52 in the session, then the book keeps arriving after the close.
         for (var s = 0; s < 120; s += 2) engine.OnTick(Tick(100m, 1000 + s, 99.95m, 100m), close.AddSeconds(s));
 
-        var heatmap = engine.Snapshot(0, 1, 1000).Heatmap;
+        var heatmap = engine.Snapshot(0, 1, 22500).Heatmap;
         Assert.Equal(5, heatmap.Count);   // 15:29:50, :52, :54, :56, :58
         Assert.True(heatmap.All(c => c.Time.ToOffset(TimeSpan.FromHours(5.5)).TimeOfDay < new TimeSpan(15, 30, 0)));
     }

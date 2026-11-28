@@ -53,7 +53,7 @@ namespace OptionAnalytics.Server.Services.OrderFlow;
 /// </summary>
 public sealed class OrderFlowEngine
 {
-    public static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(2);
+    public static readonly TimeSpan SnapshotInterval = TimeSpan.FromSeconds(1);
     /// <summary>The heatmap's finest row - every row size the page offers is a multiple of it.</summary>
     public const decimal HeatmapBaseRow = 0.5m;
     private static readonly TimeSpan DeepBookFreshness = TimeSpan.FromSeconds(5);
@@ -618,11 +618,7 @@ public sealed class OrderFlowEngine
             bars = CopyBars(_bars.Values);
             trades = _trades.ToArray();
             samples = new List<DepthSnapshot>();
-            if (_snapshots.Count > 0)
-            {
-                var step = Math.Max(1, (int)Math.Ceiling(_snapshots.Count / (double)Math.Max(1, heatmapColumns)));
-                for (var i = step - 1; i < _snapshots.Count + step - 1; i += step) samples.Add(_snapshots[Math.Min(i, _snapshots.Count - 1)]);
-            }
+            samples = SampleByClock(_snapshots, heatmapColumns);
             icebergs = Icebergs();
             book = BookDto();
             meta = Meta();
@@ -633,6 +629,29 @@ public sealed class OrderFlowEngine
         {
             Sweeps = DetectSweeps(trades, SweepMinLots * (long)LotSize),
         };
+    }
+
+    /// <summary>Seconds of the session (09:15 - 15:30) the heatmap's column grid is worked out from.</summary>
+    private const int HeatmapSessionSeconds = 375 * 60;
+
+    /// <summary>The heatmap's columns: the LAST snapshot of each fixed CLOCK bucket (epoch seconds / bucket), the bucket's
+    /// width worked out from the session's length and the columns asked for - never from how many snapshots are recorded.
+    /// The old stride (every ceil(count / columns)-th snapshot) moved with the day's growth, so the live scan (a part of
+    /// the day) and a backtest (the whole day) read DIFFERENT snapshots of the same minutes and the liquidity map's
+    /// reads / walls differed between them. A bucket that has ended is final, so a day cut at any clock gives the same
+    /// columns as the whole day up to it (the forming bucket shows its latest).</summary>
+    internal static List<DepthSnapshot> SampleByClock(IReadOnlyList<DepthSnapshot> snapshots, int heatmapColumns)
+    {
+        var result = new List<DepthSnapshot>();
+        if (snapshots.Count == 0) return result;
+        var bucketSeconds = Math.Max((int)SnapshotInterval.TotalSeconds, (int)Math.Ceiling(HeatmapSessionSeconds / (double)Math.Max(1, heatmapColumns)));
+        long? current = null;
+        foreach (var snapshot in snapshots)
+        {
+            var bucket = snapshot.Time.ToUnixTimeSeconds() / bucketSeconds;
+            if (current == bucket) result[^1] = snapshot; else { result.Add(snapshot); current = bucket; }
+        }
+        return result;
     }
 
     // A bar as copied out of the lock: its levels are the bar's frozen ones (native prices, high to low), never changed
@@ -886,7 +905,7 @@ public sealed class OrderFlowEngine
         public int Refills;
     }
 
-    private sealed record DepthSnapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
+    internal sealed record DepthSnapshot(DateTimeOffset Time, HeatRow[] Bids, HeatRow[] Asks);
 
     /// <summary>A copy of the whole day (for replay once it is over). Null before the first event.</summary>
     public OrderFlowDay? ExportDay()
