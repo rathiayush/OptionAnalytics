@@ -1488,7 +1488,11 @@ All must pass before committing.
   for - "add month by month pnl as well, day by day is perfectly fine"; `monthRows` in `signalBacktestJob.js`, worked out
   from the report's own `dayRows` and `trades`, so a background run's report written before it has them too: each calendar
   month's net first - a phone shows it before the table scrolls - trades, win %, days run, the rule's / mirror's net, green
-  days of the days traded, best / worst day, gross, charges and the total so far; "N of M months green"), a day-by-day
+  days of the days traded, best / worst day, gross, charges and the total so far; "N of M months green"), A MONTH'S TRADES (asked for -
+  "select month and it will show all trades of the month"): the Trades card's month picker (All months / each month with trades -
+  `tradeMonths`) or a click on a Month by month row (scrolls to the trades, the row picked highlighted) shows that month's trades only,
+  the title "Trades of Sep 2026 (N · ₹net)", the CSV the trades shown (with the Rule / Mirror filter); a page run and an opened
+  background run alike, a month the report has none of reads as all. a day-by-day
   table, every trade with the readings at its signal, and a CSV (`tradesCsv`). The DAY CHART (asked for - "spot chart ... with buy sell
   tag ... for already run as well as next run"; `SignalBacktestChart.jsx`, `signalBacktestChart.js`): any day of the report
   shown (the picker, ◀ ▶, or a click on a Day by day / Trades row) on the run's own timeframe's spot candles - or the futures

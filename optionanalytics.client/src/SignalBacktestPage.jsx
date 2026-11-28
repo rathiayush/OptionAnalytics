@@ -495,6 +495,8 @@ export default function SignalBacktestPage() {
   // A background run opened on the page (its report shown instead of the page's run) and the trades table's filter.
   const [viewing, setViewing] = useState(null)
   const [tradeFilter, setTradeFilter] = useState('all')
+  // The trades table's month ('all' or 'YYYY-MM' - picked there or by a click on a Month by month row).
+  const [tradeMonth, setTradeMonth] = useState('all')
   const dates = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD')), [range])
   // The same range in the background: up to MAX_BACKGROUND_DAYS (only each day's outcome is kept there).
   const backgroundDays = useMemo(() => backtestDays(range?.[0], range?.[1], dayjs().format('YYYY-MM-DD'), MAX_BACKGROUND_DAYS).length, [range])
@@ -572,6 +574,7 @@ export default function SignalBacktestPage() {
       }
       setViewing({ job, result })
       setTradeFilter('all')
+      setTradeMonth('all')
     } catch (err) {
       message.error(`The report could not be opened: ${err.message}`)
     }
@@ -714,15 +717,24 @@ export default function SignalBacktestPage() {
   }
   const chartLines = useMemo(() => (report?.lines ?? []).map((l) => ({ ...l, color: SIDE[l.id]?.color ?? '#e6e6e6' })), [report])
 
+  // The months the report's trades fall in, newest last; a month picked that this report has none of reads as all.
+  const tradeMonths = useMemo(() => [...new Set((report?.trades ?? []).map((t) => String(t.date).slice(0, 7)))].sort(), [report])
+  const month = tradeMonths.includes(tradeMonth) ? tradeMonth : 'all'
   const shownTrades = useMemo(() => {
     const all = report?.trades ?? []
-    return tradeFilter === 'all' ? all : all.filter((t) => t.strategy === tradeFilter)
-  }, [report, tradeFilter])
+    return all.filter((t) => (tradeFilter === 'all' || t.strategy === tradeFilter) && (month === 'all' || String(t.date).startsWith(month)))
+  }, [report, tradeFilter, month])
+  const shownNet = shownTrades.reduce((sum, t) => sum + (Number(t.net) || 0), 0)
+  const tradesRef = useRef(null)
+  const showMonthTrades = (key) => {
+    setTradeMonth(key)
+    requestAnimationFrame(() => tradesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }
   const downloadCsv = () => {
-    const blob = new Blob([tradesCsv(report.trades)], { type: 'text/csv' })
+    const blob = new Blob([tradesCsv(shownTrades)], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `signal-backtest-${shown.settings.underlying}-${shown.dates[0] ?? ''}-${shown.dates.at(-1) ?? ''}-${shown.settings.rule.action}.csv`
+    a.download = `signal-backtest-${shown.settings.underlying}-${month === 'all' ? `${shown.dates[0] ?? ''}-${shown.dates.at(-1) ?? ''}` : month}-${shown.settings.rule.action}.csv`
     a.click()
     URL.revokeObjectURL(a.href)
   }
@@ -1300,7 +1312,11 @@ export default function SignalBacktestPage() {
               size="small" title="Month by month"
               extra={months.length > 1 ? <Text type="secondary" style={{ fontSize: 12 }}>{months.filter((m) => m.net > 0).length} of {months.length} months green</Text> : null}
             >
-              <Table size="small" pagination={false} scroll={{ x: 1100 + 100 * (sides.length > 1 ? sides.length : 0) }} columns={monthColumns} dataSource={months} />
+              <Table
+                size="small" pagination={false} scroll={{ x: 1100 + 100 * (sides.length > 1 ? sides.length : 0) }} columns={monthColumns} dataSource={months}
+                onRow={(m) => ({ onClick: () => m.trades && showMonthTrades(m.key), style: m.trades ? { cursor: 'pointer', background: m.key === month ? 'rgba(22, 104, 220, 0.18)' : undefined } : undefined })}
+              />
+              {months.some((m) => m.trades) && <Text type="secondary" style={{ fontSize: 12 }}>Click a month to see its trades below.</Text>}
             </Card>
             <Card size="small" title="Day by day">
               {/* A long run (a background one goes back up to MAX_BACKGROUND_DAYS) in pages - 1 500 rows at once froze a phone. */}
@@ -1315,16 +1331,24 @@ export default function SignalBacktestPage() {
               date={chartDate} onDate={setChartDate} open={chartOpen !== false} onOpen={setChartOpen} cardRef={chartRef}
             />
             <Card
-              size="small" title={`Trades (${shownTrades.length})`}
-              extra={(
-                <Space size={8}>
+              ref={tradesRef}
+              size="small" title={month === 'all' ? `Trades (${shownTrades.length})` : `Trades of ${dayjs(`${month}-01`).format('MMM YYYY')} (${shownTrades.length} · ${rupees(shownNet)})`}
+            >
+              {/* In the body, not the head's extra - on a phone the pickers squeezed the title (the month and its net) out. */}
+              <div style={{ marginBottom: 8 }}>
+                <Space size={8} wrap>
+                  {tradeMonths.length > 1 && (
+                    <Select
+                      size="small" value={month} onChange={setTradeMonth} style={{ width: 130 }}
+                      options={[{ value: 'all', label: 'All months' }, ...tradeMonths.map((k) => ({ value: k, label: dayjs(`${k}-01`).format('MMM YYYY') }))]}
+                    />
+                  )}
                   {sides.length > 1 && (
                     <Select size="small" value={tradeFilter} onChange={setTradeFilter} style={{ width: 120 }} options={[{ value: 'all', label: 'Both' }, { value: 'rule', label: 'Rule' }, { value: 'mirror', label: 'Mirror' }]} />
                   )}
-                  <Button size="small" icon={<DownloadOutlined />} onClick={downloadCsv} disabled={!report.trades.length}>CSV</Button>
+                  <Button size="small" icon={<DownloadOutlined />} onClick={downloadCsv} disabled={!shownTrades.length}>CSV</Button>
                 </Space>
-              )}
-            >
+              </div>
               <Table
                 size="small" rowKey={(t) => `${t.strategy}|${t.entryTime}`} scroll={{ x: 1480 }} columns={tradeColumns} dataSource={shownTrades} pagination={{ pageSize: 25, showSizeChanger: false }}
                 onRow={(t) => ({ onClick: () => showOnChart(t.date), style: { cursor: 'pointer' } })}
