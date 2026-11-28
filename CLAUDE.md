@@ -1702,6 +1702,19 @@ All must pass before committing.
   snapshot about once a second) - the scan reads each minute right after it closes and every pass re-reads the whole day, so a missed pass loses
   nothing (entries are kept by key). Not done: an incremental day (prepare only the new minute) and moving the engine to .NET - the engine has to stay
   the backtest's own code (`tests/signal-live.test.mjs` holds live = backtest), and a C# port could not be compiled or tested here.
+  THE LIVE STRATEGIES PAGE AND EACH STRATEGY'S LOTS (asked for - "when strategy is live per strategy I should be able to configure lots ... create new page,
+  remove live strategy code from [Signal backtest] and move it to the new page ... it should not break live running strategy behaviour ... do not break any
+  existing data in our csv, you can extend csv but not break"): `/live-strategies` (`LiveStrategiesPage.jsx`, "Live strategies" in the menu, Admin / User)
+  holds the `SavedStrategiesCard` - Live / Alerts / Daily report, Live orders (Dhan), Today / Total, History, Remove - and each strategy's LOTS (`LotsInput`;
+  "Load" opens the strategy on the Signal backtest page through router state, `location.state.loadStrategy`). The Signal backtest page keeps only a
+  `SavedStrategiesBar`: Save strategy, a saved one Loaded or "Update with this page", and a link to the Live strategies page. LOTS = a NEW LAST COLUMN of
+  strategies.csv, `liveLots` (`StrategyColumns`; empty / missing = 0 = AS BEFORE - a file saved before the column reads unchanged and gains it at its next
+  write; the settings JSON is never touched), set by `PUT /api/signal-strategies/{id}` `{ liveLots }` (1 - `MaxLiveLots` 100, 0 = back to the default; a
+  strategy with Live orders on is changed by an admin only). Set, it is the lots of BOTH the live scan's paper trades (`SignalStrategy.LiveSettings()` -
+  `/live` hands the runner the settings with `lots` = it; the saved settings stay as they were) and its Dhan orders (`SignalLiveOrders` - else the traded
+  index's Trade settings lots, as before; Trade settings' max-lots cap still applies). `SignalStrategyStoreTests.cs` (an old file without the column, the
+  range, the admin rule), `SignalLiveOrdersTests.cs` (the lots on the order). Checked in a browser at 1400 / 390 px against a mocked API (one save per
+  change; Load fills the backtest page).
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

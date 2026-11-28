@@ -124,6 +124,19 @@ public sealed class SignalLiveOrdersTests : IDisposable
     }
 
     [Fact]
+    public async Task A_strategys_own_lots_go_on_its_live_orders_else_the_Trade_settings_lots_as_before()
+    {
+        var store = Store();
+        var dhan = new FakeDhan();
+        var orders = Orders(store, TradeSettings(), dhan, new List<string>());
+        var s = Strategy(store);
+        store.Update(s.Id, null, new SignalStrategyRequest(LiveLots: 7), Now);
+        await Post(store, orders, s.Id, Entry(Trade()));
+        Assert.Equal(7, Assert.Single(dhan.Placed).Lots);
+        Assert.Equal(7, Assert.Single(store.Orders(s.Id, Date)).Lots);
+    }
+
+    [Fact]
     public async Task An_armed_strategys_fresh_entry_is_a_super_order_and_its_exit_cancels_the_legs_and_closes_it()
     {
         var store = Store();
@@ -361,7 +374,9 @@ public sealed class SignalLiveOrdersTests : IDisposable
         Assert.True(Store().Get(mine.Id, null)!.LiveOrders);
         var path = Path.Combine(_dir, "runner", "signal-strategies", "strategies.csv");
         var lines = File.ReadAllLines(path);
-        File.WriteAllLines(path, lines.Select(l => l[..l.LastIndexOf(',')]));
+        // Before the liveOrders column (and the liveLots one after it): the last two cut.
+        static string Cut(string l) => l[..l.LastIndexOf(',')];
+        File.WriteAllLines(path, lines.Select(l => Cut(Cut(l))));
         Assert.False(Store().Get(mine.Id, null)!.LiveOrders);
 
         // Through the controller: a User account gets 403 for the switch; the list says whether each is armed.

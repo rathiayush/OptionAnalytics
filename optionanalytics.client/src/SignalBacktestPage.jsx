@@ -14,7 +14,8 @@ import { FLOW_BOOK, FLOW_PROFILE } from './orderFlowFeatures.js'
 import { attachDeltaPast, attachOrderFlow, backtestReport, cleanBacktestSettings, dayOutcome, daySource, engineSettings, indexLevels, loadBacktestDay, loadSourceText, monthRows, reportHead, withIndexLevels } from './signalBacktestJob.js'
 import { BackgroundRunsCard, RunInBackgroundModal } from './SignalBacktestRuns.jsx'
 import { downloadFeaturesCsv, runResult, useBackgroundRuns } from './signalBacktestQueue.js'
-import { SaveStrategyModal, SavedStrategiesCard } from './SignalStrategiesCard.jsx'
+import { SaveStrategyModal, SavedStrategiesBar } from './SignalStrategiesCard.jsx'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { RULE_TEMPLATES, TEMPLATE_FAMILIES, templateById, templateRow, withTemplate } from './signalTemplates.js'
 import { useSavedStrategies } from './signalStrategiesApi.js'
 import { FoldText } from './FoldText.jsx'
@@ -593,9 +594,19 @@ export default function SignalBacktestPage() {
     setSumExpiries(s.sumExpiries)
     message.success(`"${job.name}" - its index, days, rule and settings are on the page.`)
   }
-  // The saved strategies (the server's CSV) and their daily live scan.
+  // The saved strategies (the server's CSV) - saved / loaded / updated here; their live scan is the Live strategies page's.
   const saved = useSavedStrategies()
   const [saveOpen, setSaveOpen] = useState(false)
+  // "Load" on the Live strategies page opens a strategy here (router state), once.
+  const location = useLocation()
+  const navigate = useNavigate()
+  const loadStrategy = location.state?.loadStrategy
+  useEffect(() => {
+    if (!loadStrategy) return
+    applyRunSettings(loadStrategy, loadStrategy.name)
+    navigate(location.pathname, { replace: true, state: null })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadStrategy])
 
   // The 20 TEMPLATES (signalTemplates.js): one loaded puts its rule and its own levels on the page (Undo puts back what was
   // there); "Compare all" runs every one over the days this page has loaded and ranks them - each through the same engine.
@@ -1179,8 +1190,8 @@ export default function SignalBacktestPage() {
           />
         )}
         {saved.loaded && (
-          <SavedStrategiesCard
-            strategies={saved.strategies} today={saved.today} liveScan={saved.liveScan} refresh={saved.refresh} pageSettings={pageSettings}
+          <SavedStrategiesBar
+            strategies={saved.strategies} refresh={saved.refresh} pageSettings={pageSettings}
             onLoad={(st) => applyRunSettings(st, st.name)} onSave={() => setSaveOpen(true)}
           />
         )}

@@ -45,6 +45,45 @@ public sealed class SignalStrategyStoreTests : IDisposable
     private static SignalStrategyRequest Request(string name = "VWAP, \"cross\"", bool live = true) => new(name, Settings(), live, true, true);
 
     [Fact]
+    public void A_strategies_csv_saved_before_the_lots_column_reads_as_before_and_gains_the_column_on_the_next_write()
+    {
+        var store = Store();
+        var s = store.Create("me@x.com", Request("Old"), Now).Strategy!;
+        // The file as it was before the column: liveLots taken off the header and every row.
+        var file = Path.Combine(_dir, "runner", "signal-strategies", "strategies.csv");
+        var lines = File.ReadAllLines(file);
+        Assert.EndsWith(",liveLots", lines[0]);
+        File.WriteAllLines(file, lines.Select(l => l[..l.LastIndexOf(',')]));
+        Assert.DoesNotContain("liveLots", File.ReadAllText(file));
+        var read = store.Get(s.Id, null)!;
+        Assert.Equal(0, read.LiveLots);                                                              // 0 = the lots as before
+        Assert.Equal(read.Settings.ToJsonString(), read.LiveSettings().ToJsonString());               // the live scan reads the settings as saved
+        Assert.Equal(("Old", true, true, true), (read.Name, read.Live, read.Alerts, read.DailyReport));
+        // A change writes the new column - every other value kept.
+        var set = store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 4), Now).Strategy!;
+        Assert.Equal(4, set.LiveLots);
+        Assert.EndsWith(",liveLots", File.ReadAllLines(file)[0]);
+        Assert.Equal(4, (int)store.Get(s.Id, null)!.LiveSettings()["lots"]!);
+        Assert.Null(store.Get(s.Id, null)!.Settings["lots"]);                                         // the saved settings themselves untouched
+        Assert.Equal(read.Settings.ToJsonString(), store.Get(s.Id, null)!.Settings.ToJsonString());
+        // Back to 0 = as before; out of range refused.
+        Assert.Equal(0, store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 0), Now).Strategy!.LiveLots);
+        Assert.Contains("Lots go from 1", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 101), Now).Error);
+        Assert.Contains("Lots go from 1", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: -1), Now).Error);
+    }
+
+    [Fact]
+    public void Only_an_admin_changes_the_lots_of_a_strategy_that_places_live_orders()
+    {
+        var store = Store();
+        var s = store.Create("me@x.com", Request("Armed"), Now).Strategy!;
+        store.Update(s.Id, null, new SignalStrategyRequest(LiveOrders: true), Now);
+        Assert.Contains("only an admin", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 5), Now).Error);
+        Assert.Equal(5, store.Update(s.Id, null, new SignalStrategyRequest(LiveLots: 5), Now).Strategy!.LiveLots);
+        Assert.True(store.Get(s.Id, null)!.LiveOrders);                                              // the lots change leaves it armed
+    }
+
+    [Fact]
     public void A_strategy_is_saved_as_CSV_and_read_back_whole()
     {
         var store = Store();

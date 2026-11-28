@@ -4,6 +4,7 @@ import { Alert, Badge, Button, Drawer, Menu, Select, Space, Tag, Tooltip, Typogr
 import {
   AlignRightOutlined, ApartmentOutlined, BarChartOutlined, BellOutlined, DashboardOutlined, DatabaseOutlined, ExperimentOutlined, FileTextOutlined, FundProjectionScreenOutlined,
   LineChartOutlined, LogoutOutlined, MenuFoldOutlined, MenuUnfoldOutlined, SendOutlined, SettingOutlined, TableOutlined, TeamOutlined, ThunderboltOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { createSeriesMarkers, HistogramSeries, LineSeries, CrosshairMode, LineStyle, TickMarkType } from 'lightweight-charts'
@@ -1120,6 +1121,7 @@ const NAV_ITEMS = [
   { key: '/profiles', label: 'Volume & Market Profile', icon: <AlignRightOutlined /> },
   { key: '/structure', label: 'Spot structure', icon: <ApartmentOutlined /> },
   { key: '/signal-backtest', label: 'Signal backtest', icon: <FundProjectionScreenOutlined /> },
+  { key: '/live-strategies', label: 'Live strategies', icon: <RocketOutlined /> },
   { key: '/telegram-signals', label: 'Telegram signals', icon: <SendOutlined /> },
   { key: '/live-strike-data', label: 'Live Strike Data', icon: <ThunderboltOutlined /> },
   { key: '/triggers', label: 'Triggers', icon: <BellOutlined /> },
