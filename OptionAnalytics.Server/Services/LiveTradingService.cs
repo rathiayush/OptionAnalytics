@@ -77,7 +77,8 @@ public sealed class LiveTradingService : BackgroundService
     // Contracts this service subscribed for live P&L, with their expiry - released once expired.
     private readonly Dictionary<uint, DateOnly> _subscribedForPositions = new();
     private readonly SemaphoreSlim _refreshSignal = new(0, 1);
-    private readonly SemaphoreSlim _actionLock = new(1, 1);
+    // One order action at a time - EXITS FIRST (PriorityGate): an exit waiting is let in before any entry / level change queued ahead of it.
+    private readonly PriorityGate _actionLock = new();
     private IDisposable? _tickSubscription;
     private readonly TelegramAlertService? _telegram;
     // What happened to this panel's / the strategy scanner's orders on Dhan today - entry filled,
@@ -781,7 +782,7 @@ public sealed class LiveTradingService : BackgroundService
     {
         try
         {
-            await _actionLock.WaitAsync();
+            await _actionLock.WaitAsync(CancellationToken.None, urgent: true);
             try
             {
                 var order = (await _orders.ListAsync(CancellationToken.None)).FirstOrDefault(o => o.OrderId == protection.OrderId);
@@ -1003,10 +1004,11 @@ public sealed class LiveTradingService : BackgroundService
                     ? await PlacePlainEntryAsync(transactionType, contract, slices[i], prices.Limit, $"OIR-{stamp}-{i + 1}", cancellationToken)
                     : await PlaceSuperEntryAsync(transactionType, contract, slices[i], prices, $"OIR-{stamp}-{i + 1}", cancellationToken);
                 // A REJECTION before anything was placed (the option ran past the LIMIT's band): priced again off a fresh quote and sent again.
-                for (var retry = 0; placedId is null && orderIds.Count == 0 && retry < (request.Chase?.RejectRetries ?? 0); retry++)
+                // An exit waiting for the gate goes first: the entry gives up its retries rather than hold it.
+                for (var retry = 0; placedId is null && orderIds.Count == 0 && retry < (request.Chase?.RejectRetries ?? 0) && !_actionLock.UrgentWaiting; retry++)
                 {
-                    await Task.Delay(request.Chase!.RetryDelay, cancellationToken);
-                    var fresh = _feed.LastTickFor(contract.SecurityId);
+                    var fresh = await FreshTickAsync(contract.SecurityId, quote, request.Chase!.RetryDelay, cancellationToken);
+                    quote = fresh ?? quote;
                     var (again, _) = request.NoStop
                         ? PriceEntryOnly(isSell, fresh?.BestBidPrice ?? 0, fresh?.BestAskPrice ?? 0, request.SlippagePoints * Math.Min(retry + 2, request.Chase.MaxSlipSteps), contract.TickSize)
                         : PriceOrder(isSell, fresh?.BestBidPrice ?? 0, fresh?.BestAskPrice ?? 0, request.SlippagePoints * Math.Min(retry + 2, request.Chase.MaxSlipSteps), request.StopLossPoints, request.TargetPoints, contract.TickSize);
@@ -1077,7 +1079,7 @@ public sealed class LiveTradingService : BackgroundService
     public async Task<ManualOrderResult> CloseAsync(string securityId, decimal slippagePoints, CancellationToken cancellationToken)
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);
         try { return await CloseCoreAsync(securityId, slippagePoints, cancellationToken); }
         finally { _actionLock.Release(); }
     }
@@ -1091,7 +1093,7 @@ public sealed class LiveTradingService : BackgroundService
     public async Task<ManualOrderResult> ExitAllAsync(decimal slippagePoints, CancellationToken cancellationToken)
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);
         try
         {
             var messages = new List<string>();
@@ -1187,7 +1189,7 @@ public sealed class LiveTradingService : BackgroundService
         var failures = new List<string>();
         var swept = 0;
         try { await Task.Delay(TimeSpan.FromSeconds(1.5), cancellationToken); } catch (OperationCanceledException) { }
-        await _actionLock.WaitAsync(CancellationToken.None);
+        await _actionLock.WaitAsync(CancellationToken.None, urgent: true);
         try
         {
             for (var pass = 0; pass < 2; pass++)
@@ -1296,7 +1298,7 @@ public sealed class LiveTradingService : BackgroundService
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (lots <= 0) return ManualOrderResult.Fail("exit at least one lot");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);
         try
         {
             var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
@@ -1355,7 +1357,7 @@ public sealed class LiveTradingService : BackgroundService
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);
         try
         {
             var mine = (await _superOrders.ListAsync(cancellationToken)).Where(o => orderIds.Contains(o.OrderId)).ToList();
@@ -1703,7 +1705,7 @@ public sealed class LiveTradingService : BackgroundService
             // Rejected (the price ran past the LIMIT's band): priced again off a fresh quote, the slippage a step wider, and sent again.
             for (var retry = 0; result is null && retry < (chase?.RejectRetries ?? 0); retry++)
             {
-                await Task.Delay(chase!.RetryDelay, cancellationToken);
+                await FreshTickAsync(id, _feed.LastTickFor(id), chase!.RetryDelay, cancellationToken);
                 var again = await ExitPriceAsync(id, position.ExchangeSegment, closingIsSell, slippagePoints * Math.Min(retry + 2, chase.MaxSlipSteps), tick, cancellationToken);
                 if (again is null) continue;
                 _logger.LogWarning("Exit {Symbol} rejected ({Error}) - sent again at LIMIT {Price} (retry {Retry}).", position.TradingSymbol, error, again, retry + 1);
@@ -1840,6 +1842,21 @@ public sealed class LiveTradingService : BackgroundService
         }
     }
 
+    /// <summary>The contract's quote NEWER than <paramref name="seen"/> - the moment the feed sends one, at most <paramref name="max"/> later (the
+    /// latest there is then). A rejected order is priced again off it: the same quote would only be rejected again, and Dhan's feed sends a fresh
+    /// one about once a second - so the retry goes as soon as there is something new to price it off, not after a fixed wait.</summary>
+    private async Task<SpotTick?> FreshTickAsync(uint securityId, SpotTick? seen, TimeSpan max, CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + max;
+        while (true)
+        {
+            var tick = _feed.LastTickFor(securityId);
+            if (tick is not null && tick != seen) return tick;
+            if (DateTimeOffset.UtcNow >= deadline) return tick;
+            await Task.Delay(10, cancellationToken);
+        }
+    }
+
     /// <summary>A super order's current state: memory while the order-update socket keeps it current, else Dhan's book.</summary>
     private async Task<SuperOrderSummary?> CurrentSuperOrderAsync(string orderId)
     {
@@ -1935,7 +1952,8 @@ public sealed record ManualOrderRequest(
 /// <summary>HOW HARD AN ORDER IS PUSHED TO FILL (asked for - "when SL hits for a strategy we need to move out right ... if an order fails fetch
 /// the latest price and try again, options move fast"; a saved strategy's live orders - SignalLiveOrders): a REJECTED order (Dhan refused it -
 /// a LIMIT outside the price band as the option ran) is sent again <see cref="RejectRetries"/> times, each priced off a FRESH quote after
-/// <see cref="RetryDelay"/>; an order still unfilled is RE-PRICED to the CURRENT ask (bid) every <see cref="Interval"/>, the slippage widened
+/// <see cref="RetryDelay"/> AT MOST - as soon as the feed has a newer quote (FreshTickAsync); an entry stops retrying when an exit is waiting
+/// for the order gate (PriorityGate - exits first); an order still unfilled is RE-PRICED to the CURRENT ask (bid) every <see cref="Interval"/>, the slippage widened
 /// a step each time (2x, 3x ... at most <see cref="MaxSlipSteps"/>x) for <see cref="Attempts"/> tries, then left resting at the last price.
 /// An entry's stop-loss / target move with its price, so their distance from it stays the strategy's. None = as before (an entry placed once
 /// and left, an exit chased every 2 s, 6 tries, never retried after a rejection).</summary>
