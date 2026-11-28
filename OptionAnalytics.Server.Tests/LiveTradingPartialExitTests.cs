@@ -593,6 +593,22 @@ public sealed class LiveTradingPartialExitTests
     private static readonly OrderChase Fast = new(TimeSpan.FromMilliseconds(50), 4, 3, 2, TimeSpan.FromMilliseconds(10));
 
     [Fact]
+    public async Task A_rejected_order_is_sent_again_as_soon_as_a_fresh_quote_comes_not_after_a_fixed_wait()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        dhan.RejectNextPlaces = 1;
+        var slow = new OrderChase(TimeSpan.FromSeconds(1), 0, 3, 4, TimeSpan.FromSeconds(5));     // waits up to 5 s for a fresh quote
+        var exit = service.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true, slow);
+        await WaitFor(() => dhan.Requests.Count(r => r == "POST /orders") == 1);
+        var started = DateTimeOffset.UtcNow;
+        feed.SetLastTickForTesting(Tick(bid: 117m, ask: 117.5m, last: 117m));                      // the new quote
+        var result = await exit;
+        Assert.True(result.Success, result.Message);
+        Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(1), "sent on the fresh quote, not after the 5 s cap");
+        Assert.Equal(115m, Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-")).Price); // 117 - 1 x 2
+    }
+
+    [Fact]
     public void A_strategys_orders_try_5_times_and_the_slippage_stops_at_3x()
     {
         Assert.Equal((4, 5, 3), (OrderChase.StrategyEntry.RejectRetries, OrderChase.StrategyEntry.Attempts, OrderChase.StrategyEntry.MaxSlipSteps));

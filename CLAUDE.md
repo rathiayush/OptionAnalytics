@@ -1727,7 +1727,14 @@ All must pass before committing.
   slippage step wider and sent again (5 sends in all, 250 ms apart); an unfilled ENTRY is re-priced to the current ask (bid) every second,
   5 times, its stop-loss / target legs moved by the same amount (`ChaseEntryAsync`, `ModifyAsync` ENTRY_LEG), then left resting; an
   unfilled EXIT the same, 5 re-prices a second apart; THE SLIPPAGE NEVER PASSES 3x (asked for - "try 5 times, slippage the same, do not
-  add up after 3x": 2x, then 3x and kept - `MaxSlipSteps` 3; the panel's own orders: every 2 s, 6 tries, unbounded steps - unchanged). ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
+  add up after 3x": 2x, then 3x and kept - `MaxSlipSteps` 3; the panel's own orders: every 2 s, 6 tries, unbounded steps - unchanged). A RETRY GOES ON A FRESH QUOTE, NOT A FIXED WAIT
+  (asked - "why wait 250 ms ... can the order API always get priority without blocking anything"): the 250 ms is not a rate limit (orders
+  have their own bucket in `DhanRestRateLimiter` - data / chart calls never make an order wait); it is the CAP on waiting for a quote NEWER
+  than the one just rejected (`FreshTickAsync` - Dhan's feed sends one about once a second; the same quote would only be rejected again),
+  so a retry goes the moment one comes. EXITS FIRST: every live order action takes ONE gate (`PriorityGate` - `_actionLock`), and an EXIT
+  (a strategy's exit, Close, Exit all, the emergency exit, a partial exit, a protection's target) is let in before any entry / level change
+  queued ahead of it; an entry retrying a rejection stops when an exit is waiting (`UrgentWaiting`). `PriorityGateTests.cs`,
+  `LiveTradingPartialExitTests.cs`. ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
   strategy's own exit is read on COMPLETED 1-minute bars (the scan runs each minute + 3 s) - the real-time stop is Dhan's own stop-loss
   LEG of the super order, placed with the entry. `LiveTradingPartialExitTests.cs` (the retry, the chase and its cap, the entry's legs
   moving), `SignalLiveOrdersTests.cs`, `SignalStrategyStoreTests.cs`. `SignalStrategyStoreTests.cs` (an old file without the column, the
