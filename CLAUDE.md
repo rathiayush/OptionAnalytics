@@ -1741,7 +1741,14 @@ All must pass before committing.
   exit"): `ExitTradeAsync` sends the exit only once the trade's working legs are CANCELLED; a leg Dhan refuses to cancel is read again -
   FILLED meanwhile = closed by Dhan (no exit, not a failure), STILL WORKING = not exited (a failure - the retry loop takes it: an exit now
   could close it twice), gone = exit. Dhan's Modify Super Order needs the ENTRY_LEG's quantity - `ChaseEntryAsync` sends it. Order placement /
-  modification / cancellation needs the server's STATIC IP whitelisted with Dhan (SEBI rule, docs' "Setup Static IP"). `PriorityGateTests.cs`,
+  modification / cancellation needs the server's STATIC IP whitelisted with Dhan (SEBI rule, docs' "Setup Static IP"). EVERY SCENARIO IS
+  TESTED (asked for - "add tests for all scenarios, it is very critical"): `LiveOrderScenarioTests.cs` (a partial of LiveTradingPartialExitTests,
+  its FakeDhan - `SuperPlaces`, `HoldPlaces` / `PlaceArrived` to hold an order in flight, `RejectEntriesOnly`, `OnRefusedCancel`): entries buy /
+  sell, rejected 5 times, the panel's never retried, the kill switch, 5 re-prices with the legs' distance, the 3x cap, the chase stopping on
+  TRADED / CANCELLED / REJECTED, an entry giving way to a waiting exit; exits - legs cancelled before the order, a refused cancel whose leg is
+  gone, a short bought back, the chase stopping once filled, Dhan's own stop-loss already done; the gate - an exit before a queued entry, a
+  trail move waiting instead of skipped, none after the legs were cancelled; the 1 s pause and a burst never refused. A new live order path
+  gets its scenario there. `PriorityGateTests.cs`,
   `LiveTradingPartialExitTests.cs`, `DhanDataApiSharedLimitTests.cs`. ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
   strategy's own exit is read on COMPLETED 1-minute bars (the scan runs each minute + 3 s) - the real-time stop is Dhan's own stop-loss
   LEG of the super order, placed with the entry. `LiveTradingPartialExitTests.cs` (the retry, the chase and its cap, the entry's legs

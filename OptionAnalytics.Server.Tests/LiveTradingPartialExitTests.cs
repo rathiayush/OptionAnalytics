@@ -16,7 +16,7 @@ namespace OptionAnalytics.Server.Tests;
 /// are (no extra orders); the panel flags that the legs now cover more than is held, and a later Close
 /// cancels the legs before exiting the rest.
 /// </summary>
-public sealed class LiveTradingPartialExitTests
+public sealed partial class LiveTradingPartialExitTests
 {
     private const uint SecurityId = 40944;
     private const int Lot = 65;
@@ -817,10 +817,18 @@ public sealed class LiveTradingPartialExitTests
         public List<string> Requests { get; } = new();
         /// <summary>Super order leg cancels Dhan refuses ("S3/TARGET_LEG").</summary>
         public HashSet<string> RefuseCancel { get; } = new();
+        /// <summary>Every super order entry sent (accepted or rejected): its LIMIT, target and stop-loss.</summary>
+        public List<(decimal Price, decimal Target, decimal Stop, string Side)> SuperPlaces { get; } = new();
+        /// <summary>While set, an order placement (plain or super) waits on it before Dhan answers - an order in flight.</summary>
+        public TaskCompletionSource? HoldPlaces;
+        /// <summary>The first placement has reached Dhan and is being held.</summary>
+        public TaskCompletionSource PlaceArrived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         /// <summary>Runs when a cancel is refused - e.g. the leg fires meanwhile.</summary>
         public Action? OnRefusedCancel;
         /// <summary>How many order placements (plain or super) Dhan rejects before it takes one - an option that ran past the LIMIT's band.</summary>
         public int RejectNextPlaces;
+        /// <summary>The rejections are for super order ENTRIES only - an exit (a plain order) goes through.</summary>
+        public bool RejectEntriesOnly;
         private int _next;
 
         public sealed class PlainOrder
@@ -870,7 +878,14 @@ public sealed class LiveTradingPartialExitTests
                     if (parts[4] == "ENTRY_LEG" || leg!["legName"]!.GetValue<string>() == parts[4]) leg!["orderStatus"] = "CANCELLED";
                 return Json(new JsonObject { ["orderId"] = parts[3], ["orderStatus"] = "CANCELLED" });
             }
-            if (request.Method == HttpMethod.Post && (path == "/orders" || path == "/super/orders") && RejectNextPlaces > 0)
+            if (request.Method == HttpMethod.Post && path == "/super/orders")
+                lock (SuperPlaces) SuperPlaces.Add((body!["price"]!.GetValue<decimal>(), body["targetPrice"]!.GetValue<decimal>(), body["stopLossPrice"]!.GetValue<decimal>(), body["transactionType"]!.GetValue<string>()));
+            if (request.Method == HttpMethod.Post && (path == "/orders" || path == "/super/orders") && HoldPlaces is { } hold)
+            {
+                PlaceArrived.TrySetResult();
+                await hold.Task;
+            }
+            if (request.Method == HttpMethod.Post && (path == "/orders" || path == "/super/orders") && RejectNextPlaces > 0 && !(RejectEntriesOnly && path == "/orders"))
             {
                 RejectNextPlaces--;
                 return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"errorMessage\":\"price outside the band\"}") };
