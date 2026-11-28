@@ -119,7 +119,7 @@ public class DhanDataApiSharedLimitTests
         Assert.Equal(category, DhanRestRateLimiter.CategoryOf(new HttpMethod(method), path));
 
     [Fact]
-    public async Task Orders_never_reach_Dhan_more_than_8_in_a_second()
+    public async Task Orders_never_reach_Dhan_more_than_9_in_a_second()
     {
         var dhan = new RecordingDhan();
         var limiter = new DhanRestRateLimiter(DataLimiter());
@@ -129,8 +129,8 @@ public class DhanDataApiSharedLimitTests
 
         var at = dhan.TimesOf("/orders");
         Assert.Equal(12, at.Count);
-        Assert.True(at[7] - at[0] < TimeSpan.FromMilliseconds(300), "the first 8 go at once - no added latency");
-        NeverMoreThan(8, TimeSpan.FromMilliseconds(1000), at);
+        Assert.True(at[8] - at[0] < TimeSpan.FromMilliseconds(300), "the first 9 go at once - no added latency");
+        NeverMoreThan(9, TimeSpan.FromMilliseconds(1000), at);                 // Dhan allows 10 a second
         Assert.Equal(12, limiter.Sent(DhanApiCategory.Order));
     }
 
@@ -155,6 +155,20 @@ public class DhanDataApiSharedLimitTests
 
     private static string? ReasonOf(System.Threading.RateLimiting.RateLimitLease lease) =>
         lease.TryGetMetadata(System.Threading.RateLimiting.MetadataName.ReasonPhrase, out var reason) ? reason : null;
+
+    [Fact]
+    public void Orders_are_held_to_Dhan_s_current_limits_only_10_a_second_and_7000_a_day()
+    {
+        // Dhan's Rate Limits page (docs.dhanhq.co/api/v2/rate-limits): Order APIs 10 req/sec, 7,000 a day - no minute / hour limit any more.
+        var day = Assert.Single(DhanRateLimits.Dhan.OrderRefused);
+        Assert.Equal(TimeSpan.FromDays(1), day.Span);
+        Assert.True(day.Permits + 9 * 60 < 7_000, "the day cap plus one segment's slack stays under Dhan's 7,000");
+        var second = DhanRateLimits.Dhan.OrderPerSecond;
+        Assert.Equal(9, second.Permits);                                       // 9 of Dhan's 10, a full second apart
+        Assert.True(second.Span - second.Span / second.Segments >= TimeSpan.FromSeconds(1));
+        Assert.Equal(TimeSpan.FromSeconds(1), DhanRestRateLimiter.OrderRateLimitPause);   // "Please retry after 1 second."
+        Assert.True(DhanDataApiRateLimiter.IsRateLimited(System.Net.HttpStatusCode.BadRequest, "RL001: Too many requests. Please retry after 1 second."));
+    }
 
     [Fact]
     public async Task An_order_past_Dhan_s_minute_limit_is_refused_at_once_not_held()

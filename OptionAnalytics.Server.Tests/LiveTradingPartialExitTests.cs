@@ -609,6 +609,34 @@ public sealed class LiveTradingPartialExitTests
     }
 
     [Fact]
+    public async Task A_trade_is_exited_only_after_its_legs_are_cancelled_never_while_one_still_works()
+    {
+        // Dhan refuses to cancel S3's stop-loss leg and it is still working: no exit goes out (it could close the trade twice).
+        var (service, dhan, _) = await CreateAsync();
+        dhan.SuperOrders.Add(TradedSuperOrder("S3", Lot, 112m));
+        dhan.Positions[0]["netQty"] = 5 * Lot;
+        dhan.RefuseCancel.Add("S3/STOP_LOSS_LEG");
+        var refused = await service.ExitTradeAsync(new[] { "S3" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true);
+        Assert.False(refused.Success);
+        Assert.Contains("NOT exited", refused.Message);
+        Assert.DoesNotContain(dhan.Requests, r => r == "POST /orders");
+        Assert.True(dhan.Requests.IndexOf("DELETE /super/orders/S3/TARGET_LEG") >= 0);
+
+        // The same, but the stop-loss leg FIRED while it was being cancelled: Dhan closed the trade - nothing to send, and it says so.
+        var (service2, dhan2, _) = await CreateAsync();
+        var s3 = TradedSuperOrder("S3", Lot, 112m);
+        dhan2.SuperOrders.Add(s3);
+        dhan2.Positions[0]["netQty"] = 5 * Lot;
+        dhan2.RefuseCancel.Add("S3/STOP_LOSS_LEG");
+        s3["legDetails"]![1]!["orderStatus"] = "PENDING";
+        dhan2.OnRefusedCancel = () => s3["legDetails"]![1]!["orderStatus"] = "TRADED";
+        var closed = await service2.ExitTradeAsync(new[] { "S3" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true);
+        Assert.True(closed.Success, closed.Message);
+        Assert.Equal("stop-loss", closed.ClosedBy);
+        Assert.DoesNotContain(dhan2.Requests, r => r == "POST /orders");
+    }
+
+    [Fact]
     public void A_strategys_orders_try_5_times_and_the_slippage_stops_at_3x()
     {
         Assert.Equal((4, 5, 3), (OrderChase.StrategyEntry.RejectRetries, OrderChase.StrategyEntry.Attempts, OrderChase.StrategyEntry.MaxSlipSteps));
@@ -675,9 +703,9 @@ public sealed class LiveTradingPartialExitTests
         var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
         Assert.Equal(119m, exit.Price);                                                               // bid 120 - 1
         feed.SetLastTickForTesting(Tick(bid: 110m, ask: 110.5m, last: 110m));                      // falling fast, not filled
-        await WaitFor(() => exit.Price < 110m);
-        Assert.Equal(108m, exit.Price);                                                               // 110 - 1 x 2
-        await WaitFor(() => exit.Price < 108m);
+        // Re-priced off the new bid, the slippage a step wider each time - 2x (108) then 3x (107); under load the first look can come
+        // before the new quote (then it is 2x of 120), so only the order of the steps and the cap are held, not which look sees what.
+        await WaitFor(() => exit.Price <= 107m);
         Assert.Equal(107m, exit.Price);                                                               // 110 - 1 x 3 - the cap (3x)
         await Task.Delay(200);
         Assert.Equal(107m, exit.Price);                                                               // never wider than the cap
@@ -702,6 +730,7 @@ public sealed class LiveTradingPartialExitTests
         await WaitFor(() => dhan.SuperModifies.Any(m => m["legName"]!.GetValue<string>() == "ENTRY_LEG"));
         var moved = dhan.SuperModifies.First(m => m["legName"]!.GetValue<string>() == "ENTRY_LEG");
         Assert.Equal((127m, 165m, 105m), (moved["price"]!.GetValue<decimal>(), moved["targetPrice"]!.GetValue<decimal>(), moved["stopLossPrice"]!.GetValue<decimal>()));
+        Assert.Equal((Lot, "LIMIT"), (moved["quantity"]!.GetValue<int>(), moved["orderType"]!.GetValue<string>()));   // Dhan: required for ENTRY_LEG
         // Filled: the chase stops.
         var count = dhan.SuperModifies.Count;
         dhan.SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == result.OrderIds[0])["orderStatus"] = "TRADED";
@@ -788,6 +817,8 @@ public sealed class LiveTradingPartialExitTests
         public List<string> Requests { get; } = new();
         /// <summary>Super order leg cancels Dhan refuses ("S3/TARGET_LEG").</summary>
         public HashSet<string> RefuseCancel { get; } = new();
+        /// <summary>Runs when a cancel is refused - e.g. the leg fires meanwhile.</summary>
+        public Action? OnRefusedCancel;
         /// <summary>How many order placements (plain or super) Dhan rejects before it takes one - an option that ran past the LIMIT's band.</summary>
         public int RejectNextPlaces;
         private int _next;
@@ -825,7 +856,10 @@ public sealed class LiveTradingPartialExitTests
             {
                 var parts = path.Split('/');
                 if (RefuseCancel.Contains($"{parts[3]}/{parts[4]}"))
+                {
+                    OnRefusedCancel?.Invoke();
                     return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"errorMessage\":\"refused\"}") };
+                }
                 var order = SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == parts[3]);
                 // An entry still filling can fill more before its cancel lands.
                 if (parts[4] == "ENTRY_LEG" && FillsBeforeCancel.TryGetValue(parts[3], out var extra))

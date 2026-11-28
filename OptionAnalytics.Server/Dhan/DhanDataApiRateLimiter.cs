@@ -174,6 +174,7 @@ public sealed class DhanDataApiRateLimiter : IDisposable
     public static bool IsRateLimited(System.Net.HttpStatusCode statusCode, string? message) =>
         (int)statusCode == 429
         || (message is { Length: > 0 } m && (m.Contains("DH-904", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("RL001", StringComparison.OrdinalIgnoreCase)      // Dhan's RATE_LIMIT_ERROR (its Rate Limits page)
             || System.Text.RegularExpressions.Regex.IsMatch(m, @"(^|\D)805(\D|$)")
             || m.Contains("too many", StringComparison.OrdinalIgnoreCase)
             || (m.Contains("rate", StringComparison.OrdinalIgnoreCase) && m.Contains("limit", StringComparison.OrdinalIgnoreCase))));

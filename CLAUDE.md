@@ -78,8 +78,9 @@ All must pass before committing.
   (`DhanDataCacheTests.cs`). EVERY Dhan REST call goes through `DhanApiClient`'s Polly pipeline (stale-token retry -> chart
   "too many requests" retry, never an order -> rate limiter -> a data call's 20 s timeout from when it is SENT), whose rate
   limiter is the ONE shared `DhanRestRateLimiter` (each attempt, retries included): Dhan's limits are per account and per
-  category - orders 10/s, 250/min, 1000/h, 7000/day (.NET sliding windows; one past the minute / hour / day limit is refused,
-  not held), data 5/s (`DhanDataApiRateLimiter`: evenly spaced, page loads first), quotes 1/s, the rest 20/s
+  category - orders 10/s and 7,000/day, NO minute / hour limit (Dhan's Rate Limits page, docs.dhanhq.co/api/v2/rate-limits, checked 28 Nov
+  2026 - the 250/min and 1000/h it used to hold orders to were gone: held to 9 a second and 6,300 a day; one past the day is refused,
+  not held; after Dhan's "too many requests" - RL001 / DH-904, "retry after 1 second" - orders pause exactly 1 s, `OrderRateLimitPause`), data 5/s (`DhanDataApiRateLimiter`: evenly spaced, page loads first), quotes 1/s, the rest 20/s
   (`DhanDataApiSharedLimitTests.cs`). Never call Dhan's REST API around `DhanApiClient`. No loops of a failing request (Dhan
   support flagged them): failures are NOT cached - every call goes to Dhan - but a background timer whose Dhan call failed
   slows down (`RetryBackoff` / `KeyedBackoff`: today warm-up and spot volume 10 min doubling to 1 h, CDV 30 s doubling to
@@ -1733,8 +1734,15 @@ All must pass before committing.
   than the one just rejected (`FreshTickAsync` - Dhan's feed sends one about once a second; the same quote would only be rejected again),
   so a retry goes the moment one comes. EXITS FIRST: every live order action takes ONE gate (`PriorityGate` - `_actionLock`), and an EXIT
   (a strategy's exit, Close, Exit all, the emergency exit, a partial exit, a protection's target) is let in before any entry / level change
-  queued ahead of it; an entry retrying a rejection stops when an exit is waiting (`UrgentWaiting`). `PriorityGateTests.cs`,
-  `LiveTradingPartialExitTests.cs`. ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
+  queued ahead of it; an entry retrying a rejection stops when an exit is waiting (`UrgentWaiting`). A STOP-LOSS CHANGE IS URGENT TOO
+  (asked for - "SL also take priority for live strategy"): a trailing stop's move (`MoveTrailingStopAsync` - it was SKIPPED whenever the
+  gate was busy) and `UpdateTradeLevelsAsync` / `SetPositionProtectionAsync` queue with the exits; a trail move that waited checks again
+  that its leg still works and no tighter stop went out. CANCEL FIRST, THEN EXIT (asked for - "super order first should cancel and then
+  exit"): `ExitTradeAsync` sends the exit only once the trade's working legs are CANCELLED; a leg Dhan refuses to cancel is read again -
+  FILLED meanwhile = closed by Dhan (no exit, not a failure), STILL WORKING = not exited (a failure - the retry loop takes it: an exit now
+  could close it twice), gone = exit. Dhan's Modify Super Order needs the ENTRY_LEG's quantity - `ChaseEntryAsync` sends it. Order placement /
+  modification / cancellation needs the server's STATIC IP whitelisted with Dhan (SEBI rule, docs' "Setup Static IP"). `PriorityGateTests.cs`,
+  `LiveTradingPartialExitTests.cs`, `DhanDataApiSharedLimitTests.cs`. ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
   strategy's own exit is read on COMPLETED 1-minute bars (the scan runs each minute + 3 s) - the real-time stop is Dhan's own stop-loss
   LEG of the super order, placed with the entry. `LiveTradingPartialExitTests.cs` (the retry, the chase and its cap, the entry's legs
   moving), `SignalLiveOrdersTests.cs`, `SignalStrategyStoreTests.cs`. `SignalStrategyStoreTests.cs` (an old file without the column, the
