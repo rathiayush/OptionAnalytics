@@ -36,10 +36,14 @@ public sealed class TrueDataLiveFeed : BackgroundService
     // page to show when nothing arrives. A message has no credentials in it.
     private readonly Queue<string> _recent = new();
 
-    public TrueDataLiveFeed(IOptions<TrueDataOptions> options, ILogger<TrueDataLiveFeed> logger)
+    /// <summary>Where every applied trade / quote is recorded (Storage:TrueDataTicksPath) - none = memory only, as before.</summary>
+    private readonly TrueDataTickStore? _ticks;
+
+    public TrueDataLiveFeed(IOptions<TrueDataOptions> options, ILogger<TrueDataLiveFeed> logger, TrueDataTickStore? ticks = null)
     {
         _options = options.Value;
         _logger = logger;
+        _ticks = ticks;
         _transport = LoadTransport();
         ChainSource = new TrueDataOptionChainSource(_options);
         foreach (var i in _options.Live.Instruments.Where(i => i.Underlying.Length > 0 && i.Symbol.Length > 0))
@@ -615,17 +619,31 @@ public sealed class TrueDataLiveFeed : BackgroundService
 
     internal void OnTrade(TrueDataTrade t)
     {
-        if (_watch.Tracks(t.SymbolId)) { Rates.Record("options trades", DateTimeOffset.UtcNow); _watch.OnTrade(t, t.Time ?? Clock()); return; }
+        if (_watch.Tracks(t.SymbolId))
+        {
+            Rates.Record("options trades", DateTimeOffset.UtcNow);
+            _ticks?.RecordTrade(_watch.SymbolOf(t.SymbolId) ?? t.SymbolId, t.Time ?? Clock(), t.Price, t.TotalVolume, t.OpenInterest, t.Bid, t.BidQty, t.Ask, t.AskQty);
+            _watch.OnTrade(t, t.Time ?? Clock());
+            return;
+        }
         if (StreamOf(t.SymbolId) is not { } s) return;
         Rates.Record($"{s.Instrument.Underlying} futures trades", DateTimeOffset.UtcNow);
+        _ticks?.RecordTrade(s.Instrument.Symbol, t.Time ?? Clock(), t.Price, t.TotalVolume, t.OpenInterest, t.Bid, t.BidQty, t.Ask, t.AskQty);
         s.Book.OnTrade(t.Time ?? Clock(), t.Sequence, t.Price, t.Quantity, t.Bid, t.BidQty, t.Ask, t.AskQty, t.TotalVolume);
     }
 
     internal void OnQuote(TrueDataQuote q)
     {
-        if (_watch.Tracks(q.SymbolId)) { Rates.Record("options quotes", DateTimeOffset.UtcNow); _watch.OnQuote(q.SymbolId, q.Bid, q.BidQty, q.Ask, q.AskQty); return; }
+        if (_watch.Tracks(q.SymbolId))
+        {
+            Rates.Record("options quotes", DateTimeOffset.UtcNow);
+            _ticks?.RecordQuote(_watch.SymbolOf(q.SymbolId) ?? q.SymbolId, q.Time ?? Clock(), q.Bid, q.BidQty, q.Ask, q.AskQty);
+            _watch.OnQuote(q.SymbolId, q.Bid, q.BidQty, q.Ask, q.AskQty);
+            return;
+        }
         if (StreamOf(q.SymbolId) is not { } s) return;
         Rates.Record($"{s.Instrument.Underlying} futures quotes", DateTimeOffset.UtcNow);
+        _ticks?.RecordQuote(s.Instrument.Symbol, q.Time ?? Clock(), q.Bid, q.BidQty, q.Ask, q.AskQty);
         Interlocked.Increment(ref s.Quotes);
         s.Book.OnQuote(q.Time ?? Clock(), q.Bid, q.BidQty, q.Ask, q.AskQty);
     }

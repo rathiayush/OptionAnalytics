@@ -10,6 +10,10 @@ public static class TrueDataRegistration
         var section = configuration.GetSection(TrueDataOptions.SectionName);
         services.Configure<TrueDataOptions>(section);
         var options = section.Get<TrueDataOptions>();
+        // TrueData's raw ticks on disk - its own store (Storage:TrueDataTicksPath): the live feed records into it, the tick history reads through it.
+        if (options?.TickFlowOn == true || options?.Enabled == true) services.AddSingleton(sp => new TrueDataTickStore(
+            TrueDataTickStore.ResolveRoot(configuration["Storage:TrueDataTicksPath"], sp.GetService<IHostEnvironment>()?.ContentRootPath ?? AppContext.BaseDirectory),
+            sp.GetRequiredService<ILogger<TrueDataTickStore>>()));
         // The LIVE tick feed and the Tick Flow page: TrueData:Enabled (the master switch) with the login set - TickFlowOn.
         if (options?.TickFlowOn == true)
         {
@@ -24,7 +28,8 @@ public static class TrueDataRegistration
             services.AddHostedService(sp => sp.GetRequiredService<TrueDataLiveFeed>());
         }
         if (options?.Enabled != true) return services;
-        services.AddSingleton<ITrueDataHistoryApi, TrueDataSdkHistoryApi>();
+        services.AddSingleton<TrueDataSdkHistoryApi>();
+        services.AddSingleton<ITrueDataHistoryApi>(sp => new CachingTrueDataHistoryApi(sp.GetRequiredService<TrueDataSdkHistoryApi>(), sp.GetRequiredService<TrueDataTickStore>()));
         services.AddSingleton<TrueDataOrderFlowSource>();
         return services;
     }

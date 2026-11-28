@@ -189,7 +189,10 @@ public sealed class TrueDataRegistrationTests
     {
         var provider = Build(new Dictionary<string, string?> { ["TrueData:Enabled"] = "true", ["TrueData:UserId"] = "u", ["TrueData:Password"] = "p" });
 
-        Assert.IsType<TrueDataSdkHistoryApi>(provider.GetService(typeof(ITrueDataHistoryApi)));
+        // The SDK client, read through the tick store (a past day kept on disk is never asked again).
+        Assert.IsType<CachingTrueDataHistoryApi>(provider.GetService(typeof(ITrueDataHistoryApi)));
+        Assert.NotNull(provider.GetService(typeof(TrueDataSdkHistoryApi)));
+        Assert.NotNull(provider.GetService(typeof(TrueDataTickStore)));
         Assert.NotNull(provider.GetService(typeof(TrueDataOrderFlowSource)));
     }
 }
