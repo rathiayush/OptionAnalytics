@@ -157,6 +157,9 @@ function oiBreakReads(ceLevelSeries, peLevelSeries, t, atm, bucketSeconds) {
  * each expiry's own (`gexDay`'s `chains`); the premiums (the ATM straddle, the option bars and volumes, the trades) stay
  * the current expiry's. `expiries` on the day = how many were summed. None given: exactly as before.
  */
+/** How many of the day's first minutes decide whether the rule's price / VWAP is the futures' or the index's. */
+export const SOURCE_MINUTES = 5
+
 export function prepareDay(run, { underlying = null, prevProfile = null, minMinutes = 30, expiryChains = null } = {}) {
   const u = String(underlying ?? run?.underlying ?? '').toUpperCase()
   const session = inSession
@@ -190,7 +193,11 @@ export function prepareDay(run, { underlying = null, prevProfile = null, minMinu
     const ms = minuteOf(msOf(b.time))
     if (Number.isFinite(ms) && b.close > 0 && session(ms)) fut.set(ms, b)
   }
-  const useFutures = fut.size >= n * 0.8
+  // Decided from the day's FIRST minutes only (`SOURCE_MINUTES`, known by 09:20 - the live scan never reads earlier), never
+  // from the whole day: it counted the futures over every minute of the day, so a feed that dropped out in the afternoon
+  // turned the MORNING's VWAP / IB / candles to spot in the backtest while the live scan had read them on the futures.
+  const head = t.slice(0, Math.min(n, SOURCE_MINUTES))
+  const useFutures = head.filter((ms) => fut.has(ms)).length >= head.length * 0.8
   const priceBars = []
   let lastFut = null
   for (let i = 0; i < n; i++) {
