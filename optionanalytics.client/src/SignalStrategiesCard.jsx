@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Button, Card, Checkbox, Input, Modal, Popconfirm, Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd'
-import { DeleteOutlined, DownloadOutlined, HistoryOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Button, Card, Checkbox, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd'
+import { DeleteOutlined, DownloadOutlined, HistoryOutlined, RocketOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons'
+import { Link } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
 import { RULE_ACTIONS, normalizeRule, ruleText } from './signalBacktest.js'
@@ -264,7 +265,9 @@ function TodayCell({ s, today }) {
 }
 
 /** The saved strategies: what each is, its live switches, today's trades, and Load / Update / History / Remove. */
-export function SavedStrategiesCard({ strategies, today, liveScan, refresh, pageSettings, onLoad, onSave }) {
+/** The saved strategies and their LIVE scan - the Live strategies page's card (`LiveStrategiesPage`). `onLoad` puts one on the Signal
+ *  backtest page; `pageSettings` / `onSave` (the backtest page's settings) add Update / Save strategy where there are any. */
+export function SavedStrategiesCard({ strategies, today, liveScan, refresh, pageSettings = null, onLoad = null, onSave = null }) {
   const auth = useAuth()
   const narrow = useMediaQuery('(max-width: 768px)')
   const [busyId, setBusyId] = useState(null)
@@ -286,7 +289,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       title: `Place REAL Dhan orders for "${s.name}"?`,
       content: (
         <Space direction="vertical" size={6} style={{ fontSize: 13 }}>
-          <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: the lots set for {traded} on <b>Trade settings</b>, its stop-loss / target as the legs (Trade settings' where it has none), at the Trade settings' slippage.</span>
+          <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: {s.liveLots > 0 ? <b>{s.liveLots} lot{s.liveLots === 1 ? '' : 's'} (its own lots)</b> : <>the lots set for {traded} on <b>Trade settings</b></>}, its stop-loss / target as the legs (Trade settings' where it has none), at the Trade settings' slippage.</span>
           <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it.</span>
           <span>At most {max} a day, one at a time; an entry seen over 3 minutes late is not placed. The daily loss kill switch applies.</span>
         </Space>
@@ -303,6 +306,8 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
         <Checkbox checked={s.alerts} disabled={!s.live} onChange={(e) => toggle(s, 'alerts', e.target.checked)}><Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Alerts</Text></Checkbox>
         <Checkbox checked={s.dailyReport} disabled={!s.live} onChange={(e) => toggle(s, 'dailyReport', e.target.checked)}><Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Daily report</Text></Checkbox>
       </Space>
+      <LotsInput s={s} busy={busyId === s.id} locked={Boolean(s.liveOrders) && !isAdmin}
+        onSet={(lots) => act(s.id, () => updateStrategy(s.id, { liveLots: lots }), lots > 0 ? `"${s.name}" trades ${lots} lot${lots === 1 ? '' : 's'} live from its next entry.` : `"${s.name}" is back to its default lots.`)} />
       {isAdmin
         ? (
           <Space size={6}>
@@ -318,12 +323,12 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   )
   const actions = (s) => (
     <Space size={4} wrap>
-      <Tooltip title="Put this strategy's index, rule and settings on the page."><Button size="small" icon={<UploadOutlined />} onClick={() => onLoad(s)}>Load</Button></Tooltip>
-      <Popconfirm title={s.liveOrders
+      {onLoad && <Tooltip title="Open this strategy's index, rule and settings on the Signal backtest page."><Button size="small" icon={<UploadOutlined />} onClick={() => onLoad(s)}>Load</Button></Tooltip>}
+      {pageSettings && <Popconfirm title={s.liveOrders
         ? (isAdmin ? `"${s.name}" places LIVE orders - replace it with the rule and settings on the page now? The new rule trades real money from its next minute.` : `Replace "${s.name}" with the page's rule and settings? Its live orders are turned off (an admin turns them on again).`)
         : `Replace "${s.name}" with the rule and settings on the page now?`} okText="Update" cancelText="No" onConfirm={() => act(s.id, () => updateStrategy(s.id, { settings: pageSettings }), `"${s.name}" updated - the live scan uses it from its next minute.`)}>
         <Button size="small" icon={<SaveOutlined />}>Update</Button>
-      </Popconfirm>
+      </Popconfirm>}
       <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOf(s)}>History</Button>
       <Popconfirm title={`Remove "${s.name}" from the list? Its history stays on the server (nothing is deleted).`} okText="Remove" cancelText="Keep" onConfirm={() => act(s.id, () => deleteStrategy(s.id), `"${s.name}" removed.`)}>
         <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Remove this strategy" title="Remove this strategy" />
@@ -349,10 +354,10 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       {anyLive && liveScan && <Tag color={liveScan === 'running' ? 'green' : 'orange'} style={{ margin: 0 }}>{LIVE_STATE[liveScan] ?? liveScan}</Tag>}
     </Space>
   )
-  const extra = <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSave}>Save strategy</Button>
+  const extra = onSave ? <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSave}>Save strategy</Button> : null
   let body
   if (!strategies.length) {
-    body = <Text type="secondary" style={{ fontSize: 12 }}>Save the rule and settings on the page as a strategy - load it back any time, run it in the background, and scan it live every trading day with Telegram alerts and a daily report.</Text>
+    body = <Text type="secondary" style={{ fontSize: 12 }}>No saved strategy yet - build a rule on the <Link to="/signal-backtest">Signal backtest</Link> page and save it there; it is scanned live from here every trading day, with Telegram alerts and a daily report.</Text>
   } else if (narrow) {
     body = sorted.map((s) => (
       <div key={s.id} className="oa-bg-run">
@@ -372,7 +377,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
         tableLayout="fixed" scroll={{ x: 1000 }}
         columns={[
           { title: 'Strategy', key: 'what', render: (_, s) => what(s) },
-          { title: 'Live scan', key: 'live', width: 210, render: (_, s) => switches(s) },
+          { title: 'Live scan', key: 'live', width: 230, render: (_, s) => switches(s) },
           { title: 'Total', key: 'total', width: 130, sorter: (a, b) => totalOf(a) - totalOf(b), defaultSortOrder: 'descend', sortDirections: ['descend', 'ascend'], render: (_, s) => <TotalCell s={s} /> },
           { title: 'Today', key: 'today', width: 260, render: (_, s) => <TodayCell s={s} today={today} /> },
           { title: '', key: 'actions', width: 300, render: (_, s) => actions(s) },
@@ -384,6 +389,58 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
     <Card size="small" title={title} extra={extra}>
       {body}
       {historyOf && <StrategyHistoryModal strategy={historyOf} onClose={() => setHistoryOf(null)} />}
+    </Card>
+  )
+}
+
+/** A strategy's OWN LOTS for its live scan (`liveLots` on the server): its paper trades and P&L, and - with Live orders on - its Dhan
+ *  orders. Empty = as before: the strategy's saved lots for the paper trades, the traded index's Trade settings lots for Dhan. Saved
+ *  on Enter / leaving the box; a strategy placing live orders is changed by an admin only. */
+export function LotsInput({ s, busy, locked, onSet }) {
+  const [value, setValue] = useState(s.liveLots > 0 ? s.liveLots : null)
+  useEffect(() => { setValue(s.liveLots > 0 ? s.liveLots : null) }, [s.liveLots])
+  // The last lots sent, so Enter and the blur that follows it send one change, not two.
+  const sent = useRef(s.liveLots > 0 ? s.liveLots : 0)
+  useEffect(() => { sent.current = s.liveLots > 0 ? s.liveLots : 0 }, [s.liveLots])
+  const commit = () => { const next = value > 0 ? Math.round(value) : 0; if (next !== sent.current) { sent.current = next; onSet(next) } }
+  const fallback = s.settings?.lots ?? 1
+  return (
+    <Space size={6}>
+      <Tooltip title={locked ? 'This strategy places live Dhan orders - an admin changes its lots.'
+        : `Lots it trades live: its paper trades and P&L, and its Dhan orders when Live orders is on. Empty = as before (${fallback} lot${fallback === 1 ? '' : 's'} for the paper trades, Trade settings' lots for Dhan).`}>
+        <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Lots</Text>
+      </Tooltip>
+      <InputNumber size="small" min={1} max={100} precision={0} value={value} placeholder={`default (${fallback})`} disabled={busy || locked}
+        onChange={(v) => setValue(v)} onBlur={commit} onPressEnter={commit} style={{ width: 110 }} aria-label={`Lots for ${s.name}`} />
+    </Space>
+  )
+}
+
+/** The Signal backtest page's SAVED STRATEGIES BAR (the strategies and their live scan moved to the Live strategies page): save the
+ *  page's rule and settings, put a saved one on the page, or update one with the page's - and a link to the Live strategies page. */
+export function SavedStrategiesBar({ strategies, onSave, onLoad, pageSettings, refresh }) {
+  const [picked, setPicked] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const st = strategies.find((x) => x.id === picked) ?? null
+  const update = async () => {
+    if (!st) return
+    setBusy(true)
+    try { await updateStrategy(st.id, { settings: pageSettings }); message.success(`"${st.name}" updated - the live scan uses it from its next minute.`) }
+    catch (err) { message.error(err.message) } finally { setBusy(false); refresh() }
+  }
+  return (
+    <Card size="small" title={`Saved strategies (${strategies.length})`} extra={<Link to="/live-strategies"><Button size="small" icon={<RocketOutlined />}>Live strategies</Button></Link>}>
+      <Space wrap size={[8, 8]} align="center">
+        <Button size="small" type="primary" icon={<SaveOutlined />} onClick={onSave}>Save strategy</Button>
+        <Select size="small" showSearch optionFilterProp="label" placeholder="A saved strategy" value={picked} onChange={setPicked} style={{ width: 240 }}
+          options={sortStrategies(strategies).map((x) => ({ value: x.id, label: x.name }))} aria-label="A saved strategy" />
+        <Button size="small" icon={<UploadOutlined />} disabled={!st} onClick={() => onLoad(st)}>Load</Button>
+        <Popconfirm disabled={!st} okText="Update" cancelText="No" onConfirm={update}
+          title={st?.liveOrders ? `"${st.name}" places LIVE orders - replace it with the rule and settings on the page now? Its live orders are turned off unless you are an admin.` : `Replace "${st?.name}" with the rule and settings on the page now?`}>
+          <Button size="small" icon={<SaveOutlined />} disabled={!st} loading={busy}>Update with this page</Button>
+        </Popconfirm>
+        <Text type="secondary" style={{ fontSize: 12 }}>Live scan, lots, alerts, live orders and history: the <Link to="/live-strategies">Live strategies</Link> page.</Text>
+      </Space>
     </Card>
   )
 }

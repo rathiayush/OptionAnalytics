@@ -29,7 +29,9 @@ public sealed class SignalStrategyStore
     public const int MaxStrategiesPerOwner = 50;
     public const int MaxSettingsBytes = 64 * 1024;
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
-    public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders" };
+    /// <summary>The most lots a strategy may be set to trade live (the backtest's own range; Trade settings' max-lots cap still applies to Dhan orders).</summary>
+    public const int MaxLiveLots = 100;
+    public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders", "liveLots" };
     public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "limit", "reportedUtc" };
     /// <summary>A history row's status for a signal or a live-shown trade that was not taken (another strategy's trade was open, or the
     /// end-of-day read does not have it): it has no P&L and is in no count.</summary>
@@ -76,7 +78,9 @@ public sealed class SignalStrategyStore
                 if (JsonNode.Parse(row.GetValueOrDefault("settings") ?? "") is not JsonObject settings) continue;
                 list.Add(new SignalStrategy(row["id"], row["name"], row["owner"], row["underlying"], row["live"] == "true", row["alerts"] == "true",
                     row["dailyReport"] == "true", DateTimeOffset.Parse(row["createdUtc"], CultureInfo.InvariantCulture), DateTimeOffset.Parse(row["updatedUtc"], CultureInfo.InvariantCulture), settings,
-                    row.GetValueOrDefault("liveOrders") == "true"));
+                    row.GetValueOrDefault("liveOrders") == "true",
+                    // A file saved before the column has none: 0 = the lots as before (the settings' for the paper trades, Trade settings' for Dhan).
+                    int.TryParse(row.GetValueOrDefault("liveLots"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var lots) && lots > 0 ? lots : 0));
             }
             catch (Exception ex) when (ex is JsonException or FormatException or KeyNotFoundException) { _logger.LogWarning("A saved strategy row could not be read: {Error}", ex.Message); }
         }
@@ -89,6 +93,7 @@ public sealed class SignalStrategyStore
             ["id"] = s.Id, ["name"] = s.Name, ["owner"] = s.Owner, ["underlying"] = s.Underlying, ["live"] = Bool(s.Live), ["alerts"] = Bool(s.Alerts),
             ["dailyReport"] = Bool(s.DailyReport), ["createdUtc"] = s.CreatedUtc.ToString("O"), ["updatedUtc"] = s.UpdatedUtc.ToString("O"), ["settings"] = s.Settings.ToJsonString(),
             ["liveOrders"] = Bool(s.LiveOrders),
+            ["liveLots"] = s.LiveLots > 0 ? s.LiveLots.ToString(CultureInfo.InvariantCulture) : "",
         }));
 
     private static string Bool(bool v) => v ? "true" : "false";
@@ -138,18 +143,22 @@ public sealed class SignalStrategyStore
         if (request.LiveOrders is not null && owner is not null) return (null, "Only an admin can switch live orders.");
         var (name, settings, underlying, error) = Check(request, requireAll: false);
         if (error is not null) return (null, error);
+        if (request.LiveLots is < 0 or > MaxLiveLots) return (null, $"Lots go from 1 to {MaxLiveLots} (0 = as before).");
         lock (_lock)
         {
             var all = ReadAll();
             var k = all.FindIndex(s => s.Id == id && (owner is null || Same(s.Owner, owner)));
             if (k < 0) return (null, "No such strategy.");
             var old = all[k];
+            if (request.LiveLots is { } changed && changed != old.LiveLots && old.LiveOrders && owner is not null)
+                return (null, "This strategy places live Dhan orders - only an admin can change its lots.");
             if (name is not null && all.Any(s => s.Id != id && Same(s.Owner, old.Owner) && Same(s.Name, name))) return (null, $"A strategy is already called \"{name}\"");
             all[k] = old with
             {
                 Name = name ?? old.Name, Settings = settings ?? old.Settings, Underlying = underlying ?? old.Underlying, Live = request.Live ?? old.Live,
                 Alerts = request.Alerts ?? old.Alerts, DailyReport = request.DailyReport ?? old.DailyReport, UpdatedUtc = now,
                 LiveOrders = request.LiveOrders ?? (settings is not null && owner is not null ? false : old.LiveOrders),
+                LiveLots = request.LiveLots ?? old.LiveLots,
             };
             WriteAll(all);
             return (all[k], null);
@@ -444,12 +453,23 @@ public sealed record SignalRunningTrade(string Option, string Action, string Ent
 /// <summary>A saved strategy: its name, owner, index, the live scan's switches, its settings (the page's) and whether it
 /// places LIVE Dhan orders (an admin's switch, off by default).</summary>
 public sealed record SignalStrategy(string Id, string Name, string Owner, string Underlying, bool Live, bool Alerts, bool DailyReport,
-    DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, JsonObject Settings, bool LiveOrders = false);
+    DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, JsonObject Settings, bool LiveOrders = false, int LiveLots = 0)
+{
+    /// <summary>The settings the LIVE SCAN reads: the saved ones, with the strategy's own lots (the Live strategies page) over the
+    /// settings' when set - so its paper trades and P&amp;L are of the lots it trades. 0 = the settings as saved (as before).</summary>
+    public JsonObject LiveSettings()
+    {
+        if (LiveLots <= 0) return Settings;
+        var copy = (JsonObject)Settings.DeepClone();
+        copy["lots"] = LiveLots;
+        return copy;
+    }
+}
 
 /// <summary>A strategy saved or changed from the page (null = left as it is). LiveOrders: an admin only (a new strategy
 /// is never saved with it on).</summary>
 public sealed record SignalStrategyRequest(string? Name = null, JsonNode? Settings = null, bool? Live = null, bool? Alerts = null, bool? DailyReport = null,
-    bool? LiveOrders = null);
+    bool? LiveOrders = null, int? LiveLots = null);
 
 /// <summary>An entry / exit the live scan saw (its key makes it once), with the trade it belongs to and that trade's
 /// history row as of this event (open at its entry, closed at its exit).</summary>

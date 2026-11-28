@@ -36,7 +36,7 @@ public sealed class LiveTradingOrderGateway(LiveTradingService trading) : ISigna
 /// <list type="bullet">
 /// <item>ENTRY: a Dhan SUPER ORDER (LiveTradingService.PlaceAsync - LIMIT at the live ask / bid +- the Trade settings'
 /// slippage) of the TRADED index's option (the strategy's "Trade in"), the rule's and the mirror's alike; QUANTITY = the
-/// traded index's Trade settings lots; its stop-loss / target legs = the strategy's own SL / target in premium points from
+/// strategy's own lots (Live strategies page) when set, else the traded index's Trade settings lots; its stop-loss / target legs = the strategy's own SL / target in premium points from
 /// its entry (the Trade settings' where the strategy has none - a super order needs both); the server's time exit at 15:10
 /// IST behind it (a safety net should the scan stop). NOT placed - kept with why and sent to Telegram - when it was seen
 /// LATE (over 3 minutes after its signal minute, as the scan's "seen late": a restart), it had already exited when seen,
@@ -143,23 +143,25 @@ public sealed class SignalLiveOrders
         }
 
         var ts = _tradeSettings.Get(underlying);
+        // The strategy's own lots (the Live strategies page) when set, else the traded index's Trade settings lots - as before.
+        var lots = strategy.LiveLots > 0 ? strategy.LiveLots : ts.Lots;
         var stopLoss = t.StopLossPoints is > 0 ? Math.Round(t.StopLossPoints.Value, 2) : ts.SlPoints;
         var target = t.TargetPoints is > 0 ? Math.Round(t.TargetPoints.Value, 2) : ts.TargetPoints;
         var exitAt = IstClock.AtIstTime(IstClock.IstDate(now), LiveTradingService.TimeExitCutoffMinute);
-        var request = new ManualOrderRequest(underlying, expiry, t.Strike!.Value, side, action, ts.Lots, ts.SlippagePoints, stopLoss, target,
+        var request = new ManualOrderRequest(underlying, expiry, t.Strike!.Value, side, action, lots, ts.SlippagePoints, stopLoss, target,
             ExitAtMs: exitAt.ToUnixTimeMilliseconds(), ExitReason: $"{strategy.Name}: 15:10 square-off");
         _logger.LogWarning("Saved strategy {Name}: LIVE {Action} {Option} {Expiry:yyyy-MM-dd} x{Lots} lots (SL {Sl}, target {Target}, slippage {Slippage}) - trade {Trade}.",
-            strategy.Name, action, option, expiry, ts.Lots, stopLoss, target, ts.SlippagePoints, t.Key);
+            strategy.Name, action, option, expiry, lots, stopLoss, target, ts.SlippagePoints, t.Key);
         var result = await _gateway.PlaceAsync(request, cancellationToken);
         var status = result.Success ? "placed" : result.OrderIds.Count > 0 ? "partly placed" : "not placed";
         // What was sent: the entry's LIMIT and its super order's stop-loss / target prices (Dhan's fill comes on its own feed).
-        _store.RecordOrder(strategy.Id, new SignalOrderRow(UtcNow(), date, t.Key!, "entry", status, underlying, option, action, ts.Lots, result.OrderIds, result.Message)
+        _store.RecordOrder(strategy.Id, new SignalOrderRow(UtcNow(), date, t.Key!, "entry", status, underlying, option, action, lots, result.OrderIds, result.Message)
         {
             Price = result.Prices?.Limit, Sl = result.Prices?.StopLoss, Target = result.Prices?.Target, Reason = result.Success ? "" : result.Message,
         });
         await NotifyAsync(result.Success
             ? $"🟢 LIVE order placed · {strategy.Name}{Mirror(t)}: {result.Message}"
-            : $"⚠️ LIVE order {status.ToUpperInvariant()} · {strategy.Name}{Mirror(t)}: {action} {option} x{ts.Lots} lot{(ts.Lots == 1 ? "" : "s")} - {result.Message}");
+            : $"⚠️ LIVE order {status.ToUpperInvariant()} · {strategy.Name}{Mirror(t)}: {action} {option} x{lots} lot{(lots == 1 ? "" : "s")} - {result.Message}");
     }
 
     private async Task ExitAsync(SignalStrategy strategy, string date, SignalLiveTrade t, CancellationToken cancellationToken)
