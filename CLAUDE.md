@@ -1715,6 +1715,11 @@ All must pass before committing.
   index's Trade settings lots, as before; Trade settings' max-lots cap still applies). `SignalStrategyStoreTests.cs` (an old file without the column, the
   range, the admin rule), `SignalLiveOrdersTests.cs` (the lots on the order). Checked in a browser at 1400 / 390 px against a mocked API (one save per
   change; Load fills the backtest page).
+  RULES, LOAD, HISTORY AND THE WAY BACK (asked for - "load, history, trades all should work; every strategy selection will show the rules; load may navigate to
+  signal backtest and there will be a back option to go to live strategies"): each strategy's NAME (a link) and its "Rules" button open a Rules window
+  (`StrategyRules` - the rule and its mirror in words and every setting the live scan trades with, its own lots over the saved; Load on Signal backtest /
+  History from it); the backtest page's bar shows the same `StrategyRules` under the strategy picked; Load lands on the backtest page with "Back to Live
+  strategies" over it (`fromLive`, kept while the page is open). Checked in a browser against a mocked API: Rules, History's trades, Load, the bar, Back.
   LIVE DHAN ORDERS (asked for - "wire these strategies to actual trading on Dhan"; `SignalLiveOrders`): a strategy's
   "Live orders (Dhan)" switch (`liveOrders` in strategies.csv, the last column - a file without it reads as off) is an
   ADMIN's only (a User gets 403; `Update` refuses it for a scoped owner; a strategy is never SAVED armed; new settings

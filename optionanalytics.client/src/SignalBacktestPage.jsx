@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Alert, Button, Card, Checkbox, Input, InputNumber, Progress, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, message } from 'antd'
-import { CloudServerOutlined, CloseOutlined, DownloadOutlined, ExperimentOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, CloudServerOutlined, CloseOutlined, DownloadOutlined, ExperimentOutlined, PlayCircleOutlined, PlusOutlined, StopOutlined, SwapOutlined, TrophyOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { LineSeries } from 'lightweight-charts'
 import { AXIS_COLOR, BORDER_COLOR, DOWN_COLOR, GRID_COLOR, NavBar, UP_COLOR, useMediaQuery, usePersistedState } from './shared.jsx'
@@ -601,9 +601,12 @@ export default function SignalBacktestPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const loadStrategy = location.state?.loadStrategy
+  // Came here by Load on the Live strategies page: a way back (kept while the page is open - the router state is cleared once read).
+  const [fromLive, setFromLive] = useState(null)
   useEffect(() => {
     if (!loadStrategy) return
     applyRunSettings(loadStrategy, loadStrategy.name)
+    setFromLive(loadStrategy.name)
     navigate(location.pathname, { replace: true, state: null })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadStrategy])
@@ -822,6 +825,12 @@ export default function SignalBacktestPage() {
           <Title level={3} style={{ margin: 0 }}>Option Analytics</Title>
           <NavBar />
         </Space>
+        {fromLive && (
+          <Space wrap size={[8, 6]} align="center">
+            <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/live-strategies')}>Back to Live strategies</Button>
+            <Text type="secondary" style={{ fontSize: 12 }}>&quot;{fromLive}&quot; is on the page - run it, change it, and Update it from the Saved strategies bar below.</Text>
+          </Space>
+        )}
 
         <Card size="small" title="Signal backtest - your rule over past days">
           <Space direction="vertical" size={12} style={{ width: '100%' }}>

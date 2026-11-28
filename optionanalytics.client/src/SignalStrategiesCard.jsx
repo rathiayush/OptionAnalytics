@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Card, Checkbox, Input, InputNumber, Modal, Popconfirm, Select, Space, Switch, Table, Tabs, Tag, Tooltip, Typography, message } from 'antd'
-import { DeleteOutlined, DownloadOutlined, HistoryOutlined, RocketOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons'
+import { DeleteOutlined, DownloadOutlined, HistoryOutlined, ProfileOutlined, RocketOutlined, SaveOutlined, UploadOutlined } from '@ant-design/icons'
 import { Link } from 'react-router-dom'
 import dayjs from 'dayjs'
 import { DOWN_COLOR, UP_COLOR, useAuth, useMediaQuery } from './shared.jsx'
-import { RULE_ACTIONS, normalizeRule, ruleText } from './signalBacktest.js'
+import { RULE_ACTIONS, mirrorIsSame, mirrorLines, normalizeRule, ruleText } from './signalBacktest.js'
+import { chargesText, cleanBacktestSettings, spotStopText } from './signalBacktestJob.js'
 import { createStrategy, deleteStrategy, historyCsvUrl, strategyHistory, updateStrategy } from './signalStrategiesApi.js'
 import { orderTrades, sortStrategies, sortTrades, totalOf } from './signalStrategyHistory.js'
 
@@ -23,6 +24,41 @@ const pnlColor = (v) => (v > 0 ? UP_COLOR : v < 0 ? DOWN_COLOR : undefined)
 const num = (v) => (v === '' || v == null ? NaN : Number(v))
 const ACTION_LABEL = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.label]))
 const ruleOf = (s) => { const r = normalizeRule(s.settings?.rule); return ruleText(r.lines, r.action, r.logic) }
+const OPPOSITE_ACTION = Object.fromEntries(RULE_ACTIONS.map((a) => [a.value, a.opposite]))
+
+/** A saved strategy's WHOLE rule - the rule, its mirror (when on and it has a side) - and the settings it trades with, as the live
+ *  scan reads them (its own lots over the saved ones). The Rules window on the Live strategies page and the backtest page's bar. */
+export function StrategyRules({ strategy }) {
+  const r = normalizeRule(strategy.settings?.rule)
+  const c = cleanBacktestSettings(strategy.settings ?? {})
+  const unit = c.levelUnit === 'pts' ? ' pts' : '%'
+  const level = (v) => (v > 0 ? `${v}${unit}` : 'none')
+  const lots = strategy.liveLots > 0 ? `${strategy.liveLots} (its own - live)` : `${c.lots} (saved)`
+  const rows = [
+    ['Index', `${c.underlying}${c.tradeIn ? ` - signals; traded in ${c.tradeIn} options` : ''}`],
+    ['Candles', `${c.timeframe} min${c.sumExpiries ? ' · OI Σ 3 expiries' : ''}`],
+    ['Strike', c.moneyness ? `${Math.abs(c.moneyness)} ${c.moneyness > 0 ? 'ITM' : 'OTM'}` : 'ATM'],
+    ['Entries', `${c.entryFrom} to ${c.lastEntry} · at most ${c.maxTradesPerDay} a day · ${c.cooldownMin} min cooldown`],
+    ['SL / target', `SL ${level(c.slPct)} · target ${level(c.targetPct)}${c.trailGap > 0 ? ` · trail ${c.trailGap}${unit}${c.trailStart > 0 ? ` after +${c.trailStart}${unit}` : ''}` : ''}${c.timeStopMin > 0 ? ` · time stop ${c.timeStopMin} min` : ''}${spotStopText(c)}${c.costSl ? ` · cost SL (${c.costSl})` : ''}`],
+    ['Day limits', [c.maxDayLoss > 0 ? `max loss ₹${c.maxDayLoss}` : null, c.maxDayProfit > 0 ? `max profit ₹${c.maxDayProfit}` : null].filter(Boolean).join(' · ') || 'none'],
+    ['Expiry day', c.expiryDay === 'skip' ? 'not traded' : c.expiryDay === 'buy' ? 'buy options' : c.expiryDay === 'sell' ? 'sell options' : 'as the rule'],
+    ['Lots', lots],
+    ['Charges', chargesText(c)],
+  ]
+  const mirror = r.mirror && !mirrorIsSame(r.lines)
+  return (
+    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      <div><Text style={{ fontSize: 12 }}><span style={{ color: '#4096ff' }}>■</span> {ruleText(r.lines, r.action, r.logic) || 'No condition - it never signals.'}</Text></div>
+      {mirror && <div><Text style={{ fontSize: 12 }}><span style={{ color: '#fa8c16' }}>■</span> {ruleText(mirrorLines(r.lines), OPPOSITE_ACTION[r.action], r.logic)}</Text></div>}
+      {r.mirror && !mirror && <Text type="secondary" style={{ fontSize: 11 }}>No mirror - none of its conditions has a side.</Text>}
+      <table style={{ fontSize: 12, borderCollapse: 'collapse' }}>
+        <tbody>{rows.map(([k, v]) => (
+          <tr key={k}><td style={{ padding: '2px 12px 2px 0', color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', verticalAlign: 'top' }}>{k}</td><td style={{ padding: '2px 0' }}>{v}</td></tr>
+        ))}</tbody>
+      </table>
+    </Space>
+  )
+}
 const LIVE_STATE = { running: 'Live scan running', missing: 'Live scan not installed on the server', off: 'Live scan turned off on the server', exited: 'Live scan restarting', failed: 'Live scan failed to start', starting: 'Live scan starting' }
 
 const DANGER = '#cf1322'
@@ -272,6 +308,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   const narrow = useMediaQuery('(max-width: 768px)')
   const [busyId, setBusyId] = useState(null)
   const [historyOf, setHistoryOf] = useState(null)
+  const [rulesOf, setRulesOf] = useState(null)
   const me = (auth?.user?.email ?? '').toLowerCase()
   const isAdmin = auth?.user?.role === 'Admin'
   const act = async (id, fn, done) => {
@@ -329,6 +366,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
         : `Replace "${s.name}" with the rule and settings on the page now?`} okText="Update" cancelText="No" onConfirm={() => act(s.id, () => updateStrategy(s.id, { settings: pageSettings }), `"${s.name}" updated - the live scan uses it from its next minute.`)}>
         <Button size="small" icon={<SaveOutlined />}>Update</Button>
       </Popconfirm>}
+      <Button size="small" icon={<ProfileOutlined />} onClick={() => setRulesOf(s)}>Rules</Button>
       <Button size="small" icon={<HistoryOutlined />} onClick={() => setHistoryOf(s)}>History</Button>
       <Popconfirm title={`Remove "${s.name}" from the list? Its history stays on the server (nothing is deleted).`} okText="Remove" cancelText="Keep" onConfirm={() => act(s.id, () => deleteStrategy(s.id), `"${s.name}" removed.`)}>
         <Button size="small" type="text" icon={<DeleteOutlined />} aria-label="Remove this strategy" title="Remove this strategy" />
@@ -339,7 +377,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
   // kept its whole length on one line and stretched the column thousands of pixels wide).
   const what = (s) => (
     <div style={{ minWidth: 0, maxWidth: '100%' }}>
-      <div><Space size={6} wrap><Text strong style={{ fontSize: 13 }}>{s.name}</Text>{s.liveOrders && s.live && <Tag color="red" style={{ margin: 0 }}>LIVE orders</Tag>}</Space></div>
+      <div><Space size={6} wrap><Typography.Link strong style={{ fontSize: 13 }} onClick={() => setRulesOf(s)} title="Its rules">{s.name}</Typography.Link>{s.liveOrders && s.live && <Tag color="red" style={{ margin: 0 }}>LIVE orders</Tag>}</Space></div>
       <Text type="secondary" style={{ fontSize: 11, display: 'block' }}>
         {s.underlying}{s.settings?.tradeIn && s.settings.tradeIn !== s.underlying ? ` → traded in ${s.settings.tradeIn}` : ''} · {s.settings?.timeframe ?? 1}m{s.settings?.expiryDay === 'skip' ? ' · expiry day: not traded' : s.settings?.expiryDay && s.settings.expiryDay !== 'rule' ? ` · expiry day: ${s.settings.expiryDay}` : ''}{s.owner && s.owner.toLowerCase() !== me ? ` · ${s.owner}` : ''}
       </Text>
@@ -380,7 +418,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
           { title: 'Live scan', key: 'live', width: 230, render: (_, s) => switches(s) },
           { title: 'Total', key: 'total', width: 130, sorter: (a, b) => totalOf(a) - totalOf(b), defaultSortOrder: 'descend', sortDirections: ['descend', 'ascend'], render: (_, s) => <TotalCell s={s} /> },
           { title: 'Today', key: 'today', width: 260, render: (_, s) => <TodayCell s={s} today={today} /> },
-          { title: '', key: 'actions', width: 300, render: (_, s) => actions(s) },
+          { title: '', key: 'actions', width: 360, render: (_, s) => actions(s) },
         ]}
       />
     )
@@ -389,6 +427,16 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
     <Card size="small" title={title} extra={extra}>
       {body}
       {historyOf && <StrategyHistoryModal strategy={historyOf} onClose={() => setHistoryOf(null)} />}
+      {rulesOf && (
+        <Modal open title={`Rules - ${rulesOf.name}`} onCancel={() => setRulesOf(null)} destroyOnHidden width={Math.min(760, typeof window === 'undefined' ? 760 : window.innerWidth - 16)}
+          footer={<Space wrap>
+            {onLoad && <Button icon={<UploadOutlined />} onClick={() => { const st = rulesOf; setRulesOf(null); onLoad(st) }}>Load on Signal backtest</Button>}
+            <Button icon={<HistoryOutlined />} onClick={() => { const st = rulesOf; setRulesOf(null); setHistoryOf(st) }}>History</Button>
+            <Button type="primary" onClick={() => setRulesOf(null)}>Close</Button>
+          </Space>}>
+          <StrategyRules strategy={strategies.find((x) => x.id === rulesOf.id) ?? rulesOf} />
+        </Modal>
+      )}
     </Card>
   )
 }
@@ -441,6 +489,7 @@ export function SavedStrategiesBar({ strategies, onSave, onLoad, pageSettings, r
         </Popconfirm>
         <Text type="secondary" style={{ fontSize: 12 }}>Live scan, lots, alerts, live orders and history: the <Link to="/live-strategies">Live strategies</Link> page.</Text>
       </Space>
+      {st && <div style={{ marginTop: 10 }}><StrategyRules strategy={st} /></div>}
     </Card>
   )
 }
