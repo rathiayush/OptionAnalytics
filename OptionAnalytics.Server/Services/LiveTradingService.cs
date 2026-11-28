@@ -1941,10 +1941,12 @@ public sealed record ManualOrderRequest(
 /// and left, an exit chased every 2 s, 6 tries, never retried after a rejection).</summary>
 public sealed record OrderChase(TimeSpan Interval, int Attempts, int MaxSlipSteps, int RejectRetries, TimeSpan RetryDelay)
 {
-    /// <summary>A saved strategy's ENTRY: every second for 5 s, at most 3x the slippage - past that the market has left the signal.</summary>
-    public static readonly OrderChase StrategyEntry = new(TimeSpan.FromSeconds(1), 5, 3, 2, TimeSpan.FromMilliseconds(250));
-    /// <summary>A saved strategy's EXIT (its stop-loss, target, trail ... ): every second for 20 s, at most 5x the slippage - get out.</summary>
-    public static readonly OrderChase StrategyExit = new(TimeSpan.FromSeconds(1), 20, 5, 3, TimeSpan.FromMilliseconds(250));
+    /// <summary>A saved strategy's ENTRY (asked for - "try 5 times, slippage the same, do not add up after 3x"): a rejection sent 5 times
+    /// in all (4 retries), an unfilled order re-priced 5 times, a second apart; the slippage 2x, then 3x and kept there.</summary>
+    public static readonly OrderChase StrategyEntry = new(TimeSpan.FromSeconds(1), 5, 3, 4, TimeSpan.FromMilliseconds(250));
+    /// <summary>A saved strategy's EXIT (its stop-loss, target, trail ... ): the same - 5 sends, 5 re-prices a second apart, at most 3x.
+    /// (An exit's chase spends its last attempt on the final check, so 6 attempts = 5 re-prices.)</summary>
+    public static readonly OrderChase StrategyExit = new(TimeSpan.FromSeconds(1), 6, 3, 4, TimeSpan.FromMilliseconds(250));
 }
 
 internal sealed class TrailState
