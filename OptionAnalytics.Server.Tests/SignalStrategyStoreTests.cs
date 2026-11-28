@@ -52,8 +52,10 @@ public sealed class SignalStrategyStoreTests : IDisposable
         // The file as it was before the column: liveLots taken off the header and every row.
         var file = Path.Combine(_dir, "runner", "signal-strategies", "strategies.csv");
         var lines = File.ReadAllLines(file);
-        Assert.EndsWith(",liveLots", lines[0]);
-        File.WriteAllLines(file, lines.Select(l => l[..l.LastIndexOf(',')]));
+        Assert.EndsWith(",liveLots,liveEntrySlip,liveExitSlip", lines[0]);
+        // Before liveLots (and the slippage columns after it): the last three cut.
+        static string Cut(string l) => l[..l.LastIndexOf(',')];
+        File.WriteAllLines(file, lines.Select(l => Cut(Cut(Cut(l)))));
         Assert.DoesNotContain("liveLots", File.ReadAllText(file));
         var read = store.Get(s.Id, null)!;
         Assert.Equal(0, read.LiveLots);                                                              // 0 = the lots as before
@@ -62,7 +64,8 @@ public sealed class SignalStrategyStoreTests : IDisposable
         // A change writes the new column - every other value kept.
         var set = store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 4), Now).Strategy!;
         Assert.Equal(4, set.LiveLots);
-        Assert.EndsWith(",liveLots", File.ReadAllLines(file)[0]);
+        Assert.EndsWith(",liveLots,liveEntrySlip,liveExitSlip", File.ReadAllLines(file)[0]);
+        Assert.Equal((0m, 0m), (store.Get(s.Id, null)!.LiveEntrySlippage, store.Get(s.Id, null)!.LiveExitSlippage));
         Assert.Equal(4, (int)store.Get(s.Id, null)!.LiveSettings()["lots"]!);
         Assert.Null(store.Get(s.Id, null)!.Settings["lots"]);                                         // the saved settings themselves untouched
         Assert.Equal(read.Settings.ToJsonString(), store.Get(s.Id, null)!.Settings.ToJsonString());
@@ -70,6 +73,23 @@ public sealed class SignalStrategyStoreTests : IDisposable
         Assert.Equal(0, store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 0), Now).Strategy!.LiveLots);
         Assert.Contains("Lots go from 1", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: 101), Now).Error);
         Assert.Contains("Lots go from 1", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveLots: -1), Now).Error);
+    }
+
+    [Fact]
+    public void A_strategys_own_slippage_is_kept_in_the_csv_in_range_and_an_armed_ones_changed_by_an_admin_only()
+    {
+        var store = Store();
+        var s = store.Create("me@x.com", Request("Slip"), Now).Strategy!;
+        var set = store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveEntrySlippage: 1.5m, LiveExitSlippage: 3m), Now).Strategy!;
+        Assert.Equal((1.5m, 3m), (set.LiveEntrySlippage, set.LiveExitSlippage));
+        var back = Store().Get(s.Id, null)!;                                                          // a restart reads them back
+        Assert.Equal((1.5m, 3m, 0), (back.LiveEntrySlippage, back.LiveExitSlippage, back.LiveLots));
+        Assert.Contains("Slippage goes from 0", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveExitSlippage: 51m), Now).Error);
+        Assert.Contains("Slippage goes from 0", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveEntrySlippage: -1m), Now).Error);
+        store.Update(s.Id, null, new SignalStrategyRequest(LiveOrders: true), Now);
+        Assert.Contains("only an admin", store.Update(s.Id, "me@x.com", new SignalStrategyRequest(LiveExitSlippage: 5m), Now).Error);
+        Assert.Equal(5m, store.Update(s.Id, null, new SignalStrategyRequest(LiveExitSlippage: 5m), Now).Strategy!.LiveExitSlippage);
+        Assert.Equal(0m, store.Update(s.Id, null, new SignalStrategyRequest(LiveExitSlippage: 0m), Now).Strategy!.LiveExitSlippage);   // 0 = the Trade settings'
     }
 
     [Fact]

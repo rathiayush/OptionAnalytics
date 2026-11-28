@@ -31,7 +31,9 @@ public sealed class SignalStrategyStore
     public static readonly string[] Underlyings = { "NIFTY", "BANKNIFTY", "SENSEX" };
     /// <summary>The most lots a strategy may be set to trade live (the backtest's own range; Trade settings' max-lots cap still applies to Dhan orders).</summary>
     public const int MaxLiveLots = 100;
-    public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders", "liveLots" };
+    /// <summary>A strategy's own entry / exit slippage for its live Dhan orders, in premium points (0 = the Trade settings').</summary>
+    public const decimal MaxLiveSlippage = 50m;
+    public static readonly string[] StrategyColumns = { "id", "name", "owner", "underlying", "live", "alerts", "dailyReport", "createdUtc", "updatedUtc", "settings", "liveOrders", "liveLots", "liveEntrySlip", "liveExitSlip" };
     public static readonly string[] DayColumns = { "date", "underlying", "trades", "wins", "losses", "winRate", "net", "gross", "charges", "points", "signals", "limit", "reportedUtc" };
     /// <summary>A history row's status for a signal or a live-shown trade that was not taken (another strategy's trade was open, or the
     /// end-of-day read does not have it): it has no P&L and is in no count.</summary>
@@ -80,7 +82,12 @@ public sealed class SignalStrategyStore
                     row["dailyReport"] == "true", DateTimeOffset.Parse(row["createdUtc"], CultureInfo.InvariantCulture), DateTimeOffset.Parse(row["updatedUtc"], CultureInfo.InvariantCulture), settings,
                     row.GetValueOrDefault("liveOrders") == "true",
                     // A file saved before the column has none: 0 = the lots as before (the settings' for the paper trades, Trade settings' for Dhan).
-                    int.TryParse(row.GetValueOrDefault("liveLots"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var lots) && lots > 0 ? lots : 0));
+                    int.TryParse(row.GetValueOrDefault("liveLots"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var lots) && lots > 0 ? lots : 0)
+                {
+                    // Columns added after liveLots: a file saved before them reads 0 = the Trade settings' slippage, as before.
+                    LiveEntrySlippage = Slip(row.GetValueOrDefault("liveEntrySlip")),
+                    LiveExitSlippage = Slip(row.GetValueOrDefault("liveExitSlip")),
+                });
             }
             catch (Exception ex) when (ex is JsonException or FormatException or KeyNotFoundException) { _logger.LogWarning("A saved strategy row could not be read: {Error}", ex.Message); }
         }
@@ -94,7 +101,12 @@ public sealed class SignalStrategyStore
             ["dailyReport"] = Bool(s.DailyReport), ["createdUtc"] = s.CreatedUtc.ToString("O"), ["updatedUtc"] = s.UpdatedUtc.ToString("O"), ["settings"] = s.Settings.ToJsonString(),
             ["liveOrders"] = Bool(s.LiveOrders),
             ["liveLots"] = s.LiveLots > 0 ? s.LiveLots.ToString(CultureInfo.InvariantCulture) : "",
+            ["liveEntrySlip"] = s.LiveEntrySlippage > 0 ? s.LiveEntrySlippage.ToString(CultureInfo.InvariantCulture) : "",
+            ["liveExitSlip"] = s.LiveExitSlippage > 0 ? s.LiveExitSlippage.ToString(CultureInfo.InvariantCulture) : "",
         }));
+
+    private static decimal Slip(string? cell) =>
+        decimal.TryParse(cell, NumberStyles.Number, CultureInfo.InvariantCulture, out var v) && v > 0 ? Math.Min(v, MaxLiveSlippage) : 0m;
 
     private static string Bool(bool v) => v ? "true" : "false";
     private static bool Same(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
@@ -144,6 +156,8 @@ public sealed class SignalStrategyStore
         var (name, settings, underlying, error) = Check(request, requireAll: false);
         if (error is not null) return (null, error);
         if (request.LiveLots is < 0 or > MaxLiveLots) return (null, $"Lots go from 1 to {MaxLiveLots} (0 = as before).");
+        if (request.LiveEntrySlippage is < 0 or > MaxLiveSlippage || request.LiveExitSlippage is < 0 or > MaxLiveSlippage)
+            return (null, $"Slippage goes from 0 to {MaxLiveSlippage} points (0 = the Trade settings').");
         lock (_lock)
         {
             var all = ReadAll();
@@ -152,6 +166,9 @@ public sealed class SignalStrategyStore
             var old = all[k];
             if (request.LiveLots is { } changed && changed != old.LiveLots && old.LiveOrders && owner is not null)
                 return (null, "This strategy places live Dhan orders - only an admin can change its lots.");
+            if (old.LiveOrders && owner is not null
+                && ((request.LiveEntrySlippage is { } es && es != old.LiveEntrySlippage) || (request.LiveExitSlippage is { } xs && xs != old.LiveExitSlippage)))
+                return (null, "This strategy places live Dhan orders - only an admin can change its slippage.");
             if (name is not null && all.Any(s => s.Id != id && Same(s.Owner, old.Owner) && Same(s.Name, name))) return (null, $"A strategy is already called \"{name}\"");
             all[k] = old with
             {
@@ -159,6 +176,8 @@ public sealed class SignalStrategyStore
                 Alerts = request.Alerts ?? old.Alerts, DailyReport = request.DailyReport ?? old.DailyReport, UpdatedUtc = now,
                 LiveOrders = request.LiveOrders ?? (settings is not null && owner is not null ? false : old.LiveOrders),
                 LiveLots = request.LiveLots ?? old.LiveLots,
+                LiveEntrySlippage = request.LiveEntrySlippage ?? old.LiveEntrySlippage,
+                LiveExitSlippage = request.LiveExitSlippage ?? old.LiveExitSlippage,
             };
             WriteAll(all);
             return (all[k], null);
@@ -455,6 +474,11 @@ public sealed record SignalRunningTrade(string Option, string Action, string Ent
 public sealed record SignalStrategy(string Id, string Name, string Owner, string Underlying, bool Live, bool Alerts, bool DailyReport,
     DateTimeOffset CreatedUtc, DateTimeOffset UpdatedUtc, JsonObject Settings, bool LiveOrders = false, int LiveLots = 0)
 {
+    /// <summary>Its live Dhan ENTRY's slippage in premium points over the ask (under the bid) - 0 = the traded index's Trade settings'.</summary>
+    public decimal LiveEntrySlippage { get; init; }
+    /// <summary>Its live Dhan EXITS' slippage (stop-loss, target, trail ... ) - 0 = the Trade settings'.</summary>
+    public decimal LiveExitSlippage { get; init; }
+
     /// <summary>The settings the LIVE SCAN reads: the saved ones, with the strategy's own lots (the Live strategies page) over the
     /// settings' when set - so its paper trades and P&amp;L are of the lots it trades. 0 = the settings as saved (as before).</summary>
     public JsonObject LiveSettings()
@@ -469,7 +493,7 @@ public sealed record SignalStrategy(string Id, string Name, string Owner, string
 /// <summary>A strategy saved or changed from the page (null = left as it is). LiveOrders: an admin only (a new strategy
 /// is never saved with it on).</summary>
 public sealed record SignalStrategyRequest(string? Name = null, JsonNode? Settings = null, bool? Live = null, bool? Alerts = null, bool? DailyReport = null,
-    bool? LiveOrders = null, int? LiveLots = null);
+    bool? LiveOrders = null, int? LiveLots = null, decimal? LiveEntrySlippage = null, decimal? LiveExitSlippage = null);
 
 /// <summary>An entry / exit the live scan saw (its key makes it once), with the trade it belongs to and that trade's
 /// history row as of this event (open at its entry, closed at its exit).</summary>
