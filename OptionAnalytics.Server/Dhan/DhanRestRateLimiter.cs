@@ -9,8 +9,9 @@ namespace OptionAnalytics.Server.Dhan;
 /// account.</summary>
 public enum DhanApiCategory
 {
-    /// <summary>Placing, modifying and cancelling orders (and exiting all positions, which places orders): 10 a second,
-    /// 250 a minute, 1000 an hour, 7000 a day.</summary>
+    /// <summary>Placing, modifying and cancelling orders (and exiting all positions, which places orders): 10 a second and 7,000 a
+    /// day - NO minute or hour limit (Dhan's Rate Limits page, docs.dhanhq.co/api/v2/rate-limits, checked 28 Nov 2026; the 250 a minute /
+    /// 1000 an hour this used to hold orders to are gone from it).</summary>
     Order,
     /// <summary>Historical / intraday charts, the rolling (expired) option chain, the option chain: 5 a second, 100,000 a day.</summary>
     Data,
@@ -32,15 +33,13 @@ internal sealed record DhanRateLimits(
     DhanRateWindow OrderPerSecond, DhanRateWindow[] OrderRefused, DhanRateWindow QuotePerSecond, DhanRateWindow NonTradingPerSecond, DhanRateWindow[] DataRefused)
 {
     public static readonly DhanRateLimits Dhan = new(
-        // A window slides in 100 ms segments and a call can be seen up to one segment early: 1.2 s keeps any 8 calls a full
-        // second apart, timer jitter included.
-        OrderPerSecond: new(8, TimeSpan.FromSeconds(1.2), 12, "10 a second"),
-        // 240 + one 1 s segment (8) < 250; 900 + one 10 s segment (80) < 1000; 6000 + one 10 min segment (<= the hour's 900) < 7000.
+        // A window slides in 100 ms segments and a call can be seen up to one segment early: 1.1 s keeps any 9 calls a full
+        // second apart, timer jitter included - 9 of Dhan's 10 (it was 8 in 1.2 s, ~6.7 a second).
+        OrderPerSecond: new(9, TimeSpan.FromSeconds(1.1), 11, "10 a second"),
+        // Dhan has NO minute / hour order limit any more - only the day's: 6,300 + one 1-minute segment (at most 9 x 60 = 540) < 7,000.
         OrderRefused: new DhanRateWindow[]
         {
-            new(240, TimeSpan.FromMinutes(1), 60, "250 a minute"),
-            new(900, TimeSpan.FromHours(1), 360, "1000 an hour"),
-            new(6_000, TimeSpan.FromDays(1), 144, "7000 a day"),
+            new(6_300, TimeSpan.FromDays(1), 1_440, "7,000 a day"),
         },
         QuotePerSecond: new(1, TimeSpan.FromSeconds(1.5), 15, "1 a second"),
         NonTradingPerSecond: new(18, TimeSpan.FromSeconds(1.2), 12, "20 a second"),
@@ -151,10 +150,14 @@ public sealed class DhanRestRateLimiter : IDisposable
     }
 
     /// <summary>Dhan answered "too many requests" for a call of this category: hold its next calls back.</summary>
+    internal static readonly TimeSpan OrderRateLimitPause = TimeSpan.FromSeconds(1);
+
     public void NoteRateLimited(DhanApiCategory category)
     {
         if (category == DhanApiCategory.Data) { _data.NoteRateLimited(); return; }
-        lock (_lock) _pausedUntil[category] = DateTimeOffset.UtcNow + DhanDataApiRateLimiter.RateLimitPause;
+        // Dhan's own answer is "Too many requests. Please retry after 1 second." (RL001 / DH-904): orders wait exactly that - a live order
+        // is never held longer than Dhan asks.
+        lock (_lock) _pausedUntil[category] = DateTimeOffset.UtcNow + (category == DhanApiCategory.Order ? OrderRateLimitPause : DhanDataApiRateLimiter.RateLimitPause);
     }
 
     // ---- The call log: what reached Dhan, to see a loop -----------------------------------------------------------------

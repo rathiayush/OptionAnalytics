@@ -733,10 +733,21 @@ public sealed class LiveTradingService : BackgroundService
     {
         try
         {
-            // Never alongside a Close / Exit / Cancel: if one is running, this move waits for a later tick.
-            if (!await _actionLock.WaitAsync(0)) return;
+            // A STOP-LOSS MOVE TAKES PRIORITY (asked for - "SL also take priority for live strategy"): it queues with the exits, ahead of any
+            // entry / level change waiting - it used to be SKIPPED whenever another action held the gate, leaving the stop where it was
+            // until a later tick. Never alongside a Close / Exit / Cancel still: it waits for the one running, then reads its trail again.
+            await _actionLock.WaitAsync(CancellationToken.None, urgent: true);
             try
             {
+                // While it waited an exit may have closed the trade, or a tighter stop gone out - then there is nothing to move.
+                lock (_lock)
+                {
+                    var order = _currentOrders.FirstOrDefault(o => o.OrderId == orderId);
+                    var legOpen = order?.LegDetails.Any(l => l.LegName == "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)) == true;
+                    var isSell = string.Equals(order?.TransactionType, "SELL", StringComparison.OrdinalIgnoreCase);
+                    if (!_trails.TryGetValue(orderId, out var current) || !legOpen
+                        || current.LastSent is { } sent && (isSell ? sent <= stop : sent >= stop)) return;
+                }
                 var (result, error) = await _superOrders.ModifyAsync(orderId, "STOP_LOSS_LEG", null, null, null, null, stop, null, CancellationToken.None);
                 if (result is null) { _logger.LogWarning("Trailing stop of {Order}: Dhan did not move it to {Stop} - {Error}", orderId, stop, error); return; }
                 lock (_lock)
@@ -1370,7 +1381,7 @@ public sealed class LiveTradingService : BackgroundService
             decimal? exitPrice = null;
             string? closedByLeg = null;
 
-            async Task CancelLeg(string orderId, string leg)
+            async Task<bool> CancelLeg(string orderId, string leg)
             {
                 var (result, error) = await _superOrders.CancelAsync(orderId, leg, cancellationToken);
                 lock (messages)
@@ -1378,6 +1389,7 @@ public sealed class LiveTradingService : BackgroundService
                     if (result is null) failures.Add($"{orderId} {leg}: Dhan did not cancel it ({error ?? "no reason given"})");
                     else messages.Add($"{orderId} {leg} cancelled");
                 }
+                return result is not null;
             }
 
             foreach (var order in mine)
@@ -1397,9 +1409,32 @@ public sealed class LiveTradingService : BackgroundService
                     }
                     var workingLegs = order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)).ToList();
                     if (onlyWithWorkingLegs && workingLegs.Count == 0) { messages.Add($"{order.OrderId}: no working stop-loss / target - already closed, nothing to do"); continue; }
-                    // Its legs cancelled AT ONCE (one round trip, not one after the other) - the exit waits on them.
-                    await Task.WhenAll(workingLegs.Select(leg => CancelLeg(order.OrderId, leg.LegName)));
-                    toExit += filled;
+                    // CANCEL FIRST, THEN EXIT (asked for - "super order first should cancel and then exit"): its legs cancelled AT ONCE (one
+                    // round trip, not one after the other) and the exit sent only once they are GONE. A leg Dhan did not cancel may still fire:
+                    // the order is read again - a leg that FILLED meanwhile closed the trade (nothing to send), one STILL WORKING means this
+                    // trade is not exited now (a second close could reverse the position) - the failure hands it to the retry loop.
+                    var cancelled = await Task.WhenAll(workingLegs.Select(leg => CancelLeg(order.OrderId, leg.LegName)));
+                    if (cancelled.All(c => c)) { toExit += filled; continue; }
+                    var again = (await _superOrders.ListAsync(cancellationToken)).FirstOrDefault(o => o.OrderId == order.OrderId);
+                    var firedLeg = again?.LegDetails.FirstOrDefault(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG"
+                        && string.Equals(l.OrderStatus, "TRADED", StringComparison.OrdinalIgnoreCase));
+                    // The refusal was the leg firing or going (it was no longer there to cancel): not a failure.
+                    void Settled() { lock (messages) failures.RemoveAll(f => f.StartsWith($"{order.OrderId} ", StringComparison.Ordinal) && f.Contains("did not cancel")); }
+                    if (firedLeg is not null)
+                    {
+                        Settled();
+                        closedByLeg ??= firedLeg.LegName == "TARGET_LEG" ? "target" : "stop-loss";
+                        exitPrice ??= firedLeg.Price;
+                        lock (messages) messages.Add($"{order.OrderId}: closed on Dhan by its {closedByLeg} while it was being cancelled");
+                        continue;
+                    }
+                    if (again is null || again.LegDetails.Any(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)))
+                    {
+                        lock (messages) failures.Add($"{order.OrderId}: NOT exited - a stop-loss / target leg is still working on Dhan (an exit now could close it twice)");
+                        continue;
+                    }
+                    Settled();
+                    toExit += filled;   // the leg Dhan refused to cancel is gone after all - exit
                 }
                 else if (IsOpenStatus(status))
                 {
@@ -1468,7 +1503,7 @@ public sealed class LiveTradingService : BackgroundService
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);   // a stop-loss / target change - with the exits, first
         try
         {
             var mine = (await _superOrders.ListAsync(cancellationToken)).Where(o => orderIds.Contains(o.OrderId)).ToList();
@@ -1531,7 +1566,7 @@ public sealed class LiveTradingService : BackgroundService
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (stopLossPrice <= 0 && targetPrice <= 0) return ManualOrderResult.Fail("give a stop-loss and/or a target price");
-        await _actionLock.WaitAsync(cancellationToken);
+        await _actionLock.WaitAsync(cancellationToken, urgent: true);   // a stop-loss / target change - with the exits, first
         try
         {
             var position = (await _positions.ListAsync(cancellationToken)).FirstOrDefault(p => p.SecurityId == securityId && p.IsOpen);
@@ -1828,7 +1863,8 @@ public sealed class LiveTradingService : BackgroundService
                 var shift = price - first.Limit;
                 var target = StrategyTriggerHostedService.RoundToTick(Math.Max(contract.TickSize, first.Target + shift), contract.TickSize);
                 var stop = StrategyTriggerHostedService.RoundToTick(Math.Max(contract.TickSize, first.StopLoss + shift), contract.TickSize);
-                var (modified, error) = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", "LIMIT", null, price, target, stop, null, CancellationToken.None);
+                // Dhan's Modify Super Order: an ENTRY_LEG change needs its quantity (and order type) - sent as the order has it.
+                var (modified, error) = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", "LIMIT", order.Quantity, price, target, stop, null, CancellationToken.None);
                 if (modified is null) { _logger.LogWarning("Re-pricing entry {OrderId} ({Symbol}) failed: {Error}", orderId, contract.TradingSymbol, error); continue; }
                 _logger.LogInformation("Re-priced entry {OrderId} ({Symbol}) to {Price} (target {Target}, SL {Stop}, attempt {Attempt}).", orderId, contract.TradingSymbol, price, target, stop, attempt);
                 limit = price;
