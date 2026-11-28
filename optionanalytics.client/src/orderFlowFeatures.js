@@ -24,7 +24,7 @@ const msOf = (v) => (typeof v === 'number' ? v : new Date(v).getTime())
 const minuteOf = (ms) => Math.floor(ms / MIN) * MIN
 
 /** How many heatmap snapshots a day is asked in when the rule reads the book: ~one every 30 s of a recorded day (the
- *  server samples the book every 2 s, ~11 000 a session) - the liquidity map's 10-minute window then holds ~20. */
+ *  server samples the book every 1 s, ~22 000 a session) - the liquidity map's 10-minute window then holds ~20. */
 export const FLOW_HEATMAP_COLUMNS = 750
 /** What a rule needs of the order flow: nothing, the delta (every day has it - estimated where not recorded), or the book too. */
 export const FLOW_NONE = 0
