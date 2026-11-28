@@ -1975,6 +1975,22 @@ All must pass before committing.
   carried 1 unit; ticks are 1 - 2 s apart. That is a SNAPSHOT feed about once a second (as the NSE consolidated feed is), NOT a per-trade tape: every unit of volume is there, at the
   price / side of its snapshot. The index ("NIFTY 50") history call answered a server error from TrueData (symbol name not accepted) - the index's own rate was not measured; TrueData's
   homepage "up to 10 ticks per second" for NIFTY 50 is not shown for the futures. `TickRateMeterTests.cs`. Reading it changes nothing.
+  TRUEDATA'S RAW TICKS ON DISK - ITS OWN STORE (asked for - "cache future and options data ticks ... separate cache store for TrueData ... in compressed
+  format because we are receiving ticks there"; `TrueDataTickStore`, `Storage:TrueDataTicksPath` - /app/data/truedata-ticks in docker-compose AND the Dockerfile,
+  "truedata-ticks" in appsettings.json; nothing of the Dhan cache, the Order Flow days or the scanner runner's folder): one gzip CSV per CONTRACT and IST day in
+  TrueData's own tick-history columns (`time,ltp,volume,oi,bid,bid_qty,ask,ask_qty`, volume the day's running total - `TrueDataTickCsv` reads both kinds).
+  `live/{yyyy-MM-dd}/{SYMBOL}.csv.gz` = EVERY trade and quote the live feed applies, futures (named by the instrument's symbol, NIFTY-I) and options (their
+  chain symbol - `OptionBigOrderWatch.SymbolOf`), recorded in `TrueDataLiveFeed.OnTrade` / `OnQuote` - COMPRESSED WHILE THE DAY RUNS: each flush (every 5 s or
+  256 KB a file) is appended as its own gzip member (a file of several members reads as one stream - .NET, zcat, 7-Zip; a member cut short by a crash ends the
+  read, what came before it kept); a quote line carries the contract's last ltp / volume / oi on, so its volume does not rise and it reads as a quote. Lines go
+  through a bounded queue (500 000) to ONE writer - the tick path never waits on the disk; a full queue drops and counts (`Dropped`). `history/{yyyy-MM-dd}/
+  {SYMBOL}.csv.gz` = every whole-session tick-history answer of a PAST day (`CachingTrueDataHistoryApi` wraps `TrueDataSdkHistoryApi` - the futures replay,
+  the options' replay build and the Order Flow TrueData source all read through it): a day is asked of TrueData ONCE, a window inside a kept day is served from
+  disk, today never kept; and a day TrueData no longer keeps (the trial: today and the day before) REPLAYS FROM WHAT WAS RECORDED LIVE. NOTHING IS EVER DELETED
+  here. `GET /api/tick-flow/tick-store` = recorded / dropped / write errors and each day's files and bytes; the Cache page's "TrueData ticks" card, download only.
+  SIZE, MEASURED (`TrueDataTickStoreTests` - a contract at 3 ticks a second through the session, 67 500 ticks, random walk and sizes, written through the store):
+  ~1 MB a contract a day compressed (5 MB as text) - a day of 2 futures + 42 options ~42 MB, 250 sessions ~10 GB. Random quantities are near the worst case for
+  gzip; real ticks repeat more. Not checked against the live socket.
   OPTION TICK FEATURE FLAG (asked for - "for option data processing also add a feature flag for true tick data handling"): `TrueData:Live:OptionTicks`
   (environment variable `TrueData__Live__OptionTicks`, ON by default). OFF = no option symbol is subscribed (`SyncOptionsAsync` returns), the saved index choice
   reads as none and `PUT /api/tick-flow/options` is refused, `GET options` carries `optionTicks: false` (the card says so), `GET options/day` answers 404 - the

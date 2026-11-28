@@ -15,9 +15,11 @@ public sealed class TickFlowController : ControllerBase
     private readonly TickHistoryDays? _history;
     private readonly OptionTickHistoryDays? _optionHistory;
     private readonly TickDayDiskCache? _disk;
+    private readonly TrueDataTickStore? _ticks;
 
     public TickFlowController(IServiceProvider services)
     {
+        _ticks = services.GetService<TrueDataTickStore>();
         _feed = services.GetService<TrueDataLiveFeed>();
         _history = services.GetService<TickHistoryDays>();
         _optionHistory = services.GetService<OptionTickHistoryDays>();
@@ -32,6 +34,14 @@ public sealed class TickFlowController : ControllerBase
 
     /// <summary>HOW OFTEN THE FEED REALLY SENDS: per stream (a futures contract's trades and quotes, the options') the messages applied today, the rate over the last
     /// 10 s / 60 s, the busiest second, seconds with 1 / 2 / 3 / 4+ messages, the median gap and a verdict - tick by tick, or a snapshot about once a second.</summary>
+    /// <summary>TRUEDATA'S RAW TICKS ON DISK (TrueDataTickStore, Storage:TrueDataTicksPath): where they are, what was recorded / dropped since the start,
+    /// and each day's files and bytes - recorded live and kept from the tick history.</summary>
+    [HttpGet("tick-store")]
+    public ActionResult TickStore() =>
+        _ticks is null || !_ticks.Enabled
+            ? Ok(new { enabled = false, note = "Storage:TrueDataTicksPath is not set (or TrueData is off)." })
+            : Ok(new { enabled = true, root = _ticks.Root, recorded = _ticks.Recorded, dropped = _ticks.Dropped, writeErrors = _ticks.WriteErrors, bytesWritten = _ticks.BytesWritten, days = _ticks.Days() });
+
     [HttpGet("rate")]
     public ActionResult Rate() =>
         _feed is null

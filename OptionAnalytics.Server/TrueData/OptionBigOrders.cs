@@ -183,6 +183,9 @@ public sealed class OptionBigOrderWatch
 
     public bool Tracks(string symbolId) { lock (_lock) return _states.ContainsKey(symbolId); }
 
+    /// <summary>The option's symbol (NIFTY26120117350CE) for its feed id, or null - what the tick store names its file.</summary>
+    public string? SymbolOf(string symbolId) { lock (_lock) return _states.TryGetValue(symbolId, out var s) ? s.Contract.Symbol : null; }
+
     /// <summary>The id the feed uses for <paramref name="symbol"/> when its subscribe reply names it differently from the master.</summary>
     public void Alias(string symbol, string symbolId)
     {

@@ -53,9 +53,16 @@ public sealed class CacheBrowser
     internal Func<DateTime> Clock { get; set; } = () => DateTime.UtcNow;
     internal Func<string> Today { get; set; } = () => IstClock.Today().ToString("yyyy-MM-dd");
 
+    private static string? TrueDataTicksFolder(IConfiguration? configuration, IHostEnvironment? environment)
+    {
+        var path = configuration?["Storage:TrueDataTicksPath"];
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        return Path.IsPathRooted(path) || environment is null ? path : Path.Combine(environment.ContentRootPath, path);
+    }
+
     public CacheBrowser(DhanDataCache dhan, OrderFlowDayStore orderFlow, HistoricalSpotDataStore historical, ExpiredOptionDataStore expiredOptions,
         TelegramMessageLog telegramLog, VisitorLog visitors, ScannerRunnerStore scanner, TradeSettingsStore tradeSettings, RiskSettingsStore riskSettings,
-        ILogger<CacheBrowser> logger)
+        ILogger<CacheBrowser> logger, IConfiguration? configuration = null, IHostEnvironment? environment = null)
         : this(new[]
         {
             new CacheRoot("dhan", "Dhan data cache", dhan.Directory,
@@ -81,6 +88,9 @@ public sealed class CacheBrowser
                 null, ReadOnly: true),
             new CacheRoot("signal-backtests", "Background runs", Path.Combine(scanner.DataDirectory, "signal-backtests"),
                 "The Signal backtest's background runs - each run's settings and progress (.json), its report (.result.json) and a Feature finder run's dataset (.features.csv). Download only.",
+                null, ReadOnly: true),
+            new CacheRoot("truedata-ticks", "TrueData ticks", TrueDataTicksFolder(configuration, environment),
+                "TrueData's raw ticks, one gzip CSV per contract and IST day: live/ - every futures and option trade / quote the live feed applied (compressed as it is written - each flush its own gzip member), history/ - the tick history of past days as TrueData sent it. What was recorded live cannot be fetched again. Download only.",
                 null, ReadOnly: true),
             new CacheRoot("trade-settings", "Trade settings CSV", Path.GetDirectoryName(Path.GetFullPath(tradeSettings.FilePath)),
                 "Lots, SL / target / trail, slippage and the server alerts per index - the file the Trade settings page writes. Download only.",

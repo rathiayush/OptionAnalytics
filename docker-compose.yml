@@ -53,6 +53,8 @@ services:
       # The order flow days the server recorded live (one gzip JSON per contract and day, the newest
       # OrderFlow:DaysOnDisk dates - 252 trading days, about one year, a few GB at most) - past days replay exactly, today carries on through a deploy.
       Storage__OrderFlowPath: /app/data/order-flow
+      # TrueData's raw ticks - every live futures / option tick, and the tick history of past days - one gzip CSV per contract and IST day (TrueDataTickStore).
+      Storage__TrueDataTicksPath: /app/data/truedata-ticks
       # Every Telegram message the server sent (a CSV a day, 400 days - TelegramMessageLog), read by the Telegram signals page.
       Storage__TelegramLogPath: /app/data/telegram-log
       # The Telegram signals page's sign-in to READ the bot's channel from Telegram (a user account's session - TelegramChannelReader).
