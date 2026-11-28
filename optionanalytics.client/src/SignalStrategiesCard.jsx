@@ -43,6 +43,7 @@ export function StrategyRules({ strategy }) {
     ['Day limits', [c.maxDayLoss > 0 ? `max loss ₹${c.maxDayLoss}` : null, c.maxDayProfit > 0 ? `max profit ₹${c.maxDayProfit}` : null].filter(Boolean).join(' · ') || 'none'],
     ['Expiry day', c.expiryDay === 'skip' ? 'not traded' : c.expiryDay === 'buy' ? 'buy options' : c.expiryDay === 'sell' ? 'sell options' : 'as the rule'],
     ['Lots', lots],
+    ['Live slippage', `entry ${strategy.liveEntrySlippage > 0 ? `${strategy.liveEntrySlippage} pts` : "Trade settings'"} · exit ${strategy.liveExitSlippage > 0 ? `${strategy.liveExitSlippage} pts` : "Trade settings'"} - re-priced every second until filled, a rejected order sent again`],
     ['Charges', chargesText(c)],
   ]
   const mirror = r.mirror && !mirrorIsSame(r.lines)
@@ -326,8 +327,8 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       title: `Place REAL Dhan orders for "${s.name}"?`,
       content: (
         <Space direction="vertical" size={6} style={{ fontSize: 13 }}>
-          <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: {s.liveLots > 0 ? <b>{s.liveLots} lot{s.liveLots === 1 ? '' : 's'} (its own lots)</b> : <>the lots set for {traded} on <b>Trade settings</b></>}, its stop-loss / target as the legs (Trade settings' where it has none), at the Trade settings' slippage.</span>
-          <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it.</span>
+          <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: {s.liveLots > 0 ? <b>{s.liveLots} lot{s.liveLots === 1 ? '' : 's'} (its own lots)</b> : <>the lots set for {traded} on <b>Trade settings</b></>}, its stop-loss / target as the legs (Trade settings' where it has none), at {s.liveEntrySlippage > 0 ? <b>its own slippage ({s.liveEntrySlippage} points)</b> : <>the Trade settings' slippage</>} - re-priced every second while unfilled, sent again if rejected.</span>
+          <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it at {s.liveExitSlippage > 0 ? <b>{s.liveExitSlippage} points</b> : <>the Trade settings'</>} slippage, re-priced every second (up to 5x) until filled.</span>
           <span>At most {max} a day, one at a time; an entry seen over 3 minutes late is not placed. The daily loss kill switch applies.</span>
         </Space>
       ),
@@ -345,6 +346,8 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       </Space>
       <LotsInput s={s} busy={busyId === s.id} locked={Boolean(s.liveOrders) && !isAdmin}
         onSet={(lots) => act(s.id, () => updateStrategy(s.id, { liveLots: lots }), lots > 0 ? `"${s.name}" trades ${lots} lot${lots === 1 ? '' : 's'} live from its next entry.` : `"${s.name}" is back to its default lots.`)} />
+      <SlippageInput s={s} busy={busyId === s.id} locked={Boolean(s.liveOrders) && !isAdmin}
+        onSet={(key, v, label) => act(s.id, () => updateStrategy(s.id, { [key]: v }), v > 0 ? `"${s.name}": ${label} slippage ${v} points on its live orders.` : `"${s.name}": ${label} slippage back to the Trade settings'.`)} />
       {isAdmin
         ? (
           <Space size={6}>
@@ -461,6 +464,37 @@ export function LotsInput({ s, busy, locked, onSet }) {
       <InputNumber size="small" min={1} max={100} precision={0} value={value} placeholder={`default (${fallback})`} disabled={busy || locked}
         onChange={(v) => setValue(v)} onBlur={commit} onPressEnter={commit} style={{ width: 110 }} aria-label={`Lots for ${s.name}`} />
     </Space>
+  )
+}
+
+/** A strategy's OWN SLIPPAGE for its live Dhan orders, in premium points (`liveEntrySlippage` / `liveExitSlippage` on the server; empty =
+ *  the Trade settings'): the ENTRY's LIMIT is the ask + it (the bid - it for a sell), re-priced every second up to 3x it while unfilled,
+ *  and the EXITS (stop-loss, target, trail ... ) go at the bid - it, re-priced every second up to 5x it until filled; a rejected order is
+ *  sent again at a fresh price. */
+export function SlippageInput({ s, busy, locked, onSet }) {
+  const box = (key, label) => <SlipBox key={key} value={s[key]} label={label} disabled={busy || locked} name={s.name} onSet={(v) => onSet(key, v, label)} />
+  return (
+    <Space size={6} wrap>
+      <Tooltip title={locked ? 'This strategy places live Dhan orders - an admin changes its slippage.'
+        : 'Slippage in premium points on its live Dhan orders. Entry: the LIMIT over the ask, re-priced every second (up to 3x) while unfilled. Exit (SL, target, trail...): under the bid, re-priced every second (up to 5x) until filled. A rejected order is sent again at a fresh price. Empty = the Trade settings\' slippage.'}>
+        <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Slippage</Text>
+      </Tooltip>
+      {box('liveEntrySlippage', 'entry')}
+      {box('liveExitSlippage', 'exit')}
+    </Space>
+  )
+}
+
+function SlipBox({ value, label, disabled, name, onSet }) {
+  const own = value > 0 ? value : null
+  const [v, setV] = useState(own)
+  useEffect(() => { setV(own) }, [own])
+  const sent = useRef(own ?? 0)
+  useEffect(() => { sent.current = own ?? 0 }, [own])
+  const commit = () => { const next = v > 0 ? Math.round(v * 100) / 100 : 0; if (next !== sent.current) { sent.current = next; onSet(next) } }
+  return (
+    <InputNumber size="small" min={0} max={50} step={0.5} value={v} placeholder={label} disabled={disabled} addonBefore={label === 'entry' ? 'In' : 'Out'}
+      onChange={setV} onBlur={commit} onPressEnter={commit} style={{ width: 104 }} aria-label={`${label} slippage for ${name}`} />
   )
 }
 

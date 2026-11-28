@@ -1492,7 +1492,9 @@ All must pass before committing.
   "select month and it will show all trades of the month"): the Trades card's month picker (All months / each month with trades -
   `tradeMonths`) or a click on a Month by month row (scrolls to the trades, the row picked highlighted) shows that month's trades only,
   the title "Trades of Sep 2026 (N · ₹net)", the CSV the trades shown (with the Rule / Mirror filter); a page run and an opened
-  background run alike, a month the report has none of reads as all. a day-by-day
+  background run alike, a month the report has none of reads as all; the month picked FILTERS THE DAY BY DAY TABLE TOO (asked for -
+  "select month then in the next table as usual day") - "Day by day - Sep 2026" with an "All months" button, a Month by month row's click
+  scrolling to it. a day-by-day
   table, every trade with the readings at its signal, and a CSV (`tradesCsv`). The DAY CHART (asked for - "spot chart ... with buy sell
   tag ... for already run as well as next run"; `SignalBacktestChart.jsx`, `signalBacktestChart.js`): any day of the report
   shown (the picker, ◀ ▶, or a click on a Day by day / Trades row) on the run's own timeframe's spot candles - or the futures
@@ -1716,7 +1718,19 @@ All must pass before committing.
   write; the settings JSON is never touched), set by `PUT /api/signal-strategies/{id}` `{ liveLots }` (1 - `MaxLiveLots` 100, 0 = back to the default; a
   strategy with Live orders on is changed by an admin only). Set, it is the lots of BOTH the live scan's paper trades (`SignalStrategy.LiveSettings()` -
   `/live` hands the runner the settings with `lots` = it; the saved settings stay as they were) and its Dhan orders (`SignalLiveOrders` - else the traded
-  index's Trade settings lots, as before; Trade settings' max-lots cap still applies). `SignalStrategyStoreTests.cs` (an old file without the column, the
+  index's Trade settings lots, as before; Trade settings' max-lots cap still applies). Each strategy's own SLIPPAGE (asked for - "when SL hits for a strategy we need
+  to move out right, define slippages ... if an order fails fetch the latest price and try again ... fill orders ultra fast"): two more
+  last columns, `liveEntrySlip` / `liveExitSlip` (premium points, empty = the Trade settings' slippage as before, 0 - `MaxLiveSlippage` 50,
+  an armed strategy's changed by an admin only; the Live strategies page's "Slippage In / Out" boxes, the Rules window). A strategy's live
+  orders are PUSHED TO FILL (`OrderChase` in LiveTradingService - `StrategyEntry` / `StrategyExit`; the panel's own orders pass none and
+  behave as before): a REJECTED placement (entry or exit - the option ran past the LIMIT's band) is priced again off a FRESH quote a
+  slippage step wider and sent again (2 / 3 times, 250 ms apart); an unfilled ENTRY is re-priced to the current ask (bid) every second
+  for 5 s, slippage widened up to 3x, its stop-loss / target legs moved by the same amount (`ChaseEntryAsync`, `ModifyAsync` ENTRY_LEG),
+  then left resting; an unfilled EXIT every second for 20 s, up to 5x the exit slippage (the panel's: every 2 s, 6 tries, unbounded
+  steps - unchanged). ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
+  strategy's own exit is read on COMPLETED 1-minute bars (the scan runs each minute + 3 s) - the real-time stop is Dhan's own stop-loss
+  LEG of the super order, placed with the entry. `LiveTradingPartialExitTests.cs` (the retry, the chase and its cap, the entry's legs
+  moving), `SignalLiveOrdersTests.cs`, `SignalStrategyStoreTests.cs`. `SignalStrategyStoreTests.cs` (an old file without the column, the
   range, the admin rule), `SignalLiveOrdersTests.cs` (the lots on the order). Checked in a browser at 1400 / 390 px against a mocked API (one save per
   change; Load fills the backtest page).
   RULES, LOAD, HISTORY AND THE WAY BACK (asked for - "load, history, trades all should work; every strategy selection will show the rules; load may navigate to

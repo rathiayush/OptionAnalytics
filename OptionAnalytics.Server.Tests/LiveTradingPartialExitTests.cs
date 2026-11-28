@@ -588,6 +588,74 @@ public sealed class LiveTradingPartialExitTests
         Assert.Null(LiveTradingService.FillPrice(130, 121m, Update("X", "SELL", 130, 130, avg: 121m, status: "TRADED")));
     }
 
+    // ---- a saved strategy's orders: retried when rejected, chased until filled (OrderChase) -------------------------
+
+    private static readonly OrderChase Fast = new(TimeSpan.FromMilliseconds(50), 4, 3, 2, TimeSpan.FromMilliseconds(10));
+
+    [Fact]
+    public async Task A_rejected_exit_is_priced_again_off_a_fresh_quote_and_sent_again()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        dhan.RejectNextPlaces = 1;
+        feed.SetLastTickForTesting(Tick(bid: 118m, ask: 118.5m, last: 118m));                      // the option fell meanwhile
+
+        var result = await service.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true, Fast);
+
+        Assert.True(result.Success, result.Message);
+        // The second try: the fresh bid less the slippage a step wider (2x).
+        var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
+        Assert.Equal((4 * Lot, 116m), (exit.Quantity, exit.Price));
+        Assert.Equal(2, dhan.Requests.Count(r => r == "POST /orders"));
+        // Without a chase (the panel's Close) a rejection is reported, never retried - as before.
+        var (plain, dhan2, _) = await CreateAsync();
+        dhan2.RejectNextPlaces = 1;
+        Assert.False((await plain.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None)).Success);
+        Assert.Single(dhan2.Requests, r => r == "POST /orders");
+    }
+
+    [Fact]
+    public async Task A_chased_exit_is_repriced_to_the_current_bid_each_interval_with_the_slippage_capped()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        var result = await service.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true, Fast);
+        Assert.True(result.Success, result.Message);
+        var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
+        Assert.Equal(119m, exit.Price);                                                               // bid 120 - 1
+        feed.SetLastTickForTesting(Tick(bid: 110m, ask: 110.5m, last: 110m));                      // falling fast, not filled
+        await WaitFor(() => exit.Price < 110m);
+        Assert.Equal(108m, exit.Price);                                                               // 110 - 1 x 2
+        await WaitFor(() => exit.Price < 108m);
+        Assert.Equal(107m, exit.Price);                                                               // 110 - 1 x 3 - the cap (3x)
+        await Task.Delay(200);
+        Assert.Equal(107m, exit.Price);                                                               // never wider than the cap
+    }
+
+    [Fact]
+    public async Task A_rejected_entry_is_sent_again_and_an_unfilled_one_is_repriced_with_its_legs_moved_alike()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        dhan.RejectNextPlaces = 1;
+        var expiry = DateOnly.FromDateTime(DateTime.Today.AddDays(20));
+        feed.SetLastTickForTesting(Tick(bid: 121m, ask: 121.5m, last: 121.5m));
+
+        var result = await service.PlaceAsync(new ManualOrderRequest("NIFTY", expiry, 26000, "CE", "BUY", 1, 1m, 20m, 40m, Chase: Fast), CancellationToken.None);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(2, dhan.Requests.Count(r => r == "POST /super/orders"));
+        // Sent again at the fresh ask + the slippage a step wider: 121.5 + 2 = 123.5, its legs 40 / 20 points from the ask (the pricing rule).
+        Assert.Equal((123.5m, 161.5m, 101.5m), (result.Prices!.Limit, result.Prices.Target, result.Prices.StopLoss));
+        // Not filled, the ask runs to 125: the entry follows (125 + 1 x 2) and its legs move with it.
+        feed.SetLastTickForTesting(Tick(bid: 124.5m, ask: 125m, last: 125m));
+        await WaitFor(() => dhan.SuperModifies.Any(m => m["legName"]!.GetValue<string>() == "ENTRY_LEG"));
+        var moved = dhan.SuperModifies.First(m => m["legName"]!.GetValue<string>() == "ENTRY_LEG");
+        Assert.Equal((127m, 165m, 105m), (moved["price"]!.GetValue<decimal>(), moved["targetPrice"]!.GetValue<decimal>(), moved["stopLossPrice"]!.GetValue<decimal>()));
+        // Filled: the chase stops.
+        var count = dhan.SuperModifies.Count;
+        dhan.SuperOrders.Single(o => o["orderId"]!.GetValue<string>() == result.OrderIds[0])["orderStatus"] = "TRADED";
+        await Task.Delay(250);
+        Assert.InRange(dhan.SuperModifies.Count, count, count + 1);                                   // at most one already on its way
+    }
+
     // ---- fixture ---------------------------------------------------------------------------------
 
     private static DhanOrderUpdate Update(string orderNo, string side, int quantity, int traded, decimal avg, string status,
@@ -667,6 +735,8 @@ public sealed class LiveTradingPartialExitTests
         public List<string> Requests { get; } = new();
         /// <summary>Super order leg cancels Dhan refuses ("S3/TARGET_LEG").</summary>
         public HashSet<string> RefuseCancel { get; } = new();
+        /// <summary>How many order placements (plain or super) Dhan rejects before it takes one - an option that ran past the LIMIT's band.</summary>
+        public int RejectNextPlaces;
         private int _next;
 
         public sealed class PlainOrder
@@ -712,6 +782,23 @@ public sealed class LiveTradingPartialExitTests
                 foreach (var leg in order["legDetails"]!.AsArray())
                     if (parts[4] == "ENTRY_LEG" || leg!["legName"]!.GetValue<string>() == parts[4]) leg!["orderStatus"] = "CANCELLED";
                 return Json(new JsonObject { ["orderId"] = parts[3], ["orderStatus"] = "CANCELLED" });
+            }
+            if (request.Method == HttpMethod.Post && (path == "/orders" || path == "/super/orders") && RejectNextPlaces > 0)
+            {
+                RejectNextPlaces--;
+                return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("{\"errorMessage\":\"price outside the band\"}") };
+            }
+            if (request.Method == HttpMethod.Post && path == "/super/orders")
+            {
+                var id = $"N{Interlocked.Increment(ref _next)}";
+                lock (SuperOrders) SuperOrders.Add(new JsonObject
+                {
+                    ["orderId"] = id, ["orderStatus"] = "PENDING", ["transactionType"] = body!["transactionType"]!.GetValue<string>(), ["exchangeSegment"] = "NSE_FNO",
+                    ["securityId"] = SecurityId.ToString(), ["quantity"] = body["quantity"]!.GetValue<int>(), ["price"] = body["price"]!.GetValue<decimal>(),
+                    ["targetPrice"] = body["targetPrice"]!.GetValue<decimal>(), ["stopLossPrice"] = body["stopLossPrice"]!.GetValue<decimal>(),
+                    ["correlationId"] = body["correlationId"]?.GetValue<string>(), ["legDetails"] = new JsonArray(),
+                });
+                return Json(new JsonObject { ["orderId"] = id, ["orderStatus"] = "PENDING" });
             }
             if (request.Method == HttpMethod.Put && path.StartsWith("/super/orders/"))
             {

@@ -10,7 +10,7 @@ namespace OptionAnalytics.Server.Services.SignalStrategies;
 public interface ISignalOrderGateway
 {
     Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken);
-    Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs);
+    Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs, OrderChase? chase = null);
     DateTimeOffset? SetTimeExit(IReadOnlyList<string> orderIds, DateTimeOffset exitAt, decimal slippagePoints, string reason);
     void ClearTimeExit(IReadOnlyList<string> orderIds);
 }
@@ -20,8 +20,8 @@ public interface ISignalOrderGateway
 public sealed class LiveTradingOrderGateway(LiveTradingService trading) : ISignalOrderGateway
 {
     public Task<ManualOrderResult> PlaceAsync(ManualOrderRequest request, CancellationToken cancellationToken) => trading.PlaceAsync(request, cancellationToken);
-    public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs) =>
-        trading.ExitTradeAsync(orderIds, slippagePoints, cancellationToken, onlyWithWorkingLegs);
+    public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs, OrderChase? chase = null) =>
+        trading.ExitTradeAsync(orderIds, slippagePoints, cancellationToken, onlyWithWorkingLegs, chase);
     public DateTimeOffset? SetTimeExit(IReadOnlyList<string> orderIds, DateTimeOffset exitAt, decimal slippagePoints, string reason) =>
         trading.SetTimeExit(orderIds, exitAt, slippagePoints, reason);
     public void ClearTimeExit(IReadOnlyList<string> orderIds) => trading.ClearTimeExit(orderIds);
@@ -148,10 +148,12 @@ public sealed class SignalLiveOrders
         var stopLoss = t.StopLossPoints is > 0 ? Math.Round(t.StopLossPoints.Value, 2) : ts.SlPoints;
         var target = t.TargetPoints is > 0 ? Math.Round(t.TargetPoints.Value, 2) : ts.TargetPoints;
         var exitAt = IstClock.AtIstTime(IstClock.IstDate(now), LiveTradingService.TimeExitCutoffMinute);
-        var request = new ManualOrderRequest(underlying, expiry, t.Strike!.Value, side, action, lots, ts.SlippagePoints, stopLoss, target,
-            ExitAtMs: exitAt.ToUnixTimeMilliseconds(), ExitReason: $"{strategy.Name}: 15:10 square-off");
+        // The strategy's own slippage (Live strategies page) when set, else the Trade settings'; the entry chased / retried (OrderChase.StrategyEntry).
+        var slippage = EntrySlippage(strategy, ts);
+        var request = new ManualOrderRequest(underlying, expiry, t.Strike!.Value, side, action, lots, slippage, stopLoss, target,
+            ExitAtMs: exitAt.ToUnixTimeMilliseconds(), ExitReason: $"{strategy.Name}: 15:10 square-off", Chase: OrderChase.StrategyEntry);
         _logger.LogWarning("Saved strategy {Name}: LIVE {Action} {Option} {Expiry:yyyy-MM-dd} x{Lots} lots (SL {Sl}, target {Target}, slippage {Slippage}) - trade {Trade}.",
-            strategy.Name, action, option, expiry, lots, stopLoss, target, ts.SlippagePoints, t.Key);
+            strategy.Name, action, option, expiry, lots, stopLoss, target, slippage, t.Key);
         var result = await _gateway.PlaceAsync(request, cancellationToken);
         var status = result.Success ? "placed" : result.OrderIds.Count > 0 ? "partly placed" : "not placed";
         // What was sent: the entry's LIMIT and its super order's stop-loss / target prices (Dhan's fill comes on its own feed).
@@ -172,7 +174,9 @@ public sealed class SignalLiveOrders
         var ts = _tradeSettings.Get(entry.Underlying);
         var reason = string.IsNullOrWhiteSpace(t.ExitReason) ? "the strategy's exit" : t.ExitReason.Trim();
         _logger.LogWarning("Saved strategy {Name}: LIVE exit of {Option} ({Reason}) - orders {Orders}.", strategy.Name, entry.Option, reason, string.Join(",", entry.OrderIds));
-        var result = await _gateway.ExitTradeAsync(entry.OrderIds, ts.SlippagePoints, cancellationToken, onlyWithWorkingLegs: true);
+        // Out FAST: the strategy's own exit slippage, re-priced every second at a wider step, a rejection sent again at a fresh price.
+        var exitSlip = ExitSlippage(strategy, ts);
+        var result = await _gateway.ExitTradeAsync(entry.OrderIds, exitSlip, cancellationToken, onlyWithWorkingLegs: true, OrderChase.StrategyExit);
         string status, text;
         if (result.Success)
         {
@@ -184,7 +188,7 @@ public sealed class SignalLiveOrders
         else
         {
             // Handed to the server's time-exit loop now: tried again every 10 s (up to 30 times), Telegram on how it ends.
-            var retry = _gateway.SetTimeExit(entry.OrderIds, UtcNow().AddSeconds(2), ts.SlippagePoints, $"{strategy.Name}: exit ({reason}) retried");
+            var retry = _gateway.SetTimeExit(entry.OrderIds, UtcNow().AddSeconds(2), exitSlip, $"{strategy.Name}: exit ({reason}) retried");
             status = "exit failed";
             text = $"⚠️ LIVE exit FAILED · {strategy.Name}{Mirror(t)}: {entry.Option} ({reason}) - {result.Message}"
                 + (retry is null ? " - check Dhan." : " - the server tries it again every 10 s; check Dhan.");
@@ -193,6 +197,9 @@ public sealed class SignalLiveOrders
             result.Message) { Price = result.ExitPrice, Reason = reason });
         await NotifyAsync(text);
     }
+
+    internal static decimal EntrySlippage(SignalStrategy s, TradeSettings ts) => s.LiveEntrySlippage > 0 ? s.LiveEntrySlippage : ts.SlippagePoints;
+    internal static decimal ExitSlippage(SignalStrategy s, TradeSettings ts) => s.LiveExitSlippage > 0 ? s.LiveExitSlippage : ts.SlippagePoints;
 
     private static string Mirror(SignalLiveTrade t) => t.Strategy == "mirror" ? " (mirror)" : "";
 

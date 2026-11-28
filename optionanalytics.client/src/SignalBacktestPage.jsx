@@ -724,11 +724,14 @@ export default function SignalBacktestPage() {
     const all = report?.trades ?? []
     return all.filter((t) => (tradeFilter === 'all' || t.strategy === tradeFilter) && (month === 'all' || String(t.date).startsWith(month)))
   }, [report, tradeFilter, month])
+  // The month picked filters the Day by day table too (a click on a Month by month row = that month's days, then its trades).
+  const shownDays = useMemo(() => (month === 'all' ? report?.dayRows ?? [] : (report?.dayRows ?? []).filter((d) => String(d.date).startsWith(month))), [report, month])
   const shownNet = shownTrades.reduce((sum, t) => sum + (Number(t.net) || 0), 0)
   const tradesRef = useRef(null)
+  const daysRef = useRef(null)
   const showMonthTrades = (key) => {
     setTradeMonth(key)
-    requestAnimationFrame(() => tradesRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+    requestAnimationFrame(() => daysRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
   }
   const downloadCsv = () => {
     const blob = new Blob([tradesCsv(shownTrades)], { type: 'text/csv' })
@@ -1316,13 +1319,13 @@ export default function SignalBacktestPage() {
                 size="small" pagination={false} scroll={{ x: 1100 + 100 * (sides.length > 1 ? sides.length : 0) }} columns={monthColumns} dataSource={months}
                 onRow={(m) => ({ onClick: () => m.trades && showMonthTrades(m.key), style: m.trades ? { cursor: 'pointer', background: m.key === month ? 'rgba(22, 104, 220, 0.18)' : undefined } : undefined })}
               />
-              {months.some((m) => m.trades) && <Text type="secondary" style={{ fontSize: 12 }}>Click a month to see its trades below.</Text>}
+              {months.some((m) => m.trades) && <Text type="secondary" style={{ fontSize: 12 }}>Click a month to see its days and trades below.</Text>}
             </Card>
-            <Card size="small" title="Day by day">
+            <Card ref={daysRef} size="small" title={month === 'all' ? 'Day by day' : `Day by day - ${dayjs(`${month}-01`).format('MMM YYYY')}`} extra={month !== 'all' ? <Button size="small" onClick={() => setTradeMonth('all')}>All months</Button> : null}>
               {/* A long run (a background one goes back up to MAX_BACKGROUND_DAYS) in pages - 1 500 rows at once froze a phone. */}
               <Table
-                size="small" scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={report.dayRows}
-                pagination={report.dayRows.length > DAY_PAGE ? { pageSize: DAY_PAGE, showSizeChanger: false, size: 'small' } : false}
+                size="small" scroll={{ x: 300 + 100 * sides.length }} columns={dayColumns} dataSource={shownDays}
+                pagination={shownDays.length > DAY_PAGE ? { pageSize: DAY_PAGE, showSizeChanger: false, size: 'small' } : false}
                 onRow={(r) => ({ onClick: () => r.ok && showOnChart(r.date), style: r.ok ? { cursor: 'pointer' } : undefined })}
               />
             </Card>

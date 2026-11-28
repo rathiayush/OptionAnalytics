@@ -38,7 +38,7 @@ public sealed class SignalLiveOrdersTests : IDisposable
     private sealed class FakeDhan : ISignalOrderGateway
     {
         public List<ManualOrderRequest> Placed { get; } = new();
-        public List<(IReadOnlyList<string> Ids, decimal Slippage, bool OnlyWithWorkingLegs)> Exits { get; } = new();
+        public List<(IReadOnlyList<string> Ids, decimal Slippage, bool OnlyWithWorkingLegs, OrderChase? Chase)> Exits { get; } = new();
         public List<(IReadOnlyList<string> Ids, DateTimeOffset At, string Reason)> TimeExits { get; } = new();
         public List<IReadOnlyList<string>> Cleared { get; } = new();
         public Func<ManualOrderRequest, ManualOrderResult>? OnPlace { get; set; }
@@ -56,9 +56,9 @@ public sealed class SignalLiveOrdersTests : IDisposable
                     new ManualOrderPrices(100, 101.5m, 100 + request.TargetPoints, 100 - request.StopLossPoints)));
         }
 
-        public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs)
+        public Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs, OrderChase? chase = null)
         {
-            Exits.Add((orderIds, slippagePoints, onlyWithWorkingLegs));
+            Exits.Add((orderIds, slippagePoints, onlyWithWorkingLegs, chase));
             return Task.FromResult(ExitResult);
         }
 
@@ -134,6 +134,29 @@ public sealed class SignalLiveOrdersTests : IDisposable
         await Post(store, orders, s.Id, Entry(Trade()));
         Assert.Equal(7, Assert.Single(dhan.Placed).Lots);
         Assert.Equal(7, Assert.Single(store.Orders(s.Id, Date)).Lots);
+    }
+
+    [Fact]
+    public async Task A_strategys_own_slippage_goes_on_its_live_entry_and_exit_and_both_are_chased()
+    {
+        var store = Store();
+        var dhan = new FakeDhan();
+        var orders = Orders(store, TradeSettings(), dhan, new List<string>());
+        var s = Strategy(store);
+        var t = Trade();
+        // None of its own: the Trade settings' (1.5), still chased - a strategy's orders always are.
+        await Post(store, orders, s.Id, Entry(t));
+        Assert.Equal(1.5m, dhan.Placed[0].SlippagePoints);
+        Assert.Same(OrderChase.StrategyEntry, dhan.Placed[0].Chase);
+        await Post(store, orders, s.Id, Exit(t));
+        Assert.Equal((1.5m, OrderChase.StrategyExit), (dhan.Exits[0].Slippage, dhan.Exits[0].Chase));
+        // Its own: entry 2, exit 4 points.
+        Assert.Equal((2m, 4m), (store.Update(s.Id, null, new SignalStrategyRequest(LiveEntrySlippage: 2m, LiveExitSlippage: 4m), Now).Strategy! is var u ? (u.LiveEntrySlippage, u.LiveExitSlippage) : default));
+        var t2 = Trade(entryMs: EntryMs + 60_000);
+        await Post(store, orders, s.Id, Entry(t2));
+        Assert.Equal(2m, dhan.Placed[1].SlippagePoints);
+        await Post(store, orders, s.Id, Exit(t2));
+        Assert.Equal(4m, dhan.Exits[1].Slippage);
     }
 
     [Fact]
@@ -374,9 +397,9 @@ public sealed class SignalLiveOrdersTests : IDisposable
         Assert.True(Store().Get(mine.Id, null)!.LiveOrders);
         var path = Path.Combine(_dir, "runner", "signal-strategies", "strategies.csv");
         var lines = File.ReadAllLines(path);
-        // Before the liveOrders column (and the liveLots one after it): the last two cut.
+        // Before the liveOrders column (and the liveLots / liveEntrySlip / liveExitSlip ones after it): the last four cut.
         static string Cut(string l) => l[..l.LastIndexOf(',')];
-        File.WriteAllLines(path, lines.Select(l => Cut(Cut(l))));
+        File.WriteAllLines(path, lines.Select(l => Cut(Cut(Cut(Cut(l))))));
         Assert.False(Store().Get(mine.Id, null)!.LiveOrders);
 
         // Through the controller: a User account gets 403 for the switch; the list says whether each is armed.

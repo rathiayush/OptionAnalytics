@@ -1002,6 +1002,21 @@ public sealed class LiveTradingService : BackgroundService
                 var (placedId, placeError) = request.NoStop
                     ? await PlacePlainEntryAsync(transactionType, contract, slices[i], prices.Limit, $"OIR-{stamp}-{i + 1}", cancellationToken)
                     : await PlaceSuperEntryAsync(transactionType, contract, slices[i], prices, $"OIR-{stamp}-{i + 1}", cancellationToken);
+                // A REJECTION before anything was placed (the option ran past the LIMIT's band): priced again off a fresh quote and sent again.
+                for (var retry = 0; placedId is null && orderIds.Count == 0 && retry < (request.Chase?.RejectRetries ?? 0); retry++)
+                {
+                    await Task.Delay(request.Chase!.RetryDelay, cancellationToken);
+                    var fresh = _feed.LastTickFor(contract.SecurityId);
+                    var (again, _) = request.NoStop
+                        ? PriceEntryOnly(isSell, fresh?.BestBidPrice ?? 0, fresh?.BestAskPrice ?? 0, request.SlippagePoints * Math.Min(retry + 2, request.Chase.MaxSlipSteps), contract.TickSize)
+                        : PriceOrder(isSell, fresh?.BestBidPrice ?? 0, fresh?.BestAskPrice ?? 0, request.SlippagePoints * Math.Min(retry + 2, request.Chase.MaxSlipSteps), request.StopLossPoints, request.TargetPoints, contract.TickSize);
+                    if (again is null) continue;
+                    _logger.LogWarning("Manual LIVE order {Symbol} rejected ({Error}) - sent again at LIMIT {Limit} (retry {Retry}).", contract.TradingSymbol, placeError, again.Limit, retry + 1);
+                    prices = again;
+                    (placedId, placeError) = request.NoStop
+                        ? await PlacePlainEntryAsync(transactionType, contract, slices[i], prices.Limit, $"OIR-{stamp}-{i + 1}r{retry + 1}", cancellationToken)
+                        : await PlaceSuperEntryAsync(transactionType, contract, slices[i], prices, $"OIR-{stamp}-{i + 1}r{retry + 1}", cancellationToken);
+                }
                 if (placedId is null)
                 {
                     RefreshUnlessStreaming();
@@ -1014,6 +1029,9 @@ public sealed class LiveTradingService : BackgroundService
             }
 
             if (request.TrailGapPoints > 0 && !request.NoStop) SetTrail(orderIds, request.TrailStartPoints, request.TrailGapPoints);
+            if (request.Chase is { Attempts: > 0 } chase && !request.NoStop)
+                foreach (var orderId in orderIds)
+                    _ = ChaseEntryAsync(orderId, contract, isSell, prices, request.SlippagePoints, chase);
             var exitAt = request.ExitAtMs > 0 ? SetTimeExit(orderIds, DateTimeOffset.FromUnixTimeMilliseconds(request.ExitAtMs), request.SlippagePoints, request.ExitReason ?? "time stop") : null;
             _logger.LogWarning("Manual LIVE order: {Transaction} {Symbol} x{Quantity} LIMIT {Limit} (ref {Reference}), {Legs} - orders {Orders}.",
                 transactionType, contract.TradingSymbol, quantity, prices.Limit, prices.Reference,
@@ -1333,7 +1351,7 @@ public sealed class LiveTradingService : BackgroundService
     /// still working - legs gone means the trade was already closed (by hand, an exit-all, a partial exit's
     /// own protection), so nothing is placed. The server's time exit uses it, so a later position in the
     /// same contract is never closed in the trade's name.</param>
-    public async Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs = false)
+    public async Task<ManualOrderResult> ExitTradeAsync(IReadOnlyList<string> orderIds, decimal slippagePoints, CancellationToken cancellationToken, bool onlyWithWorkingLegs = false, OrderChase? chase = null)
     {
         if (!_session.IsAuthenticated) return ManualOrderResult.Fail("not logged in to Dhan right now");
         if (orderIds.Count == 0) return ManualOrderResult.Fail("no orders given");
@@ -1353,8 +1371,11 @@ public sealed class LiveTradingService : BackgroundService
             async Task CancelLeg(string orderId, string leg)
             {
                 var (result, error) = await _superOrders.CancelAsync(orderId, leg, cancellationToken);
-                if (result is null) failures.Add($"{orderId} {leg}: Dhan did not cancel it ({error ?? "no reason given"})");
-                else messages.Add($"{orderId} {leg} cancelled");
+                lock (messages)
+                {
+                    if (result is null) failures.Add($"{orderId} {leg}: Dhan did not cancel it ({error ?? "no reason given"})");
+                    else messages.Add($"{orderId} {leg} cancelled");
+                }
             }
 
             foreach (var order in mine)
@@ -1374,8 +1395,8 @@ public sealed class LiveTradingService : BackgroundService
                     }
                     var workingLegs = order.LegDetails.Where(l => l.LegName is "TARGET_LEG" or "STOP_LOSS_LEG" && IsOpenStatus(l.OrderStatus)).ToList();
                     if (onlyWithWorkingLegs && workingLegs.Count == 0) { messages.Add($"{order.OrderId}: no working stop-loss / target - already closed, nothing to do"); continue; }
-                    foreach (var leg in workingLegs)
-                        await CancelLeg(order.OrderId, leg.LegName);
+                    // Its legs cancelled AT ONCE (one round trip, not one after the other) - the exit waits on them.
+                    await Task.WhenAll(workingLegs.Select(leg => CancelLeg(order.OrderId, leg.LegName)));
                     toExit += filled;
                 }
                 else if (IsOpenStatus(status))
@@ -1412,7 +1433,7 @@ public sealed class LiveTradingService : BackgroundService
                     if (quantity <= 0) messages.Add("exit orders for it are already working");
                     else
                     {
-                        var (ids, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken);
+                        var (ids, price, error) = await PlaceExitAsync(position, quantity, slippagePoints, cancellationToken, chase);
                         orderIdsOut.AddRange(ids);
                         if (error is not null) failures.Add(error);
                         else
@@ -1659,7 +1680,7 @@ public sealed class LiveTradingService : BackgroundService
     /// <summary>Sends <paramref name="quantity"/> of a position out as chased LIMIT exits, sliced at the
     /// freeze limit, priced off the live bid (ask) with the slippage.</summary>
     private async Task<(List<string> OrderIds, decimal? Price, string? Error)> PlaceExitAsync(
-        DhanPosition position, int quantity, decimal slippagePoints, CancellationToken cancellationToken)
+        DhanPosition position, int quantity, decimal slippagePoints, CancellationToken cancellationToken, OrderChase? chase = null)
     {
         var orderIds = new List<string>();
         uint.TryParse(position.SecurityId, out var id);
@@ -1679,9 +1700,20 @@ public sealed class LiveTradingService : BackgroundService
             if (i > 0) await Task.Delay(SliceCallDelay, cancellationToken);
             var (result, error) = await _orders.PlaceAsync(transactionType, position.ExchangeSegment, position.ProductType, "LIMIT", "DAY",
                 position.SecurityId, slices[i], price.Value, $"OIRX-{stamp}-{i + 1}", cancellationToken);
+            // Rejected (the price ran past the LIMIT's band): priced again off a fresh quote, the slippage a step wider, and sent again.
+            for (var retry = 0; result is null && retry < (chase?.RejectRetries ?? 0); retry++)
+            {
+                await Task.Delay(chase!.RetryDelay, cancellationToken);
+                var again = await ExitPriceAsync(id, position.ExchangeSegment, closingIsSell, slippagePoints * Math.Min(retry + 2, chase.MaxSlipSteps), tick, cancellationToken);
+                if (again is null) continue;
+                _logger.LogWarning("Exit {Symbol} rejected ({Error}) - sent again at LIMIT {Price} (retry {Retry}).", position.TradingSymbol, error, again, retry + 1);
+                price = again;
+                (result, error) = await _orders.PlaceAsync(transactionType, position.ExchangeSegment, position.ProductType, "LIMIT", "DAY",
+                    position.SecurityId, slices[i], price.Value, $"OIRX-{stamp}-{i + 1}r{retry + 1}", cancellationToken);
+            }
             if (result is null) return (orderIds, price, $"{position.TradingSymbol}: Dhan rejected the exit order: {error}");
             orderIds.Add(result.OrderId);
-            _ = ChaseExitAsync(result.OrderId, id, position.ExchangeSegment, closingIsSell, slippagePoints, tick, position.TradingSymbol);
+            _ = ChaseExitAsync(result.OrderId, id, position.ExchangeSegment, closingIsSell, slippagePoints, tick, position.TradingSymbol, chase);
         }
 
         _logger.LogWarning("Manual LIVE exit: {Transaction} {Symbol} x{Quantity} LIMIT {Price} - orders {Orders}.",
@@ -1732,13 +1764,16 @@ public sealed class LiveTradingService : BackgroundService
     /// quantity sent is the remaining (unfilled) part, so an ambiguous modify can only under-close,
     /// never reverse the position. Gives up after MaxExitAttempts, leaving the order resting (visible
     /// and cancellable in the panel).</summary>
-    private async Task ChaseExitAsync(string orderId, uint securityId, string segment, bool isSell, decimal slippage, decimal tick, string symbol)
+    private async Task ChaseExitAsync(string orderId, uint securityId, string segment, bool isSell, decimal slippage, decimal tick, string symbol, OrderChase? chase = null)
     {
+        var maxAttempts = chase?.Attempts ?? MaxExitAttempts;
+        var interval = chase?.Interval ?? ExitCheckInterval;
+        var maxSteps = chase?.MaxSlipSteps ?? int.MaxValue;
         try
         {
-            for (var attempt = 1; attempt <= MaxExitAttempts; attempt++)
+            for (var attempt = 1; attempt <= maxAttempts; attempt++)
             {
-                await Task.Delay(ExitCheckInterval);
+                await Task.Delay(interval);
                 var order = await CurrentOrderAsync(orderId);
                 if (order is null) continue;
                 if (order.OrderStatus == "TRADED") { RefreshUnlessStreaming(); return; }
@@ -1748,22 +1783,75 @@ public sealed class LiveTradingService : BackgroundService
                     RefreshUnlessStreaming();
                     return;
                 }
-                if (attempt == MaxExitAttempts) break;
+                if (attempt == maxAttempts) break;
 
-                var price = await ExitPriceAsync(securityId, segment, isSell, slippage * (attempt + 1), tick, CancellationToken.None);
+                var price = await ExitPriceAsync(securityId, segment, isSell, slippage * Math.Min(attempt + 1, maxSteps), tick, CancellationToken.None);
                 if (price is null || price == order.Price) continue;
                 var remaining = order.Quantity - order.FilledQty;
                 var (modified, error) = await _orders.ModifyAsync(orderId, "LIMIT", "DAY", remaining, price, CancellationToken.None);
                 if (modified is null) _logger.LogWarning("Re-pricing manual exit {OrderId} ({Symbol}) failed: {Error}", orderId, symbol, error);
                 else _logger.LogInformation("Re-priced manual exit {OrderId} ({Symbol}) to {Price} for {Remaining} (attempt {Attempt}).", orderId, symbol, price, remaining, attempt);
             }
-            _logger.LogWarning("Manual exit {OrderId} ({Symbol}) still not filled after {Attempts} attempts - left resting.", orderId, symbol, MaxExitAttempts);
+            _logger.LogWarning("Manual exit {OrderId} ({Symbol}) still not filled after {Attempts} attempts - left resting.", orderId, symbol, maxAttempts);
             RefreshUnlessStreaming();
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Chasing manual exit {OrderId} ({Symbol}) failed.", orderId, symbol);
         }
+    }
+
+    /// <summary>Keeps a strategy's super-order ENTRY moving until it fills (<see cref="OrderChase"/>): while it is still pending (or part
+    /// filled), every interval it is re-priced to the CURRENT ask (bid) with the slippage a step wider, its stop-loss / target moved by the
+    /// same amount (their distance from the entry stays); filled, cancelled or rejected = done. After the last try it is left resting.</summary>
+    private async Task ChaseEntryAsync(string orderId, DhanOptionInstrument contract, bool isSell, ManualOrderPrices first, decimal slippage, OrderChase chase)
+    {
+        try
+        {
+            var limit = first.Limit;
+            for (var attempt = 1; attempt <= chase.Attempts; attempt++)
+            {
+                await Task.Delay(chase.Interval);
+                var order = await CurrentSuperOrderAsync(orderId);
+                if (order is null) continue;
+                var status = (order.OrderStatus ?? "").Trim().ToUpperInvariant();
+                if (status is not ("PENDING" or "PART_TRADED" or "TRANSIT" or "OPEN")) return;
+                var quote = _feed.LastTickFor(contract.SecurityId);
+                var reference = isSell ? quote?.BestBidPrice ?? 0 : quote?.BestAskPrice ?? 0;
+                if (reference <= 0) continue;
+                var step = slippage * Math.Min(attempt + 1, chase.MaxSlipSteps);
+                var price = StrategyTriggerHostedService.RoundToTick(Math.Max(contract.TickSize, isSell ? reference - step : reference + step), contract.TickSize);
+                if (price == limit) continue;
+                // The legs keep their distance from the entry: moved by what the entry moved from its first price.
+                var shift = price - first.Limit;
+                var target = StrategyTriggerHostedService.RoundToTick(Math.Max(contract.TickSize, first.Target + shift), contract.TickSize);
+                var stop = StrategyTriggerHostedService.RoundToTick(Math.Max(contract.TickSize, first.StopLoss + shift), contract.TickSize);
+                var (modified, error) = await _superOrders.ModifyAsync(orderId, "ENTRY_LEG", "LIMIT", null, price, target, stop, null, CancellationToken.None);
+                if (modified is null) { _logger.LogWarning("Re-pricing entry {OrderId} ({Symbol}) failed: {Error}", orderId, contract.TradingSymbol, error); continue; }
+                _logger.LogInformation("Re-priced entry {OrderId} ({Symbol}) to {Price} (target {Target}, SL {Stop}, attempt {Attempt}).", orderId, contract.TradingSymbol, price, target, stop, attempt);
+                limit = price;
+            }
+            _logger.LogWarning("Entry {OrderId} ({Symbol}) re-priced {Attempts} times - left resting if still unfilled.", orderId, contract.TradingSymbol, chase.Attempts);
+            RefreshUnlessStreaming();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Chasing entry {OrderId} ({Symbol}) failed.", orderId, contract.TradingSymbol);
+        }
+    }
+
+    /// <summary>A super order's current state: memory while the order-update socket keeps it current, else Dhan's book.</summary>
+    private async Task<SuperOrderSummary?> CurrentSuperOrderAsync(string orderId)
+    {
+        if (_orderUpdates.IsConnected)
+        {
+            lock (_lock)
+            {
+                var known = _currentOrders.FirstOrDefault(o => o.OrderId == orderId);
+                if (known is not null) return known;
+            }
+        }
+        return (await _superOrders.ListAsync(CancellationToken.None)).FirstOrDefault(o => o.OrderId == orderId);
     }
 
     /// <summary>An order's current state: from memory while the order-update socket keeps it current,
@@ -1842,7 +1930,22 @@ public sealed class LiveTradingService : BackgroundService
 public sealed record ManualOrderRequest(
     string Underlying, DateOnly Expiry, decimal Strike, string Side, string Direction, int Lots,
     decimal SlippagePoints, decimal StopLossPoints, decimal TargetPoints, decimal TrailStartPoints = 0, decimal TrailGapPoints = 0,
-    long ExitAtMs = 0, string? ExitReason = null, bool NoStop = false);
+    long ExitAtMs = 0, string? ExitReason = null, bool NoStop = false, OrderChase? Chase = null);
+
+/// <summary>HOW HARD AN ORDER IS PUSHED TO FILL (asked for - "when SL hits for a strategy we need to move out right ... if an order fails fetch
+/// the latest price and try again, options move fast"; a saved strategy's live orders - SignalLiveOrders): a REJECTED order (Dhan refused it -
+/// a LIMIT outside the price band as the option ran) is sent again <see cref="RejectRetries"/> times, each priced off a FRESH quote after
+/// <see cref="RetryDelay"/>; an order still unfilled is RE-PRICED to the CURRENT ask (bid) every <see cref="Interval"/>, the slippage widened
+/// a step each time (2x, 3x ... at most <see cref="MaxSlipSteps"/>x) for <see cref="Attempts"/> tries, then left resting at the last price.
+/// An entry's stop-loss / target move with its price, so their distance from it stays the strategy's. None = as before (an entry placed once
+/// and left, an exit chased every 2 s, 6 tries, never retried after a rejection).</summary>
+public sealed record OrderChase(TimeSpan Interval, int Attempts, int MaxSlipSteps, int RejectRetries, TimeSpan RetryDelay)
+{
+    /// <summary>A saved strategy's ENTRY: every second for 5 s, at most 3x the slippage - past that the market has left the signal.</summary>
+    public static readonly OrderChase StrategyEntry = new(TimeSpan.FromSeconds(1), 5, 3, 2, TimeSpan.FromMilliseconds(250));
+    /// <summary>A saved strategy's EXIT (its stop-loss, target, trail ... ): every second for 20 s, at most 5x the slippage - get out.</summary>
+    public static readonly OrderChase StrategyExit = new(TimeSpan.FromSeconds(1), 20, 5, 3, TimeSpan.FromMilliseconds(250));
+}
 
 internal sealed class TrailState
 {
