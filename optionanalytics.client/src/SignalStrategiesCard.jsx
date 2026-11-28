@@ -43,7 +43,7 @@ export function StrategyRules({ strategy }) {
     ['Day limits', [c.maxDayLoss > 0 ? `max loss ₹${c.maxDayLoss}` : null, c.maxDayProfit > 0 ? `max profit ₹${c.maxDayProfit}` : null].filter(Boolean).join(' · ') || 'none'],
     ['Expiry day', c.expiryDay === 'skip' ? 'not traded' : c.expiryDay === 'buy' ? 'buy options' : c.expiryDay === 'sell' ? 'sell options' : 'as the rule'],
     ['Lots', lots],
-    ['Live slippage', `entry ${strategy.liveEntrySlippage > 0 ? `${strategy.liveEntrySlippage} pts` : "Trade settings'"} · exit ${strategy.liveExitSlippage > 0 ? `${strategy.liveExitSlippage} pts` : "Trade settings'"} - re-priced every second until filled, a rejected order sent again`],
+    ['Live slippage', `entry ${strategy.liveEntrySlippage > 0 ? `${strategy.liveEntrySlippage} pts` : "Trade settings'"} · exit ${strategy.liveExitSlippage > 0 ? `${strategy.liveExitSlippage} pts` : "Trade settings'"} - re-priced every second 5 times (at most 3x), a rejected order tried 5 times`],
     ['Charges', chargesText(c)],
   ]
   const mirror = r.mirror && !mirrorIsSame(r.lines)
@@ -328,7 +328,7 @@ export function SavedStrategiesCard({ strategies, today, liveScan, refresh, page
       content: (
         <Space direction="vertical" size={6} style={{ fontSize: 13 }}>
           <span>Every fresh entry of its live scan - the rule's and the mirror's - places a live <b>super order</b> on Dhan for the {traded} option it trades: {s.liveLots > 0 ? <b>{s.liveLots} lot{s.liveLots === 1 ? '' : 's'} (its own lots)</b> : <>the lots set for {traded} on <b>Trade settings</b></>}, its stop-loss / target as the legs (Trade settings' where it has none), at {s.liveEntrySlippage > 0 ? <b>its own slippage ({s.liveEntrySlippage} points)</b> : <>the Trade settings' slippage</>} - re-priced every second while unfilled, sent again if rejected.</span>
-          <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it at {s.liveExitSlippage > 0 ? <b>{s.liveExitSlippage} points</b> : <>the Trade settings'</>} slippage, re-priced every second (up to 5x) until filled.</span>
+          <span>Its own exits - trailing stop, cost SL, time stop, the day's limits, SL / target, 15:10 - cancel the legs and close it at {s.liveExitSlippage > 0 ? <b>{s.liveExitSlippage} points</b> : <>the Trade settings'</>} slippage, re-priced every second, 5 times, the slippage at most 3x.</span>
           <span>At most {max} a day, one at a time; an entry seen over 3 minutes late is not placed. The daily loss kill switch applies.</span>
         </Space>
       ),
@@ -468,15 +468,15 @@ export function LotsInput({ s, busy, locked, onSet }) {
 }
 
 /** A strategy's OWN SLIPPAGE for its live Dhan orders, in premium points (`liveEntrySlippage` / `liveExitSlippage` on the server; empty =
- *  the Trade settings'): the ENTRY's LIMIT is the ask + it (the bid - it for a sell), re-priced every second up to 3x it while unfilled,
- *  and the EXITS (stop-loss, target, trail ... ) go at the bid - it, re-priced every second up to 5x it until filled; a rejected order is
- *  sent again at a fresh price. */
+ *  the Trade settings'): the ENTRY's LIMIT is the ask + it (the bid - it for a sell), re-priced every second 5 times (2x, then 3x - never more),
+ *  and the EXITS (stop-loss, target, trail ... ) go at the bid - it, the same 5 re-prices up to 3x; a rejected order is sent again at a
+ *  fresh price, 5 tries in all. */
 export function SlippageInput({ s, busy, locked, onSet }) {
   const box = (key, label) => <SlipBox key={key} value={s[key]} label={label} disabled={busy || locked} name={s.name} onSet={(v) => onSet(key, v, label)} />
   return (
     <Space size={6} wrap>
       <Tooltip title={locked ? 'This strategy places live Dhan orders - an admin changes its slippage.'
-        : 'Slippage in premium points on its live Dhan orders. Entry: the LIMIT over the ask, re-priced every second (up to 3x) while unfilled. Exit (SL, target, trail...): under the bid, re-priced every second (up to 5x) until filled. A rejected order is sent again at a fresh price. Empty = the Trade settings\' slippage.'}>
+        : 'Slippage in premium points on its live Dhan orders. Entry: the LIMIT over the ask, re-priced every second, 5 times (2x, then 3x - never more) while unfilled. Exit (SL, target, trail...): under the bid, the same 5 re-prices up to 3x. A rejected order is sent again at a fresh price, 5 tries in all. Empty = the Trade settings\' slippage.'}>
         <Text style={{ fontSize: 12, whiteSpace: 'nowrap' }}>Slippage</Text>
       </Tooltip>
       {box('liveEntrySlippage', 'entry')}

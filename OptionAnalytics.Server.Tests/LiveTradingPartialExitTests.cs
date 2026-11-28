@@ -593,6 +593,38 @@ public sealed class LiveTradingPartialExitTests
     private static readonly OrderChase Fast = new(TimeSpan.FromMilliseconds(50), 4, 3, 2, TimeSpan.FromMilliseconds(10));
 
     [Fact]
+    public void A_strategys_orders_try_5_times_and_the_slippage_stops_at_3x()
+    {
+        Assert.Equal((4, 5, 3), (OrderChase.StrategyEntry.RejectRetries, OrderChase.StrategyEntry.Attempts, OrderChase.StrategyEntry.MaxSlipSteps));
+        // An exit's chase spends its last attempt on the final check: 6 attempts = 5 re-prices.
+        Assert.Equal((4, 6, 3), (OrderChase.StrategyExit.RejectRetries, OrderChase.StrategyExit.Attempts, OrderChase.StrategyExit.MaxSlipSteps));
+        Assert.Equal(TimeSpan.FromSeconds(1), OrderChase.StrategyExit.Interval);
+    }
+
+    [Fact]
+    public async Task A_chased_exit_is_repriced_5_times_then_left_resting()
+    {
+        var (service, dhan, feed) = await CreateAsync();
+        var five = new OrderChase(TimeSpan.FromMilliseconds(40), 6, 3, 4, TimeSpan.FromMilliseconds(10));
+        Assert.True((await service.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true, five)).Success);
+        var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
+        // The bid keeps falling (never filled), so every look has a new price to go to.
+        using var stop = new CancellationTokenSource();
+        var falling = Task.Run(async () =>
+        {
+            for (var bid = 110m; !stop.IsCancellationRequested; bid -= 0.5m)
+            {
+                feed.SetLastTickForTesting(Tick(bid: bid, ask: bid + 0.5m, last: bid));
+                await Task.Delay(5);
+            }
+        });
+        await Task.Delay(600);                                                                        // well past 6 x 40 ms
+        stop.Cancel();
+        await falling;
+        Assert.Equal(5, dhan.Requests.Count(r => r.StartsWith("PUT /orders/")));                      // 5 re-prices, then left resting
+    }
+
+    [Fact]
     public async Task A_rejected_exit_is_priced_again_off_a_fresh_quote_and_sent_again()
     {
         var (service, dhan, feed) = await CreateAsync();
@@ -606,6 +638,11 @@ public sealed class LiveTradingPartialExitTests
         var exit = Assert.Single(dhan.Orders.Values, o => o.Tag.StartsWith("OIRX-"));
         Assert.Equal((4 * Lot, 116m), (exit.Quantity, exit.Price));
         Assert.Equal(2, dhan.Requests.Count(r => r == "POST /orders"));
+        // Rejected every time: 5 sends in all, then reported.
+        var (always, dhan3, _) = await CreateAsync();
+        dhan3.RejectNextPlaces = 99;
+        Assert.False((await always.ExitTradeAsync(new[] { "S1" }, 1m, CancellationToken.None, onlyWithWorkingLegs: true, Fast with { RejectRetries = 4 })).Success);
+        Assert.Equal(5, dhan3.Requests.Count(r => r == "POST /orders"));
         // Without a chase (the panel's Close) a rejection is reported, never retried - as before.
         var (plain, dhan2, _) = await CreateAsync();
         dhan2.RejectNextPlaces = 1;

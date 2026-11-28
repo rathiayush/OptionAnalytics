@@ -1724,10 +1724,10 @@ All must pass before committing.
   an armed strategy's changed by an admin only; the Live strategies page's "Slippage In / Out" boxes, the Rules window). A strategy's live
   orders are PUSHED TO FILL (`OrderChase` in LiveTradingService - `StrategyEntry` / `StrategyExit`; the panel's own orders pass none and
   behave as before): a REJECTED placement (entry or exit - the option ran past the LIMIT's band) is priced again off a FRESH quote a
-  slippage step wider and sent again (2 / 3 times, 250 ms apart); an unfilled ENTRY is re-priced to the current ask (bid) every second
-  for 5 s, slippage widened up to 3x, its stop-loss / target legs moved by the same amount (`ChaseEntryAsync`, `ModifyAsync` ENTRY_LEG),
-  then left resting; an unfilled EXIT every second for 20 s, up to 5x the exit slippage (the panel's: every 2 s, 6 tries, unbounded
-  steps - unchanged). ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
+  slippage step wider and sent again (5 sends in all, 250 ms apart); an unfilled ENTRY is re-priced to the current ask (bid) every second,
+  5 times, its stop-loss / target legs moved by the same amount (`ChaseEntryAsync`, `ModifyAsync` ENTRY_LEG), then left resting; an
+  unfilled EXIT the same, 5 re-prices a second apart; THE SLIPPAGE NEVER PASSES 3x (asked for - "try 5 times, slippage the same, do not
+  add up after 3x": 2x, then 3x and kept - `MaxSlipSteps` 3; the panel's own orders: every 2 s, 6 tries, unbounded steps - unchanged). ExitTradeAsync cancels a trade's working legs AT ONCE (Task.WhenAll), not one after the other. NOTE: the
   strategy's own exit is read on COMPLETED 1-minute bars (the scan runs each minute + 3 s) - the real-time stop is Dhan's own stop-loss
   LEG of the super order, placed with the entry. `LiveTradingPartialExitTests.cs` (the retry, the chase and its cap, the entry's legs
   moving), `SignalLiveOrdersTests.cs`, `SignalStrategyStoreTests.cs`. `SignalStrategyStoreTests.cs` (an old file without the column, the
