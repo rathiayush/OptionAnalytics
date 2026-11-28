@@ -39,7 +39,7 @@ public sealed class SignalLiveOrdersTests : IDisposable
     {
         public List<ManualOrderRequest> Placed { get; } = new();
         public List<(IReadOnlyList<string> Ids, decimal Slippage, bool OnlyWithWorkingLegs, OrderChase? Chase)> Exits { get; } = new();
-        public List<(IReadOnlyList<string> Ids, DateTimeOffset At, string Reason)> TimeExits { get; } = new();
+        public List<(IReadOnlyList<string> Ids, DateTimeOffset At, string Reason, decimal Slippage)> TimeExits { get; } = new();
         public List<IReadOnlyList<string>> Cleared { get; } = new();
         public Func<ManualOrderRequest, ManualOrderResult>? OnPlace { get; set; }
         public ManualOrderResult ExitResult { get; set; } = new ManualOrderResult(true, "STOP_LOSS_LEG cancelled · TARGET_LEG cancelled · SELL x3 at LIMIT 131.5 to close this trade", new[] { "x1" }, null)
@@ -64,7 +64,7 @@ public sealed class SignalLiveOrdersTests : IDisposable
 
         public DateTimeOffset? SetTimeExit(IReadOnlyList<string> orderIds, DateTimeOffset exitAt, decimal slippagePoints, string reason)
         {
-            TimeExits.Add((orderIds, exitAt, reason));
+            TimeExits.Add((orderIds, exitAt, reason, slippagePoints));
             return exitAt;
         }
 
@@ -359,6 +359,26 @@ public sealed class SignalLiveOrdersTests : IDisposable
         Assert.Empty(dhan.Cleared);
         Assert.Equal("exit failed", store.Orders(s.Id, Date).Last().Status);
         Assert.Contains("LIVE exit FAILED", telegrams.Last());
+        Assert.Equal(1.5m, retry.Slippage);                                                            // no own exit slippage: the Trade settings'
+    }
+
+    [Fact]
+    public async Task A_failed_exit_is_retried_with_the_strategys_own_exit_slippage_and_the_exit_was_chased()
+    {
+        var store = Store();
+        var dhan = new FakeDhan { ExitResult = ManualOrderResult.Fail("Dhan rejected the exit order: price outside the band") };
+        var orders = Orders(store, TradeSettings(), dhan, new List<string>());
+        var s = Strategy(store);
+        store.Update(s.Id, null, new SignalStrategyRequest(LiveExitSlippage: 4m), Now);
+        var t = Trade();
+        await Post(store, orders, s.Id, Entry(t));
+        await Post(store, orders, s.Id, Exit(t with { ExitReason = "SL" }));
+        var exit = Assert.Single(dhan.Exits);
+        Assert.Equal((4m, true, OrderChase.StrategyExit), (exit.Slippage, exit.OnlyWithWorkingLegs, exit.Chase));   // out fast, its own slippage
+        var retry = Assert.Single(dhan.TimeExits);
+        Assert.Equal(4m, retry.Slippage);                                                              // the retry loop keeps it
+        Assert.Contains("SL", retry.Reason);
+        Assert.Equal(("exit failed", "SL"), (store.Orders(s.Id, Date).Last().Status, store.Orders(s.Id, Date).Last().Reason));
     }
 
     [Fact]
